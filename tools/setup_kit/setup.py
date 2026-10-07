@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -162,7 +163,10 @@ def ghidra_natives(ghidra, java):
             any(ghidra.glob("Ghidra/Features/Decompiler/os/mac_arm_64/decompile")):
         return
     say("  building Ghidra's decompiler for Apple Silicon (once)")
-    run([ghidra / "support/gradle/gradlew", "--no-daemon", "-q", "buildNatives"], cwd=ghidra / "support/gradle",
+    # Started as arm64 explicitly: an Intel parent would make Gradle's xcrun an Intel process, which the Command Line
+    # Tools on macOS 27 can no longer run ("unable to load libxcrun ... need 'x86_64'").
+    run(["/usr/bin/arch", "-arm64", "/bin/sh", ghidra / "support/gradle/gradlew", "--no-daemon", "-q", "buildNatives"],
+        cwd=ghidra / "support/gradle",
         env={**ENV, "JAVA_HOME": str(java)})
     if not any(ghidra.glob("Ghidra/Features/Decompiler/*/os/mac_arm_64/decompile")):
         fail("Ghidra's decompiler did not build; see build/setup.log")
@@ -200,6 +204,8 @@ def main():
     ap.add_argument("--ghidra-home", type=Path, help="use this Ghidra 12.1.3 instead of downloading one")
     ap.add_argument("--java-home", type=Path, help="use this Java runtime (21 or later) instead of downloading one")
     args = ap.parse_args()
+    if platform.machine() != "arm64":
+        fail("this Python runs under Rosetta (Intel). Run ./setup.sh, which picks a native Apple Silicon Python.")
     (ROOT / "build").mkdir(exist_ok=True)
     LOG.write_text("")
     game = args.game.expanduser().resolve()

@@ -8,8 +8,13 @@ if ! xcode-select -p >/dev/null 2>&1; then
     echo "The Xcode Command Line Tools are needed. Run:  xcode-select --install   then run this setup again."; exit 1
 fi
 PYTHON=""
+# A Python 3.11+ that runs natively on Apple Silicon. An Intel-only Python (for example an old Homebrew in /usr/local)
+# runs under Rosetta, and everything it starts would too: the Command Line Tools on macOS 27 have no Intel half.
 for p in python3.13 python3.12 python3.11 python3; do
-    if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then PYTHON=$p; break; fi
+    if command -v "$p" >/dev/null 2>&1 && \
+            "$p" -c 'import platform, sys; sys.exit(sys.version_info < (3, 11) or platform.machine() != "arm64")' 2>/dev/null; then
+        PYTHON=$p; break
+    fi
 done
 if [ -z "$PYTHON" ]; then
     # No Python 3.11+ on this Mac: use a standalone Python in the setup's own cache (pinned download, not installed system-wide).
@@ -29,6 +34,10 @@ if [ ! -f kit/tools/setup.py ]; then echo "The kit folder is missing: clone the 
 for a in "$@"; do
     if [ "$a" = "--check-only" ]; then exec "$PYTHON" tools/setup_kit/setup.py "$@"; fi
 done
+# An environment made by an earlier run with an Intel Python is made again with this one.
+if [ -x .venv/bin/python ] && ! .venv/bin/python -c 'import platform, sys; sys.exit(platform.machine() != "arm64")' 2>/dev/null; then
+    echo "Making the Python environment again for Apple Silicon (an earlier run used an Intel Python)."; rm -rf .venv
+fi
 if [ ! -x .venv/bin/python ]; then "$PYTHON" -m venv .venv; fi
 if ! .venv/bin/python -m pip install --quiet --disable-pip-version-check --retries 8 --timeout 30 \
         -r kit/requirements-dev.txt; then

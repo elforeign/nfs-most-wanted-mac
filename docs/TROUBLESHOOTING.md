@@ -27,6 +27,12 @@ Snitch or LuLu, or a content filter. Allow Python and *NFS Most Wanted Native Se
 and click **Build** again. To check, open https://pypi.org/simple/capstone/ in a browser: if it does not load, the
 network is blocking it. Running `./setup.sh` from Terminal is another way round a filter that only blocks the app.
 
+**"unable to load libxcrun ... need 'x86_64'" or "Process 'command 'xcrun'' finished with non-zero exit value 1"**
+— the setup was run by an Intel-only Python (often an old Homebrew in `/usr/local`, copied over from an Intel Mac),
+which runs under Rosetta; the Command Line Tools on macOS 27 have no Intel half. Update to the latest setup: it now
+skips Intel Pythons (using its own Apple Silicon Python instead) and rebuilds the environment an earlier run made.
+Then click **Build** again. Nothing needs to be uninstalled.
+
 **Download of Ghidra or Java failed** — check the internet connection and run the setup again. If a download is
 blocked on your network, `./setup.sh --help` shows how to point it at copies you downloaded yourself (they are
 checked against the same hashes).
