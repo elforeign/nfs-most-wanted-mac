@@ -21,5 +21,6 @@ Then:
 Your saves and settings: ~/Library/Application Support/NFS Most Wanted Native/
 The setup's own files (safe to delete after building; an update is quicker with them): ~/Library/NFSMW-Native-Setup/
 
-Guides, troubleshooting and the source: see the project's GitHub page.
+This text is also in the Setup app (Read Me button).
+Guides, troubleshooting and the source: https://github.com/elforeign/nfs-most-wanted-mac
 This project is not affiliated with or endorsed by Electronic Arts.

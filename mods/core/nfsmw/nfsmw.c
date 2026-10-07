@@ -194,7 +194,7 @@ static int64_t setting(const char *key, int64_t fallback) {
  * negative/positive rotation axis. DirectInput uses unsigned axes centred
  * at 32768. game.toml defines the button numbering and axis order.
  * This keeps the game's real analog steering and its keyboard path intact.
- * Disable ps2_controls to use the game's own controller customization. */
+ * The driving rows are the player's: see pad_mapping.h. */
 static void pad_binding(unsigned row, unsigned slot, uint32_t kind, uint32_t control) {
     uint32_t addr = GAME_BINDINGS + row * 52u + 28u + slot * 12u;
     g_api->guest_write_u32(g_api, addr, kind);
@@ -202,6 +202,7 @@ static void pad_binding(unsigned row, unsigned slot, uint32_t kind, uint32_t con
     g_api->guest_write_u32(g_api, addr + 8, control);
 }
 
+#include "pad_mapping.h"    /* controller mapping: the Controls screen, analog triggers, names */
 static void msaa_apply(const PopModApi *api, int reset);
 static void quality_apply(const PopModApi *api, int reset);
 static void look_poll(const PopModApi *api);
@@ -226,86 +227,14 @@ static void game_device_update(const PopModApi *api, pop_cpu_v1 *cpu,
     position_log(api);  /* diagnostics: time + world position every 2 s while driving (Test136) */
     preculler_switch(api); /* Test149: only acts when the switch is off, or to restore */
     memory_log(api);       /* Test151: one line a minute */
-    if (setting("ps2_controls", 1)) {
-        /* Table row numbers are not the engine's action enum. */
-        static const struct { unsigned row, kind, control; } bindings[] = {
-            {0, 2, 1},  /* gas: Cross */
-            {1, 2, 0},  /* brake: Square */
-            {2, 4, 0}, {3, 5, 0}, /* steer: left stick X, both halves */
-            {4, 2, 2},  /* handbrake: Circle */
-            {5, 2, 4},  /* Speedbreaker: L1 */
-            {6, 2, 5},  /* nitrous: R1 */
-            {7, 2, 6}, {8, 2, 7}, /* shift down/up: L2/R2 */
-            {9, 2, 8},  /* reset: Create */
-            {10, 3, 0}, {11, 3, 2}, {12, 3, 3}, {13, 3, 1}, /* HUD: dpad */
-            {15, 2, 11}, /* camera: R3 */
-            {16, 2, 3}, /* look back: Triangle */
-            {17, 0, 0}, /* no competing pull-back binding */
-            {18, 2, 9}, /* pause: Options */
-            {19, 4, 0}, {20, 5, 0}, {21, 4, 1}, {22, 5, 1}, /* menu stick */
-            {23, 2, 9}, /* skip cinematic: Options */
-            {29, 2, 7}, {30, 2, 6},
-            {32, 2, 1}, {33, 2, 3}, {34, 2, 9}, /* confirm/back/start */
-            /* FE_ACTION_LTRIG/RTRIG (keyboard 9/0) feed camera actions
-             * 43/44 in 007a2310, unlike F1/F2 rows29/30 above. Assign the
-             * triggers here so Showcase zoom matches its L2/R2 prompts.
-             * Keep L1/R1 for contextual actions without a second tab event. */
-            {35, 2, 6}, {36, 2, 7},
-            {37, 2, 5}, /* FE_ACTION_B0 / keyboard 3: Showcase, R1 */
-            {38, 2, 4}, /* FE_ACTION_B1 / keyboard M: L1 */
-            {39, 2, 11}, /* FE_ACTION_B3 / keyboard 4: R3 */
-            {40, 2, 0}, /* FE_ACTION_B4 / keyboard 2: secondary action, Square */
-            {41, 2, 2}, /* FE_ACTION_B5 / keyboard 1: tertiary/delete/sell, Circle */
-        };
-        for (unsigned i = 0; i < sizeof bindings / sizeof bindings[0]; ++i) {
-            pad_binding(bindings[i].row, 0, bindings[i].kind, bindings[i].control);
-            pad_binding(bindings[i].row, 1, 0, 0);
-        }
-        /* Right-stick Y is DirectInput Rz (rotation axis 2). Forward is
-         * negative. The game combines each action's bindings by maximum,
-         * so Cross/Square remain full-pressure alternatives to this axis. */
-        pad_binding(0, 1, 6, 2);
-        pad_binding(1, 1, 7, 2);
-        pad_binding(19, 1, 3, 3);
-        pad_binding(20, 1, 3, 1);
-        pad_binding(21, 1, 3, 0);
-        pad_binding(22, 1, 3, 2);
-        /* The trigger role is independent of Showcase. Never make a pedal
-         * also shift when the player selects analog throttle/brake. */
-        static const char *shift_keys[2][2] = {
-            {"shift_down", "shift_down_secondary"},
-            {"shift_up", "shift_up_secondary"}
-        };
-        for (unsigned action = 0; action < 2; ++action)
-            for (unsigned slot = 0; slot < 2; ++slot) {
-                int button = (int)setting(shift_keys[action][slot], slot ? -1 : 6 + action);
-                if (setting("trigger_pedals", 0) && (button == 6 || button == 7)) button = -1;
-                pad_binding(7 + action, slot, button < 0 ? 0 : 2, button < 0 ? 0 : button);
-            }
-        /* L3 skips the music track: row 14 is FE_ACTION_B2, the T key; the pad action loop 0x00559400 calls the
-         * game's skip-track function 0x00517070 for it. R3 stays camera; L2/R2 stay the shifts. */
-        pad_binding(14, 0, setting("l3_skip_track", 1) ? 2 : 0, setting("l3_skip_track", 1) ? 10 : 0);
-        /* The old PC defaults also alias controller inputs to numpad keys.
-         * Those aliases would cause unrelated actions alongside this layout. */
-        for (unsigned row = 63; row <= 73; ++row) {
-            pad_binding(row, 0, 0, 0);
-            pad_binding(row, 1, 0, 0);
-        }
-    }
+    /* Driving rows are the player's (Options -> Controls); the layout is their default (pad_mapping.h). */
+    pad_settings_poll();
+    if (setting("ps2_controls", 1)) pad_frontend_rows();
     api->call_original(api, cpu->target, cpu);
-    if (setting("ps2_controls", 1) && setting("trigger_pedals", 0) &&
-        get_u32(device + 36) == 0) {
-        uint32_t pad = get_u32(0x0091f150u), state = 0, values = get_u32(device + 32);
-        uint32_t getter = pad ? get_u32(get_u32(pad) + 4) : 0;
-        if (values && getter && api->guest_call(api, getter, pad, NULL, 0, &state) == POP_OK && state) {
-            /* In this engine state, Rx/Ry are unsigned full-range L2/R2,
-             * unlike centred stick axes. Preserve both existing gas/brake
-             * alternatives by combining with the original action maximum. */
-            float brake = fminf(get_u32(state + 0x20c) / 65535.0f, 1.0f);
-            float gas = fminf(get_u32(state + 0x210) / 65535.0f, 1.0f);
-            put_float(values, fmaxf(get_float(values), gas));
-            put_float(values + 4, fmaxf(get_float(values + 4), brake));
-        }
+    if (get_u32(device + 36) == 0) {
+        pad_trigger_analog(api, device);
+        pad_rows_save();   /* the player's current rows, kept across a controller reconnect */
+        pad_mapping_test(api); /* TEST ONLY: NFSMW_TEST_PADMAP */
     }
     if (get_u32(device + 36) == 0) frontend_pad_activity(api);
     impact_feedback_tick(api);
@@ -1361,6 +1290,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
         return s;
     if ((s = install(GAME_DEVICE_UPDATE, game_device_update, POP_HOOK_REPLACE, 13)) != POP_OK)
         return s;
+    pad_mapping_install();
     if ((s = install(0x006dc800u, impact_feedback, POP_HOOK_REPLACE, 29)) != POP_OK)
         return s;
     /* Road-surface feedback is optional: without it only the impact bridge runs. */

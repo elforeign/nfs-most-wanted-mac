@@ -58,14 +58,30 @@ Connect a controller over USB or Bluetooth before or after starting the game. Wi
 | Pause | Options | Menu |
 | HUD / map | D-pad | D-pad |
 
-- **Triggers as pedals** (`trigger_pedals`): R2 accelerates and L2 brakes, like most modern racing games. Shifting
-  then moves off the triggers; pick other buttons with *Shift up/down button*.
+### Change the buttons
+
+Any driving action can go on any button, stick or trigger, in the game's own menu:
+
+1. In the game, open **Options → Controls** and choose the **controller** (not the keyboard).
+2. Select an action (Gas, Brake, Handbrake, Nitrous, …) in the **Primary** or **Secondary** column.
+3. Press the button, trigger or stick direction you want for it. The screen shows its name (for example *R2 / RT* or
+   *Left Stick Up*). A button already used by another action moves to this one.
+4. **Accept** to keep the layout. It is saved with your profile. **Defaults** puts this port's layout back.
+
+A trigger works as a full analog pedal for whatever you give it, so *Gas* on R2 and *Brake* on L2 drive like a
+modern racing game. For exactly that, the quickest way is the switch below.
+
+- **Triggers as pedals** (`trigger_pedals`, F10 → Mods → Controls): R2 accelerates and L2 brakes, both analog, at
+  once. Shifting then moves off the triggers; give *Shift Up*/*Shift Down* other buttons on the Controls screen, or
+  with *Shift up/down button* in F10 (numbers: 0 Square/X, 1 Cross/A, 2 Circle/B, 3 Triangle/Y, 4 L1/LB, 5 R1/RB,
+  6 L2/LT, 7 R2/RT, 8 Create/View, 9 Options/Menu, 10 L3, 11 R3).
 - **Button icons:** the menus show PlayStation symbols (`ps_icons`) when your game folder has XtendedInput's button
   textures, `GLOBAL/XtendedInputButtons.tpk` (see [Optional mods](#optional-mods)). Without them the menus keep the
   game's own prompts.
 - **Rumble:** from the game's own force-feedback (road surfaces, wheelspin, impacts). *Rumble: crashes %* and
   *Rumble: driving %* set the strength; 0 turns each off.
-- Turn **PlayStation-style buttons** off to use the game's own controller customisation instead.
+- Turn **PlayStation-style buttons** off for the PC version's own controller layout: **Defaults** on the Controls
+  screen then gives the PC layout. The menus' buttons (confirm, back, tabs) stay as in the table above while it is on.
 
 Keyboard and mouse work exactly as on PC. **T** skips the music track, in the menus and (with *Skip music track
 while driving*, on by default) while driving.

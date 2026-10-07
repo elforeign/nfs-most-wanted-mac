@@ -17,6 +17,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -parse-as-library -target arm64-apple-macos13 -o "$APP/Contents/MacOS/Setup" tools/installer/SetupApp.swift
 git archive --format=tar.gz -o "$APP/Contents/Resources/source.tar.gz" HEAD
 printf '%s\n' "$VERSION" > "$APP/Contents/Resources/source-version.txt"
+cp tools/installer/ReadMe.txt "$APP/Contents/Resources/ReadMe.txt"
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 EOF
 codesign --force --sign - "$APP"
 cp tools/installer/ReadMe.txt "$OUT/dmg/Read Me First.txt"
+chmod 644 "$OUT/dmg/Read Me First.txt"; xattr -c "$OUT/dmg/Read Me First.txt" 2>/dev/null || true
 mkdir -p dist
 DMG="dist/NFS-Most-Wanted-Native-Setup-$VERSION.dmg"
 rm -f "$DMG"

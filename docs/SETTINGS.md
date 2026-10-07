@@ -72,8 +72,8 @@ Open the settings menu with **F10** (Fn+F10 on a laptop), the controller's touch
 
 | Setting | Key | Default | Takes effect | What it does |
 |---|---|---|---|---|
-| PlayStation-style buttons | `ps2_controls` | on | at once | Cross accelerates and Triangle goes back, like the PlayStation version. |
-| Triggers as pedals | `trigger_pedals` | off | at once | R2 accelerates and L2 brakes, like most modern racing games. |
+| PlayStation-style buttons | `ps2_controls` | on | at once | The default controller layout: Cross accelerates and Triangle goes back, like the PlayStation version. Change any driving button in the game's Options > Controls. |
+| Triggers as pedals | `trigger_pedals` | off | at once | R2 accelerates and L2 brakes (both analog), like most modern racing games. |
 | L3 skips music track | `l3_skip_track` | on | at once | Clicking the left stick skips to the next music track, like the T key. |
 | PlayStation button icons | `ps_icons` | on | after a restart | Shows PlayStation button symbols in the menus. Restart to apply. |
 | Shift up button | `shift_up` | 7 | at once | Controller button for shifting up (manual gears). -1 turns it off. 7 is R2. See the guide for other numbers. |

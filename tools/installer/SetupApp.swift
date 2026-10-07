@@ -387,12 +387,42 @@ final class Setup: ObservableObject {
     func showLog() { NSWorkspace.shared.activateFileViewerSelecting([workDir.appendingPathComponent("build/setup.log")]) }
 }
 
+/// The disk image's "Read Me First" text, also inside the app: some Macs refuse to open the file from the disk image.
+func readMeText() -> String {
+    guard let url = Bundle.main.url(forResource: "ReadMe", withExtension: "txt"),
+          let text = try? String(contentsOf: url, encoding: .utf8) else {
+        return "The guides are on the project's GitHub page: github.com/elforeign/nfs-most-wanted-mac"
+    }
+    return text
+}
+
+struct ReadMeView: View {
+    @Binding var shown: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView {
+                Text(readMeText()).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack { Spacer(); Button("Done") { shown = false }.keyboardShortcut(.defaultAction) }
+        }
+        .padding(20)
+        .frame(width: 760, height: 520)
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var s: Setup
+    @State private var showReadMe = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(gameAppName).font(.largeTitle).bold()
+            HStack(alignment: .firstTextBaseline) {
+                Text(gameAppName).font(.largeTitle).bold()
+                Spacer()
+                Button("Read Me") { showReadMe = true }
+            }
+            .sheet(isPresented: $showReadMe) { ReadMeView(shown: $showReadMe) }
             Text("Builds the native Mac version of Need for Speed: Most Wanted (2005) from your own copy of the PC game. "
                  + "Everything happens on this Mac; nothing is uploaded, and your game folder is never changed.")
                 .foregroundStyle(.secondary)
