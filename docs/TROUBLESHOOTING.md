@@ -55,6 +55,13 @@ menu. On a TV, the TV's own refresh setting matters: 60 Hz is right for this gam
 **Controller does nothing** — connect it before starting a race, check it in System Settings → Game Controllers, and
 make sure the F10 menu is closed (the game ignores the controller while it is open).
 
+**A button change on the Controls screen comes back as "Button 1"** — that was 1.0.1 and earlier, which wrote its
+own layout over the screen's changes. Update to the latest version and set the buttons again (see *Change the
+buttons* in the companion guide).
+
+**"Read Me First" on the disk image will not open** — some Macs refuse to open a text file from a disk image. The
+same text is in the Setup app (**Read Me** button, top right), and the guides are on the project's GitHub page.
+
 **No sound in 5.1, or voices from the wrong speakers** — use *Stereo* in the game's Audio Mode, or turn on *Dolby
 Digital (for TVs and receivers)* in F10 → Mods → Audio. Some TV/soundbar HDMI chains scramble 6-channel PCM.
 

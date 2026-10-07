@@ -60,15 +60,18 @@ Connect a controller over USB or Bluetooth before or after starting the game. Wi
 
 ### Change the buttons
 
-Any driving action can go on any button, stick or trigger, in the game's own menu:
+Any driving action can go on any button, trigger or stick direction, in the game's own menu:
 
-1. In the game, open **Options → Controls** and choose the **controller** (not the keyboard).
-2. Select an action (Gas, Brake, Handbrake, Nitrous, …) in the **Primary** or **Secondary** column.
-3. Press the button, trigger or stick direction you want for it. The screen shows its name (for example *R2 / RT* or
-   *Left Stick Up*). A button already used by another action moves to this one.
-4. **Accept** to keep the layout. It is saved with your profile. **Defaults** puts this port's layout back.
+1. In the game, open **Options → Controls**. It opens on the **Keyboard** page: press **R2** (or **Tab**) to switch
+   to the **Controller** page.
+2. Pick an action (Accelerate, Brake / Reverse, Handbrake, N2O, …) in the **Primary** or **Secondary** column and
+   press **Cross** (or **Return**).
+3. Press the button, trigger or stick direction you want for it. The screen shows its name, for example *R2 / RT*
+   or *Left Stick Up*. If another action had that button, it moves to this one.
+4. Press **Triangle** (or **Esc**) when you are done. The layout is saved with your profile.
 
-A trigger works as a full analog pedal for whatever you give it, so *Gas* on R2 and *Brake* on L2 drive like a
+On that page **Square** clears a slot and **Circle** puts this port's layout back (on the keyboard: **2** and **1**).
+A trigger works as a full analog pedal whatever you give it, so *Accelerate* on R2 and *Brake* on L2 drive like a
 modern racing game. For exactly that, the quickest way is the switch below.
 
 - **Triggers as pedals** (`trigger_pedals`, F10 → Mods → Controls): R2 accelerates and L2 brakes, both analog, at
@@ -80,8 +83,8 @@ modern racing game. For exactly that, the quickest way is the switch below.
   game's own prompts.
 - **Rumble:** from the game's own force-feedback (road surfaces, wheelspin, impacts). *Rumble: crashes %* and
   *Rumble: driving %* set the strength; 0 turns each off.
-- Turn **PlayStation-style buttons** off for the PC version's own controller layout: **Defaults** on the Controls
-  screen then gives the PC layout. The menus' buttons (confirm, back, tabs) stay as in the table above while it is on.
+- Turn **PlayStation-style buttons** off to start from the PC version's own controller layout instead: **Circle**
+  (Defaults) on the Controls screen then gives that layout.
 
 Keyboard and mouse work exactly as on PC. **T** skips the music track, in the menus and (with *Skip music track
 while driving*, on by default) while driving.

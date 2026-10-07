@@ -24,7 +24,8 @@
  *   pedals" to rows 7/8 (no shifting on a pedal) plus its analog throttle and
  *   brake.
  * - Names on the Controls screen are the controller's own (Cross / A, R2 / RT,
- *   Left Stick Up) instead of DirectInput's "Button 1" or "Y Rotation".
+ *   Left Stick Up) instead of DirectInput's "Button 1" or "Y Rotation", and the
+ *   keyboard page names its keys (it showed none).
  *
  * Kinds: 2 button, 3 POV, 4/5 negative/positive translation axis, 6/7
  * negative/positive rotation axis. Axis order (game.toml): X Y Z = left stick
@@ -233,15 +234,47 @@ static const char *pad_name(uint32_t kind, uint32_t control) {
     }
     return NULL;
 }
+/* Keyboard keys by DirectInput scan code. The game names keys through DirectInput's GetObjectInfo, which this
+ * port's keyboard does not provide, so the keyboard page showed no names at all. */
+static const char *key_name(uint32_t dik) {
+    static const struct { uint8_t code; const char *name; } keys[] = {
+        {0x01, "Esc"}, {0x02, "1"}, {0x03, "2"}, {0x04, "3"}, {0x05, "4"}, {0x06, "5"}, {0x07, "6"}, {0x08, "7"},
+        {0x09, "8"}, {0x0a, "9"}, {0x0b, "0"}, {0x0c, "-"}, {0x0d, "="}, {0x0e, "Backspace"}, {0x0f, "Tab"},
+        {0x10, "Q"}, {0x11, "W"}, {0x12, "E"}, {0x13, "R"}, {0x14, "T"}, {0x15, "Y"}, {0x16, "U"}, {0x17, "I"},
+        {0x18, "O"}, {0x19, "P"}, {0x1a, "["}, {0x1b, "]"}, {0x1c, "Return"}, {0x1d, "Left Control"},
+        {0x1e, "A"}, {0x1f, "S"}, {0x20, "D"}, {0x21, "F"}, {0x22, "G"}, {0x23, "H"}, {0x24, "J"}, {0x25, "K"},
+        {0x26, "L"}, {0x27, ";"}, {0x28, "'"}, {0x29, "`"}, {0x2a, "Left Shift"}, {0x2b, "\\"}, {0x2c, "Z"},
+        {0x2d, "X"}, {0x2e, "C"}, {0x2f, "V"}, {0x30, "B"}, {0x31, "N"}, {0x32, "M"}, {0x33, ","}, {0x34, "."},
+        {0x35, "/"}, {0x36, "Right Shift"}, {0x37, "Keypad *"}, {0x38, "Left Option"}, {0x39, "Space"},
+        {0x3a, "Caps Lock"}, {0x3b, "F1"}, {0x3c, "F2"}, {0x3d, "F3"}, {0x3e, "F4"}, {0x3f, "F5"}, {0x40, "F6"},
+        {0x41, "F7"}, {0x42, "F8"}, {0x43, "F9"}, {0x44, "F10"}, {0x47, "Keypad 7"}, {0x48, "Keypad 8"},
+        {0x49, "Keypad 9"}, {0x4a, "Keypad -"}, {0x4b, "Keypad 4"}, {0x4c, "Keypad 5"}, {0x4d, "Keypad 6"},
+        {0x4e, "Keypad +"}, {0x4f, "Keypad 1"}, {0x50, "Keypad 2"}, {0x51, "Keypad 3"}, {0x52, "Keypad 0"},
+        {0x53, "Keypad ."}, {0x57, "F11"}, {0x58, "F12"}, {0x9c, "Keypad Enter"}, {0x9d, "Right Control"},
+        {0xb5, "Keypad /"}, {0xb8, "Right Option"}, {0xc5, "Pause"}, {0xc7, "Home"}, {0xc8, "Up Arrow"},
+        {0xc9, "Page Up"}, {0xcb, "Left Arrow"}, {0xcd, "Right Arrow"}, {0xcf, "End"}, {0xd0, "Down Arrow"},
+        {0xd1, "Page Down"}, {0xd2, "Insert"}, {0xd3, "Delete"},
+    };
+    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; ++i)
+        if (keys[i].code == dik) return keys[i].name;
+    return NULL;
+}
 static void pad_names_hook(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv, void *user) {
     (void)inv; (void)user;
     uint32_t out = get_u32(cpu->esp + 4), device = get_u32(cpu->esp + 8), row = get_u32(cpu->esp + 12);
     uint32_t primary = get_u32(cpu->esp + 16) & 0xffu;
     api->call_original(api, cpu->target, cpu);
-    if (device == 1 || row >= 76u || !out) return;
-    uint32_t at = GAME_BINDINGS + row * 52u + 4u + (primary ? 2u : 3u) * 12u;
-    const char *name = pad_name(get_u32(at), get_u32(at + 8));
+    if (row >= 76u || !out) return;
     char *dst = NULL;
+    const char *name = NULL;
+    if (device == 1) {   /* keyboard: slots 0/1 {kind 1, scan code, 0}; only where the game wrote no name */
+        uint32_t at = GAME_BINDINGS + row * 52u + 4u + (primary ? 0u : 1u) * 12u;
+        if (api->guest_ptr(api, out, 1, (void **)&dst) != POP_OK || !dst || *dst) return;
+        if (get_u32(at) == 1) name = key_name(get_u32(at + 4));
+    } else {             /* controller: slots 2/3 */
+        uint32_t at = GAME_BINDINGS + row * 52u + 4u + (primary ? 2u : 3u) * 12u;
+        name = pad_name(get_u32(at), get_u32(at + 8));
+    }
     if (name && api->guest_ptr(api, out, (uint32_t)strlen(name) + 1, (void **)&dst) == POP_OK && dst)
         memcpy(dst, name, strlen(name) + 1);
 }

@@ -315,7 +315,7 @@ static void test_joy_enum_devices() {
     g_enum_calls = 0;
     CHECK_EQ(call_method(di, DI_EnumDevices, {4 /* DIDEVTYPE_JOYSTICK */, cb, 0, 1}), DI_OK);
     CHECK_EQ(g_enum_calls, 1u);
-    CHECK(!strcmp(g_enum_name, "Recomp Virtual Pad"));
+    CHECK(!strcmp(g_enum_name, "Controller"));
     CHECK_EQ(g_enum_devtype, 0x0404u);
     CHECK(!memcmp(g_enum_instance, GUID_RecompPadInstance_, 16));
 
@@ -425,7 +425,7 @@ static void test_joy_dinput8() {
     g_enum_calls = 0;
     CHECK_EQ(call_method(di, DI_EnumDevices, {DI8_CLASS_GAMECTRL, cb, 0, 1}), DI_OK);
     CHECK_EQ(g_enum_calls, 1u);
-    CHECK(!strcmp(g_enum_name, "Recomp Virtual Pad"));
+    CHECK(!strcmp(g_enum_name, "Controller"));
     CHECK_EQ(g_enum_devtype, DI8_PAD_DEVTYPE);
     CHECK(!memcmp(g_enum_instance, GUID_RecompPadInstance_, 16));
 

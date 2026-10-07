@@ -58,7 +58,8 @@ void di_put_wide(uint32_t at, const char *name, uint32_t units) {
 
 namespace {
 
-const char *const kPadName = "Recomp Virtual Pad";
+// Shown by games that name the device, for example on a controls screen.
+const char *const kPadName = "Controller";
 
 // The object GUIDs of dinput.h: GUID_XAxis and friends share everything but
 // their first dword.

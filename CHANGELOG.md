@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2 — change any button
+
+- **Remap your controller in the game's own menu:** Options → Controls, press R2 for the Controller page, pick an
+  action and press the button you want. Changes stay (1.0.1 put its own layout back, so a remapped button returned
+  as "Button 1") and are saved with your profile. Circle puts this port's layout back.
+- The Controls screen names your controller's buttons (*Cross / A*, *R2 / RT*, *Left Stick Up*) and, on the keyboard
+  page, your keys (it showed none).
+- A trigger is a full analog pedal for any action you give it.
+- The Setup app shows its Read Me itself (**Read Me** button), for Macs that will not open the text file on the disk
+  image.
+
 ## 1.0.1 — setup fixes
 
 - **Setup on Macs with an Intel-only Python** (for example an old Homebrew in `/usr/local` from an Intel Mac): the setup

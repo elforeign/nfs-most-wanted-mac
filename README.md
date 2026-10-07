@@ -34,8 +34,9 @@ also build in Terminal with `./setup.sh`.
 - **HDR output** for HDR TVs, and 4x MSAA anti-aliasing.
 - **Audio:** the game's own 5.1 mix as Mono, Stereo or 5.1 PCM, switchable live, plus an optional **Dolby Digital
   5.1** bitstream for TVs and soundbars that misplace multichannel PCM.
-- **Controllers:** DualSense tested over USB and Bluetooth (other controllers macOS supports should work), PlayStation-style layout and button icons, analog
-  triggers as pedals if you like, rumble from the game's own force-feedback.
+- **Controllers:** DualSense tested over USB and Bluetooth (other controllers macOS supports should work), PlayStation-style layout and button icons, any
+  button remappable in the game's own Controls menu, analog triggers as pedals, rumble from the game's own
+  force-feedback.
 - **Extra Options, built in:** Black Edition content, replay beaten Blacklist rivals, special vinyls, max-performance
   shop button, 6 rival reward markers, longer profile names, starting cash, police heat levels 1–10, helicopter
   takedown bounty, skip the music track while driving (T or L3), and optional unlock-everything and barrier
