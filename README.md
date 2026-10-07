@@ -26,7 +26,7 @@ also build in Terminal with `./setup.sh`.
 
 - Native Apple Silicon app (tested at 4K 60 fps on an M5 Pro MacBook Pro), any resolution and aspect ratio, true widescreen
   (field of view, HUD and minimap moved out to the edges, widescreen movies fitted correctly).
-- **Definitive look** (default): the PC game's heavy gold haze removed, with rebuilt effects written for this
+- **Definitive look** (default): the XBOX 360 game's heavy gold haze removed, with rebuilt effects written for this
   port: glow, gentle auto brightness for tunnels, motion blur at speed and movie-style depth of field in
   cut-scenes. **PC - Original** shows the game exactly as it shipped.
 - **Light pools** cast by the PC game's own street lamps and tunnel lights onto the road and walls.
