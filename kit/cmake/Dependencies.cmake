@@ -201,7 +201,10 @@ if(RECOMP_VIDEO)
     endif()
     list(APPEND RECOMP_FFMPEG_LIBRARIES "${RECOMP_FFMPEG_PREFIX}/${libdir}/${filename}")
     add_library(ffmpeg::${component} SHARED IMPORTED GLOBAL)
+    # Keep bundled headers ahead of older FFmpeg headers in /usr/local/include.
+    # They must match the bundled libraries, including AVCodecContext's layout.
     set_target_properties(ffmpeg::${component} PROPERTIES
+      IMPORTED_NO_SYSTEM TRUE
       IMPORTED_LOCATION "${RECOMP_FFMPEG_PREFIX}/${libdir}/${filename}"
       IMPORTED_SONAME "${soname}"
       INTERFACE_INCLUDE_DIRECTORIES "${RECOMP_FFMPEG_PREFIX}/include")
