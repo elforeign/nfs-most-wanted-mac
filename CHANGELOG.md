@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.1 — setup fixes
+
+- **Setup on Macs with an Intel-only Python** (for example an old Homebrew in `/usr/local` from an Intel Mac): the setup
+  stopped at Ghidra with "unable to load libxcrun ... need 'x86_64'" on macOS 27, whose Command Line Tools have no Intel
+  half. It now uses only a native Apple Silicon Python (or its own), and rebuilds an environment an earlier run made.
+- **Blocked connection to pypi.org:** the setup retries longer and, if the package index stays unreachable, says so
+  plainly (VPN, proxy or firewall app) instead of pip's "No matching distribution found". Checking the game folder
+  (`--check-only`) no longer downloads anything.
+- **Older FFmpeg installed elsewhere** (for example in `/usr/local/include`): the build always uses the bundled FFmpeg's
+  own headers (thanks DarthMDev).
+
+If 1.0 stopped partway for you, open the new Setup and click **Build** again: it continues where it can.
+
 ## 1.0.0 — first public release
 
 The native Mac port of Need for Speed: Most Wanted (2005), with the setup kit that builds it from the player's own
