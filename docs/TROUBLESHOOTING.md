@@ -20,6 +20,13 @@ game folder.
 **The analysis step is slow** — it runs once (a few minutes on a recent Mac, longer on older ones); later setups reuse it. If it was interrupted,
 run the setup again: it starts the analysis over cleanly.
 
+**"Failed to establish a new connection" or "No matching distribution found for capstone"** — the setup could not
+reach the Python package index (pypi.org) to install its build tools. This is the network, not your game folder.
+Check the connection, then look for anything that filters connections: a VPN, a proxy, a firewall app such as Little
+Snitch or LuLu, or a content filter. Allow Python and *NFS Most Wanted Native Setup* to connect (or pause the filter)
+and click **Build** again. To check, open https://pypi.org/simple/capstone/ in a browser: if it does not load, the
+network is blocking it. Running `./setup.sh` from Terminal is another way round a filter that only blocks the app.
+
 **Download of Ghidra or Java failed** — check the internet connection and run the setup again. If a download is
 blocked on your network, `./setup.sh --help` shows how to point it at copies you downloaded yourself (they are
 checked against the same hashes).

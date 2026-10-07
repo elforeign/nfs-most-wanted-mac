@@ -25,6 +25,17 @@ if [ -z "$PYTHON" ]; then
     PYTHON="$PBS/bin/python3"
 fi
 if [ ! -f kit/tools/setup.py ]; then echo "The kit folder is missing: clone the whole repository again." >&2; exit 1; fi
+# Checking the game folder needs nothing from the internet: no environment, no downloads.
+for a in "$@"; do
+    if [ "$a" = "--check-only" ]; then exec "$PYTHON" tools/setup_kit/setup.py "$@"; fi
+done
 if [ ! -x .venv/bin/python ]; then "$PYTHON" -m venv .venv; fi
-.venv/bin/python -m pip install --quiet --disable-pip-version-check -r kit/requirements-dev.txt
+if ! .venv/bin/python -m pip install --quiet --disable-pip-version-check --retries 8 --timeout 30 \
+        -r kit/requirements-dev.txt; then
+    echo
+    echo "SETUP STOPPED: the setup could not download its build tools from the Python package index (pypi.org)."
+    echo "Check the internet connection. A VPN, proxy or firewall app (for example Little Snitch or LuLu) may be"
+    echo "blocking Python or the Setup app: allow them to connect, or pause it, and run the setup again."
+    exit 1
+fi
 exec .venv/bin/python tools/setup_kit/setup.py "$@"
