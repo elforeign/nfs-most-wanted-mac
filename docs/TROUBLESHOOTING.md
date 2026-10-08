@@ -33,6 +33,13 @@ which runs under Rosetta; the Command Line Tools on macOS 27 have no Intel half.
 skips Intel Pythons (using its own Apple Silicon Python instead) and rebuilds the environment an earlier run made.
 Then click **Build** again. Nothing needs to be uninstalled.
 
+**"The setup could not install its build tools"**, or the pypi.org message on a Mac whose internet works — up to
+1.0.2 the setup used a Python 3.13 or later when it found one (Homebrew installs them), and one of its build tools
+has no ready-made package for those, so installing it failed. 1.0.3 and later use Python 3.11 or 3.12, or download
+their own 3.12, and remake the environment an earlier run left. Update the Setup app and click **Build** again;
+nothing needs to be uninstalled. The full output is in `build/pip.log` (the Setup app's **Copy the log** button
+copies what it showed).
+
 **Download of Ghidra or Java failed** — check the internet connection and run the setup again. If a download is
 blocked on your network, `./setup.sh --help` shows how to point it at copies you downloaded yourself (they are
 checked against the same hashes).

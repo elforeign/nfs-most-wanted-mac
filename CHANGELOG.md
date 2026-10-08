@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3 — setup fix for newer Pythons
+
+- **Setup stopped with the pypi.org message on Macs with Python 3.13 or later** (for example from Homebrew), although
+  the internet was fine (#5): one build tool has no ready-made package for those Pythons. The setup now uses Python
+  3.11 or 3.12 (or downloads its own 3.12), remakes the environment an earlier run left, installs ready-made packages
+  only, and says plainly whether the network or something else stopped it (the full output is in `build/pip.log`).
+- The Setup app has a **Copy the log** button for bug reports.
+
 ## 1.0.2 — change any button
 
 - **Remap your controller in the game's own menu:** Options → Controls, press R2 for the Controller page, pick an

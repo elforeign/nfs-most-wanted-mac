@@ -103,7 +103,7 @@ def main():
     info = tmp / "Contents/Info.plist"
     p = plistlib.loads(info.read_bytes())
     p.update(CFBundleDisplayName=NAME, CFBundleName="NFSMW Native", CFBundleExecutable="Launch",
-             CFBundleIdentifier="io.github.nfsmw-native-mac", CFBundleShortVersionString="1.0.2", CFBundleVersion="3",
+             CFBundleIdentifier="io.github.nfsmw-native-mac", CFBundleShortVersionString="1.0.3", CFBundleVersion="4",
              LSMinimumSystemVersion=min_macos(tmp / "Contents/MacOS/SpeedRecomp") or "13.0", NSHighResolutionCapable=True, LSApplicationCategoryType="public.app-category.racing-games")
     p.pop("CFBundleIconFile", None)
     info.write_bytes(plistlib.dumps(p))

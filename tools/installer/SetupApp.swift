@@ -385,6 +385,11 @@ final class Setup: ObservableObject {
     func openGame() { NSWorkspace.shared.open(builtApp) }
     func showGame() { NSWorkspace.shared.activateFileViewerSelecting([builtApp]) }
     func showLog() { NSWorkspace.shared.activateFileViewerSelecting([workDir.appendingPathComponent("build/setup.log")]) }
+    /// Everything the setup printed, for a bug report (the log view selects one line at a time).
+    func copyLog() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+    }
 }
 
 /// The disk image's "Read Me First" text, also inside the app: some Macs refuse to open the file from the disk image.
@@ -522,6 +527,7 @@ struct ContentView: View {
                 logView
                 HStack {
                     Button("Show the log") { s.showLog() }
+                    Button("Copy the log") { s.copyLog() }
                     Spacer()
                     Button("Build again") { s.build() }.disabled(!s.canBuild)
                 }
