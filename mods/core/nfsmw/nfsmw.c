@@ -339,6 +339,7 @@ static void cop_numbers_poll(const PopModApi *api); /* cop_numbers.h */
 #include "position_log.h"   /* Test136; needs setting/get_u32/get_float above */
 #include "preculler_switch.h" /* Test149: optional preculler off (experimental) */
 #include "memory_log.h"       /* Test151: game footprint + Mac swap once a minute (crash evidence) */
+#include "discord_status.h"   /* Discord status: menus or driving, via the local Discord app */
 #include "remaster_probe.h"   /* TEST ONLY (NFSMW_PROFILE_PROBE=1): Transmission setting finder (owner, 6 Oct) */
 static void fe_shadow_probe_tick(const PopModApi *api);   /* fe_shadow_probe.h, TEST ONLY */
 static void pool_prof_tick(const PopModApi *api);        /* pool_prof.h, TEST ONLY (Remaster P1) */
@@ -386,6 +387,7 @@ static void game_device_update(const PopModApi *api, pop_cpu_v1 *cpu,
     position_log(api);  /* diagnostics: time + world position every 2 s while driving (Test136) */
     preculler_switch(api); /* Test149: only acts when the switch is off, or to restore */
     memory_log(api);       /* Test151: one line a minute */
+    discord_status_tick(api); /* menus or driving, for the Discord worker; no socket work here */
     /* Driving rows are the player's (Options -> Controls); the layout is their default (pad_mapping.h). */
     pad_settings_poll();
     if (setting("ps2_controls", 1)) pad_frontend_rows();
@@ -854,6 +856,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
     /* ...and the main view's colour pass writes alpha (the HDR scene mark) and gives up its depth surface. */
     if (g_pfx_enabled && install_at(0x006de210u, 0x006ded21u, pfx_view_colour, POP_HOOK_BEFORE, 72) != POP_OK)
         api->log(api, "core.nfsmw: effects: colour-pass hook unavailable; no HDR mark, depth of field from the bound depth");
+    discord_status_start(api); /* Discord status (setting discord_status); its worker waits for Discord */
     if (!g_widescreen)
         return POP_OK;
 
@@ -890,6 +893,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
 }
 
 PopModStatus pop_mod_exit(void) {
+    discord_status_stop();
     stream_timing_exit(g_api);
     audio_env_probe_exit(g_api);
     scenery_lod_probe_exit(g_api);

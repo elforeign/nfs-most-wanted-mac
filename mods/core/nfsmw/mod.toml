@@ -154,6 +154,7 @@ no_catch_up = { type = "bool", default = false, apply = "restart", label = "No c
 skip_movies = { type = "bool", default = false , apply = "restart", label = "Skip intro movies", help = "Skips the movies (logos and story videos). Restart to apply." }
 skip_nis = { type = "bool", default = false , apply = "restart", label = "Skip cut-scenes", help = "Skips the in-game cut-scenes. Restart to apply." }
 position_log = { type = "bool", default = false, apply = "live", label = "Log my position", group = "diagnostics", help = "Writes where you are to the log, so you can report a spot to fix." }
+discord_status = { type = "bool", default = true, apply = "live", label = "Discord status", group = "", help = "Shows Need for Speed: Most Wanted, whether you are driving or in the menus, and your time played on your Discord profile, when the Discord app is open. Off clears it at once." }
 memory_log = { type = "bool", default = true, apply = "live", label = "Log memory use", group = "diagnostics", help = "Writes the game's memory use to the log once a minute." }
 scenery_trace = { type = "bool", default = false, apply = "restart", label = "Log scenery pop-in", group = "diagnostics", help = "Writes scenery pop-in and flicker to the log, for bug reports. Restart to apply." }
 input_trace = { type = "bool", default = false, apply = "live", label = "Log controller input", group = "diagnostics", help = "Writes controller and keyboard input to the log, for bug reports." }

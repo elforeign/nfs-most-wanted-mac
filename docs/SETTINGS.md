@@ -244,6 +244,7 @@ Open the settings menu with **F10** (Fn+F10 on a laptop), the controller's touch
 |---|---|---|---|---|
 | Skip intro movies | `skip_movies` | off | after a restart | Skips the movies (logos and story videos). Restart to apply. |
 | Skip cut-scenes | `skip_nis` | off | after a restart | Skips the in-game cut-scenes. Restart to apply. |
+| Discord status | `discord_status` | on | at once | Shows Need for Speed: Most Wanted, whether you are driving or in the menus, and your time played on your Discord profile, when the Discord app is open. Off clears it at once. |
 
 ## Controls
 
