@@ -118,8 +118,16 @@ void host_display_set_screen(int32_t w, int32_t h) {
     g_screen_h.store(h);
 }
 int host_display_screen(int32_t *w, int32_t *h) {
-    if (g_screen_w.load() <= 0 || g_screen_h.load() <= 0)
-        return 0;
+    if (g_screen_w.load() <= 0 || g_screen_h.load() <= 0) {
+        // NFSU1 run 8: only a game's display module publishes the screen here; otherwise ask the host, which knows
+        // the screen the window is on (host_display_screen_size; the weak default answers 0).
+        int sw = 0, sh = 0;
+        if (!host_display_screen_size(&sw, &sh) || sw <= 0 || sh <= 0)
+            return 0;
+        *w = sw;
+        *h = sh;
+        return 1;
+    }
     *w = g_screen_w.load();
     *h = g_screen_h.load();
     return 1;

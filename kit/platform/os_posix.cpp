@@ -788,6 +788,13 @@ void *os_vm_reserve(size_t bytes) {
 void os_vm_release(void *p, size_t bytes) {
     munmap(p, bytes);
 }
+size_t os_vm_page_size(void) {
+    static const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    return page;
+}
+int os_vm_set_readonly(void *p, size_t bytes, int readonly) {
+    return mprotect(p, bytes, readonly ? PROT_READ : PROT_READ | PROT_WRITE) == 0 ? 0 : -1;
+}
 
 void *os_dlopen(const char *path) {
     return dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -1030,7 +1037,15 @@ static OsFaultFn g_fault_fn = nullptr;
 // Written by the handler (plain stores, signal-safe), read by g_fault_fn.
 static OsFaultInfo g_fault_info;
 static uint64_t g_image_load = 0; // taken at install, never inside the handler
+static std::atomic<OsWriteFaultHook> g_write_fault_hook{nullptr};
+void os_set_write_fault_hook(OsWriteFaultHook hook) {
+    g_write_fault_hook.store(hook);
+}
 static void fault_trampoline(int sig, siginfo_t *info, void *uc_) {
+    if (sig == SIGSEGV || sig == SIGBUS)
+        if (OsWriteFaultHook hook = g_write_fault_hook.load())
+            if (hook(info ? (uint64_t)(uintptr_t)info->si_addr : 0, uc_))
+                return;
     g_fault_info.addr = info ? (uint64_t)(uintptr_t)info->si_addr : 0;
     g_fault_info.image_load = g_image_load;
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -1068,6 +1083,9 @@ int os_install_fault_handlers(OsFaultFn fn) {
     sigaction(SIGBUS, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
     return 1;
+}
+uint64_t os_image_load(void) {
+    return g_image_load;
 }
 void os_fault_info(OsFaultInfo *out) {
     *out = g_fault_info;

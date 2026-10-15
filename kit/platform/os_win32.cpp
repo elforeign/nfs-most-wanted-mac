@@ -649,3 +649,15 @@ int os_unsetenv(const char *name) {
 }
 
 } // extern "C"
+
+// NFSMW issue 8: no read-only guest pages on this platform yet (the hook is never asked).
+size_t os_vm_page_size(void) {
+    return 4096;
+}
+int os_vm_set_readonly(void *, size_t, int) {
+    return -1;
+}
+void os_set_write_fault_hook(OsWriteFaultHook) {}
+uint64_t os_image_load(void) {
+    return 0;
+}

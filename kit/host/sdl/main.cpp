@@ -22,6 +22,8 @@
 #endif
 #if defined(__APPLE__) && TARGET_OS_OSX
 void os_cursor_set_hidden(bool hidden);   // host/sdl/os_cursor_macos.mm (run 27: SDL alone left an idle arrow)
+double os_window_max_fps(void *ns_window); // host/sdl/os_display_macos.mm (NFSU1 run 8: 120 Hz screens)
+int os_window_notch_pixels(void *ns_window); // host/sdl/os_display_macos.mm (NFSMW run 35: below the notch)
 #endif
 #include "../../mods/display_settings.h"
 #include "game_config.h"
@@ -184,6 +186,28 @@ HostWindowSize window_size_for(int gw, int gh) {
 // selected game mode must not hide the display's own resolution from menus.
 // SDL video queries stay on the main thread; guest threads read only this cache.
 std::atomic<int> g_screen_w{0}, g_screen_h{0};
+// NFSMW run 35 (PR #10): the pixel rows a notched MacBook Pro keeps above a full-screen window (0 elsewhere); the
+// mods' "your screen" size is the area below it, which a full-screen game fills 1:1.
+std::atomic<int> g_screen_notch{0};
+// NFSU1 run 8: the highest refresh of the screen the window is on, for the presenter's pacing (refresh_period):
+// AppKit's maximumFramesPerSecond (120 on a ProMotion panel, which CoreGraphics reports as 0), else SDL's mode rate.
+std::atomic<double> g_window_hz{0};
+void note_window_refresh(SDL_DisplayID display) {
+    double hz = 0;
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    if (g_window)
+        hz = os_window_max_fps(SDL_GetPointerProperty(SDL_GetWindowProperties(g_window),
+                                                      SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr));
+#endif
+    if (!(hz > 1))
+        if (const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display))
+            hz = mode->refresh_rate;
+    if (hz > 1 && std::fabs(hz - g_window_hz.load()) > 0.5)
+        fprintf(stderr, "[host] display refresh: %.0f Hz (the window's screen)\n", hz);
+    if (hz > 1)
+        g_window_hz.store(hz);
+}
+
 void note_screen_size() {
     int w = 0, h = 0;
     SDL_DisplayID display = g_window ? SDL_GetDisplayForWindow(g_window) : SDL_GetPrimaryDisplay();
@@ -203,8 +227,22 @@ void note_screen_size() {
             h = int(std::lround(bounds.h * density));
         }
     }
+    note_window_refresh(display);
     if (w <= 0 || h <= 0)
         return;
+    int notch = 0;
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    notch = os_window_notch_pixels(
+        g_window ? SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr)
+                 : nullptr);
+#endif
+    if (notch < 0 || notch >= h / 4)
+        notch = 0;
+    if (notch != g_screen_notch.load() || w != g_screen_w.load() || h != g_screen_h.load()) {
+        if (notch)
+            fprintf(stderr, "[host] display below the notch: %dx%d\n", w, h - notch);
+    }
+    g_screen_notch.store(notch);
     if (w != g_screen_w.load() || h != g_screen_h.load())
         fprintf(stderr, "[host] display pixel size: %dx%d\n", w, h);
     g_screen_w.store(w);
@@ -2498,10 +2536,17 @@ int main(int argc, char **argv) {
 }
 
 extern "C" int host_display_screen_size(int *w, int *h) {
-    const int sw = g_screen_w.load(), sh = g_screen_h.load();
+    const int sw = g_screen_w.load(), notch = g_screen_notch.load();
+    const int sh = g_screen_h.load() - (notch > 0 ? notch : 0);
     if (!w || !h || sw <= 0 || sh <= 0)
         return 0;
     // Never a portrait screen: the game's image goes above the controls.
     host_landscape_screen_size(sw, sh, w, h);
     return 1;
+}
+
+// NFSU1 run 8: the presenter's pacing reads the window screen's refresh (metal_surface.mm refresh_period; a weak
+// default there answers 0 in binaries without this host).
+extern "C" double host_window_refresh_hz(void) {
+    return g_window_hz.load();
 }

@@ -45,6 +45,8 @@ def render_header(cfg):
     for field, value in zip(("MAJOR", "MINOR", "BUILD", "PLATFORM"),
                             game_config.windows_version(game["windows_version"])):
         lines.append("#define RECOMP_WINDOWS_%s %du" % (field, value))
+    if game.get("frame_cap"):
+        lines.append("#define RECOMP_GAME_FRAME_CAP_ADDR %s" % c_hex(game["frame_cap"]))
     # Absolute: the developer's game lives beside game.toml, not under the kit.
     lines.append("#define RECOMP_DEVELOPER_EXE %s" % c_string(cfg["developer_exe_path"].as_posix()))
     lines.append("#define RECOMP_DEVELOPER_GAME_DIR %s" % c_string(cfg["developer_exe_path"].parent.as_posix()))

@@ -5,7 +5,7 @@
 # recompiled game. See NOTICE and docs/analysis.md.
 id = "core.nfsmw"
 name = "Most Wanted native controls, graphics and Extra Options"
-version = "3.0.2"
+version = "3.0.3"
 api = 1
 game = "80774c2e5d619b4f120b48d4462896fd504c263399d203a238769cffde1d253c"
 requires = ["core.hooks >= 1.0.0"]

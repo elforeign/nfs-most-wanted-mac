@@ -214,7 +214,7 @@ elseif(ANDROID)
 else()
   set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_desktop.cpp ${HOST}/launcher/launcher_platform_desktop.cpp)
   if(APPLE)   # run 27: the OS cursor also hidden through AppKit (host/sdl/os_cursor_macos.mm)
-    list(APPEND POP_PLATFORM_UI ${HOST}/sdl/os_cursor_macos.mm)
+    list(APPEND POP_PLATFORM_UI ${HOST}/sdl/os_cursor_macos.mm ${HOST}/sdl/os_display_macos.mm)
   endif()
 endif()
 

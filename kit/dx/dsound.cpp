@@ -650,6 +650,7 @@ void Buffer_GetFrequency(X86 *c) {
 }
 
 void Buffer_GetStatus(X86 *c) {
+    heap_readonly_report(); // NFSMW issue 8: the sound thread asks this every 10 ms
     ComObj *b = this_buffer(c);
     uint32_t out = arg(c, 1);
     if (!b || !out || !gm_valid(out, 4)) {
@@ -903,6 +904,7 @@ void Buffer_Unlock(X86 *c) {
     // The guest has just written: its own ring's gaps now, every guarded
     // block about once a second (thread stacks, the other rings).
     heap_guard_check(b->buf_pixels);
+    heap_readonly_report(); // NFSMW issue 8: any write to a sound buffer object that was stopped
     {
         static uint32_t unlocks;
         if (++unlocks % 128u == 0)

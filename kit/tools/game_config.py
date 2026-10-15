@@ -152,6 +152,11 @@ def load(game_dir):
         raise ValueError("%s: missing [game] keys: %s" % (source, ", ".join(missing)))
     game["heap_base"] = validate_heap_base(int(game.get("heap_base", HEAP_BASE_DEFAULT)))
     windows_version(game.setdefault("windows_version", "4.10"))
+    # NFSU1 run 8: the guest address of the game's own frame-time cap (a float, seconds per frame, e.g. 1/60). The kit
+    # writes 1/limit there when the Frame limit setting is 40/60/120 so the game itself runs at that rate; 0 = none.
+    frame_cap = game.setdefault("frame_cap", 0)
+    if not isinstance(frame_cap, int) or isinstance(frame_cap, bool) or not 0 <= frame_cap <= 0xFFFFFFFF:
+        raise ValueError("%s: [game] frame_cap must be a guest address (int) or 0" % source)
     translate = cfg.setdefault("translate", {})
     resumable = translate.setdefault("resumable_stacks", False)
     if not isinstance(resumable, bool):

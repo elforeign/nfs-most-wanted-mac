@@ -305,6 +305,7 @@ struct ComObj {
     SlotPacer present_slots;          // 3.0.2: the limit on the presenter's refresh slots when it paces at the limit
     int present_fps = 0;
     int present_locked = -1;          // 1 slots, 0 own clock, -1 not decided yet
+    bool present_cap_set = false;     // NFSU1 run 8: the game frame cap (game.toml frame_cap) applied once
     std::vector<uint32_t> viewports;
     uint32_t render_state[D3D_RENDERSTATE_MAX] = {0};
     uint32_t light_state[D3D_LIGHTSTATE_MAX] = {0};

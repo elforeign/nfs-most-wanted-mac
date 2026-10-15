@@ -640,6 +640,35 @@ static void pool_stats_frame();   // Remaster run 10 (below gpu_draw)
 // (this, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion). The back
 // buffer goes to the host as a 32-bit frame: the first thing this module puts
 // on screen.
+// NFSU1 run 8: the game's own frame cap follows the Frame limit (game.toml [game] frame_cap: a float of seconds per
+// frame the game's limiter waits for). 40/60/120 write 1/limit; 0 (off) puts back the game's own value. Without this
+// a game that caps itself at 60 never reaches 120 whatever the presenter does. RECOMP_GAME_FRAME_CAP=0: untouched.
+static void game_frame_cap(int fps) {
+#ifdef RECOMP_GAME_FRAME_CAP_ADDR
+    static bool have_original = false;
+    static uint32_t original = 0;
+    const char *off = recomp_env("GAME_FRAME_CAP");
+    if ((off && *off == '0') || !gm_valid(RECOMP_GAME_FRAME_CAP_ADDR, 4))
+        return;
+    if (!have_original) {
+        original = rd32(RECOMP_GAME_FRAME_CAP_ADDR);
+        have_original = true;
+    }
+    uint32_t bits = original;
+    if (fps > 0) {
+        const float period = 1.0f / (float)fps;
+        memcpy(&bits, &period, 4);
+    }
+    wr32(RECOMP_GAME_FRAME_CAP_ADDR, bits);
+    float now;
+    memcpy(&now, &bits, 4);
+    LOGW("d3d9: the game's frame cap (game.toml frame_cap) is %.6f s (%s)", now,
+         fps > 0 ? "the Frame limit" : "the game's own");
+#else
+    (void)fps;
+#endif
+}
+
 void Dev_Present(X86 *c) {
     ComObj *dev = this_device9(c);
     if (dev) {
@@ -653,6 +682,9 @@ void Dev_Present(X86 *c) {
         if (fps != dev->present_fps || locked != dev->present_locked) {
             dev->present_deadline = FrameDeadline{};
             dev->present_slots = SlotPacer{};
+            if (fps != dev->present_fps || !dev->present_cap_set)
+                game_frame_cap(fps);
+            dev->present_cap_set = true;
             dev->present_fps = fps;
             dev->present_locked = locked;
             LOGW("d3d9: completed-frame limit %d fps (0 = unlimited)%s", fps,

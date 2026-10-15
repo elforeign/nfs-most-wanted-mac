@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <map>
 #include <algorithm>
@@ -1131,6 +1132,41 @@ static void test_heap_guard() {
     uint32_t plain = heap_alloc(64);
     check(heap_free_guarded(plain), "heap_free_guarded frees a plain block too");
     check(heap_check().empty(), "the heap is consistent after the guard checks");
+}
+
+// NFSMW issue 8 (3.0.3): a write to a sealed read-only page is stopped in the fault handler and recorded; the
+// object keeps what the kit wrote and the writer goes on.
+static void readonly_test_fault(const char *what) {
+    fprintf(stderr, "runtime_tests: unexpected %s in the read-only page test\n", what);
+    _exit(3);
+}
+static void test_heap_readonly() {
+    section("heap read-only pages");
+    if (!heap_readonly_enabled()) {
+        ++g_skips;
+        printf("  [skip] read-only pages need macOS on arm64\n");
+        return;
+    }
+    os_install_fault_handlers(readonly_test_fault);
+    const uint32_t hits0 = heap_readonly_hits();
+    uint32_t v = heap_alloc_readonly(16, "dsound buffer object", 164);
+    check(v && v % (uint32_t)os_vm_page_size() == 0, "a read-only page is page-aligned (%08x)", v);
+    wr32(v, 0x031dce80u);
+    wr32(v + 4, 0x504f504du);
+    check(rd32(v + 4) == 0x504f504du, "control: the page takes writes before it is sealed");
+    check(heap_seal_readonly(v), "the page seals");
+    wr32(v + 4, 0x74db0bcdu);
+    wr16(v + 2, 0x74e2);
+    check(rd32(v + 4) == 0x504f504du && rd32(v) == 0x031dce80u, "writes to the sealed page are stopped, the object intact");
+    check(heap_readonly_hits() == hits0 + 2, "both stopped writes are counted (%u)", heap_readonly_hits() - hits0);
+    heap_readonly_report();
+    check(rd32(v) == 0x031dce80u, "reads of the sealed page work");
+    check(heap_free_guarded(v), "a sealed page frees");
+    uint32_t again = heap_alloc(64, true, 16);
+    wr32(again, 7);
+    check(rd32(again) == 7, "memory allocated after the free takes writes");
+    heap_free(again);
+    check(heap_check().empty(), "the heap is consistent after the read-only checks");
 }
 
 static void test_heap_shims(X86 *c) {
@@ -7079,6 +7115,7 @@ int main(int argc, char **argv) {
 
     test_allocator();
     test_heap_guard();
+    test_heap_readonly();
     test_heap_shims(c);
     test_memory_shims_2(c);
     test_files(c);

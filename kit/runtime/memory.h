@@ -43,6 +43,18 @@ uint32_t heap_guard_check_all();
 // Times any gap has been found written (all blocks, since mem_init).
 uint64_t heap_guard_hits();
 
+// Read-only guest pages (NFSMW issue 8, 3.0.3): a small kit object the guest must only read (a COM view) gets whole
+// host pages of its own, writable until heap_seal_readonly. A guest write to a sealed page is stopped in the fault
+// handler (the store is stepped over, so the object stays intact and the game goes on) and recorded with the guest
+// EIP, stack and the host pc; heap_readonly_report logs new records from a normal context. heap_free_guarded frees
+// these too. RECOMP_READONLY_PAGES=0 turns it off (heap_readonly_enabled false: callers allocate as before).
+bool heap_readonly_enabled();
+uint32_t heap_alloc_readonly(uint32_t size, const char *what, uint32_t tag);
+bool heap_seal_readonly(uint32_t addr);
+void heap_readonly_report();
+// Writes stopped so far (all pages, since mem_init).
+uint32_t heap_readonly_hits();
+
 struct HeapStats {
     uint32_t used_blocks;
     uint32_t free_blocks;

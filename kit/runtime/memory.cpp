@@ -9,6 +9,11 @@
 #include <execinfo.h>
 #endif
 #include <algorithm>
+#include <atomic>
+#include <signal.h>
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#endif
 #include <map>
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,9 +352,12 @@ void drop_block(std::map<uint32_t, Blk>::iterator it) {
 }
 
 void guard_reset(); // the guarded-block registry, below
+void readonly_reset(); // the read-only page table, below (cleared with the heap)
+bool readonly_release(uint32_t addr); // below: true when `addr` was a read-only page (now writable, untracked)
 
 void heap_reset() {
     guard_reset();
+    readonly_reset();
     if (!g_blocks)
         g_blocks = new std::map<uint32_t, Blk>();
     if (!g_free)
@@ -545,6 +553,7 @@ void guard_reset() {
     g_guard_hits = 0;
 }
 
+
 bool guard_enabled() {
     static const bool on = [] {
         const char *v = recomp_env("HEAP_GUARD");
@@ -638,6 +647,8 @@ uint32_t heap_alloc_guarded(uint32_t size, bool zero, uint32_t guard, const char
 bool heap_free_guarded(uint32_t addr) {
     if (!addr)
         return false;
+    if (readonly_release(addr)) // a read-only page: opened and taken out of the table first
+        return heap_free(addr);
     if (g_guards) {
         auto it = g_guards->find(addr);
         if (it != g_guards->end()) {
@@ -815,4 +826,209 @@ std::string heap_check() {
         return buf;
     }
     return std::string();
+}
+
+// ---------------------------------------------------------------------------
+// Read-only guest pages (NFSMW GitHub issue 8, 3.0.3). The 3.0.2 log showed the
+// 16-byte COM view of the game's DirectSound buffer written over between two
+// untouched 16 KB gaps: not an overrun but a write aimed at the object itself,
+// from code nobody has found by reading (the game's driver only calls through
+// it). The view now sits alone on its own sealed page. The fault handler steps
+// over each store to it, so the view stays what the kit wrote and the game goes
+// on, and records where the store came from for the log.
+//
+// SIGNAL SAFETY: the hook only reads preallocated tables and the guest arena,
+// and writes plain fields and atomics; no allocation, no lock, no stdio.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr int kReadonlyPages = 32;
+struct ReadonlyPage {
+    std::atomic<uint32_t> addr{0}; // guest address (page-aligned); 0 = free slot
+    uint32_t bytes = 0;
+    const char *what = "";
+    uint32_t tag = 0;
+    bool sealed = false;
+};
+ReadonlyPage g_readonly[kReadonlyPages];
+constexpr uint32_t kReadonlyRecords = 8;
+struct ReadonlyRecord {
+    uint32_t page, offset, eip, esp, ebp, ret[6];
+    uint64_t pc, lr;
+    int slot;
+};
+ReadonlyRecord g_readonly_record[kReadonlyRecords];
+std::atomic<uint32_t> g_readonly_hits{0}, g_readonly_logged{0};
+std::atomic<uint64_t> g_readonly_last_pc{0};
+std::atomic<uint32_t> g_readonly_same_pc{0};
+
+int readonly_fault(uint64_t addr, void *uc_) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!g_mem)
+        return 0;
+    const uint64_t base = (uint64_t)(uintptr_t)g_mem;
+    if (addr < base || addr >= base + (uint64_t)GUEST_SIZE)
+        return 0;
+    const uint32_t ga = (uint32_t)(addr - base);
+    int slot = -1;
+    for (int i = 0; i < kReadonlyPages; ++i) {
+        const uint32_t a = g_readonly[i].addr.load(std::memory_order_acquire);
+        if (a && g_readonly[i].sealed && ga >= a && ga - a < g_readonly[i].bytes) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+        return 0;
+    ucontext_t *uc = (ucontext_t *)uc_;
+    if (!uc || !uc->uc_mcontext)
+        return 0;
+    // Only a write is ours to stop (EC 0x24/0x25 = data abort, ISS bit 6 = WnR); a read of a sealed page cannot fault.
+    const uint64_t esr = uc->uc_mcontext->__es.__esr;
+    const uint64_t ec = (esr >> 26) & 0x3f;
+    if ((ec != 0x24 && ec != 0x25) || !(esr & (1u << 6)))
+        return 0;
+    const uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+    // A store that faults again and again from one place (an exclusive-store loop) must not spin for ever: after 1000
+    // in a row the page is opened and the store goes through, as it did before 3.0.3.
+    if (g_readonly_last_pc.exchange(pc) == pc) {
+        if (g_readonly_same_pc.fetch_add(1) > 1000) {
+            g_readonly[slot].sealed = false;
+            os_vm_set_readonly(g_mem + g_readonly[slot].addr.load(), g_readonly[slot].bytes, 0);
+            return 1;
+        }
+    } else {
+        g_readonly_same_pc.store(0);
+    }
+    const uint32_t n = g_readonly_hits.fetch_add(1);
+    if (n < kReadonlyRecords) {
+        ReadonlyRecord &r = g_readonly_record[n];
+        memset(&r, 0, sizeof r);
+        r.slot = slot;
+        r.page = g_readonly[slot].addr.load();
+        r.offset = ga - r.page;
+        r.pc = pc;
+        r.lr = (uint64_t)__darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+        if (const X86 *c = guest_current_context()) {
+            r.eip = c->eip;
+            r.esp = c->r[R_ESP];
+            r.ebp = c->r[R_EBP];
+            uint32_t fp = r.ebp;
+            for (int k = 0; k < 6 && fp >= 0x1000 && fp <= GUEST_SIZE - 8; ++k) {
+                uint32_t next, ret;
+                memcpy(&next, g_mem + fp, 4);
+                memcpy(&ret, g_mem + fp + 4, 4);
+                r.ret[k] = ret;
+                if (next <= fp)
+                    break;
+                fp = next;
+            }
+        }
+    }
+    // Step over the store: every AArch64 instruction is 4 bytes, and this one only wrote (to a page that refused it).
+    __darwin_arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss, (void *)(uintptr_t)(pc + 4));
+    return 1;
+#else
+    (void)addr;
+    (void)uc_;
+    return 0;
+#endif
+}
+
+void readonly_reset() {
+    for (auto &p : g_readonly) {
+        p.addr.store(0);
+        p.sealed = false;
+    }
+    g_readonly_hits.store(0);
+    g_readonly_logged.store(0);
+    g_readonly_last_pc.store(0);
+    g_readonly_same_pc.store(0);
+    os_set_write_fault_hook(readonly_fault);
+}
+
+int readonly_slot(uint32_t addr) {
+    for (int i = 0; i < kReadonlyPages; ++i)
+        if (addr && g_readonly[i].addr.load() == addr)
+            return i;
+    return -1;
+}
+
+bool readonly_release(uint32_t addr) {
+    const int slot = readonly_slot(addr);
+    if (slot < 0)
+        return false;
+    g_readonly[slot].sealed = false;
+    os_vm_set_readonly(g_mem + addr, g_readonly[slot].bytes, 0);
+    g_readonly[slot].addr.store(0);
+    return true;
+}
+} // namespace
+
+bool heap_readonly_enabled() {
+#if defined(__APPLE__) && defined(__aarch64__)
+    static const bool on = [] {
+        const char *v = recomp_env("READONLY_PAGES");
+        return !(v && v[0] == '0');
+    }();
+    return on;
+#else
+    return false;
+#endif
+}
+
+uint32_t heap_alloc_readonly(uint32_t size, const char *what, uint32_t tag) {
+    if (!heap_readonly_enabled() || !size)
+        return 0;
+    const uint32_t page = (uint32_t)os_vm_page_size();
+    const uint32_t bytes = align_up(size, page);
+    int slot = -1;
+    for (int i = 0; i < kReadonlyPages && slot < 0; ++i)
+        if (!g_readonly[i].addr.load())
+            slot = i;
+    if (slot < 0)
+        return 0; // table full: the caller allocates as before
+    const uint32_t a = heap_alloc(bytes, true, page);
+    if (!a)
+        return 0;
+    g_readonly[slot].bytes = bytes;
+    g_readonly[slot].what = what;
+    g_readonly[slot].tag = tag;
+    g_readonly[slot].sealed = false;
+    g_readonly[slot].addr.store(a, std::memory_order_release);
+    return a;
+}
+
+bool heap_seal_readonly(uint32_t addr) {
+    const int slot = readonly_slot(addr);
+    if (slot < 0)
+        return false;
+    if (os_vm_set_readonly(g_mem + addr, g_readonly[slot].bytes, 1) != 0)
+        return false;
+    g_readonly[slot].sealed = true;
+    return true;
+}
+
+uint32_t heap_readonly_hits() {
+    return g_readonly_hits.load();
+}
+
+void heap_readonly_report() {
+    const uint32_t hits = g_readonly_hits.load(std::memory_order_acquire);
+    uint32_t logged = g_readonly_logged.load();
+    if (hits == logged)
+        return;
+    g_readonly_logged.store(hits);
+    const uint64_t image = os_image_load();
+    for (uint32_t n = logged; n < hits && n < kReadonlyRecords; ++n) {
+        const ReadonlyRecord &r = g_readonly_record[n];
+        const ReadonlyPage &p = g_readonly[r.slot];
+        LOGW("heap: a write to the %s %u at %08x+%u was stopped (the object stays as the kit made it): guest EIP=%08x "
+             "ESP=%08x EBP=%08x, returns %08x %08x %08x %08x %08x %08x; host pc image+%llx lr image+%llx",
+             p.what, p.tag, r.page, r.offset, r.eip, r.esp, r.ebp, r.ret[0], r.ret[1], r.ret[2], r.ret[3], r.ret[4],
+             r.ret[5], (unsigned long long)(image && r.pc > image ? r.pc - image : r.pc),
+             (unsigned long long)(image && r.lr > image ? r.lr - image : r.lr));
+    }
+    if (hits > kReadonlyRecords)
+        LOGW("heap: %u writes to read-only kit objects stopped so far (the first %u are logged)", hits,
+             kReadonlyRecords);
 }

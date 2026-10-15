@@ -48,6 +48,9 @@ OsThreadId os_thread_id_of(const OsThread *t);
 // ---------------------------------------------------------------------------
 void *os_vm_reserve(size_t bytes); // NULL on failure
 void os_vm_release(void *p, size_t bytes);
+// NFSMW issue 8: the host page size, and a page-aligned span made read-only (1) or read-write again (0); 0 on success.
+size_t os_vm_page_size(void);
+int os_vm_set_readonly(void *p, size_t bytes, int readonly);
 
 // ---------------------------------------------------------------------------
 // Plugins.
@@ -148,6 +151,13 @@ typedef struct OsFaultInfo {
     uint64_t pc, lr, addr, image_load;
 } OsFaultInfo;
 void os_fault_info(OsFaultInfo *out);
+// NFSMW issue 8: asked first, inside the signal handler, for every SIGSEGV/SIGBUS. Returns 1 when it has dealt with
+// the fault (the context may have been changed to step over the instruction) and the thread should go on; 0 sends
+// the fault on to the OsFaultFn as before. Must be signal-safe. `addr` is si_addr; `uc` the signal's ucontext.
+typedef int (*OsWriteFaultHook)(uint64_t addr, void *uc);
+void os_set_write_fault_hook(OsWriteFaultHook hook);
+// The main executable's load address (0 before os_install_fault_handlers, or where unknown), for atos -l.
+uint64_t os_image_load(void);
 // For use inside a fault handler: a raw write to the error stream and an
 // immediate process exit, neither of which touches stdio or runs destructors.
 void os_write_stderr_raw(const char *s, size_t n);

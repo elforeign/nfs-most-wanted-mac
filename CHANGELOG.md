@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.3 — the right resolution for your screen, 120 Hz on any screen, and a crash guard
+
+- **Auto resolution sees your screen:** Auto (and the list's own entry for your screen) now reads the screen the game
+  is on. Before, it never got the screen's size and fell back to 1280x720 on every Mac.
+- **MacBook Pro sizes below the notch:** 3024x1890 (14") and 3456x2160 (16") are in the resolution list, and on a
+  MacBook Pro with a notch "your screen" is the area below it, which full screen fills pixel for pixel. Thanks to
+  **Simonxdd**, whose pull request (#10) added the two sizes.
+- **120 Hz on the screen the game is on:** the frame pacing reads the refresh of the screen the window is on, not
+  only the main display's, so a 120 Hz TV next to a 60 Hz main display (or a ProMotion panel) is paced at 120.
+- **Start-up crash (#8):** on some Macs something writes into the game's sound buffer object about two seconds after
+  start. That object now sits on memory that refuses writes: the write is stopped, the game goes on, and the log
+  names the code that tried (a line starting "heap: a write to the dsound buffer object").
+
 ## 3.0.2 — a start-up crash, steadier 60 fps and controller prompts
 
 - **Start-up crash (#8):** on some Macs the game quit about two seconds after it started (seen with a monitor that is

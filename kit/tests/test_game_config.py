@@ -54,6 +54,21 @@ class LoadTests(unittest.TestCase):
                 for field, value in zip(("MAJOR", "MINOR", "BUILD", "PLATFORM"), expected):
                     self.assertIn("#define RECOMP_WINDOWS_%s %du" % (field, value), header)
 
+    def test_frame_cap_is_optional_and_rendered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            (game / "game.toml").write_text(stub)
+            self.assertNotIn("RECOMP_GAME_FRAME_CAP_ADDR", gen_game_config.render_header(game_config.load(game)))
+            (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\nframe_cap = 0x006f0890\n"))
+            self.assertIn("#define RECOMP_GAME_FRAME_CAP_ADDR 0x006f0890u",
+                          gen_game_config.render_header(game_config.load(game)))
+            for bad in ('"x"', "true", "-1"):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\nframe_cap = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "frame_cap"):
+                    game_config.load(game)
+
     def test_windows_version_rejects_invalid_components(self):
         with tempfile.TemporaryDirectory() as tmp:
             game = Path(tmp)

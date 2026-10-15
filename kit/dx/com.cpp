@@ -153,7 +153,12 @@ uint32_t com_view(ComObj *o, ComIface iface) {
         LOGW("dx: %s has no vtable; was com_define called?", com_iface_name(iface));
         return 0;
     }
-    uint32_t a = heap_alloc(COM_VIEW_SIZE, true, 16);
+    // NFSMW issue 8 (3.0.3): a DirectSound buffer's view gets a sealed page of its own; a guest write to it is stopped
+    // and logged (heap_alloc_readonly), so the game keeps calling a view the kit made. Others as before.
+    const bool sealed = iface == IF_DSBUFFER && heap_readonly_enabled();
+    uint32_t a = sealed ? heap_alloc_readonly(COM_VIEW_SIZE, "dsound buffer object", o->id) : 0;
+    if (!a)
+        a = heap_alloc(COM_VIEW_SIZE, true, 16);
     if (!a) {
         LOGW("dx: out of guest memory for a %s view", com_iface_name(iface));
         return 0;
@@ -162,6 +167,8 @@ uint32_t com_view(ComObj *o, ComIface iface) {
     wr32(a + COM_OFF_magic, COM_MAGIC);
     wr32(a + COM_OFF_obj, o->id);
     wr32(a + COM_OFF_iface, iface);
+    if (sealed)
+        heap_seal_readonly(a); // a no-op for a plain block (the table was full)
     o->views[iface] = a;
     if (!o->identity)
         o->identity = a; // fixed for the object's lifetime
@@ -295,7 +302,7 @@ void com_destroy(ComObj *o) {
         g_dtor[o->kind](o);
     for (uint32_t i = 0; i < IF_COUNT; ++i) {
         if (o->views[i]) {
-            heap_free(o->views[i]);
+            heap_free_guarded(o->views[i]); // a sealed view is opened first; a plain one is freed as before
             o->views[i] = 0;
         }
     }
