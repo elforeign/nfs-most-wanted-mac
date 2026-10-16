@@ -1,6 +1,7 @@
 // script.cpp - see script.h.
 #include "script.h"
 #include "game_config.h"
+#include "fe_layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,21 +29,51 @@ double host_script_counter_metric(const char *name, uint32_t (*guest_u32)(uint32
     return value;
 }
 
+#if defined(RECOMP_GLOBAL_FE_ROOT_ADDR) && defined(RECOMP_GLOBAL_FE_ROOT_SKIP)
+static bool fe_package_skipped(uint32_t (*guest_u32)(uint32_t), uint32_t name) {
+    static const char *const skip[] = RECOMP_GLOBAL_FE_ROOT_SKIP;
+    char text[64];
+    size_t n = 0;
+    char c;
+    while (name && n + 1 < sizeof text && (c = (char)(guest_u32(name + (uint32_t)n) & 0xffu)) != 0)
+        text[n++] = c;
+    text[n] = 0;
+    for (const char *const *s = skip; *s; ++s)
+        if (!strcasecmp(text, *s))
+            return true;
+    return false;
+}
+#endif
+
 int host_script_fe_screen(uint32_t (*guest_u32)(uint32_t), char *out, size_t cap) {
     if (!cap)
         return 0;
     out[0] = 0;
 #ifdef RECOMP_GLOBAL_FE_ROOT_ADDR
-    // As the game's own FindPackageWithControl (NFSMW 005b0be0): the root object's engine (+0x00), its package
-    // list's last entry (engine +0xe4), walked back (+0x08) to the first entry with a control mask (+0x20); that
-    // entry's name (+0x0c, e.g. "MainMenu.fng"). Reads only; a torn read during a screen change answers the next poll.
+    // As the game's own FindPackageWithControl: the root object's engine, a package list entry, walked by its link
+    // to the entry with a control mask; that entry's name (e.g. "MainMenu.fng"). The offsets are the game's
+    // (globals.toml fe_root fields); the defaults are NFSMW's (005b0be0): engine +0x00, the LAST entry at +0xe4,
+    // walked back by +0x08 to the FIRST with control +0x20, name +0x0c. NFSU1 (004e6660) walks forward from the
+    // head and keeps the LAST with control (`forward = 1`). Reads only; a torn read during a screen change answers
+    // the next poll.
     const uint32_t root = guest_u32(RECOMP_GLOBAL_FE_ROOT_ADDR);
-    const uint32_t engine = root ? guest_u32(root) : 0;
-    uint32_t package = engine ? guest_u32(engine + 0xe4) : 0;
-    for (int guard = 0; package && guard < 256; ++guard, package = guest_u32(package + 0x08)) {
-        if (!guest_u32(package + 0x20))
+    const uint32_t engine = root ? guest_u32(root + RECOMP_GLOBAL_FE_ROOT_ENGINE) : 0;
+    uint32_t package = engine ? guest_u32(engine + RECOMP_GLOBAL_FE_ROOT_LIST) : 0, found = 0;
+    for (int guard = 0; package && guard < 256; ++guard, package = guest_u32(package + RECOMP_GLOBAL_FE_ROOT_LINK)) {
+        if (!guest_u32(package + RECOMP_GLOBAL_FE_ROOT_CONTROL))
             continue;
-        const uint32_t name = guest_u32(package + 0x0c);
+#ifdef RECOMP_GLOBAL_FE_ROOT_SKIP
+        // Overlays that keep a control mask on every screen (UG2's help bar: its own FUN_004a0000 skips them by
+        // name the same way), so they would always answer.
+        if (fe_package_skipped(guest_u32, guest_u32(package + RECOMP_GLOBAL_FE_ROOT_NAME)))
+            continue;
+#endif
+        found = package;
+        if (!RECOMP_GLOBAL_FE_ROOT_FORWARD)
+            break;
+    }
+    if (found) {
+        const uint32_t name = guest_u32(found + RECOMP_GLOBAL_FE_ROOT_NAME);
         size_t n = 0;
         char c;
         while (name && n + 1 < cap && (c = (char)(guest_u32(name + (uint32_t)n) & 0xffu)) != 0)

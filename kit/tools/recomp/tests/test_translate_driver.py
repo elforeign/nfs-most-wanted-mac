@@ -620,6 +620,56 @@ def test_a_call_that_never_returns_ends_the_block_with_a_trap():
     assert "recomp_jump(c, 0x40110au)" not in text and "CALL_FN(0040110a)" not in text
 
 
+def test_an_iat_call_to_exitprocess_ends_the_block_but_raiseexception_does_not():
+    """A listing that stops on `CALL dword ptr [IAT ExitProcess]` must not fall
+    through into the padding behind it (NFSU1, 9da309e). RaiseException is not
+    such an import: a continuable exception returns when a handler continues,
+    and NFSMW's C runtime reads the exception record back after the call."""
+    from test_translate_insns import NoImage, Opts
+    assert {"ExitProcess", "ExitThread", "FatalAppExitA"} <= T.NORETURN_IAT_IMPORTS
+    assert "RaiseException" not in T.NORETURN_IAT_IMPORTS
+    fn, slot = 0x00401100, 0x00408000
+    listing = "00401100  CALL dword ptr [0x00408000]\n00401106  MOV EAX,0x1\n0040110b  RET\n"
+    texts = []
+    for noreturn in (set(), {slot}):
+        tr = T.Translator(NoImage(), {fn}, Opts())
+        tr.noreturn_iat = noreturn
+        f = T.Function(fn, "exits", 12, T.parse_listing_text(listing))
+        f.measure(NoImage())
+        tr.prepare(f)
+        texts.append("\n".join(tr.translate(f)))
+    assert "00401106 MOV EAX,0x1" in texts[0]
+    assert "00401106 MOV EAX,0x1" not in texts[1]
+
+
+def test_a_poll_checkpoint_goes_on_the_named_edge_only():
+    """[translate] poll_checkpoints: a scheduler checkpoint before the taken
+    branch of a verified busy-wait edge, nowhere else; NFSMW names none, so its
+    generated code is unchanged."""
+    from test_translate_insns import NoImage, Opts
+    fn = 0x00401100
+    listing = "00401100  CMP EAX,0x0\n00401103  JNZ 0x00401100\n00401105  RET\n"
+    saved = dict(T.POLL_CHECKPOINTS)
+    texts = []
+    try:
+        for edges in ({}, {0x00401103: 0x00401100}):
+            T.POLL_CHECKPOINTS.clear()
+            T.POLL_CHECKPOINTS.update(edges)
+            T.POLL_CHECKPOINTS_APPLIED.clear()
+            tr = T.Translator(NoImage(), {fn}, Opts())
+            f = T.Function(fn, "poll", 6, T.parse_listing_text(listing))
+            f.measure(NoImage())
+            tr.prepare(f)
+            texts.append("\n".join(tr.translate(f)))
+        assert 0x00401103 in T.POLL_CHECKPOINTS_APPLIED
+    finally:
+        T.POLL_CHECKPOINTS.clear()
+        T.POLL_CHECKPOINTS.update(saved)
+        T.POLL_CHECKPOINTS_APPLIED.clear()
+    assert "recomp_poll_checkpoint(c);" not in texts[0]
+    assert texts[1].count("recomp_poll_checkpoint(c);") == 1
+
+
 def test_a_code_pointer_spelled_in_printable_bytes_is_still_a_pointer():
     """`PUSH 0x5b2370` stores the address as bytes 70 23 5b 00: 'p', '#', '['
     and a terminator, which the string-tail test reads as the end of a

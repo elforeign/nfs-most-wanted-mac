@@ -644,6 +644,43 @@ static void test_surface_container_refs(uint32_t dev) {
     CHECK(com_get(tex_id) == nullptr);
 }
 
+// SetFVF makes the declaration D3D9 builds for the FVF (run 4: NFS Underground's race minimap is
+// XYZ | DIFFUSE | TEX1 | TEXCOORDSIZE4(0), a projected four-float texture coordinate); GetFVF reads
+// it back; one declaration per FVF; SetVertexDeclaration clears the FVF.
+static void test_fvf(uint32_t dev) {
+    auto decl_bytes = [&]() {
+        std::vector<uint8_t> b;
+        CHECK(call_method(dev, 88, {sc(0x40)}) == 0); // GetVertexDeclaration
+        const uint32_t view = rd32(sc(0x40));
+        CHECK(view != 0);
+        if (ComObj *d = view ? com_this(view) : nullptr)
+            b = d->blob;
+        if (view)
+            call_method(view, 2);
+        return std::make_pair(view, b);
+    };
+    CHECK(call_method(dev, 89, {0x00020142u}) == 0); // SetFVF
+    CHECK(call_method(dev, 90, {sc(0x44)}) == 0);    // GetFVF
+    CHECK(rd32(sc(0x44)) == 0x00020142u);
+    const auto minimap = decl_bytes();
+    const std::vector<uint8_t> want = {0, 0, 0,  0, 2, 0, 0,  0,   // POSITION0 FLOAT3 @0
+                                       0, 0, 12, 0, 4, 0, 10, 0,   // COLOR0 D3DCOLOR @12
+                                       0, 0, 16, 0, 3, 0, 5,  0,   // TEXCOORD0 FLOAT4 @16
+                                       0xff, 0, 0, 0, 17, 0, 0, 0}; // D3DDECL_END
+    CHECK(minimap.second == want);
+    CHECK(call_method(dev, 89, {0x104u}) == 0); // XYZRHW | TEX1
+    const auto screen = decl_bytes();
+    const std::vector<uint8_t> want_t = {0, 0, 0,  0, 3, 0, 9, 0,   // POSITIONT FLOAT4 @0
+                                         0, 0, 16, 0, 1, 0, 5, 0,   // TEXCOORD0 FLOAT2 @16
+                                         0xff, 0, 0, 0, 17, 0, 0, 0};
+    CHECK(screen.second == want_t);
+    CHECK(call_method(dev, 89, {0x00020142u}) == 0);
+    CHECK(decl_bytes().first == minimap.first); // the same declaration again
+    CHECK(call_method(dev, 87, {0}) == 0);       // SetVertexDeclaration(NULL)
+    CHECK(call_method(dev, 90, {sc(0x44)}) == 0);
+    CHECK(rd32(sc(0x44)) == 0u);
+}
+
 static uint32_t make_device() {
     const uint32_t api = call_shim(tramp("d3d9.dll", "Direct3DCreate9"), {32});
     CHECK(api != 0);
@@ -1764,6 +1801,93 @@ static void test_lit_smoke() {
 
 // Owner 8 Oct (Off / 2x / 4x): the D3D9 multisample request as a sample count, the 2x cap the core mod sets, and the
 // renderer's fall to the next lower supported count. Unset cap: every count exactly as before (4x stays 4x).
+// UG1 run 6 Xbox-style fog (PixelVariant / VertexVariant xfog) and headlight fade (PixelVariant hlfade): off =
+// byte-identical text, the variant text, refusals. UG1_MSL_OUT=<dir> writes the patched sources for an xcrun metal compile.
+namespace ug1 {
+// worldheadlight.efx pixel_shader as ps_1_1: tex t0..t2; mul r0, t1, t2; mad r0, r0, c0, v0; mul_x2 r0, r0, t0.
+static std::vector<uint8_t> headlight_ps() {
+    return smk::bytes({0xFFFF0101u,
+                       0x00000042u, 0xB00F0000u,                                     // tex t0
+                       0x00000042u, 0xB00F0001u,                                     // tex t1
+                       0x00000042u, 0xB00F0002u,                                     // tex t2
+                       0x00000005u, 0x800F0000u, 0xB0E40001u, 0xB0E40002u,           // mul r0, t1, t2
+                       0x00000004u, 0x800F0000u, 0x80E40000u, 0xA0E40000u, 0x90E40000u,   // mad r0, r0, c0, v0
+                       0x00000005u, 0x810F0000u, 0x80E40000u, 0xB0E40000u,           // mul_x2 r0, r0, t0
+                       0x0000FFFFu});
+}
+// A ps_1_1 world program without the headlight stages: tex t0; mul_x2 r0, t0, v0.
+static std::vector<uint8_t> world_ps() {
+    return smk::bytes({0xFFFF0101u, 0x00000042u, 0xB00F0000u,
+                       0x00000005u, 0x810F0000u, 0xB0E40000u, 0x90E40000u, 0x0000FFFFu});
+}
+static std::vector<uint8_t> fog_vs() {   // smk::vs() plus mov oFog, v0.x
+    std::vector<uint8_t> b = smk::vs();
+    const uint32_t add[] = {0x02000001u, 0xC0010001u, 0x90000000u};
+    b.insert(b.end() - 4, (const uint8_t *)add, (const uint8_t *)add + sizeof add);
+    return b;
+}
+} // namespace ug1
+
+static void test_ug1_looks() {
+    const char *out = getenv("UG1_MSL_OUT");
+    const d9sh::Program &vp = d9sh::program_for(smk::vs()), &hp = d9sh::program_for(ug1::headlight_ps()),
+                        &wp = d9sh::program_for(ug1::world_ps()), &fv = d9sh::program_for(ug1::fog_vs());
+    CHECK(vp.ok && hp.ok && hp.pixel && hp.major == 1 && wp.ok && fv.ok);
+    std::string why, a, b;
+    // fog, vertex half: o.fog carries clip y; off = unchanged; a program writing oFog is refused
+    d9msl::VertexVariant vv;
+    CHECK(d9msl::vertex_source(vp, vv, &a, &why) && a.find("o.fog = ofog.x;") != std::string::npos);
+    vv.xfog = 1;
+    CHECK(d9msl::vertex_source(vp, vv, &b, &why) && b.find("o.fog = opos.y;") != std::string::npos &&
+          b.find("o.fog = ofog.x;") == std::string::npos);
+    CHECK(vv.key() != d9msl::VertexVariant{}.key());
+    std::string wf;
+    CHECK(!d9msl::vertex_source(fv, vv, &b, &wf) && wf.find("oFog") != std::string::npos);
+    if (out)
+        smk::write(out, "ug1fog.vs.metal", (d9msl::vertex_source(vp, vv, &b, &why), b));
+    // fog, pixel half: the generic D3D fog block is replaced by ours; off = unchanged
+    d9msl::PixelVariant pv;
+    std::string p0, p1;
+    CHECK(d9msl::pixel_source(wp, pv, &p0, &why) && p0.find("if (P.fog_mode != 0)") != std::string::npos);
+    pv.xfog = 1;
+    CHECK(d9msl::pixel_source(wp, pv, &p1, &why));
+    CHECK(p1.find("if (P.fog_mode != 0)") == std::string::npos &&
+          p1.find("clamp((1.0 / vin.pos.w - P.fog_start) * P.fog_end, 0.0, P.fog_color.a)") != std::string::npos &&
+          p1.find("abs(vin.fog * vin.pos.w) * P.fog_density") != std::string::npos);
+    CHECK(pv.key() != d9msl::PixelVariant{}.key());
+    if (out)
+        smk::write(out, "ug1fog.ps.metal", p1);
+    // headlight: the classifier, off = unchanged, modes 1 and 2 insert after the one t[2] line, others fail closed
+    CHECK(d9msl::pixel_is_headlight(hp) && !d9msl::pixel_is_headlight(wp));
+    d9msl::PixelVariant hv;
+    hv.projected_mask = 6;
+    std::string h0, h1, h2, hw;
+    CHECK(d9msl::pixel_source(hp, hv, &h0, &why) && h0.find("headlight fade") == std::string::npos);
+    hv.hlfade = 1;
+    CHECK(d9msl::pixel_source(hp, hv, &h1, &why));
+    const size_t t2 = h1.find("    t[2] = (tx2.sample(sm2, "), add = h1.find("    t[2] *= saturate(1.0 - tc[1].w * 0.01);");
+    CHECK(t2 != std::string::npos && add != std::string::npos && add > t2 && add == h1.find('\n', t2) + 1);
+    CHECK(h1.size() > h0.size() && h1.substr(0, add) == h0.substr(0, add) &&
+          h1.substr(h1.find('\n', add) + 1) == h0.substr(add));
+    hv.hlfade = 2;
+    CHECK(d9msl::pixel_source(hp, hv, &h2, &why) && h2.find("saturate((tc[1].w - 1.6) * 0.32)") != std::string::npos &&
+          h2.find("t[2].xyz *= float3(1.125, 1.125, 1.056);") != std::string::npos);
+    d9msl::PixelVariant wv;
+    wv.hlfade = 1;
+    CHECK(!d9msl::pixel_source(wp, wv, &hw, &why) && why.find("hlfade") != std::string::npos);
+    hv.hlfade = 3;
+    CHECK(!d9msl::pixel_source(hp, hv, &hw, &why));
+    if (out) {
+        smk::write(out, "ug1hl1.ps.metal", h1);
+        smk::write(out, "ug1hl2.ps.metal", h2);
+        hv.hlfade = 1;
+        hv.xfog = 1;   // both on one draw
+        std::string hb;
+        CHECK(d9msl::pixel_source(hp, hv, &hb, &why));
+        smk::write(out, "ug1hlfog.ps.metal", hb);
+    }
+}
+
 static void test_msaa_count() {
     using namespace d9msaa;
     CHECK(count(0, 0) == 0 && count(1, 0) == 2 && count(1, 1) == 4 && count(2, 0) == 2 && count(4, 0) == 4 &&
@@ -2368,6 +2492,7 @@ int main() {
     test_msaa_count();
     test_volume_dds();
     test_lit_smoke();
+    test_ug1_looks();
     test_water_shapes();
     test_raindrop_patch();
     test_mipbias_patch();
@@ -2385,6 +2510,7 @@ int main() {
     if (!dev)
         return 1;
     test_device_booleans(dev);
+    test_fvf(dev);
     test_draw_limits(dev);
     test_depth_stencil_get(dev);
     test_surface_container_refs(dev);

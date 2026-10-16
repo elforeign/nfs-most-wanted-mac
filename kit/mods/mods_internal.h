@@ -223,6 +223,9 @@ void mods_settings_clear_pending(void);
 // Test86 (also in runtime/mods_seam.h): a declared setting's value by "mod_id/key", or `fallback`.
 int64_t mods_setting_value(const char *mod_id_slash_key, int64_t fallback);
 int mods_settings_recover_pending(void);
+// NFSMW 3.0.4 (D-202 item 4; also in runtime/mods_seam.h): the settings menu pausing the game (settings_menu.cpp).
+bool mods_menu_pause_wanted(void);
+void mods_menu_note_pause(bool paused);
 
 // ---- host services and the page (T9) --------------------------------------
 void mods_host_set_main_thread(void);

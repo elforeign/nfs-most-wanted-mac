@@ -113,15 +113,15 @@ struct Directory {
     }
 };
 
-bool identifier(uint32_t p, ResourceName &out, std::string *why) {
+bool identifier(uint32_t p, ResourceName &out, std::string *why, bool ansi) {
     out = {};
     if (p <= 0xffff) {
         out.id = p;
         return true;
     }
-    if (!gm_valid(p, 2))
+    if (!gm_valid(p, ansi ? 1 : 2))
         return fail(why, "invalid resource identifier address");
-    std::string text = gm_wstr(p);
+    std::string text = ansi ? gm_str(p) : gm_wstr(p);
     if (!text.empty() && text[0] == '#') {
         if (text.size() == 1)
             return fail(why, "empty numeric resource identifier");
@@ -142,11 +142,11 @@ bool identifier(uint32_t p, ResourceName &out, std::string *why) {
 }
 } // namespace
 
-uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::string *why) {
+uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::string *why, bool ansi) {
     Directory dir(why);
     ResourceName type, name;
-    if (!dir.open() || !identifier(type_id_or_name, type, why) ||
-        !identifier(name_id_or_name, name, why))
+    if (!dir.open() || !identifier(type_id_or_name, type, why, ansi) ||
+        !identifier(name_id_or_name, name, why, ansi))
         return 0;
     uint32_t type_dir, name_dir, first, count;
     if (!dir.child(0, type, type_dir) || !dir.child(type_dir, name, name_dir) ||
@@ -177,7 +177,7 @@ bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names, 
     Directory dir(why);
     ResourceName type;
     uint32_t type_dir, first, count;
-    if (!dir.open() || !identifier(type_id_or_name, type, why) || !dir.child(0, type, type_dir) ||
+    if (!dir.open() || !identifier(type_id_or_name, type, why, false) || !dir.child(0, type, type_dir) ||
         !dir.entries(type_dir, first, count))
         return false;
     for (uint32_t i = 0; i < count; ++i) {

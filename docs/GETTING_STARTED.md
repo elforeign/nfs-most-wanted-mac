@@ -8,9 +8,9 @@ It runs on your Mac only. Nothing is uploaded, and nothing it makes is meant to 
 
 | | |
 |---|---|
-| **Mac** | Apple Silicon (M1 or later). Developed and tested on macOS 27 (M5 Pro); earlier macOS versions are untested. The app is built for the macOS version your Mac runs. About 10 GB free: the setup's tools and working files take about 4–5 GB, and the finished app is about the size of your game folder (about 6 GB more with the optional HD textures). |
+| **Mac** | Apple Silicon (M1 or later) with **macOS 14.5 (Sonoma) or later**: the game is built with Command Line Tools 16 or later (the macOS 15 SDK), which need macOS 14.5. Developed and tested on macOS 27 (M5 Pro); earlier macOS versions are untested. The app is built for the macOS version your Mac runs. About 10 GB free: the setup's tools and working files take about 4–5 GB, and the finished app is about the size of your game folder (about 6 GB more with the optional HD textures). |
 | **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC (Black Edition), as an **installed game folder** with its own working `speed.exe` (the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `MOVIES` and so on). Copy it to the Mac from a Windows PC where it is installed, or from a backup. The setup checks first that the exe is one it can use, and stops without changing anything if it is not. |
-| **Xcode Command Line Tools** | Apple's free developer tools. The Setup app offers to install them; in Terminal, `xcode-select --install`. |
+| **Xcode Command Line Tools** | Apple's free developer tools, **version 16 or later**. The Setup app offers to install them; in Terminal, `xcode-select --install`. The setup checks the version first and says if yours is too old. |
 | **Time** | About 10 minutes the first time on an M5 Pro, including the one-time analysis of `speed.exe`. The optional shader warm-up adds about 35 minutes and the optional HD textures about 1¼ hours (see below); allow longer on older Macs. Updates are quicker. |
 
 The setup downloads the free developer tools it needs into its own folder (`~/Library/NFSMW-Native-Setup`):
@@ -76,8 +76,9 @@ where the *Remaster HD textures* setting uses it. With the Xbox 360 Stuff Pack, 
 - **Turn it on:** tick *Make HD textures now* in the Setup app, or pass `--hd-textures` (`--no-hd-textures` skips it).
   It is off unless you turn it on.
 - **Updates keep it (3.0.1):** when you open a newer Setup, *Make HD textures now* and *Prepare the shaders now*
-  start ticked if an earlier build made them. The HD textures are reused (minutes, not hours); the shaders are
-  prepared again for the new version (about 35 minutes). Untick to leave them out.
+  start ticked if an earlier build made them. The HD textures are reused (minutes, not hours). The shaders are
+  reused too (seconds) when the new version draws them the same way (3.0.4: the setup log says "shader warm-up:
+  reused the prepared shaders"); otherwise they are prepared again (about 35 minutes). Untick to leave them out.
   From the command line, pass `--hd-textures` / `--shader-seed` again.
 - **Time:** about 1¼ hours on an M5 Pro the first time (measured, including the one-time downloads), much longer on a
   base M1. The Mac stays awake.

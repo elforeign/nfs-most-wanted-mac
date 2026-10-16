@@ -351,7 +351,29 @@ void drop_block(std::map<uint32_t, Blk>::iterator it) {
     g_blocks->erase(it);
 }
 
+// The kit span (NFSMW issue 8, 3.0.4): the top 32 MB of the extra heap span hold the kit's own objects - DirectSound
+// rings and views, guest thread stacks - and nothing the guest allocates. On Windows those live in DirectSound's and
+// the system's own memory, never among the game's blocks; a player's game wrote a sound bank over the kit's sound
+// buffer when the two were neighbours in one heap. heap_alloc never takes a block in the span, heap_alloc_kit takes
+// only those, and no merge or in-place growth crosses its lower edge. RECOMP_KIT_SPAN=0 = one shared heap (3.0.3).
+const uint32_t KIT_SPAN_BYTES = 0x02000000u;
+uint32_t g_kit_lo = 0, g_kit_hi = 0;
+inline bool kit_side(uint32_t addr) {
+    return addr >= g_kit_lo && addr < g_kit_hi;
+}
+// Blocks at `a` and `b` may join only on the same side of the kit span's edge.
+inline bool same_side(uint32_t a, uint32_t b) {
+    return kit_side(a) == kit_side(b);
+}
+bool kit_span_enabled() {
+    static const bool on = [] {
+        const char *v = recomp_env("KIT_SPAN");
+        return !(v && v[0] == '0');
+    }();
+    return on;
+}
 void guard_reset(); // the guarded-block registry, below
+void large_reset(); // the large-block log, below
 void readonly_reset(); // the read-only page table, below (cleared with the heap)
 bool readonly_release(uint32_t addr); // below: true when `addr` was a read-only page (now writable, untracked)
 
@@ -365,9 +387,17 @@ void heap_reset() {
     g_blocks->clear();
     g_free->clear();
     put_block(HEAP_BASE, HEAP_LIMIT - HEAP_BASE, 0, false);
-    if (GUEST_HEAP_EXTRA_SIZE)
+    g_kit_lo = g_kit_hi = 0;
+    if (GUEST_HEAP_EXTRA_SIZE >= 4 * KIT_SPAN_BYTES && kit_span_enabled()) {
+        g_kit_hi = GUEST_HEAP_EXTRA_BASE + GUEST_HEAP_EXTRA_SIZE;
+        g_kit_lo = g_kit_hi - KIT_SPAN_BYTES;
+        put_block(GUEST_HEAP_EXTRA_BASE, GUEST_HEAP_EXTRA_SIZE - KIT_SPAN_BYTES, 0, false);
+        put_block(g_kit_lo, KIT_SPAN_BYTES, 0, false);
+    } else if (GUEST_HEAP_EXTRA_SIZE) {
         put_block(GUEST_HEAP_EXTRA_BASE, GUEST_HEAP_EXTRA_SIZE, 0, false);
+    }
     g_total_allocs = g_total_frees = 0;
+    large_reset();
 }
 
 } // namespace
@@ -404,7 +434,54 @@ void mem_shutdown() {
     guard_reset();
 }
 
+namespace {
+uint32_t heap_alloc_side(uint32_t size, bool zero, uint32_t align, bool kit);
+}
+// 3.0.4 (issue 8): the guest's large blocks (256 KB and up), the first 48 taken and the first 48 of those freed, with
+// the guest EIP, so a log shows which allocation a stray write came from and whether it was still live.
+namespace {
+constexpr uint32_t kLargeBlock = 0x40000u;
+constexpr uint32_t kLargeLogged = 48;
+uint32_t g_large_taken, g_large_freed;
+uint32_t g_large_addr[kLargeLogged];
+void large_reset() {
+    g_large_taken = g_large_freed = 0;
+}
+void note_large_take(uint32_t a, uint32_t size) {
+    if (!a || size < kLargeBlock || g_large_taken >= kLargeLogged)
+        return;
+    g_large_addr[g_large_taken++] = a;
+    const X86 *c = guest_current_context();
+    LOGW("heap: guest block %08x..%08x (%u KB) taken at EIP=%08x", a, a + size, size / 1024u, c ? c->eip : 0u);
+}
+void note_large_free(uint32_t a, uint32_t size) {
+    if (g_large_freed >= kLargeLogged)
+        return;
+    for (uint32_t i = 0; i < g_large_taken; ++i)
+        if (g_large_addr[i] == a) {
+            g_large_addr[i] = 0;
+            ++g_large_freed;
+            const X86 *c = guest_current_context();
+            LOGW("heap: guest block %08x (%u KB) freed at EIP=%08x", a, size / 1024u, c ? c->eip : 0u);
+            return;
+        }
+}
+} // namespace
 uint32_t heap_alloc(uint32_t size, bool zero, uint32_t align) {
+    const uint32_t a = heap_alloc_side(size, zero, align, false);
+    note_large_take(a, size);
+    return a;
+}
+uint32_t heap_alloc_kit(uint32_t size, bool zero, uint32_t align) {
+    if (g_kit_hi) {
+        if (uint32_t a = heap_alloc_side(size, zero, align, true))
+            return a;
+        LOGW("heap: the kit span is full; a %u-byte kit object goes in the shared heap", size);
+    }
+    return heap_alloc_side(size, zero, align, false);
+}
+namespace {
+uint32_t heap_alloc_side(uint32_t size, bool zero, uint32_t align, bool kit) {
     if (!g_blocks)
         return 0;
     if (!size_is_sane(size)) {
@@ -440,6 +517,8 @@ uint32_t heap_alloc(uint32_t size, bool zero, uint32_t align) {
     uint32_t need = align_up(size ? size : 1, 16);
 
     for (uint32_t start : *g_free) {
+        if (kit_side(start) != kit)
+            continue; // the other side of the kit span's edge
         auto it = g_blocks->find(start);
         if (it == g_blocks->end() || it->second.used)
             continue; // index out of step
@@ -463,9 +542,11 @@ uint32_t heap_alloc(uint32_t size, bool zero, uint32_t align) {
         ++g_total_allocs;
         return user;
     }
-    LOGW("heap_alloc: out of guest heap (%u bytes requested)", size);
+    if (!kit)
+        LOGW("heap_alloc: out of guest heap (%u bytes requested)", size);
     return 0;
 }
+} // namespace
 
 bool heap_owns(uint32_t addr) {
     if (!g_blocks)
@@ -491,6 +572,8 @@ bool heap_free(uint32_t addr) {
         LOGW("heap_free: %08x is not a live allocation", addr);
         return false;
     }
+    if (it->second.req >= kLargeBlock)
+        note_large_free(addr, it->second.req);
     it->second.used = false;
     it->second.req = 0;
     ++g_total_frees;
@@ -510,14 +593,14 @@ bool heap_free(uint32_t addr) {
     // Coalesce with the following block.
     auto next = std::next(it);
     if (next != g_blocks->end() && !next->second.used &&
-        next->first == it->first + it->second.size) {
+        next->first == it->first + it->second.size && same_side(it->first, next->first)) {
         it->second.size += next->second.size;
         drop_block(next);
     }
     // Coalesce with the preceding block.
     if (it != g_blocks->begin()) {
         auto prev = std::prev(it);
-        if (!prev->second.used && prev->first + prev->second.size == it->first) {
+        if (!prev->second.used && prev->first + prev->second.size == it->first && same_side(prev->first, it->first)) {
             prev->second.size += it->second.size;
             drop_block(it);
         }
@@ -630,7 +713,7 @@ uint32_t heap_alloc_guarded(uint32_t size, bool zero, uint32_t guard, const char
     uint64_t total = (uint64_t)size + 2ull * guard;
     if (!size_is_sane(size) || total > 0xffffffffull)
         return heap_alloc(size, zero, 16); // refused there, with its diagnostics
-    uint32_t base = heap_alloc((uint32_t)total, false, 16);
+    uint32_t base = heap_alloc_kit((uint32_t)total, false, 16);
     if (!base)
         return 0;
     uint32_t user = base + guard;
@@ -711,7 +794,8 @@ uint32_t heap_realloc(uint32_t addr, uint32_t new_size, bool zero) {
         if (tail >= 16) {
             it->second.size = need;
             auto next = std::next(it);
-            if (next != g_blocks->end() && !next->second.used && next->first == addr + have) {
+            if (next != g_blocks->end() && !next->second.used && next->first == addr + have &&
+                same_side(addr, next->first)) {
                 uint32_t merged = tail + next->second.size;
                 drop_block(next);
                 put_block(addr + need, merged, 0, false);
@@ -728,7 +812,7 @@ uint32_t heap_realloc(uint32_t addr, uint32_t new_size, bool zero) {
     // Try to grow into a free neighbour.
     auto next = std::next(it);
     if (next != g_blocks->end() && !next->second.used && next->first == addr + have &&
-        have + next->second.size >= need) {
+        same_side(addr, next->first) && have + next->second.size >= need) {
         uint32_t total = have + next->second.size;
         drop_block(next);
         uint32_t tail = total - need;
@@ -741,7 +825,7 @@ uint32_t heap_realloc(uint32_t addr, uint32_t new_size, bool zero) {
         return addr;
     }
 
-    uint32_t fresh = heap_alloc(new_size, false);
+    uint32_t fresh = kit_side(addr) ? heap_alloc_kit(new_size, false, 16) : heap_alloc(new_size, false);
     if (!fresh)
         return 0;
     uint32_t copy = old_req < new_size ? old_req : new_size;
@@ -796,6 +880,8 @@ std::string heap_check() {
             snprintf(buf, sizeof buf, "block %08x has bad size %u", kv.first, kv.second.size);
             return buf;
         }
+        if (kv.first == g_kit_lo && g_kit_hi)
+            prev_free = false; // the kit span's lower edge keeps its free block apart (3.0.4)
         if (!kv.second.used && prev_free) {
             snprintf(buf, sizeof buf, "adjacent free blocks at %08x", kv.first);
             return buf;
@@ -966,11 +1052,11 @@ bool readonly_release(uint32_t addr) {
 
 bool heap_readonly_enabled() {
 #if defined(__APPLE__) && defined(__aarch64__)
-    static const bool on = [] {
-        const char *v = recomp_env("READONLY_PAGES");
-        return !(v && v[0] == '0');
-    }();
-    return on;
+    // 3.0.4: opt-in (RECOMP_READONLY_PAGES=1). Stopping a guest store keeps a kit object intact but leaves the
+    // guest's own data half-written (issue 8: the game then hung); the kit span is the fix, the seal a probe. Read
+    // on every call (only when a view is made), so a test can turn it on.
+    const char *v = recomp_env("READONLY_PAGES");
+    return v && v[0] == '1';
 #else
     return false;
 #endif
@@ -987,7 +1073,7 @@ uint32_t heap_alloc_readonly(uint32_t size, const char *what, uint32_t tag) {
             slot = i;
     if (slot < 0)
         return 0; // table full: the caller allocates as before
-    const uint32_t a = heap_alloc(bytes, true, page);
+    const uint32_t a = heap_alloc_kit(bytes, true, page);
     if (!a)
         return 0;
     g_readonly[slot].bytes = bytes;

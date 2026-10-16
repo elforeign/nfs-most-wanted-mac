@@ -1034,6 +1034,8 @@ builtin = "none"
 # Renderer settings are supplied by this game's core mod. The shared page
 # also exposes touch layout selection and button remapping on the iPad.
 rows = ["window", "frame_limit", "performance_overlay", "filtering", "controls"]
+# 3.0.4: the core mod whose settings the host reads for its own features (mute in background, deadzones, brightness).
+core_mod = "core.nfsmw"
 # World filtering (Test72): "original" keeps the game's own texture filtering, so a profile that
 # never chose a value looks as before; 2-4 raise the anisotropy where the game filters anisotropically.
 filtering_default = 0
@@ -1074,6 +1076,10 @@ select = "key:C"
 start = "key:Escape"
 
 [launcher]
+# 3.0.4: "Check for updates" (Settings, an opt-in button) asks this repository's latest GitHub release.
+releases_repo = "elforeign/nfs-most-wanted-mac"
+# 3.0.4: the Setup app's build log (relative to the home folder), which Save bug report adds: it names the compiler.
+setup_log = "Library/NFSMW-Native-Setup/source/build/setup.log"
 # Opens when the executable is missing or wrong, with --launcher,
 # RECOMP_LAUNCHER=1, or Shift/Alt held at start. No store sells this game
 # (checked 2026-09-17): GOG only lists it on its Dreamlist, and Steam's "Most

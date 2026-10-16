@@ -152,6 +152,9 @@ int host_audio_capture_begin(const char *path);
 void host_audio_capture_end(void);
 // Pause or resume the output device without stopping the engine (app lifecycle).
 void host_audio_pause(bool paused);
+// NFSMW 3.0.4: output silence (the mix and the device keep running, so streams keep time); the focus events set it
+// when the core mod's mute_in_background is on.
+void host_audio_set_background_mute(bool muted);
 
 // Channels with something playing on them, which is what separates a silence
 // that is correct from one that is a fault.

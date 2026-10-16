@@ -80,7 +80,8 @@ HostLayout compute() {
         l.profile_dir = l.build_dir + "/profile";
     else {
         char buf[4096];
-        if (os_user_data_dir(RECOMP_APP_NAME, buf, sizeof buf) == 0)
+        // [game] data_dir_name (default app_name): the player-facing folder, e.g. "NFS Underground Native".
+        if (os_user_data_dir(RECOMP_DATA_DIR_NAME, buf, sizeof buf) == 0)
             l.profile_dir = buf;
         else
             l.profile_dir = "profile"; // no home at all: beside the cwd

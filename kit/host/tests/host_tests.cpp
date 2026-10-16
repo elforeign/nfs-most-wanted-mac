@@ -1,6 +1,7 @@
 #include "../gpu/metal/label_class.h"
 #include <map>
 #include "game_config.h"
+#include "../fe_layout.h"
 #include "../texture_pack.h"
 #include "../../runtime/display_seam.h"
 #include "../../runtime/native_seam.h"
@@ -54,6 +55,7 @@ extern "C" {
 #endif
 #include <SDL3/SDL.h>
 #include "../game_path.h"
+#include "../focus_note.h"
 #include "../../runtime/layout.h"
 #include "../d3d_render.h"
 #include "../../dx/host_api.h"
@@ -602,20 +604,27 @@ static void test_script_keyuntil_and_fe_screen() {
     CHECK(host_script_key_release_ready(1000, 50, 4000, 50));    // the game never read: released at 3 s
     CHECK(host_script_key_release_ready(0xffffff00u, 0xfffffffeu, 0x000000a0u, 0));   // both counters wrap
 #ifdef RECOMP_GLOBAL_FE_ROOT_ADDR
+    // Through the game's own layout (fe_layout.h): list entry -> overlay (no input) -> menu (input) -> popup (input).
+    // Walked back (NFSMW) the first with input answers; walked forward (NFSU1) the last with input does.
     g_fake_fe.clear();
-    const uint32_t root = 0x01000000u, engine = 0x01000100u, menu = 0x01000200u, overlay = 0x01000300u;
+    const uint32_t root = 0x01000000u, engine = 0x01000100u, overlay = 0x01000300u, menu = 0x01000200u,
+                   popup = 0x01000600u;
     fake_fe_put(RECOMP_GLOBAL_FE_ROOT_ADDR, root);
-    fake_fe_put(root, engine);
-    fake_fe_put(engine + 0xe4, overlay);        // the last package: an overlay without input
-    fake_fe_put(overlay + 0x20, 0);
-    fake_fe_put(overlay + 0x08, menu);
-    fake_fe_put(overlay + 0x0c, 0x01000400u);
-    fake_fe_put(menu + 0x20, 0xffu);            // the one with the input
-    fake_fe_put(menu + 0x08, 0);
-    fake_fe_put(menu + 0x0c, 0x01000500u);
-    const char *over = "PauseOverlay.fng", *name = "MainMenu.fng";
+    fake_fe_put(root + RECOMP_GLOBAL_FE_ROOT_ENGINE, engine);
+    fake_fe_put(engine + RECOMP_GLOBAL_FE_ROOT_LIST, overlay);
+    fake_fe_put(overlay + RECOMP_GLOBAL_FE_ROOT_CONTROL, 0);
+    fake_fe_put(overlay + RECOMP_GLOBAL_FE_ROOT_LINK, menu);
+    fake_fe_put(overlay + RECOMP_GLOBAL_FE_ROOT_NAME, 0x01000400u);
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_CONTROL, 0xffu);
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_LINK, 0);
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_NAME, 0x01000500u);
+    fake_fe_put(popup + RECOMP_GLOBAL_FE_ROOT_CONTROL, 0xffu);
+    fake_fe_put(popup + RECOMP_GLOBAL_FE_ROOT_LINK, 0);
+    fake_fe_put(popup + RECOMP_GLOBAL_FE_ROOT_NAME, 0x01000700u);
+    const char *over = "PauseOverlay.fng", *name = "MainMenu.fng", *pop = "Popup.fng";
     for (size_t i = 0; i <= strlen(over); ++i) g_fake_fe[0x01000400u + i] = uint8_t(over[i]);
     for (size_t i = 0; i <= strlen(name); ++i) g_fake_fe[0x01000500u + i] = uint8_t(name[i]);
+    for (size_t i = 0; i <= strlen(pop); ++i) g_fake_fe[0x01000700u + i] = uint8_t(pop[i]);
     char screen[64];
     CHECK_EQ(host_script_fe_screen(fake_fe_u32, screen, sizeof screen), 1);
     CHECK(!strcmp(screen, "MainMenu.fng"));
@@ -624,7 +633,22 @@ static void test_script_keyuntil_and_fe_screen() {
     CHECK_EQ(host_script_fe_metric("fe:Track_Select.fng", fake_fe_u32), 0.0);   // control: the wrong screen
     CHECK_EQ(host_script_fe_metric("fe:PauseOverlay", fake_fe_u32), 0.0);       // control: no input there
     CHECK_EQ(host_script_fe_metric("turn", fake_fe_u32), -1.0);
-    fake_fe_put(menu + 0x20, 0);                  // no screen has the input
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_LINK, popup);   // a second screen with input after it
+    CHECK_EQ(host_script_fe_screen(fake_fe_u32, screen, sizeof screen), 1);
+    CHECK(!strcmp(screen, RECOMP_GLOBAL_FE_ROOT_FORWARD ? "Popup.fng" : "MainMenu.fng"));
+#ifdef RECOMP_GLOBAL_FE_ROOT_SKIP
+    {
+        // An overlay named in fe_root `skip` keeps input on every screen; the menu still answers (UG2 help bar).
+        static const char *const skip[] = RECOMP_GLOBAL_FE_ROOT_SKIP;
+        for (size_t i = 0; i <= strlen(skip[0]); ++i) g_fake_fe[0x01000700u + i] = uint8_t(skip[0][i]);
+        CHECK_EQ(host_script_fe_screen(fake_fe_u32, screen, sizeof screen), 1);
+        CHECK(!strcmp(screen, "MainMenu.fng"));
+        for (size_t i = 0; i <= strlen(pop); ++i) g_fake_fe[0x01000700u + i] = uint8_t(pop[i]);
+        CHECK(!strcmp(screen, "MainMenu.fng"));
+    }
+#endif
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_LINK, 0);
+    fake_fe_put(menu + RECOMP_GLOBAL_FE_ROOT_CONTROL, 0);    // no screen has the input
     CHECK_EQ(host_script_fe_screen(fake_fe_u32, screen, sizeof screen), 0);
     CHECK(screen[0] == 0);
     CHECK_EQ(host_script_fe_metric("fe:MainMenu", fake_fe_u32), 0.0);
@@ -1219,16 +1243,15 @@ static void test_game_path() {
     os_setenv("RECOMP_PROFILE_DIR", dir);
     os_unsetenv("RECOMP_EXE");
     host_layout_set_exe_path_for_test((std::string(dir) + "/nowhere/exe").c_str()); // no checkout
-    // The build's own developer copy (an absolute path from game.toml) is
-    // used from wherever the app runs, so a game repository's build finds its
-    // game without a checkout marker above the executable.
+    // The build's own developer copy (game.toml developer_exe) is for
+    // developer runs only: an app with no checkout above it (a package, on
+    // any Mac) finds the player's game by its saved path or the launcher.
     OsStat dev_st;
     const bool have_dev = os_stat(RECOMP_DEVELOPER_EXE, &dev_st) == 0;
-    const GamePathSource idle = have_dev ? GamePathSource::Checkout : GamePathSource::None;
+    const GamePathSource idle = GamePathSource::None;
     GamePath first = game_path_resolve(nullptr);
     CHECK(first.source == idle);
-    if (have_dev)
-        CHECK(first.exe == RECOMP_DEVELOPER_EXE);
+    CHECK(first.exe.empty());
     // A flag wins without any check.
     CHECK(game_path_resolve("/x/D3DPopTB.exe").source == GamePathSource::Flag);
     // A saved path to a wrong file is ignored.
@@ -1247,8 +1270,14 @@ static void test_game_path() {
         CHECK(game_path_save(RECOMP_DEVELOPER_EXE));
         GamePath g = game_path_resolve(nullptr);
         CHECK(g.exe == RECOMP_DEVELOPER_EXE);
+        CHECK(g.source == GamePathSource::Saved);
     }
     os_unsetenv("RECOMP_PROFILE_DIR");
+    // A developer run (a checkout above the executable; the kit is one) uses the build's own copy.
+    if (have_dev) {
+        host_layout_set_exe_path_for_test((std::string(RECOMP_KIT_DIR) + "/build/x/exe").c_str());
+        CHECK(game_path_resolve(nullptr).source == GamePathSource::Checkout);
+    }
     host_layout_set_exe_path_for_test(nullptr);
 }
 
@@ -8754,6 +8783,79 @@ extern "C" void mods_page_draw(void *pixels, int w, int h, int bpp, int pitch,
         p[(size_t)y * (size_t)pitch] = 0xab;
 }
 
+// Run 39 (NFSMW 3.0.4): the tabbed menu's renderer, weak in mods_seam.cpp (0 = hidden). Visible, it draws when its
+// generation moved since the caller's (2) and otherwise says unchanged (1), as mods_menu_render does.
+static bool g_menu_visible = false;
+static uint64_t g_menu_gen = 0;
+extern "C" int mods_menu_render(int w, int h, uint64_t *generation, const uint8_t **pixels) {
+    if (!g_menu_visible)
+        return 0;
+    if (*generation == g_menu_gen)
+        return 1;
+    static std::vector<uint8_t> page;
+    page.assign((size_t)w * (size_t)h * 4, 0x40);
+    *generation = g_menu_gen;
+    *pixels = page.data();
+    return 2;
+}
+
+// Run 39 (NFSMW 3.0.4, D-202 item 4): while the menu has the guest parked nothing is sealed, so the menu froze on
+// screen. host_present_menu_refresh, from the park loop, redraws a changed page and the next repeat composes it over
+// the held frame: no new frame id. Controls: an unchanged page and a hidden one cost nothing and recompose nothing.
+static void test_menu_redrawn_while_parked() {
+    host_page_set_enabled(true);
+    g_menu_visible = true;
+    g_menu_gen = 1;
+    host_present_test_begin();
+    host_present_acquire_target(640, 480, 640, 480);
+    host_present_test_seal(1);
+    host_present_tick_for_test(0.01);
+    host_present_test_command_done(1);
+    host_present_test_presented(1, 0.02);
+    CHECK_EQ(host_present_unique_completed(), 1u);
+    const uint64_t pages = host_present_settings_pages();   // the test seal path attaches no page
+    // A repeat is in flight (made before the menu changed), as nearly always in the real app.
+    host_present_tick_for_test(0.025);
+    CHECK_EQ(host_present_repeats(), 1u);
+    const uint64_t old_page = host_present_test_page_id();
+    // Parked: the cursor moved (a new generation) and no frame is sealed.
+    g_menu_gen = 2;
+    host_present_menu_refresh();
+    CHECK_EQ(host_present_menu_refreshes(), 1u);
+    CHECK_EQ(host_present_settings_pages(), pages + 1);
+    const uint64_t new_page = host_present_test_page_id();
+    CHECK(new_page != old_page);
+    // That repeat retires after the refresh: it must not put its older page back (the real-app freeze).
+    host_present_test_command_done(1);
+    host_present_test_presented(1, 0.028);
+    CHECK_EQ(host_present_test_page_id(), new_page);
+    host_present_tick_for_test(0.03);
+    CHECK_EQ(host_present_repeats(), 2u);
+    CHECK_EQ(host_present_test_recomposed(), 1u);  // the repeat composes the new page
+    CHECK_EQ(host_present_test_last_id(), 1u);     // the held frame: no new id
+    host_present_test_command_done(1);
+    host_present_test_presented(1, 0.04);
+    CHECK_EQ(host_present_unique_completed(), 1u);
+    CHECK_EQ(host_present_test_page_id(), new_page);
+    // Control: nothing changed on the page: no texture, the next repeat reuses the composition.
+    host_present_menu_refresh();
+    CHECK_EQ(host_present_menu_refreshes(), 1u);
+    host_present_tick_for_test(0.05);
+    CHECK_EQ(host_present_repeats(), 3u);
+    CHECK_EQ(host_present_test_recomposed(), 1u);
+    host_present_test_command_done(1);
+    host_present_test_presented(1, 0.06);
+    // Control: the menu closed: nothing drawn.
+    g_menu_visible = false;
+    g_menu_gen = 3;
+    host_present_menu_refresh();
+    CHECK_EQ(host_present_menu_refreshes(), 1u);
+    host_present_stop();
+    host_present_menu_refresh();                   // no presenter: a no-op
+    host_page_set_enabled(false);
+    g_menu_gen = 0;
+}
+
 static void test_page_draws_on_a_copy() {
     host_page_set_enabled(true);
     const int w = 64, h = 32, pitch = 80; // a padded stride, as a lock gives
@@ -9099,6 +9201,40 @@ static void test_t9_relative_crossing_and_layout_mailbox() {
     host_gate_reset();
 }
 
+// The pair form (NFS Underground: x 0x0070649c, y 0x007064a0, guard = its DirectInput mouse pointer 0x00706498).
+static void test_guest_pointer_pair_resolution() {
+    std::vector<uint8_t> arena(4096);
+    auto put = [&](uint32_t address, uint32_t value) { memcpy(arena.data() + address, &value, sizeof value); };
+    auto name = [](HostGuestPointer p) { return std::string(host_guest_pointer_failure_name(p.failure)); };
+    auto resolve = [&](int w, int h) { return host_guest_pointer_resolve_pair(arena.data(), arena.size(), 0x100, 0x104, 0x108, w, h); };
+    put(0x104, 400);
+    put(0x108, 300);
+    CHECK(name(resolve(800, 600)) == "object-null"); // the game's mouse does not exist yet
+    put(0x100, 0x01234560);
+    auto p = resolve(800, 600);
+    CHECK(name(p) == "ready");
+    CHECK_EQ(p.x, 400);
+    CHECK_EQ(p.y, 300);
+    CHECK_EQ(p.right, 799);
+    CHECK_EQ(p.bottom, 599);
+    CHECK_EQ(p.x_addr, 0x104u);
+    CHECK_EQ(p.y_addr, 0x108u);
+    put(0x104, 800); // the game's clamp keeps the client width itself
+    CHECK(name(resolve(800, 600)) == "ready");
+    put(0x104, 801);
+    CHECK(name(resolve(800, 600)) == "coordinates-outside-bounds");
+    put(0x104, uint32_t(-1));
+    CHECK(name(resolve(800, 600)) == "coordinates-outside-bounds");
+    put(0x104, 10);
+    CHECK(name(resolve(0, 600)) == "bounds-invalid");
+    CHECK(name(host_guest_pointer_resolve_pair(arena.data(), arena.size(), 0x100, 4094, 0x108, 800, 600)) ==
+          "object-outside-arena");
+    CHECK(name(host_guest_pointer_resolve_pair(arena.data(), arena.size(), 0, 0x104, 0x108, 800, 600)) ==
+          "object-outside-arena");
+    CHECK(name(host_guest_pointer_resolve_pair(nullptr, arena.size(), 0x100, 0x104, 0x108, 800, 600)) ==
+          "arena-unavailable");
+}
+
 static void test_t9_guest_pointer_resolution() {
     // A separate arena proves resolution does not accidentally read g_mem or
     // a cached absolute coordinate address. object models ECX at 0052d430.
@@ -9271,18 +9407,143 @@ static void test_native_touch_placement() {
     host_input_reset();
 }
 
-static void test_t9_pointer_survives_layout_rescale() {
-    constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
+// The game's pointer cell for the closed-loop tests that read the result back: the pair globals when [hooks]
+// mouse_pair_x is set (NFS Underground), else the object's +0x20/+0x24. arm() makes either form resolve; the
+// object's bounds are +0x40/+0x44, the pair's are the display mode the test sets. The destructor restores both.
+struct TestPointerCell {
+    static constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
+#ifdef RECOMP_HOOK_MOUSE_PAIR_X
+    static constexpr uint32_t x_addr = RECOMP_HOOK_MOUSE_PAIR_X, y_addr = RECOMP_HOOK_MOUSE_PAIR_Y,
+                              guard = RECOMP_HOOK_MOUSE_PAIR_GUARD;
+#else
+    static constexpr uint32_t x_addr = base + 0x20, y_addr = base + 0x24, guard = 0;
+#endif
     uint8_t saved[0x48];
-    memcpy(saved, gm_ptr(base), sizeof saved);
+    uint32_t saved_x, saved_y, saved_guard, held_x = 0;
+    TestPointerCell() {
+        memcpy(saved, gm_ptr(base), sizeof saved);
+        saved_x = rd32(x_addr);
+        saved_y = rd32(y_addr);
+        saved_guard = guard ? rd32(guard) : 0;
+    }
+    ~TestPointerCell() {
+        memcpy(gm_ptr(base), saved, sizeof saved);
+        wr32(x_addr, saved_x);
+        wr32(y_addr, saved_y);
+        if (guard)
+            wr32(guard, saved_guard);
+    }
+    void arm(int right, int bottom) {
+        memset(gm_ptr(base), 0, 0x48);
+        wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
+        wr32(base + 0x40, right);
+        wr32(base + 0x44, bottom);
+        if (guard)
+            wr32(guard, 1); // the game's mouse exists
+    }
+    void put(int x, int y) {
+        wr32(x_addr, x);
+        wr32(y_addr, y);
+    }
+    void move(int32_t dx, int32_t dy) {
+        put(int(rd32(x_addr)) + dx, int(rd32(y_addr)) + dy);
+    }
+    // Make the pointer unreadable the way each form can be: the object's rectangle empty or the pair's mouse
+    // missing; then the coordinates outside the object's rectangle (right = 199) or past the pair's frame.
+    void fail_bounds() {
+        wr32(base + 0x40, 0);
+        if (guard)
+            wr32(guard, 0);
+    }
+    void fail_coordinates() {
+        wr32(base + 0x40, 199);
+        if (guard) {
+            wr32(guard, 1);
+            held_x = rd32(x_addr);
+            wr32(x_addr, 5000);
+        }
+    }
+    void recover(int right) {
+        wr32(base + 0x40, right);
+        if (guard) {
+            wr32(guard, 1);
+            wr32(x_addr, held_x);
+        }
+    }
+    // An uninitialised guest: no object, no pair mouse.
+    void clear() {
+        memset(gm_ptr(base), 0, 0x48);
+        if (guard)
+            wr32(guard, 0);
+    }
+    uint32_t x() const { return rd32(x_addr); }
+    uint32_t y() const { return rd32(y_addr); }
+    TestPointerCell(const TestPointerCell &) = delete;
+    TestPointerCell &operator=(const TestPointerCell &) = delete;
+};
+// A pair cursor's bounds are the frame the game draws (run 8): NFS Underground draws 800x600 through Direct3D 9, which
+// reports no display mode, so bounds from the 640x480 default kept the cursor out of a menu's right and bottom.
+static void test_pair_pointer_bounds_follow_the_drawn_frame() {
+#if defined(RECOMP_HOOK_MOUSE_PAIR_X) && !defined(RECOMP_HOOK_MOUSE_PAIR_SPACE_W)
+    TestPointerCell cell;
     host_gate_reset();
     host_input_reset();
-    memset(gm_ptr(base), 0, 0x48);
-    wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-    wr32(base + 0x40, 639);
-    wr32(base + 0x44, 479);
-    wr32(base + 0x20, 320);
-    wr32(base + 0x24, 240);
+    cell.arm(639, 479);
+    cell.put(700, 550);
+    auto in = t9_layout(nullptr);
+    in.cls = HOST_SCREEN_MENU;
+    in.guest_w = 800;
+    in.guest_h = 600;
+    host_gate_set_layout(&in);
+    host_gate_hit_test(nullptr, 0, 0); // the guest side takes the published layout
+    const HostGuestPointer p = host_guest_pointer_current();
+    CHECK(p.failure == HostGuestPointer::None);
+    CHECK_EQ(p.right, 799);
+    CHECK_EQ(p.bottom, 599);
+    host_gate_reset();
+    host_input_reset();
+#endif
+}
+// A menu drawn as a 4:3 box centred in a wide frame (NFS Underground, run 9): with the box published
+// (host_display_set_ui_box), the pointer maps into the box, so its middle is the cursor space's middle and the bars
+// are its edges.
+static void test_pair_pointer_maps_into_the_ui_box() {
+#ifdef RECOMP_HOOK_MOUSE_PAIR_X
+    TestPointerCell cell;
+    host_gate_reset();
+    host_input_reset();
+    cell.arm(639, 479);
+    cell.put(10, 10);
+    auto in = t9_layout(nullptr);
+    in.cls = HOST_SCREEN_MENU;
+    in.guest_w = in.drawable_w = 1920;
+    in.guest_h = in.drawable_h = 1080;
+    in.scene = {1.0f, 1.0f, 0, 0, 1920};
+    host_gate_set_layout(&in);
+    host_gate_hit_test(nullptr, 0, 0);
+    const HostGuestPointer p = host_guest_pointer_current();
+    CHECK(p.failure == HostGuestPointer::None);
+    host_display_set_ui_box(0.125f, 0.0f, 0.75f, 1.0f);
+    CHECK(host_gate_pointer_place(960, 540));
+    CHECK(std::abs(int(cell.x()) - (p.right + 1) / 2) <= 1);
+    CHECK(std::abs(int(cell.y()) - (p.bottom + 1) / 2) <= 1);
+    CHECK(host_gate_pointer_place(100, 540)); // the left bar: the box's left edge
+    CHECK_EQ(cell.x(), uint32_t(p.left));
+    CHECK(host_gate_pointer_place(1919, 540)); // the right bar
+    CHECK_EQ(cell.x(), uint32_t(p.right));
+    host_display_set_ui_box(0.0f, 0.0f, 1.0f, 1.0f); // without a box: the whole frame
+    CHECK(host_gate_pointer_place(240, 540));
+    CHECK(std::abs(int(cell.x()) - int(std::lround(240.0 / 1919 * p.right))) <= 1);
+    host_gate_reset();
+    host_input_reset();
+#endif
+}
+static void test_t9_pointer_survives_layout_rescale() {
+    TestPointerCell cell;
+    host_gate_reset();
+    host_input_reset();
+    cell.arm(639, 479);
+    cell.put(320, 240);
     auto big = t9_layout(nullptr);
     big.cls = HOST_SCREEN_MENU;
     big.drawable_w = 3840;
@@ -9305,21 +9566,14 @@ static void test_t9_pointer_survives_layout_rescale() {
     CHECK(px >= 0 && px < small.drawable_w);
     CHECK(py >= 0 && py < small.drawable_h);
     CHECK(std::abs(dx) <= 64 && std::abs(dy) <= 64);
-    memcpy(gm_ptr(base), saved, sizeof saved);
 }
 
 static void test_t9_pointer_loop_gives_up_when_unanswered() {
-    constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
-    uint8_t saved[0x48];
-    memcpy(saved, gm_ptr(base), sizeof saved);
+    TestPointerCell cell;
     host_gate_reset();
     host_input_reset();
-    memset(gm_ptr(base), 0, 0x48);
-    wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-    wr32(base + 0x40, 639);
-    wr32(base + 0x44, 479);
-    wr32(base + 0x20, 100);
-    wr32(base + 0x24, 100); // never updated below
+    cell.arm(639, 479);
+    cell.put(100, 100); // never updated below
     auto in = t9_layout(nullptr);
     in.cls = HOST_SCREEN_MENU;
     in.drawable_w = 1280;
@@ -9337,8 +9591,7 @@ static void test_t9_pointer_loop_gives_up_when_unanswered() {
     }
     CHECK(gave_up);
     // The pair moving on its own re-arms the loop.
-    wr32(base + 0x20, 150);
-    wr32(base + 0x24, 140);
+    cell.put(150, 140);
     int32_t dx = 0, dy = 0;
     host_input_pointer_correction(&dx, &dy);
     // Main's foreign-writer protection first adopts that external movement.
@@ -9347,7 +9600,6 @@ static void test_t9_pointer_loop_gives_up_when_unanswered() {
     CHECK_EQ(dy, 0);
     host_input_pointer_correction(&dx, &dy);
     CHECK(dx || dy);
-    memcpy(gm_ptr(base), saved, sizeof saved);
 }
 
 // Within the correction's deadband the cursor is where the user is pointing.
@@ -9356,18 +9608,12 @@ static bool near(uint32_t got, uint32_t want) {
 }
 
 static void test_t9_pointer_closed_loop() {
-    constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
-    uint8_t saved[0x48];
-    memcpy(saved, gm_ptr(base), sizeof saved);
+    TestPointerCell cell;
     for (bool captured : {false, true}) {
         host_gate_reset();
         host_input_reset();
-        memset(gm_ptr(base), 0, 0x48);
-        wr32(base, RECOMP_HOOK_MOUSE_VTABLE); // Constructed cursor with no attached context.
-        wr32(base + 0x40, 639);
-        wr32(base + 0x44, 479);
-        wr32(base + 0x20, 100);
-        wr32(base + 0x24, 100);
+        cell.arm(639, 479); // Constructed cursor with no attached context.
+        cell.put(100, 100);
         auto in = t9_layout(nullptr);
         in.cls = HOST_SCREEN_MENU;
         in.drawable_w = 1280;
@@ -9384,15 +9630,13 @@ static void test_t9_pointer_closed_loop() {
         CHECK_EQ(state.mouse_dy, 25); // half of the gap
         // That delta went to the guest: a real guest applies it, and the next
         // correction is owed only once its own coordinates have moved.
-        wr32(base + 0x20, rd32(base + 0x20) + state.mouse_dx);
-        wr32(base + 0x24, rd32(base + 0x24) + state.mouse_dy);
+        cell.move(state.mouse_dx, state.mouse_dy);
         // Batch multiple OS events while the guest has not applied anything.
         CHECK(host_gate_window_motion(400, 300, 0, 0, &hit));
         CHECK(host_gate_window_motion(400, 300, 0, 0, &hit));
         // Those deliveries carry corrections too; a guest applies what it read.
         host_input_state(&state);
-        wr32(base + 0x20, rd32(base + 0x20) + state.mouse_dx);
-        wr32(base + 0x24, rd32(base + 0x24) + state.mouse_dy);
+        cell.move(state.mouse_dx, state.mouse_dy);
         int steps = 0, idle = 0;
         for (; steps < 20; ++steps) {
             int32_t dx = 999, dy = 999;
@@ -9404,16 +9648,14 @@ static void test_t9_pointer_closed_loop() {
                 continue;
             }
             idle = 0;
-            wr32(base + 0x20, rd32(base + 0x20) + dx);
-            wr32(base + 0x24, rd32(base + 0x24) + dy);
+            cell.move(dx, dy);
         }
         CHECK(steps <= 6);
-        CHECK(near(rd32(base + 0x20), 200u));
-        CHECK(near(rd32(base + 0x24), 150u));
+        CHECK(near(cell.x(), 200u));
+        CHECK(near(cell.y(), 150u));
         // A guest clamp or dropped motion introduces a large divergence.
         // Exactly 300 pixels on both axes: four 64s and a final 44.
-        wr32(base + 0x20, 500);
-        wr32(base + 0x24, 450);
+        cell.put(500, 450);
         idle = 0;
         for (steps = 0; steps < 30; ++steps) {
             int32_t dx = 0, dy = 0;
@@ -9426,18 +9668,16 @@ static void test_t9_pointer_closed_loop() {
             }
             idle = 0;
             CHECK(dx <= 0 && dy <= 0); // never away from the target
-            wr32(base + 0x20, rd32(base + 0x20) + dx);
-            wr32(base + 0x24, rd32(base + 0x24) + dy);
+            cell.move(dx, dy);
         }
         CHECK(steps < 30);
-        CHECK(near(rd32(base + 0x20), 200u));
-        CHECK(near(rd32(base + 0x24), 150u));
+        CHECK(near(cell.x(), 200u));
+        CHECK(near(cell.y(), 150u));
         // Polled far more often than the guest applies motion. Each poll may
         // ask again, but never for more than the poll before and never in the
         // opposite direction, so a guest that lags cannot be sent sailing past
         // the target and back - the "mouse keeps moving" the user reported.
-        wr32(base + 0x20, 120);
-        wr32(base + 0x24, 120);
+        cell.put(120, 120);
         int32_t prev_x = 1 << 30, prev_y = 1 << 30;
         for (int poll = 0; poll < 8; ++poll) {
             int32_t dx = 999, dy = 999;
@@ -9464,11 +9704,10 @@ static void test_t9_pointer_closed_loop() {
                 continue;
             }
             z = 0;
-            wr32(base + 0x20, rd32(base + 0x20) + dx);
-            wr32(base + 0x24, rd32(base + 0x24) + dy);
+            cell.move(dx, dy);
         }
-        CHECK(near(rd32(base + 0x20), 200u));
-        CHECK(near(rd32(base + 0x24), 150u));
+        CHECK(near(cell.x(), 200u));
+        CHECK(near(cell.y(), 150u));
         host_gate_release_all();
         int32_t dx = 7, dy = -3;
         host_input_pointer_correction(&dx, &dy);
@@ -9486,12 +9725,8 @@ static void test_t9_pointer_closed_loop() {
     const uint32_t out = gate_scratch(0x1200), count = gate_scratch(0x1180);
     host_gate_reset();
     host_input_reset();
-    memset(gm_ptr(base), 0, 0x48);
-    wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-    wr32(base + 0x40, 639);
-    wr32(base + 0x44, 479);
-    wr32(base + 0x20, 100);
-    wr32(base + 0x24, 100);
+    cell.arm(639, 479);
+    cell.put(100, 100);
     auto buffered_layout = t9_layout(nullptr);
     buffered_layout.cls = HOST_SCREEN_MENU;
     buffered_layout.drawable_w = 640;
@@ -9518,8 +9753,7 @@ static void test_t9_pointer_closed_loop() {
             CHECK(dx >= 0 && dy >= 0);
             continue;
         }
-        wr32(base + 0x20, rd32(base + 0x20) + dx);
-        wr32(base + 0x24, rd32(base + 0x24) + dy);
+        cell.move(dx, dy);
     }
     // Damping needs more than four deliveries; drain the rest.
     for (int i = 0, z = 0; i < 40; ++i) {
@@ -9538,15 +9772,13 @@ static void test_t9_pointer_closed_loop() {
             continue;
         }
         z = 0;
-        wr32(base + 0x20, rd32(base + 0x20) + dx);
-        wr32(base + 0x24, rd32(base + 0x24) + dy);
+        cell.move(dx, dy);
     }
-    CHECK(near(rd32(base + 0x20), 200u));
-    CHECK(near(rd32(base + 0x24), 150u));
+    CHECK(near(cell.x(), 200u));
+    CHECK(near(cell.y(), 150u));
     // Five actual DirectInput deliveries converge 300 pixels with no context
     // and no further OS events. Exercise both correction signs together.
-    wr32(base + 0x20, 100);
-    wr32(base + 0x24, 450);
+    cell.put(100, 450);
     CHECK(host_gate_window_motion(400, 150, 0, 0, &buffered_hit));
     CHECK_EQ(buffered_hit.gx, 400);
     CHECK_EQ(buffered_hit.gy, 150);
@@ -9571,32 +9803,31 @@ static void test_t9_pointer_closed_loop() {
         idle = 0;
         CHECK(dx >= 0 && dy <= 0);
         CHECK(dx <= 64 && dy >= -64);
-        wr32(base + 0x20, rd32(base + 0x20) + dx);
-        wr32(base + 0x24, rd32(base + 0x24) + dy);
+        cell.move(dx, dy);
     }
     CHECK(deliveries < 40);
-    CHECK(near(rd32(base + 0x20), 400u));
-    CHECK(near(rd32(base + 0x24), 150u));
+    CHECK(near(cell.x(), 400u));
+    CHECK(near(cell.y(), 150u));
     gate_call_method(&c, mouse, 2, {});
     gate_call_method(&c, keyboard, 2, {});
     // Distinct failures on the production delivery path preserve fallback
     // motion. Repeating them must produce only one diagnostic per reason.
-    wr32(base + 0x40, 0);
+    cell.fail_bounds();
     for (int i = 0; i < 2; ++i) {
         int32_t dx = 9, dy = -4;
         host_input_pointer_correction(&dx, &dy);
         CHECK_EQ(dx, 9);
         CHECK_EQ(dy, -4);
     }
-    wr32(base + 0x40, 199);
-    wr32(base + 0x1c, 0xfffffffcu);
+    cell.fail_coordinates();
+    wr32(TestPointerCell::base + 0x1c, 0xfffffffcu); // an unmapped context (the object form's)
     for (int i = 0; i < 2; ++i) {
         int32_t dx = 9, dy = -4;
         host_input_pointer_correction(&dx, &dy);
         CHECK_EQ(dx, 9);
         CHECK_EQ(dy, -4);
     }
-    wr32(base + 0x40, 639);
+    cell.recover(639);
     {
         int32_t dx = 9, dy = -4;
         host_input_pointer_correction(&dx, &dy);
@@ -9606,7 +9837,7 @@ static void test_t9_pointer_closed_loop() {
     // Uninitialised guest uses the old position difference, including fractions.
     host_gate_reset();
     host_input_reset();
-    memset(gm_ptr(base), 0, 0x48);
+    cell.clear();
     auto in = t9_layout(nullptr);
     in.cls = HOST_SCREEN_MENU;
     in.drawable_w = 1280;
@@ -9630,7 +9861,6 @@ static void test_t9_pointer_closed_loop() {
     host_input_pointer_correction(&dx, &dy);
     CHECK_EQ(dx, 9);
     CHECK_EQ(dy, -4);
-    memcpy(gm_ptr(base), saved, sizeof saved);
     host_gate_reset();
     host_input_reset();
 }
@@ -9640,18 +9870,12 @@ static void test_t9_pointer_closed_loop() {
 // where the pointer is ON THE PICTURE. The DirectInput correction used to span the whole drawable: the pointer at
 // x 280 (Classic guest 80) drove the cursor to 140, at x 400 (menu guest 80) to 200.
 static void test_t9_pointer_letterbox() {
-    constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
-    uint8_t saved[0x48];
-    memcpy(saved, gm_ptr(base), sizeof saved);
+    TestPointerCell cell;
     for (bool classic : {false, true}) {
         host_gate_reset();
         host_input_reset();
-        memset(gm_ptr(base), 0, 0x48);
-        wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-        wr32(base + 0x40, 639);
-        wr32(base + 0x44, 479);
-        wr32(base + 0x20, 100);
-        wr32(base + 0x24, 100);
+        cell.arm(639, 479);
+        cell.put(100, 100);
         auto in = t9_layout(nullptr);
         in.cls = classic ? HOST_SCREEN_GAMEPLAY : HOST_SCREEN_MENU;
         in.classic = classic;
@@ -9664,8 +9888,7 @@ static void test_t9_pointer_letterbox() {
         CHECK_EQ(hit.gy, 240);
         HostInputState state{};
         host_input_state(&state);
-        wr32(base + 0x20, rd32(base + 0x20) + state.mouse_dx);
-        wr32(base + 0x24, rd32(base + 0x24) + state.mouse_dy);
+        cell.move(state.mouse_dx, state.mouse_dy);
         int idle = 0;
         for (int steps = 0; steps < 30; ++steps) {
             int32_t dx = 0, dy = 0;
@@ -9676,13 +9899,11 @@ static void test_t9_pointer_letterbox() {
                 continue;
             }
             idle = 0;
-            wr32(base + 0x20, rd32(base + 0x20) + dx);
-            wr32(base + 0x24, rd32(base + 0x24) + dy);
+            cell.move(dx, dy);
         }
-        CHECK(near(rd32(base + 0x20), 80u));
-        CHECK(near(rd32(base + 0x24), 240u));
+        CHECK(near(cell.x(), 80u));
+        CHECK(near(cell.y(), 240u));
     }
-    memcpy(gm_ptr(base), saved, sizeof saved);
     host_gate_reset();
     host_input_reset();
 }
@@ -10361,13 +10582,11 @@ static void test_wide_cursor_bound() {
     // scaling the physical pointer across the entire canvas would give x=835.
     // Keep main's damping/foreign-write handling while converging on the hit.
     host_input_reset();
-    memset(gm_ptr(base), 0, 0x48);
-    wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-    wr32(base + 0x40, 639); // device geometry used by pointer integration
+    {
+    TestPointerCell cell;
+    cell.arm(639, 479); // device geometry used by pointer integration
     wr32(right, 639);
-    wr32(base + 0x44, 479);
-    wr32(base + 0x20, 100);
-    wr32(base + 0x24, 100);
+    cell.put(100, 100);
     UiFrame ui{{t9_element(9, 600, 440, 40, 40, 2)}, 640, 480};
     in = t9_layout(&ui);
     test_scene_width = 852;
@@ -10379,11 +10598,11 @@ static void test_wide_cursor_bound() {
     for (int i = 0; i < 40; ++i) {
         dx = dy = 0;
         host_input_pointer_correction(&dx, &dy);
-        wr32(base + 0x20, rd32(base + 0x20) + dx);
-        wr32(base + 0x24, rd32(base + 0x24) + dy);
+        cell.move(dx, dy);
     }
-    CHECK(near(rd32(base + 0x20), 620u));
-    CHECK(near(rd32(base + 0x24), 460u));
+    CHECK(near(cell.x(), 620u));
+    CHECK(near(cell.y(), 460u));
+    }
     host_gate_reset();
     host_input_reset();
     test_scene_width = 0;
@@ -10391,9 +10610,12 @@ static void test_wide_cursor_bound() {
     wr32(right, saved_right);
 }
 static void test_pointer_reaches_scrolling_edges() {
-    constexpr uint32_t base = RECOMP_HOOK_MOUSE_DEVICE_PTR;
-    uint8_t saved[0x48];
-    memcpy(saved, gm_ptr(base), sizeof saved);
+#ifdef RECOMP_HOOK_MOUSE_PAIR_SPACE_W
+    // A pair in a fixed space ([hooks] mouse_pair_space_w/_h) does not follow the frame size these cases sweep;
+    // test_pair_pointer_maps_into_the_ui_box covers it.
+    return;
+#endif
+    TestPointerCell cell;
     const int sizes[][2] = {{640, 480},   {800, 600},   {1024, 768}, {1280, 720},
                             {1920, 1080}, {2560, 1440}, {3840, 2160}};
     for (const auto &size : sizes)
@@ -10405,11 +10627,13 @@ static void test_pointer_reaches_scrolling_edges() {
                         host_gate_reset();
                         host_input_reset();
                         host_pointer_set_mode(width, height);
-                        memset(gm_ptr(base), 0, 0x48);
-                        wr32(base, RECOMP_HOOK_MOUSE_VTABLE);
-                        const int right = width - 1 + inclusive, bottom = height - 1 + inclusive;
-                        wr32(base + 0x40, right);
-                        wr32(base + 0x44, bottom);
+                        cell.arm(width - 1 + inclusive, height - 1 + inclusive);
+                        cell.put(width / 2, height / 2);
+                        // The bounds the game's pointer form reports: the object's own rectangle, or the
+                        // display mode for a pair (whose right edge is width - 1 either way).
+                        const HostGuestPointer bounds = host_guest_pointer_current();
+                        CHECK(bounds.failure == HostGuestPointer::None);
+                        const int right = bounds.right, bottom = bounds.bottom;
                         const int tx = edge == 0   ? 0
                                        : edge == 1 ? (classic ? right : width - 1)
                                                    : width / 2;
@@ -10418,8 +10642,8 @@ static void test_pointer_reaches_scrolling_edges() {
                                                    : height / 2;
                         // Inside the former four-pixel deadband: this is near the edge,
                         // but 004adbb0 will not issue its edge-scrolling command here.
-                        wr32(base + 0x20, edge == 0 ? 3 : edge == 1 ? width - 4 : tx);
-                        wr32(base + 0x24, edge == 2 ? 3 : edge == 3 ? height - 4 : ty);
+                        cell.put(edge == 0 ? 3 : edge == 1 ? width - 4 : tx,
+                                 edge == 2 ? 3 : edge == 3 ? height - 4 : ty);
                         auto in = t9_layout(nullptr);
                         in.cls = HOST_SCREEN_GAMEPLAY;
                         in.classic = classic;
@@ -10442,24 +10666,21 @@ static void test_pointer_reaches_scrolling_edges() {
                         CHECK(host_gate_window_motion(px, py, 0, 0, &hit));
                         HostInputState queued{};
                         host_input_state(&queued);
-                        wr32(base + 0x20, rd32(base + 0x20) + queued.mouse_dx);
-                        wr32(base + 0x24, rd32(base + 0x24) + queued.mouse_dy);
+                        cell.move(queued.mouse_dx, queued.mouse_dy);
                         for (int poll = 0; poll < 20; ++poll) {
                             int32_t dx = 0, dy = 0;
                             host_input_pointer_correction(&dx, &dy);
-                            wr32(base + 0x20, rd32(base + 0x20) + dx);
-                            wr32(base + 0x24, rd32(base + 0x24) + dy);
+                            cell.move(dx, dy);
                         }
                         if (edge < 2)
-                            CHECK_EQ(rd32(base + 0x20), uint32_t(tx));
+                            CHECK_EQ(cell.x(), uint32_t(tx));
                         else
-                            CHECK_EQ(rd32(base + 0x24), uint32_t(ty));
+                            CHECK_EQ(cell.y(), uint32_t(ty));
                         // Pulling away from the edge must still work immediately.
                         CHECK(host_gate_window_motion(in.drawable_w / 2, in.drawable_h / 2, 0, 0,
                                                       &hit));
                         host_input_state(&queued);
-                        wr32(base + 0x20, rd32(base + 0x20) + queued.mouse_dx);
-                        wr32(base + 0x24, rd32(base + 0x24) + queued.mouse_dy);
+                        cell.move(queued.mouse_dx, queued.mouse_dy);
                         for (int poll = 0; poll < 40; ++poll) {
                             // The app can wake the stationary pointer repeatedly before
                             // DirectInput consumes motion. Wakes must not mark a delta as
@@ -10467,8 +10688,7 @@ static void test_pointer_reaches_scrolling_edges() {
                             host_gate_pointer_tick();
                             int32_t dx = 0, dy = 0;
                             host_input_pointer_correction(&dx, &dy);
-                            wr32(base + 0x20, rd32(base + 0x20) + dx);
-                            wr32(base + 0x24, rd32(base + 0x24) + dy);
+                            cell.move(dx, dy);
                         }
                         const int center_x = classic ? int(std::lround(double(in.drawable_w / 2) *
                                                                        right / (in.drawable_w - 1)))
@@ -10477,14 +10697,13 @@ static void test_pointer_reaches_scrolling_edges() {
                                                  ? int(std::lround(double(in.drawable_h / 2) *
                                                                    bottom / (in.drawable_h - 1)))
                                                  : hit.gy;
-                        CHECK(near(rd32(base + 0x20), uint32_t(center_x)));
-                        CHECK(near(rd32(base + 0x24), uint32_t(center_y)));
+                        CHECK(near(cell.x(), uint32_t(center_x)));
+                        CHECK(near(cell.y(), uint32_t(center_y)));
                     }
                 }
     host_gate_reset();
     host_input_reset();
     test_scene_width = 0;
-    memcpy(gm_ptr(base), saved, sizeof saved);
 }
 // Match the host's revision-gated publication, then check the actual GPU
 // output: dragging moves only the knob, keeping the base and touch zone put.
@@ -11389,6 +11608,23 @@ static void test_d3d9_gpu_renderer() {
 // must retain bad frames together with their recovered neighbors. No game,
 // profiles or visible window are involved; Python checks the emitted artifact.
 // R3 run 31 O6: label_class::of answers every prefix exactly as the strncmp it replaced, near misses included.
+// NFSU1 387564e in the shared kit: a focus change before the guest has a window is not counted as delivered, so
+// the next note (the window now exists) queues it again; once delivered, a repeat is not queued.
+static void test_focus_note_waits_for_a_guest_window() {
+    FocusNote f;
+    CHECK(f.note(true, false)); // focused before CreateWindow: queued, dropped by apply_focus
+    CHECK(!f.activated);
+    CHECK(f.note(true, true));  // the same focus once the window exists: queued again (was lost before)
+    CHECK(f.activated);
+    CHECK(!f.note(true, true)); // nothing new
+    CHECK(f.note(false, true)); // a real change
+    CHECK(f.note(true, true));
+    FocusNote old_rule; // control: the earlier rule marked the first note delivered whatever the window
+    old_rule.note(true, false);
+    old_rule.activated = true;
+    CHECK(!old_rule.note(true, true)); // so the activation never reached the guest
+}
+
 static void test_label_class_matches_strncmp() {
     const char *labels[] = {nullptr, "", "IDI", "IDI_", "IDI_W", "IDI_WORLD", "IDI_WORLD_FX", "IDI_WORLD_FX/",
                             "IDI_WORLD_FX/p0", "IDI_WORLDX", "IDI_WORLDNORMALMAP_FX", "IDI_WORLDNORMALMAP_FX/a",
@@ -11661,6 +11897,7 @@ int main(int argc, char **argv) {
     test_native_frame_metrics();
     test_slot_pacer();
     test_label_class_matches_strncmp();
+    test_focus_note_waits_for_a_guest_window();
     test_wide_cursor_bound();
     test_pointer_reaches_scrolling_edges();
     test_native_overlay_pixels();
@@ -11682,9 +11919,12 @@ int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--t9-input") == 0) {
         test_native_touch_placement();
         test_t9_guest_pointer_resolution();
+        test_guest_pointer_pair_resolution();
         test_t9_hits_and_drag();
         test_t9_snapshot_capture_edges_cursor();
         test_t9_relative_crossing_and_layout_mailbox();
+        test_pair_pointer_bounds_follow_the_drawn_frame();
+        test_pair_pointer_maps_into_the_ui_box();
         test_t9_pointer_closed_loop();
         test_t9_pointer_letterbox();
         test_t9_pointer_loop_gives_up_when_unanswered();
@@ -11727,12 +11967,14 @@ int main(int argc, char **argv) {
         {"drain wanted", test_drain_wanted},
         {"run unfinished", test_run_unfinished},
         {"page draws on a copy", test_page_draws_on_a_copy},
+        {"menu redrawn while parked", test_menu_redrawn_while_parked},
         {"pointer capture", test_pointer_capture},
         {"T9 hits and drag", test_t9_hits_and_drag},
         {"T9 capture edges cursor", test_t9_snapshot_capture_edges_cursor},
         {"T9 relative and mailbox", test_t9_relative_crossing_and_layout_mailbox},
         {"native touch placement", test_native_touch_placement},
         {"T9 guest pointer resolution", test_t9_guest_pointer_resolution},
+        {"guest pointer pair resolution", test_guest_pointer_pair_resolution},
         {"T9 pointer closed loop", test_t9_pointer_closed_loop},
         {"T9 window motion round1", test_t9_window_motion_round1},
         {"T9 resize without ack round1", test_t9_resize_without_ack_round1},

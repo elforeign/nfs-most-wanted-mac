@@ -482,6 +482,9 @@ void recomp_div_error(X86 *c, uint32_t addr);
 
 void recomp_rdtsc(X86 *c); /* -> EDX:EAX */
 void recomp_cpuid(X86 *c); /* EAX in -> EAX EBX ECX EDX */
+/* A title-configured busy-wait edge ([translate] poll_checkpoints): pass a scheduler checkpoint (the
+ * same one every import call passes), leaving guest state untouched. */
+void recomp_poll_checkpoint(X86 *c);
 uint32_t recomp_in(X86 *c, uint32_t port, int size);
 void recomp_out(X86 *c, uint32_t port, uint32_t val, int size);
 void recomp_cli(X86 *c);

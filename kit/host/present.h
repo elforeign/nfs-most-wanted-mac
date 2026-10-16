@@ -282,6 +282,9 @@ uint64_t host_present_drops(void);
 uint64_t host_present_waits(void);
 // Sealed frames that carried the open settings page.
 uint64_t host_present_settings_pages(void);
+// Run 39: menu pages redrawn while the guest was parked (host_present_menu_refresh).
+uint64_t host_present_menu_refreshes(void);
+void host_present_menu_refresh(void);
 // Distinct fault reasons since service start, including completion fallback.
 uint64_t host_present_faults(void);
 uint64_t host_present_scene_reused(void);

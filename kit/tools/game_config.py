@@ -71,6 +71,72 @@ def windows_version(value):
     return major, minor, build, 2 if major >= 5 else 1
 
 
+#: [game] cpu_features: CPUID leaf 1 EDX bits a game may report beyond the kit's FPU | TSC | CMOV. NFS Underground's
+#: EA movie YUV->RGB converter has only an MMX path and writes nothing when CPUID says no MMX (run 2).
+CPU_FEATURES = {"mmx": 1 << 23}
+
+
+def cpu_features_edx(value):
+    """The EDX bits for [game] cpu_features (a list of names from CPU_FEATURES; default none)."""
+    if not isinstance(value, list) or not all(isinstance(v, str) and v in CPU_FEATURES for v in value):
+        raise ValueError("[game] cpu_features must be a list of: %s" % ", ".join(sorted(CPU_FEATURES)))
+    edx = 0
+    for v in value:
+        edx |= CPU_FEATURES[v]
+    return edx
+
+
+#: [game] cpu_brand_index: CPUID leaf 1 EBX bits 0-7 (Intel's brand index; default 0 = none, as on the Pentium II the
+#: kit reports). NFS Underground's auto-detect rates the CPU from it: index 0 scores 0 and forces the lowest video
+#: preset whatever the GPU (run 7).
+
+
+#: [game] data_dir_name: the per-user folder the profile lives in when RECOMP_PROFILE_DIR is unset
+#: (~/Library/Application Support/<name> on macOS); default app_name. A player-facing name may hold spaces
+#: (NFS Underground run 8: "NFS Underground Native").
+
+
+def data_dir_name(value):
+    """[game] data_dir_name: one folder name (no separators, no control characters, not . or ..)."""
+    if (not isinstance(value, str) or not value or value != value.strip() or value in (".", "..")
+            or any(c in value for c in '/\\:') or any(ord(c) < 32 for c in value)):
+        raise ValueError("[game] data_dir_name must be a single folder name")
+    return value
+
+
+def cpu_brand_index(value):
+    """[game] cpu_brand_index: an int 0-255."""
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 0xff:
+        raise ValueError("[game] cpu_brand_index must be an integer 0-255")
+    return value
+
+
+#: [game] adapter: the display adapter D3D9's GetAdapterIdentifier names. Games of this era pick their detail level by
+#: vendor and device id. The default is a GeForce 7800 GTX (what the renderer covers; Most Wanted offers shadows only
+#: on NVIDIA and ATI). NFS Underground scores only the NVIDIA ids it knew: an unknown id scores -1 and its auto-detect
+#: picks the lowest video preset (no headlights, no reflections; run 7), so it names a card its table rates.
+# modes: "desktop" = one 1280x960 mode, whatever is asked (NFSMW's released behaviour); "list" = the kit's 4:3, 5:4,
+# 16:9 and 16:10 sizes, for a game that builds its menu from them or picks a mode only when it is listed (NFSU1/NFSU2).
+ADAPTER_DEFAULT = {"vendor": 0x10de, "device": 0x0091, "name": "NVIDIA GeForce 7800 GTX", "modes": "desktop"}
+
+
+def adapter(value):
+    """[game] adapter {vendor, device, name, modes}: missing fields take ADAPTER_DEFAULT; ids are 16-bit, the name
+    ASCII, modes "desktop" or "list"."""
+    if not isinstance(value, dict) or set(value) - set(ADAPTER_DEFAULT):
+        raise ValueError("[game] adapter must be a table of: vendor, device, name, modes")
+    out = dict(ADAPTER_DEFAULT, **value)
+    for key in ("vendor", "device"):
+        if not isinstance(out[key], int) or isinstance(out[key], bool) or not 0 < out[key] <= 0xffff:
+            raise ValueError("[game] adapter %s must be a 16-bit id" % key)
+    name = out["name"]
+    if not isinstance(name, str) or not name or len(name) > 511 or not all(32 <= ord(ch) < 127 for ch in name):
+        raise ValueError("[game] adapter name must be 1-511 printable ASCII characters")
+    if out["modes"] not in ("desktop", "list"):
+        raise ValueError('[game] adapter modes must be "desktop" or "list"')
+    return out
+
+
 def validate_heap_base(value):
     """The heap arena start: page aligned, above the image base, below the arena end."""
     if value % 0x1000 or not (0x00400000 < value < HEAP_END):
@@ -152,11 +218,19 @@ def load(game_dir):
         raise ValueError("%s: missing [game] keys: %s" % (source, ", ".join(missing)))
     game["heap_base"] = validate_heap_base(int(game.get("heap_base", HEAP_BASE_DEFAULT)))
     windows_version(game.setdefault("windows_version", "4.10"))
+    cpu_features_edx(game.setdefault("cpu_features", []))
+    cpu_brand_index(game.setdefault("cpu_brand_index", 0))
+    # [game] qpc_us: QueryPerformanceCounter in real microseconds (NFSU1 run 5: its limiter spins on it, 17 -> 16.67 ms
+    # frames). false (default) keeps the 1000-tick millisecond steps NFSMW was released with (D-203).
+    if not isinstance(game.setdefault("qpc_us", False), bool):
+        raise ValueError("%s: [game] qpc_us must be true or false" % source)
+    data_dir_name(game.setdefault("data_dir_name", game["app_name"]))
     # NFSU1 run 8: the guest address of the game's own frame-time cap (a float, seconds per frame, e.g. 1/60). The kit
     # writes 1/limit there when the Frame limit setting is 40/60/120 so the game itself runs at that rate; 0 = none.
     frame_cap = game.setdefault("frame_cap", 0)
     if not isinstance(frame_cap, int) or isinstance(frame_cap, bool) or not 0 <= frame_cap <= 0xFFFFFFFF:
         raise ValueError("%s: [game] frame_cap must be a guest address (int) or 0" % source)
+    game["adapter"] = adapter(game.get("adapter", {}))
     translate = cfg.setdefault("translate", {})
     resumable = translate.setdefault("resumable_stacks", False)
     if not isinstance(resumable, bool):
@@ -204,6 +278,11 @@ def load(game_dir):
     page = settings.setdefault("page", "list")
     if page not in ("list", "tabs"):
         raise ValueError('%s: [settings] page must be "list" or "tabs", not %r' % (source, page))
+    # NFSMW 3.0.4: the game's core mod, whose settings the host reads for its own features (mute in background,
+    # deadzones, brightness): "<mod>/<key>". "" = none, the features keep their defaults.
+    core_mod = settings.setdefault("core_mod", "")
+    if not isinstance(core_mod, str) or (core_mod and not re.fullmatch(r"[a-z0-9_]+(\.[a-z0-9_]+)*", core_mod)):
+        raise ValueError("%s: [settings] core_mod must be a mod id like core.game, not %r" % (source, core_mod))
     launcher = cfg.setdefault("launcher", {})
     launcher.setdefault("title", game["name"])
     launcher.setdefault("store", "")
@@ -214,6 +293,15 @@ def load(game_dir):
     for key in ("title", "store"):
         if not isinstance(launcher[key], str):
             raise ValueError("%s: [launcher] %s must be a string" % (source, key))
+    # NFSMW 3.0.4: the GitHub owner/name whose latest release "Check for updates" asks; "" = no such button.
+    # NFSMW 3.0.4: the Setup app's build log, relative to the home folder, which Save bug report adds (it holds the
+    # compiler and SDK every player's Setup used); "" = none.
+    setup_log = launcher.setdefault("setup_log", "")
+    if not isinstance(setup_log, str) or setup_log.startswith("/") or ".." in setup_log.split("/"):
+        raise ValueError("%s: [launcher] setup_log must be a path relative to the home folder, not %r" % (source, setup_log))
+    repo = launcher.setdefault("releases_repo", "")
+    if not isinstance(repo, str) or (repo and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        raise ValueError("%s: [launcher] releases_repo must be owner/name, not %r" % (source, repo))
     min_free = launcher.setdefault("min_free_mb", 0)
     if not isinstance(min_free, int) or min_free < 0:
         raise ValueError("%s: [launcher] min_free_mb must be a non-negative integer" % source)

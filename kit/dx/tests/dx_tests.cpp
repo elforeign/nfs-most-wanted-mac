@@ -692,6 +692,7 @@ enum {
     DI_CreateDevice = 3,
     DID_SetProperty = 6,
     DID_Acquire = 7,
+    DID_Unacquire = 8,
     DID_GetDeviceState = 9,
     DID_GetDeviceData = 10,
     DID_SetDataFormat = 11,
@@ -5151,6 +5152,105 @@ static void test_dinput_event_notification() {
 // proving it. That is host_tests.mm's "input gate", which drives the real
 // host_key_event and checks all four guest channels including this one, with
 // the DirectInput shim linked in.
+// DirectInput 8 action mapping, keyboard (run 2, NFS Underground): EnumDevicesBySemantics hands a keyboard to the
+// callback for a format with DIKEYBOARD_* semantics, BuildActionMap maps them, and after SetActionMap the state is
+// one DWORD per action and a buffered event carries the action's offset and uAppData.
+static uint32_t g_sem_calls, g_sem_type, g_sem_dev;
+static void test_dinput8_keyboard_action_map() {
+    cpu_reset();
+    dinput_reset();
+    memset(&g_input, 0, sizeof g_input);
+    uint32_t create = tramp("DINPUT8.dll", "DirectInput8Create");
+    CHECK_EQ(call_shim(create, {0x400000, 0x0800, sc(0x100), sc(0), 0}), DI_OK);
+    uint32_t di = rd32(sc(0));
+    CHECK(di != 0);
+    // Three actions: uAppData 7 on DIK_RETURN (0x1c), 9 on DIK_UP (0xc8), 11 on a genre axis (not a key).
+    uint32_t acts = sc(0x200), fmt = sc(0x300);
+    gm_zero(acts, 3 * 0x28);
+    const uint32_t sem[3] = {0x8100041cu, 0x810004c8u, 0x01008a01u}, app[3] = {7, 9, 11};
+    for (uint32_t i = 0; i < 3; ++i) {
+        wr32(acts + i * 0x28 + 0, app[i]);
+        wr32(acts + i * 0x28 + 4, sem[i]);
+    }
+    wr32(acts + 1 * 0x28 + 8, 0x4u); // DIA_APPNOMAP, as UG1's race Throttle on DIK_UP: the named key is still mapped
+    gm_zero(fmt, 0x148);
+    wr32(fmt + 0, 0x148);
+    wr32(fmt + 4, 0x28);
+    wr32(fmt + 8, 12);
+    wr32(fmt + 12, 3);
+    wr32(fmt + 16, acts);
+    wr32(fmt + 40, 16);
+    static uint32_t cb = imports_alloc_trampoline(
+        "TEST", "SemanticsCallback",
+        [](X86 *c) {
+            ++g_sem_calls;
+            g_sem_type = rd8(arg(c, 0) + 0x24);
+            g_sem_dev = arg(c, 1);
+            call_method(g_sem_dev, 1 /* AddRef */, {}); // the game keeps the device
+            set_eax(c, 1);
+        },
+        5);
+    g_sem_calls = g_sem_dev = 0;
+    CHECK_EQ(call_method(di, 9 /* EnumDevicesBySemantics */, {0, fmt, cb, 0, 0}), DI_OK);
+    CHECK_EQ(g_sem_calls, 1u);
+    CHECK_EQ(g_sem_type, 0x13u); // DI8DEVTYPE_KEYBOARD: what the game's callback checks
+    uint32_t kb = g_sem_dev;
+    CHECK(kb != 0);
+    CHECK_EQ(call_method(kb, 29 /* BuildActionMap */, {fmt, 0, 2 /* DIDBAM_INITIALIZE */}), DI_OK);
+    CHECK_EQ(rd32(acts + 0 * 0x28 + 0x20), 0x1c0cu);
+    CHECK_EQ(rd32(acts + 1 * 0x28 + 0x20), 0xc80cu);
+    CHECK_EQ(rd32(acts + 0 * 0x28 + 0x24), 0x20u); // DIAH_DEFAULT
+    CHECK_EQ(rd32(acts + 2 * 0x28 + 0x24), 0u);    // the axis stays unmapped
+    CHECK_EQ(call_method(kb, 30 /* SetActionMap */, {fmt, 0, 0}), DI_OK);
+    CHECK_EQ(call_method(kb, DID_Acquire, {}), DI_OK);
+    CHECK_EQ(call_method(kb, 30 /* SetActionMap */, {fmt, 0, 0}), DIERR_ACQUIRED);
+
+    uint32_t state = sc(0x480), count = sc(0x4c0), buf = sc(0x500);
+    g_input.keys[0xc8] = 0x80; // Up down
+    dinput_host_input_changed();
+    CHECK_EQ(call_method(kb, DID_GetDeviceState, {12, state}), DI_OK);
+    CHECK_EQ(rd32(state + 0), 0u);
+    CHECK_EQ(rd32(state + 4), 0x80u);
+    CHECK_EQ(rd32(state + 8), 0u);
+    wr32(count, 8);
+    CHECK_EQ(call_method(kb, DID_GetDeviceData, {DIDEVICEOBJECTDATA_DX8_SIZE, buf, count, 0}), DI_OK);
+    CHECK_EQ(rd32(count), 1u);
+    CHECK_EQ(rd32(buf + DIDOD_OFF_dwOfs), 4u);     // action 1's offset in the 12-byte data
+    CHECK_EQ(rd32(buf + DIDOD_OFF_dwData), 0x80u);
+    CHECK_EQ(rd32(buf + DIDOD_OFF_uAppData), 9u);
+    g_input.keys[0x1e] = 0x80; // A: no action reads it
+    dinput_host_input_changed();
+    wr32(count, 8);
+    CHECK_EQ(call_method(kb, DID_GetDeviceData, {DIDEVICEOBJECTDATA_DX8_SIZE, buf, count, 0}), DI_OK);
+    CHECK_EQ(rd32(count), 0u);
+    // A key held across Unacquire / SetActionMap / Acquire sends no press (Windows buffers only changes made while
+    // acquired): UG2 swaps maps while ESC opens its pause screen, and a fresh press closed it (run 2). The state
+    // still reads it down, and letting go is one release.
+    CHECK_EQ(call_method(kb, DID_Unacquire, {}), DI_OK);
+    CHECK_EQ(call_method(kb, 30 /* SetActionMap */, {fmt, 0, 0}), DI_OK);
+    CHECK_EQ(call_method(kb, DID_Acquire, {}), DI_OK);
+    wr32(count, 8);
+    CHECK_EQ(call_method(kb, DID_GetDeviceData, {DIDEVICEOBJECTDATA_DX8_SIZE, buf, count, 0}), DI_OK);
+    CHECK_EQ(rd32(count), 0u);
+    CHECK_EQ(call_method(kb, DID_GetDeviceState, {12, state}), DI_OK);
+    CHECK_EQ(rd32(state + 4), 0x80u);
+    g_input.keys[0xc8] = 0; // Up released
+    dinput_host_input_changed();
+    wr32(count, 8);
+    CHECK_EQ(call_method(kb, DID_GetDeviceData, {DIDEVICEOBJECTDATA_DX8_SIZE, buf, count, 0}), DI_OK);
+    CHECK_EQ(rd32(count), 1u);
+    CHECK_EQ(rd32(buf + DIDOD_OFF_dwData), 0u);
+    CHECK_EQ(rd32(buf + DIDOD_OFF_uAppData), 9u);
+
+    // A format with no keyboard semantics: nothing serves it, the callback is not called.
+    wr32(acts + 0 * 0x28 + 4, 0x01008a01u);
+    wr32(acts + 1 * 0x28 + 4, 0x01008a01u);
+    g_sem_calls = 0;
+    CHECK_EQ(call_method(di, 9, {0, fmt, cb, 0, 0}), DI_OK);
+    CHECK_EQ(g_sem_calls, 0u);
+    dinput_reset();
+}
+
 static void test_unchanged_state_produces_no_buffered_event() {
     cpu_reset();
     dinput_reset();
@@ -6270,6 +6370,71 @@ static void test_d3d_pipeline() {
 
 // DirectSound: create a buffer, fill it through Lock, play it, and check the
 // PCM and format reached the host.
+// Releasing an IDirectSound ends the sound of every buffer it made and gives
+// their channels back (UG1 releases only the device at the end of each music
+// stream, run 4). A buffer of another device keeps playing, and a late Release
+// of an ended buffer is an ordinary one.
+static void test_dsound_device_release() {
+    cpu_reset();
+    g_plays.clear();
+    g_stops.clear();
+    uint32_t create = tramp("DSOUND.dll", "ord1");
+    CHECK(create != 0);
+    CHECK_EQ(call_shim(create, {0, sc(0), 0}), DS_OK);
+    CHECK_EQ(call_shim(create, {0, sc(0x10), 0}), DS_OK);
+    uint32_t ds_a = rd32(sc(0)), ds_b = rd32(sc(0x10));
+    CHECK(ds_a != 0 && ds_b != 0 && ds_a != ds_b);
+
+    uint32_t wfx = sc(0x100);
+    wr16(wfx + WFX_OFF_wFormatTag, WAVE_FORMAT_PCM);
+    wr16(wfx + WFX_OFF_nChannels, 2);
+    wr32(wfx + WFX_OFF_nSamplesPerSec, 22050);
+    wr32(wfx + WFX_OFF_nAvgBytesPerSec, 88200);
+    wr16(wfx + WFX_OFF_nBlockAlign, 4);
+    wr16(wfx + WFX_OFF_wBitsPerSample, 16);
+    wr16(wfx + WFX_OFF_cbSize, 0);
+    uint32_t bd = sc(0x200);
+    gm_zero(bd, DSBUFFERDESC_SIZE);
+    wr32(bd + DSBD_OFF_dwSize, DSBUFFERDESC_SIZE);
+    wr32(bd + DSBD_OFF_dwFlags, DSBCAPS_CTRLVOLUME);
+    wr32(bd + DSBD_OFF_dwBufferBytes, 4096);
+    wr32(bd + DSBD_OFF_lpwfxFormat, wfx);
+    CHECK_EQ(call_method(ds_a, DS_CreateSoundBuffer, {bd, sc(4), 0}), DS_OK);
+    CHECK_EQ(call_method(ds_b, DS_CreateSoundBuffer, {bd, sc(8), 0}), DS_OK);
+    uint32_t buf_a = rd32(sc(4)), buf_b = rd32(sc(8));
+    CHECK(buf_a != 0 && buf_b != 0);
+    CHECK_EQ(call_method(buf_a, B_Play, {0, 0, DSBPLAY_LOOPING}), DS_OK);
+    CHECK_EQ(call_method(buf_b, B_Play, {0, 0, DSBPLAY_LOOPING}), DS_OK);
+    CHECK_EQ(g_plays.size(), 2u);
+    if (g_plays.size() != 2u)
+        return;
+    int32_t ch_a = g_plays[0].channel, ch_b = g_plays[1].channel;
+    CHECK(ch_a != ch_b);
+
+    // The device goes; its buffer stops and its channel is free again.
+    g_stops.clear();
+    CHECK_EQ(call_method(ds_a, 2, {}), 0u); // Release
+    CHECK_EQ(g_stops.size(), 1u);
+    if (!g_stops.empty())
+        CHECK_EQ(g_stops[0], ch_a);
+    CHECK_EQ(call_method(buf_a, B_GetStatus, {sc(0x20)}), DS_OK);
+    CHECK_EQ(rd32(sc(0x20)) & DSBSTATUS_PLAYING, 0u);
+    int32_t again = dx_alloc_audio_channel();
+    CHECK_EQ(again, ch_a);
+    dx_free_audio_channel(again);
+
+    // The other device's buffer was not touched.
+    CHECK_EQ(call_method(buf_b, B_GetStatus, {sc(0x20)}), DS_OK);
+    CHECK(rd32(sc(0x20)) & DSBSTATUS_PLAYING);
+
+    // A late Release of the ended buffer is ordinary; nothing else stops.
+    g_stops.clear();
+    CHECK_EQ(call_method(buf_a, 2, {}), 0u);
+    CHECK_EQ(g_stops.size(), 0u);
+    CHECK_EQ(call_method(buf_b, 2, {}), 0u);
+    CHECK_EQ(call_method(ds_b, 2, {}), 0u);
+}
+
 static void test_dsound() {
     cpu_reset();
     g_plays.clear();
@@ -13048,6 +13213,7 @@ int main() {
         {"dinput notification", test_dinput_event_notification},
         {"dinput create W and Ex", test_dinput_create_w},
         {"mouse motion survives", test_mouse_motion_survives_keyboard_poll},
+        {"dinput8 keyboard action map", test_dinput8_keyboard_action_map},
         {"unchanged state buffered", test_unchanged_state_produces_no_buffered_event},
         {"re-attach a palette", test_setpalette_self},
         {"colour key at 16 bpp", test_colorkey_16bpp},
@@ -13062,6 +13228,7 @@ int main() {
         {"Direct3D pipeline", test_d3d_pipeline},
         {"Direct3D3 pipeline", test_d3d3_pipeline},
         {"DirectSound", test_dsound},
+        {"DirectSound device release ends its buffers", test_dsound_device_release},
         {"DirectInput", test_dinput},
         {"QMixer", test_qmixer},
         {"FMOD samples", test_fmod},

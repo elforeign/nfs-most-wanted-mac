@@ -314,6 +314,7 @@ void *watchdog_main(void *) {
                         "stopped by the host watchdog";
         fprintf(stderr, "\n[host] watchdog: %.0fs elapsed with no response\n", elapsed);
         fflush(stderr);
+        sched_watchdog_dump();
         // The guest thread owns the host's counters. Take the report lock so
         // the summary is a consistent snapshot, but only for a second: if the
         // guest is wedged holding it, say so and end the run anyway.
@@ -713,6 +714,7 @@ void boot_request_close(const char *reason) {
         return;
     g_close_posted = true;
     g_close_time = now_seconds();
+    host_guest_pause_cancel();   // 3.0.4: a game parked under the settings menu must run to act on the close
     if (reason)
         g_stop_reason = reason;
     // The caller says why in its own words; boot only delivers the message,

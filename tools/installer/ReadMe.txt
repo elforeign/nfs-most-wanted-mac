@@ -4,7 +4,7 @@ This app builds the native Mac version of Need for Speed: Most Wanted (2005) fro
 It contains no game files. Everything happens on your Mac; nothing is uploaded.
 
 You need:
-  - An Apple Silicon Mac (M1 or later).
+  - An Apple Silicon Mac (M1 or later) with macOS 14.5 (Sonoma) or later.
   - Your own installed PC game folder: Need for Speed: Most Wanted, Black Edition, version 1.3 (English),
     the folder with speed.exe, GLOBAL, TRACKS, MOVIES and so on.
   - About 10 GB free, and about 10 minutes the first time on a recent Mac (longer on older ones).

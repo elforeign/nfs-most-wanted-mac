@@ -14,7 +14,7 @@ NAME="NFS Most Wanted Native Setup"
 rm -rf "$OUT"; mkdir -p "$OUT/dmg"
 APP="$OUT/dmg/$NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -parse-as-library -target arm64-apple-macos13 -o "$APP/Contents/MacOS/Setup" tools/installer/SetupApp.swift
+swiftc -O -parse-as-library -target arm64-apple-macos14.5 -o "$APP/Contents/MacOS/Setup" tools/installer/SetupApp.swift
 git archive --format=tar.gz -o "$APP/Contents/Resources/source.tar.gz" HEAD
 printf '%s\n' "$VERSION" > "$APP/Contents/Resources/source-version.txt"
 cp tools/installer/ReadMe.txt "$APP/Contents/Resources/ReadMe.txt"
@@ -29,7 +29,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$SHORT</string>
   <key>CFBundleVersion</key><string>$SHORT</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.5</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
@@ -42,4 +42,6 @@ DMG="dist/NFS-Most-Wanted-Native-Setup-$VERSION.dmg"
 rm -f "$DMG"
 hdiutil create -quiet -volname "$NAME" -srcfolder "$OUT/dmg" -ov -format UDZO "$DMG"
 echo "$DMG ($(du -h "$DMG" | cut -f1)); app $(du -sh "$APP" | cut -f1)"
-shasum -a 256 "$DMG"
+# 3.0.4: a checksum file beside the DMG, attached to the release too, so a download can be checked with
+# `shasum -a 256 -c <dmg>.sha256` in the same folder (an idea from SpeedBreaker's releases).
+(cd dist && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256")

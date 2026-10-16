@@ -149,13 +149,23 @@ int32_t g_loop_expect_x = 0, g_loop_expect_y = 0;
 
 int g_saved_cursor_right = 0, g_installed_cursor_right = 0;
 
+// A pointer position as a fraction of the frame, mapped into the box where the game draws its menus
+// (host_display_ui_box; the whole frame unless a mod set one): NFS Underground draws a 4:3 menu centred in a wide
+// frame, and its cursor lives in that menu's coordinates (run 9).
+double ui_fraction(double f, int axis) {
+    float box[4];
+    host_display_ui_box(box);
+    const double o = box[axis], w = box[axis + 2];
+    return std::clamp((f - o) / (w > 0 ? w : 1.0), 0.0, 1.0);
+}
+
 // Compute a damped delta toward the mapped guest pointer target. Resolve guest state
 // on every delivery so asynchronous input service and layout changes cannot reuse stale coordinates.
 bool pointer_correction(const HitResult &hit, int32_t *dx, int32_t *dy, bool delivery = true) {
     // 00526dd2 is MOV ECX,0xd0595c (B9 immediate), NOT MOV ECX,[...].
     // Resolve a fresh snapshot each delivery; neither the context pointer nor
     // the coordinate values survive into the next delivery.
-    const auto p = host_guest_pointer_resolve(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_DEVICE_PTR);
+    const auto p = host_guest_pointer_current();
     if (p.failure != HostGuestPointer::None) {
         const char *reason = host_guest_pointer_failure_name(p.failure);
         const std::string key = std::string("host.pointer.") + reason;
@@ -171,7 +181,7 @@ bool pointer_correction(const HitResult &hit, int32_t *dx, int32_t *dy, bool del
              "host: guest pointer ready: reason=ready arena=present size=0x%08x "
              "object=0x%08x pair=0x%08x vtable=0x%08x context=0x%08x "
              "xy=(%d,%d) bounds=(%d,%d,%d,%d); using closed-loop correction",
-             p.arena_size, p.object, p.object + 0x20, p.vtable, p.context, p.x, p.y, p.left, p.top,
+             p.arena_size, p.object, p.x_addr, p.vtable, p.context, p.x, p.y, p.left, p.top,
              p.right, p.bottom);
     // DAMPED correction. The guest applies our delta with its own gain and on
     // its own schedule (0052ceda waits up to 200 ms) while DirectInput is
@@ -227,8 +237,8 @@ bool pointer_correction(const HitResult &hit, int32_t *dx, int32_t *dy, bool del
     const double py = scene_ok ? (g_drawable_y - sc.offset_y) / sc.scale_y : g_drawable_y;
     const double span_x = std::max(1.0, dom_w - 1);
     const double span_y = std::max(1.0, dom_h - 1);
-    int64_t tx = p.left + int64_t(std::lround(std::clamp(px, 0.0, span_x) / span_x * (screen_w - 1)));
-    int64_t ty = p.top + int64_t(std::lround(std::clamp(py, 0.0, span_y) / span_y * (screen_h - 1)));
+    int64_t tx = p.left + int64_t(std::lround(ui_fraction(std::clamp(px, 0.0, span_x) / span_x, 0) * (screen_w - 1)));
+    int64_t ty = p.top + int64_t(std::lround(ui_fraction(std::clamp(py, 0.0, span_y) / span_y, 1) * (screen_h - 1)));
     // Enhanced composition publishes an explicit scene/HUD input domain.
     // Use that inverse mapping so the expanded world and fixed sidebar agree;
     // Classic retains main's physical-pointer mapping and loop health checks.
@@ -492,6 +502,8 @@ HostGuestPointer host_guest_pointer_resolve(const uint8_t *arena, uint32_t size,
     // boot mode, or Classic falls back to position differencing for the run.
     // 0052cbe0 installs this vtable. This is a structural startup guard, not
     // a correctness gate on input attachment or the game's current state.
+    p.x_addr = object + 0x20;
+    p.y_addr = object + 0x24;
     if (p.vtable != RECOMP_HOOK_MOUSE_VTABLE)
         return fail(HostGuestPointer::VtableMismatch);
     if (!(p.left >= 0 && p.top >= 0 && p.right > p.left && p.bottom > p.top && p.right < 4096 &&
@@ -500,6 +512,66 @@ HostGuestPointer host_guest_pointer_resolve(const uint8_t *arena, uint32_t size,
     if (!(p.x >= p.left && p.x <= p.right && p.y >= p.top && p.y <= p.bottom))
         return fail(HostGuestPointer::CoordinatesOutsideBounds);
     return p;
+}
+
+HostGuestPointer host_guest_pointer_resolve_pair(const uint8_t *arena, uint32_t size, uint32_t guard, uint32_t x_addr,
+                                                 uint32_t y_addr, int32_t mode_w, int32_t mode_h) {
+    HostGuestPointer p;
+    p.arena_available = arena != nullptr;
+    p.arena_size = size;
+    p.object = guard;
+    p.x_addr = x_addr;
+    p.y_addr = y_addr;
+    auto fail = [&](HostGuestPointer::Failure why) {
+        p.failure = why;
+        return p;
+    };
+    auto valid = [&](uint32_t address) { return address && address < size && 4 <= size - address; };
+    auto read = [&](uint32_t address) {
+        uint32_t value;
+        memcpy(&value, arena + address, sizeof value);
+        return value;
+    };
+    if (!arena)
+        return fail(HostGuestPointer::ArenaUnavailable);
+    if (!valid(guard) || !valid(x_addr) || !valid(y_addr))
+        return fail(HostGuestPointer::ObjectOutsideArena);
+    p.vtable = read(guard); // the guard's value, reported where the object form reports its vtable
+    p.x = int32_t(read(x_addr));
+    p.y = int32_t(read(y_addr));
+    if (!p.vtable)
+        return fail(HostGuestPointer::ObjectNull); // the game has not made its mouse yet
+    if (!(mode_w > 1 && mode_h > 1 && mode_w < 4096 && mode_h < 4096))
+        return fail(HostGuestPointer::BoundsInvalid);
+    p.right = mode_w - 1;
+    p.bottom = mode_h - 1;
+    if (!(p.x >= 0 && p.x <= mode_w && p.y >= 0 && p.y <= mode_h))
+        return fail(HostGuestPointer::CoordinatesOutsideBounds);
+    return p;
+}
+
+HostGuestPointer host_guest_pointer_current() {
+#ifdef RECOMP_HOOK_MOUSE_PAIR_X
+    // The pair's bounds are the frame the game draws, as the presenter last published it: a Direct3D 9 game reports
+    // no display mode, so g_mode stayed 640x480 while NFS Underground draws 800x600 and the cursor could not reach
+    // the right or bottom of a menu (run 8). The display mode until the first frame.
+    const bool drawn = g_layout.guest_w > 1 && g_layout.guest_h > 1;
+#ifdef RECOMP_HOOK_MOUSE_PAIR_SPACE_W
+    // A game whose cursor lives in its own fixed space whatever it draws ([hooks] mouse_pair_space_w/_h): NFS
+    // Underground's menus read the pair as 640x480 units at every resolution (run 9: at 800x600 the cursor value
+    // 440,260 is drawn at pixel 555,330), so frame-pixel bounds ran the cursor off the menu's right and bottom.
+    (void)drawn;
+    return host_guest_pointer_resolve_pair(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_PAIR_GUARD, RECOMP_HOOK_MOUSE_PAIR_X,
+                                           RECOMP_HOOK_MOUSE_PAIR_Y, RECOMP_HOOK_MOUSE_PAIR_SPACE_W,
+                                           RECOMP_HOOK_MOUSE_PAIR_SPACE_H);
+#else
+    return host_guest_pointer_resolve_pair(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_PAIR_GUARD, RECOMP_HOOK_MOUSE_PAIR_X,
+                                           RECOMP_HOOK_MOUSE_PAIR_Y, drawn ? g_layout.guest_w : g_mode_w,
+                                           drawn ? g_layout.guest_h : g_mode_h);
+#endif
+#else
+    return host_guest_pointer_resolve(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_DEVICE_PTR);
+#endif
 }
 
 void host_pointer_set_mode(int w, int h) {
@@ -1034,7 +1106,7 @@ bool host_gate_pointer_place(int32_t x, int32_t y) {
         g_pointer_target_valid = false;
         return true;
     }
-    const auto p = host_guest_pointer_resolve(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_DEVICE_PTR);
+    const auto p = host_guest_pointer_current();
     if (p.failure != HostGuestPointer::None)
         return false;
     x = std::clamp(x, 0, std::max(0, g_layout.drawable_w - 1));
@@ -1064,8 +1136,8 @@ bool host_gate_pointer_place(int32_t x, int32_t y) {
         const int32_t screen_w = p.right - p.left + 1, screen_h = p.bottom - p.top + 1;
         const double span_x = std::max(1, g_layout.drawable_w - 1);
         const double span_y = std::max(1, g_layout.drawable_h - 1);
-        tx = p.left + int64_t(std::lround(x / span_x * (screen_w - 1)));
-        ty = p.top + int64_t(std::lround(y / span_y * (screen_h - 1)));
+        tx = p.left + int64_t(std::lround(ui_fraction(x / span_x, 0) * (screen_w - 1)));
+        ty = p.top + int64_t(std::lround(ui_fraction(y / span_y, 1) * (screen_h - 1)));
     }
     tx = std::clamp(tx, int64_t(p.left), int64_t(p.right));
     ty = std::clamp(ty, int64_t(p.top), int64_t(p.bottom));
@@ -1077,8 +1149,8 @@ bool host_gate_pointer_place(int32_t x, int32_t y) {
                 x, y, g_layout.drawable_w, g_layout.drawable_h, int(hit.kind), hit.gx, hit.gy,
                 (long long)tx, (long long)ty, p.left, p.top, p.right, p.bottom,
                 int(g_layout.classic), int(g_layout.cls));
-    wr32(p.object + 0x20, uint32_t(tx));
-    wr32(p.object + 0x24, uint32_t(ty));
+    wr32(p.x_addr, uint32_t(tx));
+    wr32(p.y_addr, uint32_t(ty));
     // Tell the closed loop where the pair now is, so it neither fights the
     // write nor reads it as a foreign writer.
     g_loop_expect_valid = true;

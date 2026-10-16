@@ -88,9 +88,13 @@ def cmake_tool(name):
     return shutil.which(name) or name
 
 
-def game_defines(game_dir, build_root):
-    """The two cache paths every configure needs."""
-    return ["-DRECOMP_GAME_DIR=%s" % Path(game_dir).as_posix(), "-DPOP_BUILD_ROOT=%s" % Path(build_root).as_posix()]
+def game_defines(game_dir, build_root, version=None):
+    """The two cache paths every configure needs, and the version baked into the hosts when one is given (else the
+    CMake default: git describe, or "unknown" in a source archive)."""
+    defines = ["-DRECOMP_GAME_DIR=%s" % Path(game_dir).as_posix(), "-DPOP_BUILD_ROOT=%s" % Path(build_root).as_posix()]
+    if version:
+        defines.append("-DPOP_RECOMP_VERSION=%s" % version)
+    return defines
 
 
 def configure(preset, extra=(), build_dir=None):
@@ -404,6 +408,9 @@ def parse_args(argv, system=None):
     parser.add_argument("--allow-unmodelled", metavar="REASON", default=None,
                         help="Translate instructions the translator cannot model into a trap at "
                              "their own address (passed to translate.py)")
+    parser.add_argument("--version", default=None,
+                        help="Version baked into the hosts (POP_RECOMP_VERSION; default: git describe, else unknown). "
+                        "A game's Setup passes its release version: a source archive has no git history")
     parser.add_argument("--target", choices=sorted(TARGETS), default="app")
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
     parser.add_argument("--preset", default=default_preset(system), help="CMake configure preset")
@@ -451,7 +458,7 @@ def main():
         parser.error("Prepare your own game installation with tools/setup.py first")
     preset = preset_name(args.preset, args.config, stub=args.stub, target=args.target)
     build_dir = build_dir_for(args.build_root, preset)
-    defines = game_defines(args.game_dir, args.build_root)
+    defines = game_defines(args.game_dir, args.build_root, args.version)
     try:
         # The lock lives at <build root>/recomp/.lock: BuildLock joins build/recomp/.lock onto its argument.
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py"):

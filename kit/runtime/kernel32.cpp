@@ -140,6 +140,9 @@ struct HObj {
     uint32_t exit_code = 0;
     uint32_t thread_start = 0;
     uint32_t thread_param = 0;
+    // A service thread the runtime runs for itself (see k32_spawn_service_thread): its body is native code
+    // run with the thread's own guest context and the scheduler baton, instead of guest code at thread_start.
+    void (*native_start)(X86 *, uint32_t) = nullptr;
     bool thread_suspended = false;
     bool thread_ran = false;
     // H_MAPPING
@@ -1482,6 +1485,34 @@ void k_IsBadCodePtr(X86 *c) {
     uint32_t p = arg(c, 0);
     set_eax(c, loader_in_image(p) || imports_is_trampoline(p) ? 0 : 1);
 }
+// IsProcessorFeaturePresent(feature): FALSE for every feature. Runtime CPU dispatchers (an MSVC 7-era
+// math library picks x87, 3DNow! (PF 7) or SSE (PF 6) tables with it) must take the x87 path, which is the
+// only one the translator models; this matches CPUID, which advertises FPU|TSC|CMOV and nothing else.
+// lstrcmpiA(a, b): case-insensitive ordinal comparison of two NUL-terminated strings, -1/0/1. Windows
+// compares by the user locale's word sort; ASCII case folding is what a 2003 game's file and key lookups need.
+void k_lstrcmpiA(X86 *c) {
+    uint32_t a = arg(c, 0), b = arg(c, 1);
+    int r = 0;
+    for (uint32_t i = 0;; ++i) {
+        int ca = (a && gm_valid(a + i, 1)) ? rd8(a + i) : 0;
+        int cb = (b && gm_valid(b + i, 1)) ? rd8(b + i) : 0;
+        if (ca >= 'A' && ca <= 'Z')
+            ca += 32;
+        if (cb >= 'A' && cb <= 'Z')
+            cb += 32;
+        if (ca != cb) {
+            r = ca < cb ? -1 : 1;
+            break;
+        }
+        if (!ca)
+            break;
+    }
+    set_eax(c, (uint32_t)r);
+}
+void k_IsProcessorFeaturePresent(X86 *c) {
+    (void)arg(c, 0);
+    set_eax(c, 0);
+}
 
 void k_GetVolumeInformationA(X86 *c) {
     volume_information_named(c, gm_str(arg(c, 0)), false);
@@ -1716,11 +1747,44 @@ void k_QueryPerformanceFrequency(X86 *c) {
     set_eax(c, 1);
 }
 
+// The counter runs at the 1 MHz QueryPerformanceFrequency reports, in real microseconds. A counter that moved in
+// 1000-tick (whole millisecond) steps rounded a spin-wait up to the next millisecond: NFS Underground's frame limiter
+// (00585b40) spins on this counter until its frame time has passed, and every frame took 17 ms, 58.8 fps instead of
+// 60 (run 5, drive d1). The microseconds are the monotonic clock aligned to host_millis() at the first read, which
+// is still read every time for its side effects (a boot host's clock poll and ticks), and a reading never goes
+// back. Only for a game with game.toml [game] qpc_us = true (NFSMW keeps its released millisecond steps, D-203). A
+// pinned clock (deterministic runs) keeps the millisecond steps, as does RECOMP_QPC_MS=1 (kill switch) and the
+// earlier phase of an in-run A/B (RECOMP_AB_SWITCHES=qpcfine).
+static uint64_t qpc_ticks() {
+    const uint64_t ms_ticks = (uint64_t)host_millis() * 1000ull;
+    static const bool ms_only = [] {
+        const char *e = recomp_env("QPC_MS");
+        return e && !strcmp(e, "1");
+    }();
+    if (!RECOMP_QPC_US || ms_only || host_time_source_is_pinned())
+        return ms_ticks;
+    static std::atomic<int64_t> offset_us{INT64_MIN};
+    static std::atomic<uint64_t> last{0};
+    const int64_t now_us = (int64_t)host_guest_clock_us(os_monotonic_ns() / 1000ull);   // held while paused (3.0.4)
+    int64_t off = offset_us.load(std::memory_order_relaxed);
+    if (off == INT64_MIN) {
+        const int64_t want = now_us - (int64_t)ms_ticks;
+        if (offset_us.compare_exchange_strong(off, want, std::memory_order_relaxed))
+            off = want; // else off holds the value another thread set first
+    }
+    uint64_t ticks = recomp_ab::old(recomp_ab::QPCFINE) ? ms_ticks
+                                                        : (uint64_t)std::max<int64_t>(0, now_us - off);
+    uint64_t prev = last.load(std::memory_order_relaxed);
+    while (ticks > prev && !last.compare_exchange_weak(prev, ticks, std::memory_order_relaxed))
+        ;
+    return std::max(ticks, prev);
+}
+
 void k_QueryPerformanceCounter(X86 *c) {
     host_note_cadence("QueryPerformanceCounter");
     uint32_t p = arg(c, 0);
     if (p) {
-        uint64_t ticks = (uint64_t)host_millis() * 1000ull;
+        uint64_t ticks = qpc_ticks();
         wr32(p, (uint32_t)ticks);
         wr32(p + 4, (uint32_t)(ticks >> 32));
     }
@@ -1743,6 +1807,15 @@ void k_InterlockedExchange(X86 *c) {
     uint32_t p = arg(c, 0), v = arg(c, 1);
     uint32_t old = rd32(p);
     wr32(p, v);
+    set_eax(c, old);
+}
+// InterlockedCompareExchange(Destination, Exchange, Comperand): UG2 imports it (run 2). Guest threads run one at a
+// time under the scheduler's baton, so a plain read-compare-write is atomic for the guest, as the others above.
+void k_InterlockedCompareExchange(X86 *c) {
+    uint32_t p = arg(c, 0), v = arg(c, 1), cmp = arg(c, 2);
+    uint32_t old = rd32(p);
+    if (old == cmp)
+        wr32(p, v);
     set_eax(c, old);
 }
 
@@ -1902,6 +1975,11 @@ enum WaitKind : uint8_t { W_NONE, W_OBJECTS, W_CRITSEC };
 struct GuestThread {
     size_t index = 0;
     uint32_t handle = 0; // 0 for the main thread: it has none
+    // What to run, captured when the thread is created: the guest may close its handle (CreateThread then
+    // CloseHandle at once is the common idiom) before the thread is first scheduled, and that must not lose
+    // the start routine (NFS Underground's network thread did: a call to 0 at its first slice).
+    uint32_t start = 0, param = 0;
+    void (*native_start)(X86 *, uint32_t) = nullptr;
     uint32_t id = 1;     // GetCurrentThreadId
     X86 ctx{};
     uint32_t stack_lo = 0, stack_hi = 0;
@@ -2405,6 +2483,47 @@ void dump_scheduler_locked(const char *what, size_t me) {
     for (uint32_t k = 0; k < n; ++k) {
         const Handoff &h = g_handoffs[(g_handoff_count - n + k) % 16];
         fprintf(stderr, "[sched]   %zu -> %zu (%s)\n", h.from, h.to, h.why);
+    }
+    fflush(stderr);
+}
+
+void watchdog_dump_locked_bounded() {
+    std::unique_lock<std::mutex> lk(g_sched_m, std::defer_lock);
+    double give_up = sched_now() + 1.0;
+    while (!lk.try_lock()) {
+        if (sched_now() > give_up) {
+            fprintf(stderr, "[sched] watchdog: the scheduler lock stayed held for 1 s; no thread dump\n");
+            fflush(stderr);
+            return;
+        }
+        os_sleep_us(1000);
+    }
+    dump_scheduler_locked("watchdog", g_baton);
+    double now = sched_now();
+    for (GuestThread *t : threads()) {
+        // The main thread runs on the loader's context, every other one on its own.
+        const X86 *x = t->is_main ? loader_context() : &t->ctx;
+        uint32_t esp = x ? x->r[R_ESP] : 0;
+        fprintf(stderr, "[sched]   %zu: start %08x eip %08x esp %08x stack %08x %08x %08x %08x", t->index, t->start,
+                x ? x->eip : 0, esp, esp ? rd32(esp) : 0, esp ? rd32(esp + 4) : 0, esp ? rd32(esp + 8) : 0,
+                esp ? rd32(esp + 12) : 0);
+        if (t->has_deadline)
+            fprintf(stderr, " deadline in %.3f s", t->deadline - now);
+        fprintf(stderr, " runnable %.1f s ago\n", t->runnable_at > 0.0 ? now - t->runnable_at : -1.0);
+        for (uint32_t k = 0; t->blocked && t->wait_kind == W_OBJECTS && k < t->wait_n; ++k) {
+            HObj *o = handle_any(t->wait_h[k]);
+            if (!o) {
+                fprintf(stderr, "[sched]     waits on %08x: no such handle\n", t->wait_h[k]);
+                continue;
+            }
+            fprintf(stderr, "[sched]     waits on %08x%s: kind %d signalled %d manual %d count %d owner %u x%u%s '%s'\n",
+                    t->wait_h[k], t->wait_all ? " (all)" : "", (int)o->kind, o->signalled, o->manual_reset,
+                    o->count, o->owner_tid, o->owner_recursion, o->abandoned ? " abandoned" : "",
+                    o->object_name.c_str());
+        }
+        if (t->blocked && t->wait_kind == W_CRITSEC && t->wait_cs)
+            fprintf(stderr, "[sched]     waits on critical section %08x: lock %d recursion %d owner %u\n", t->wait_cs,
+                    (int32_t)rd32(t->wait_cs + 4), (int32_t)rd32(t->wait_cs + 8), rd32(t->wait_cs + 12));
     }
     fflush(stderr);
 }
@@ -2954,6 +3073,10 @@ const double SCHED_SLICE_SECONDS = 0.001; // default; RECOMP_SCHED_SLICE_MS over
 
 } // namespace
 
+void sched_watchdog_dump() {
+    watchdog_dump_locked_bounded();
+}
+
 // Cumulative main-thread baton accounting (see g_main_yield_ns); out[3] is the
 // longest single starvation stretch since the previous call, which resets it;
 // out[4..6] sleep requested / sleep overrun / object+lock waits; out[7] the part of
@@ -3364,15 +3487,15 @@ void *thread_host_main(void *arg) {
         return nullptr;
     }
 
-    uint32_t start = 0, param = 0;
-    if (HObj *o = handle_any(t->handle)) {
-        start = o->thread_start;
-        param = o->thread_param;
-    }
+    uint32_t start = t->start, param = t->param;
+    void (*native_start)(X86 *, uint32_t) = t->native_start;
     uint32_t result = 0;
-    if (setjmp(t->exit_jmp) == 0)
-        result = guest_call(&t->ctx, start, param);
-    else
+    if (setjmp(t->exit_jmp) == 0) {
+        if (native_start)
+            native_start(&t->ctx, param);
+        else
+            result = guest_call(&t->ctx, start, param);
+    } else
         result = t->exit_code;
 
     // Before anything is published: this thread still holds the baton here.
@@ -3547,6 +3670,11 @@ bool thread_spawn(uint32_t h) {
     GuestThread *t = new GuestThread();
     t->index = threads().size();
     t->handle = h;
+    if (HObj *o = handle_any(h)) {
+        t->start = o->thread_start;
+        t->param = o->thread_param;
+        t->native_start = o->native_start;
+    }
     t->id = g_next_thread_id++;
     if (!thread_prepare_context(t)) {
         delete t;
@@ -3577,6 +3705,26 @@ bool thread_spawn(uint32_t h) {
     os_thread_detach(host);
     t->spawned = true;
     return true;
+}
+
+// A thread the runtime itself needs, as Windows has (the multimedia timer thread): a cooperative guest
+// thread with its own context that holds the baton while it runs, whose body is `fn` instead of guest code.
+// It calls into the guest with guest_call and blocks with sched_sleep_ms like any other thread. Returns the
+// thread handle, or 0 if no context was available.
+uint32_t k32_spawn_service_thread(void (*fn)(X86 *, uint32_t), uint32_t param, const char *what) {
+    uint32_t h = handle_new(H_THREAD);
+    handles()[h].thread_param = param;
+    handles()[h].native_start = fn;
+    handles()[h].exit_code = STILL_ACTIVE_;
+    if (!thread_spawn(h)) {
+        LOGW("sched: %s service thread: no context available", what);
+        handles()[h].thread_ran = true;
+        handles()[h].exit_code = 0;
+        return 0;
+    }
+    handles()[h].thread_ran = true;
+    LOGW("sched: %s service -> guest thread %u", what, threads().back()->id);
+    return h;
 }
 
 // Create the guest thread context and its cooperative host worker.
@@ -3795,6 +3943,21 @@ void k_UnhandledExceptionFilter(X86 *c) {
 // delivered anywhere. Continuing would run the guest past a point it never
 // reaches on Windows, so both abort with the state that caused them.
 } // namespace
+
+// Generated code at a title's verified busy-wait edge (translate.py POLL_CHECKPOINTS). The checkpoint yields
+// the baton only after the current slice and never inside an atomic stretch, exactly as at an import call.
+extern "C" void recomp_poll_checkpoint(X86 *c) {
+    (void)c;
+    sched_checkpoint();
+}
+
+// External-linkage entry points for the multimedia timer service in misc.cpp (both helpers are internal here).
+uint32_t recomp_spawn_service_thread(void (*fn)(X86 *, uint32_t), uint32_t param, const char *what) {
+    return k32_spawn_service_thread(fn, param, what);
+}
+void recomp_service_sleep_ms(uint32_t ms) {
+    sched_sleep_ms(ms);
+}
 
 static bool printable_guest_string(uint32_t a, std::string *out) {
     if (!a || !gm_valid(a, 1))
@@ -5208,6 +5371,8 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "IsBadReadPtr", 2, k_IsBadReadPtr},
     {"KERNEL32.dll", "IsBadWritePtr", 2, k_IsBadWritePtr},
     {"KERNEL32.dll", "IsBadCodePtr", 1, k_IsBadCodePtr},
+    {"KERNEL32.dll", "IsProcessorFeaturePresent", 1, k_IsProcessorFeaturePresent},
+    {"KERNEL32.dll", "lstrcmpiA", 2, k_lstrcmpiA},
     // time
     {"KERNEL32.dll", "GetTickCount", 0, k_GetTickCount},
     {"KERNEL32.dll", "QueryPerformanceCounter", 1, k_QueryPerformanceCounter},
@@ -5247,6 +5412,13 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "QueueUserAPC", 3, nullptr},
     {"KERNEL32.dll", "SetConsoleCtrlHandler", 2, nullptr},
     {"KERNEL32.dll", "TerminateThread", 2, nullptr},
+    // UG1 (Speed.exe) imports the console input API and FormatMessageA: no console here.
+    {"KERNEL32.dll", "ReadConsoleInputA", 4, nullptr},
+    {"KERNEL32.dll", "PeekConsoleInputA", 4, nullptr},
+    {"KERNEL32.dll", "GetNumberOfConsoleInputEvents", 2, nullptr},
+    {"KERNEL32.dll", "GetConsoleMode", 2, nullptr},
+    {"KERNEL32.dll", "SetConsoleMode", 2, nullptr},
+    {"KERNEL32.dll", "FormatMessageA", 7, nullptr},
     {"KERNEL32.dll", "GetTimeZoneInformation", 1, k_GetTimeZoneInformation},
     // TLS / interlocked / critical sections
     {"KERNEL32.dll", "TlsAlloc", 0, k_TlsAlloc},
@@ -5256,6 +5428,7 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "InterlockedIncrement", 1, k_InterlockedIncrement},
     {"KERNEL32.dll", "InterlockedDecrement", 1, k_InterlockedDecrement},
     {"KERNEL32.dll", "InterlockedExchange", 2, k_InterlockedExchange},
+    {"KERNEL32.dll", "InterlockedCompareExchange", 3, k_InterlockedCompareExchange},
     {"KERNEL32.dll", "InitializeCriticalSection", 1, k_InitializeCriticalSection},
     {"KERNEL32.dll", "EnterCriticalSection", 1, k_EnterCriticalSection},
     {"KERNEL32.dll", "LeaveCriticalSection", 1, k_LeaveCriticalSection},

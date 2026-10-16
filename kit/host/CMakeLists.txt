@@ -85,7 +85,8 @@ add_executable(controls_tests ${HOST}/controls/json.cpp ${HOST}/controls/layout.
                               ${HOST}/controls/editor_actions.cpp
                               ${HOST}/keypad_layout.cpp
                               ${HOST}/keypad_modifiers.cpp ${HOST}/tests/controls_tests.cpp
-                              ${HOST}/tests/keypad_legacy_oracle.cpp ${POP_ROOT}/mods/font6x8.cpp)
+                              ${HOST}/tests/keypad_legacy_oracle.cpp ${POP_ROOT}/mods/font6x8.cpp
+                              ${HOST}/tests/mods_core_setting_stub.cpp)
 target_include_directories(controls_tests PRIVATE ${POP_ROOT})
 target_compile_options(controls_tests PRIVATE ${POP_WARN_WERROR})
 target_link_libraries(controls_tests PRIVATE recomp_platform)
@@ -97,7 +98,8 @@ set_tests_properties(controls_tests PROPERTIES LABELS nogame)
 
 # Opt-in physical device probe. Never run a motor test from unattended CTest.
 add_executable(gamepad_device_probe ${HOST}/tests/gamepad_device_probe.cpp
-                                   ${HOST}/controls/vpad.cpp ${HOST}/controls/haptics.cpp)
+                                   ${HOST}/controls/vpad.cpp ${HOST}/controls/haptics.cpp
+                                   ${HOST}/tests/mods_core_setting_stub.cpp)
 target_compile_options(gamepad_device_probe PRIVATE ${POP_WARN_WERROR})
 pop_link_sdl(gamepad_device_probe)
 pop_test_binary(gamepad_device_probe)
@@ -214,7 +216,8 @@ elseif(ANDROID)
 else()
   set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_desktop.cpp ${HOST}/launcher/launcher_platform_desktop.cpp)
   if(APPLE)   # run 27: the OS cursor also hidden through AppKit (host/sdl/os_cursor_macos.mm)
-    list(APPEND POP_PLATFORM_UI ${HOST}/sdl/os_cursor_macos.mm ${HOST}/sdl/os_display_macos.mm)
+    list(APPEND POP_PLATFORM_UI ${HOST}/sdl/os_cursor_macos.mm ${HOST}/sdl/os_display_macos.mm
+                                ${HOST}/sdl/os_update_macos.mm)   # 3.0.4: the opt-in update check
   endif()
 endif()
 
@@ -253,6 +256,7 @@ if(TARGET recomp_gen)
             ${HOST}/controls/controls_host.cpp ${HOST}/controls/gamepad_sdl.cpp
             ${HOST}/controls/vpad_host_api.cpp
             ${HOST}/game_path.cpp ${HOST}/present.cpp
+            ${HOST}/bug_report.cpp ${HOST}/update_check.cpp   # 3.0.4: Settings > Mods > Help
             ${HOST}/page_overlay.cpp
             ${POP_PRESENT_SOURCES}
             ${HOST}/input.cpp ${HOST}/input_gate.cpp ${HOST}/input_touch.cpp ${POP_AUDIO_SOURCES}
@@ -337,6 +341,7 @@ pop_host(host_tests UI_LAYER
           ${POP_AUDIO_SOURCES}
           ${POP_ROOT}/dx/com.cpp ${POP_ROOT}/dx/host_api.cpp
           ${POP_ROOT}/dx/display_stubs.cpp ${POP_ROOT}/dx/dinput.cpp
+          ${POP_ROOT}/dx/dinput_effect.cpp
           ${POP_ROOT}/dx/dinput_joystick.cpp
           ${POP_ROOT}/dx/d3d11.cpp ${POP_ROOT}/dx/dxgi.cpp
           ${POP_ROOT}/dx/d3dcompiler.cpp ${POP_ROOT}/dx/d3dx10.cpp

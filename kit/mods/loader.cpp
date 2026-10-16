@@ -378,6 +378,7 @@ void build_api(ModContext &c) {
     c.api.rumble_pulse = guarded<&PopModApi::rumble_pulse>;
     c.api.audio_output = guarded<&PopModApi::audio_output>;
     c.api.d3d9_texture_tag = guarded<&PopModApi::d3d9_texture_tag>;
+    c.api.pointer_box = guarded<&PopModApi::pointer_box>;
     c.api.hook_install_ex = guarded<&PopModApi::hook_install_ex>;
 }
 

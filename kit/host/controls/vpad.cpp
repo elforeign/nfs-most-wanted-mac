@@ -1,5 +1,6 @@
 // vpad.cpp - see vpad.h.
 #include "vpad.h"
+#include "../../runtime/mods_seam.h"
 
 #include <algorithm>
 #include <cmath>
@@ -262,11 +263,11 @@ float unit_axis(int16_t v, float lo) {
 }
 
 // A stick pair inside the radial dead zone reads as centred; outside it
-// passes through unscaled (the game applies its own curve).
-void stick_pair(int16_t x, int16_t y, float *ox, float *oy) {
-    constexpr float kDeadZone = 0.08f;
+// passes through unscaled (the game applies its own curve). NFSMW 3.0.4: the
+// zone is the core mod's stick_deadzone (percent; 8 as before).
+void stick_pair(int16_t x, int16_t y, float dead, float *ox, float *oy) {
     const float fx = unit_axis(x, -1.0f), fy = unit_axis(y, -1.0f);
-    if (std::hypot(fx, fy) < kDeadZone) {
+    if (std::hypot(fx, fy) < dead) {
         *ox = *oy = 0;
         return;
     }
@@ -301,10 +302,19 @@ PadState pad_from_sdl(const bool buttons[kSdlPadButtonCount], const int16_t axes
     for (const auto &h : kHat)
         if (buttons[h.sdl])
             p.hat |= h.bit;
-    stick_pair(axes[kSdlAxisLeftX], axes[kSdlAxisLeftY], &p.lx, &p.ly);
-    stick_pair(axes[kSdlAxisRightX], axes[kSdlAxisRightY], &p.rx, &p.ry);
-    p.l2 = unit_axis(axes[kSdlAxisLeftTrigger], 0.0f);
-    p.r2 = unit_axis(axes[kSdlAxisRightTrigger], 0.0f);
+    // NFSMW 3.0.4 (idea: SpeedBreaker's deadzone settings; no code taken): Controls > Stick deadzone / Trigger deadzone (core mod, percent; 8 and 0 = as before). A trigger
+    // below its zone reads 0 and above it is rescaled to 0..1, so a worn trigger that never quite returns stops
+    // giving gas or brake.
+    const float stick_dead = std::clamp(float(mods_core_setting("stick_deadzone", 8)), 0.0f, 30.0f) / 100.0f;
+    const float trigger_dead = std::clamp(float(mods_core_setting("trigger_deadzone", 0)), 0.0f, 30.0f) / 100.0f;
+    stick_pair(axes[kSdlAxisLeftX], axes[kSdlAxisLeftY], stick_dead, &p.lx, &p.ly);
+    stick_pair(axes[kSdlAxisRightX], axes[kSdlAxisRightY], stick_dead, &p.rx, &p.ry);
+    auto trigger = [trigger_dead](int16_t v) {
+        const float t = unit_axis(v, 0.0f);
+        return t <= trigger_dead ? 0.0f : (t - trigger_dead) / (1.0f - trigger_dead);
+    };
+    p.l2 = trigger(axes[kSdlAxisLeftTrigger]);
+    p.r2 = trigger(axes[kSdlAxisRightTrigger]);
     if (p.l2 > 0.5f)
         p.buttons |= kPadL2;
     if (p.r2 > 0.5f)

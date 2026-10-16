@@ -1771,6 +1771,10 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "MapVirtualKeyExA", 3, u_MapVirtualKeyA},
     {"USER32.dll", "ToUnicode", 6, nullptr},
     {"USER32.dll", "SendInput", 3, nullptr},
+    // UG1 (Speed.exe) imports these; logging-only, but the stack stays balanced.
+    {"USER32.dll", "keybd_event", 4, nullptr},
+    {"USER32.dll", "SetWindowsHookExA", 4, nullptr},
+    {"USER32.dll", "SendNotifyMessageA", 4, nullptr},
     {"USER32.dll", "PostThreadMessageA", 4, nullptr},
     {"USER32.dll", "GetForegroundWindow", 0, u_GetForegroundWindow},
     {"USER32.dll", "WaitMessage", 0, u_WaitMessage},

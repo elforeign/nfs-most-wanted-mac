@@ -184,6 +184,7 @@ struct StreamRecord {
     bool active = false;   // converted, and being fed by Unlock
     bool refused = false;  // this host cannot stream; stay on re-submission
     uint32_t ring_end = 0; // ring offset just past the last byte fed
+    int32_t told_volume = DSBVOLUME_MAX; // last volume the lifecycle line reported
 };
 
 std::vector<StreamRecord> &streams() {
@@ -218,6 +219,16 @@ void stream_reset(uint32_t id) {
         r->active = false;
         r->ring_end = 0;
     }
+}
+
+// One line per lifecycle step of a buffer the guest has streamed into (music,
+// movie sound): replay, stop, a volume step of 15 dB or more, release. These
+// are a handful per screen change, and they are what says which call a
+// sound that outlives its screen never received.
+void stream_life(const ComObj *b, const char *what) {
+    if (stream_for(b->id))
+        LOGW("dsound: stream buffer %u %s (channel %d, playing %d, volume %d)", b->id, what,
+             b->channel, (int)b->playing, b->volume);
 }
 
 // Where a converted stream's play cursor is.
@@ -766,6 +777,7 @@ void Buffer_Play(X86 *c) {
         return;
     }
     b->playing = true;
+    stream_life(b, "play again");
     // A fresh Play is a fresh sound: whatever the last one had been converted
     // into is over, and the ring is a loop again until the guest writes.
     stream_reset(b->id);
@@ -830,6 +842,12 @@ void Buffer_SetVolume(X86 *c) {
         return;
     }
     b->volume = v;
+    if (StreamRecord *r = stream_for(b->id)) {
+        if (abs(v - r->told_volume) >= 1500 || (v == DSBVOLUME_MIN && r->told_volume != v)) {
+            r->told_volume = v;
+            stream_life(b, "volume");
+        }
+    }
     if (b->channel >= 0)
         host_audio_set_volume(b->channel, v);
     com_ret(c, DS_OK);
@@ -881,6 +899,7 @@ void Buffer_Stop(X86 *c) {
         b->play_cursor = live_position(b);
         host_audio_stop(b->channel);
     }
+    stream_life(b, "stop");
     b->playing = false;
     stream_reset(b->id);
     signal_stop_positions(b);
@@ -1514,6 +1533,7 @@ void DS_CreateSoundBuffer(X86 *c) {
 
     ComObj *b = com_new(K_DSBUFFER);
     b->buf_flags = flags;
+    b->ds_owner = ds->id;
     b->is_primary_buffer = primary;
     if (primary) {
         b->rate = 22050;
@@ -1544,6 +1564,16 @@ void DS_CreateSoundBuffer(X86 *c) {
     com_out_ptr(out, view);
     LOGV("dsound: created a %s buffer of %u bytes (flags %08x)", primary ? "primary" : "secondary",
          bytes, flags);
+    {   // 3.0.4 (issue 8): where each buffer's samples and object are, the first 8, for a log beside the game's own
+        static uint32_t placed;
+        if (placed++ < 8u) {
+            if (primary)
+                LOGW("dsound: buffer %u (primary): object %08x", b->id, view);
+            else
+                LOGW("dsound: buffer %u: samples %08x..%08x, object %08x", b->id, b->buf_pixels,
+                     b->buf_pixels + b->buf_bytes, view);
+        }
+    }
     com_ret(c, DS_OK);
 }
 
@@ -1579,6 +1609,7 @@ void DS_DuplicateSoundBuffer(X86 *c) {
     }
     ComObj *b = com_new(K_DSBUFFER);
     b->buf_flags = src->buf_flags;
+    b->ds_owner = ds->id;
     b->buf_bytes = src->buf_bytes;
     b->rate = src->rate;
     b->nchannels = src->nchannels;
@@ -1718,6 +1749,7 @@ void dsbuffer_destroy(ComObj *b) {
         notifies().erase(notifies().begin() + (ptrdiff_t)i);
         break;
     }
+    stream_life(b, "released");
     stream_drop(b->id);
     if (b->playing && b->channel >= 0)
         host_audio_stop(b->channel);
@@ -1729,6 +1761,41 @@ void dsbuffer_destroy(ComObj *b) {
     // one reference; the last one out frees it.
     pcm_release(b->buf_pixels);
     b->buf_pixels = 0;
+}
+
+// Releasing an IDirectSound releases every buffer it made, and their sound
+// ends with it. UG1 relies on this: each music stream (front end, race, movie)
+// opens its own DirectSound with a primary and a secondary buffer, and at the
+// end of the stream releases the device and nothing else. Without this the
+// old stream's ring went on looping under the next one on its own channel,
+// and the channels ran out after six streams (run 4, r03-play / r04-pause1).
+//
+// The buffer objects stay valid: a caller that does still release one later
+// gets an ordinary Release. What ends here is the sound and the channel.
+void dsound_destroy(ComObj *ds) {
+    int ended = 0, sounding = 0;
+    for (const std::unique_ptr<ComObj> &p : *g_com_objects) {
+        ComObj *b = p.get();
+        if (!b || !b->alive || b->kind != K_DSBUFFER || b->ds_owner != ds->id)
+            continue;
+        ++ended;
+        if (b->playing)
+            ++sounding;
+        stream_life(b, "ended with its device");
+        stream_drop(b->id);
+        if (b->playing && b->channel >= 0)
+            host_audio_stop(b->channel);
+        if (b->channel >= 0) {
+            dx_free_audio_channel(b->channel);
+            b->channel = -1;
+        }
+        b->playing = false;
+        b->ds_owner = 0;
+        signal_stop_positions(b);
+    }
+    if (ended)
+        LOGW("dsound: device %u released; %d of its buffers ended with it (%d were playing)", ds->id,
+             ended, sounding);
 }
 
 } // namespace
@@ -1789,6 +1856,7 @@ void dsound_register() {
     com_register_iid(IF_DSNOTIFY, IID_IDirectSoundNotify_);
 
     com_set_destructor(K_DSBUFFER, dsbuffer_destroy);
+    com_set_destructor(K_DSOUND, dsound_destroy);
     com_set_qi_hook(K_DSOUND, dsound_qi);
     com_set_qi_hook(K_DSBUFFER, dsbuffer_qi);
 

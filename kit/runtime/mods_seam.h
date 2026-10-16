@@ -22,6 +22,14 @@ void mods_present_level_end(void);
 // Test86: a declared setting's current value by "mod_id/key" (the presenter's HDR output reads
 // core.nfsmw/hdr_output); `fallback` when no such setting, or without the mods module.
 int64_t mods_setting_value(const char *mod_id_slash_key, int64_t fallback);
+// NFSMW 3.0.4: a setting of the game's core mod (game.toml [settings] core_mod) by its key alone, for the host's own
+// features; `fallback` when the game names no core mod or the mod has no such setting.
+int64_t mods_core_setting(const char *key, int64_t fallback);
+// NFSMW 3.0.4 (D-202 item 4, runtime/guest_pause.h): true on the main guest thread while the settings menu is open
+// and the core mod's pause_in_menu is on; the pause point calls mods_menu_note_pause at the start and end of a pause
+// (the Apply watchdog counts only time the game ran). False / nothing without the mods module.
+bool mods_menu_pause_wanted(void);
+void mods_menu_note_pause(bool paused);
 // Thread-safe application Settings command, drained by the guest frame loop.
 void mods_options_request(void);
 

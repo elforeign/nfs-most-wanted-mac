@@ -7,6 +7,7 @@
 // what a real buffered device delivers and what a guest that asks for relative
 // mouse motion needs.
 #include "com.h"
+#include "dinput_effect.h"
 #include "dinput_joystick.h"
 #include "dx.h"
 
@@ -180,6 +181,20 @@ void refresh_host_input() {
     g_host_in.acc_dz += in.mouse_dz;
 }
 
+// The state a fresh event stream starts from: what is held now. Windows queues buffered events only for changes
+// made while the device is acquired, so a key already down at Acquire (or across a SetActionMap) sends no press.
+// Zeroing instead turned a held key into a new press: UG2 swaps the race map for the menu map when ESC opens the
+// pause screen, and the still-held ESC then arrived as the menu's BACK and closed it (run 2, r02-pause3).
+static void seed_held_state(ComObj *d) {
+    if (is_joystick(d))
+        return;
+    refresh_host_input();
+    for (uint32_t k = 0; k < 256; ++k)
+        d->last_keys[k] = g_host_in.keys[k] & 0x80u;
+    for (uint32_t b = 0; b < 8; ++b)
+        d->last_buttons[b] = g_host_in.buttons[b] & 0x80u;
+}
+
 // Appends whatever changed since the last poll. This is the only place device
 // state advances, so GetDeviceState and GetDeviceData always agree about what
 // "now" is.
@@ -194,8 +209,12 @@ void poll_device(ComObj *d) {
         for (uint32_t k = 0; k < 256; ++k) {
             uint8_t now = g_host_in.keys[k] & 0x80u;
             if (now != (d->last_keys[k] & 0x80u)) {
-                if (d->buffer_size)
+                if (d->buffer_size && !d->action_mapped)
                     d->events.push_back(pack_event(k, now ? 0x80 : 0));
+                // Action-mapped: one event per action this key drives, packed by action index.
+                for (size_t i = 0; d->buffer_size && d->action_mapped && i < d->action_dik.size(); ++i)
+                    if (d->action_dik[i] == k)
+                        d->events.push_back(pack_event((uint32_t)i, now ? 0x80 : 0));
                 d->last_keys[k] = now;
             }
         }
@@ -298,6 +317,10 @@ void Device_GetProperty(X86 *c) {
         return;
     }
     uint32_t hr = DI_OK;
+    if (dinput_ff_get_property(d, prop, ph, &hr)) {
+        com_ret(c, hr);
+        return;
+    }
     if (is_joystick(d) && joy_get_property(d, prop, ph, &hr)) {
         com_ret(c, hr);
         return;
@@ -329,6 +352,10 @@ void Device_SetProperty(X86 *c) {
         return;
     }
     uint32_t hr = DI_OK;
+    if (dinput_ff_set_property(d, prop, ph, &hr)) {
+        com_ret(c, hr);
+        return;
+    }
     if (is_joystick(d) && joy_set_property(d, prop, ph, &hr)) {
         com_ret(c, hr);
         return;
@@ -374,8 +401,7 @@ void Device_Acquire(X86 *c) {
     // Acquiring resets the event stream, so the first read after acquisition
     // reports the state now rather than a backlog from before.
     d->events.clear();
-    memset(d->last_keys, 0, sizeof d->last_keys);
-    memset(d->last_buttons, 0, sizeof d->last_buttons);
+    seed_held_state(d);
     if (is_joystick(d))
         joy_acquired(d);
     com_ret(c, DI_OK);
@@ -393,6 +419,8 @@ void Device_Unacquire(X86 *c) {
     }
     d->acquired = false;
     d->events.clear();
+    if (is_joystick(d))
+        dinput_ff_device_unacquired(d);
     com_ret(c, DI_OK);
 }
 
@@ -410,6 +438,7 @@ void Device_GetDeviceState(X86 *c) {
         return;
     }
     if (is_joystick(d)) {
+        dinput_ff_pump();
         com_ret(c, joy_get_device_state(d, size, out));
         return;
     }
@@ -419,6 +448,15 @@ void Device_GetDeviceState(X86 *c) {
     // zero motion and lose this frame's movement.
     poll_device(d);
 
+    if (d->dev_type == DIDEVTYPE_KEYBOARD && d->action_mapped) {
+        // DIACTIONFORMAT data: one DWORD per action, 0x80 while its key is down.
+        gm_zero(out, size);
+        for (uint32_t i = 0; i < d->action_dik.size() && (i + 1) * 4 <= size; ++i)
+            if (d->action_dik[i] < 256 && (d->last_keys[d->action_dik[i]] & 0x80u))
+                wr32(out + i * 4, 0x80);
+        com_ret(c, DI_OK);
+        return;
+    }
     if (d->dev_type == DIDEVTYPE_KEYBOARD) {
         // The keyboard format is one byte per DIK_ scan code.
         if (size > 256)
@@ -505,13 +543,15 @@ void Device_GetDeviceData(X86 *c) {
         for (uint32_t i = 0; i < n; ++i) {
             uint32_t e = d->events[i];
             uint32_t a = out + i * objsize;
+            const bool mapped = d->action_mapped && event_ofs(e) < d->action_app.size();
             if (objsize >= DIDEVICEOBJECTDATA_DX8_SIZE)
-                wr32(a + DIDOD_OFF_uAppData, 0);
-            wr32(a + DIDOD_OFF_dwOfs, event_ofs(e));
+                wr32(a + DIDOD_OFF_uAppData, mapped ? d->action_app[event_ofs(e)] : 0);
+            // Action-mapped: dwOfs is the action's offset in the DIACTIONFORMAT data, index * 4.
+            wr32(a + DIDOD_OFF_dwOfs, mapped ? event_ofs(e) * 4 : event_ofs(e));
             // dwData is a full dword; a signed axis delta was packed into 24
             // bits, so sign-extend it back.
             uint32_t ofs = event_ofs(e);
-            uint32_t data = (ofs == DIMOFS_X || ofs == DIMOFS_Y || ofs == DIMOFS_Z)
+            uint32_t data = (d->dev_type == DIDEVTYPE_MOUSE && (ofs == DIMOFS_X || ofs == DIMOFS_Y || ofs == DIMOFS_Z))
                                 ? (uint32_t)event_data_signed(e)
                                 : event_data(e);
             wr32(a + DIDOD_OFF_dwData, data);
@@ -655,11 +695,25 @@ DX_STUB(Device_RunControlPanel, DIERR_UNSUPPORTED)
 DX_STUB(Device_Initialize, DI_OK)
 
 // --- IDirectInputDevice2A additions (force feedback and polling)
-DX_STUB(Device_CreateEffect, DIERR_UNSUPPORTED)
+// Force feedback on the virtual pad (dinput_effect.cpp) when RECOMP_DINPUT_FF=1; otherwise DIERR_UNSUPPORTED.
+static void Device_CreateEffect(X86 *c) {
+    ComObj *d = this_device(c);
+    if (!d) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    dinput_ff_create_effect(c, d);
+}
 DX_STUB(Device_EnumEffects, DI_OK)
 DX_STUB(Device_GetEffectInfo, DIERR_UNSUPPORTED)
-DX_STUB(Device_GetForceFeedbackState, DIERR_UNSUPPORTED)
-DX_STUB(Device_SendForceFeedbackCommand, DIERR_UNSUPPORTED)
+static void Device_GetForceFeedbackState(X86 *c) {
+    ComObj *d = this_device(c);
+    com_ret(c, d ? dinput_ff_state(d, arg(c, 1)) : DIERR_INVALIDPARAM);
+}
+static void Device_SendForceFeedbackCommand(X86 *c) {
+    ComObj *d = this_device(c);
+    com_ret(c, d ? dinput_ff_command(d, arg(c, 1)) : DIERR_INVALIDPARAM);
+}
 DX_STUB(Device_EnumCreatedEffectObjects, DI_OK)
 DX_STUB(Device_Escape, DIERR_UNSUPPORTED)
 
@@ -676,6 +730,8 @@ void Device_Poll(X86 *c) {
     // A joystick has nothing to poll (poll_device skips it) and answers
     // DI_OK, not DI_NOEFFECT, so a game that checks for DI_OK keeps reading.
     poll_device(d);
+    if (is_joystick(d))
+        dinput_ff_pump();
     com_ret(c, DI_OK);
 }
 
@@ -836,7 +892,7 @@ static void enum_devices(X86 *c, bool v8) {
     if (v8 && version < DIRECTINPUT_VERSION_8)
         version = DIRECTINPUT_VERSION_8;
     if (!stopped && joy_served() && joy_enum_matches(devtype, version) &&
-        !(flags & DIEDFL_FORCEFEEDBACK)) {
+        (!(flags & DIEDFL_FORCEFEEDBACK) || dinput_ff_served())) {
         uint32_t a = scratch(INST_SIZE);
         if (a) {
             wr32(a, INST_SIZE);
@@ -904,8 +960,174 @@ void DI8_EnumDevices(X86 *c) {
 void DI8_FindDevice(X86 *c) {
     com_ret(c, DIERR_DEVICENOTREG);
 }
+// DirectInput 8 action mapping, keyboard only. NFS Underground describes its controls as DIACTIONFORMATs whose
+// actions all name explicit keys (DIKEYBOARD_* semantics, 0x81000400 | DIK) and takes its keyboard only from
+// EnumDevicesBySemantics; with no callback it had no keyboard at all (run 2). Other semantics (genre axes and
+// buttons, mouse) are left unmapped: the pad and the mouse are served through EnumDevices/CreateDevice.
+// DIACTIONFORMATA: dwSize, dwActionSize, dwDataSize, dwNumActions, rgoAction, guidActionMap, dwGenre,
+// dwBufferSize, ... DIACTIONA (0x28): uAppData, dwSemantic, dwFlags, name, guidInstance, dwObjID, dwHow.
+static const uint32_t DIAF_OFF_dwActionSize = 4, DIAF_OFF_dwDataSize = 8, DIAF_OFF_dwNumActions = 12,
+                      DIAF_OFF_rgoAction = 16, DIAF_OFF_dwBufferSize = 40, DIAF_MIN_SIZE = 44;
+static const uint32_t DIA_OFF_uAppData = 0, DIA_OFF_dwSemantic = 4, DIA_OFF_dwFlags = 8, DIA_OFF_guidInstance = 16,
+                      DIA_OFF_dwObjID = 32, DIA_OFF_dwHow = 36, DIA_MIN_SIZE = 40;
+static const uint32_t DIA_APPNOMAP = 0x4, DIAH_DEFAULT = 0x20, DIDBAM_PRESERVE = 0x1;
+static const uint32_t DIEDBS_MAPPEDPRI1 = 0x1;
+
+// The keyboard DIK a semantic names, or -1.
+static int keyboard_semantic_dik(uint32_t sem) {
+    return (sem & 0xffffff00u) == 0x81000400u ? (int)(sem & 0xffu) : -1;
+}
+// The format's actions, or false when it is not a readable DIACTIONFORMAT.
+static bool action_format(uint32_t fmt, uint32_t *rg, uint32_t *n, uint32_t *asz) {
+    if (!fmt || !gm_valid(fmt, DIAF_MIN_SIZE))
+        return false;
+    *asz = rd32(fmt + DIAF_OFF_dwActionSize);
+    *n = rd32(fmt + DIAF_OFF_dwNumActions);
+    *rg = rd32(fmt + DIAF_OFF_rgoAction);
+    return *asz >= DIA_MIN_SIZE && *n <= 1024 && (!*n || gm_fits_n(*rg, *n, *asz));
+}
+
 void DI8_EnumDevicesBySemantics(X86 *c) {
-    com_ret(c, DI_OK); // no action-mapped devices: the callback is never called
+    ComObj *di = this_dinput(c);
+    uint32_t fmt = arg(c, 2), cb = arg(c, 3), ref = arg(c, 4);
+    uint32_t rg, n, asz;
+    if (!di || !cb || !action_format(fmt, &rg, &n, &asz)) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    bool keyboard = false;
+    for (uint32_t i = 0; i < n && !keyboard; ++i)
+        keyboard = keyboard_semantic_dik(rd32(rg + i * asz + DIA_OFF_dwSemantic)) >= 0;
+    if (!keyboard) {
+        com_ret(c, DI_OK); // nothing here serves the format: the callback is not called
+        return;
+    }
+    ComObj *d = com_new(K_DIDEVICE);
+    d->dev_type = DIDEVTYPE_KEYBOARD;
+    d->di_wide = di->di_wide;
+    d->di_version = di->di_version;
+    uint32_t view = com_view(d, IF_DINPUTDEVICE8);
+    const uint32_t INST_SIZE = di->di_wide ? 1100 : 580;
+    uint32_t a = view ? scratch(INST_SIZE) : 0;
+    if (!a) {
+        com_release(d);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    gm_zero(a, INST_SIZE);
+    wr32(a, INST_SIZE);
+    memcpy(gm_ptr(a + 4), GUID_SysKeyboard_, 16);
+    memcpy(gm_ptr(a + 20), GUID_SysKeyboard_, 16);
+    wr32(a + 36, 0x0113u); // DI8DEVTYPE_KEYBOARD, as EnumDevices describes it
+    if (di->di_wide) {
+        di_put_wide(a + 40, "Keyboard", 260);
+        di_put_wide(a + 560, "Keyboard", 260);
+    } else {
+        gm_put_str(a + 40, "Keyboard", 260);
+        gm_put_str(a + 300, "Keyboard", 260);
+    }
+    // LPDIENUMDEVICESBYSEMANTICSCB(lpddi, lpdid, dwFlags, dwRemaining, pvRef). The device is DirectInput's: a
+    // caller that keeps it AddRefs it, and the enumeration's own reference goes when the callback returns.
+    const uint32_t args[5] = {a, view, DIEDBS_MAPPEDPRI1, 0, ref};
+    guest_call(c, cb, args, 5);
+    com_release(d);
+    com_ret(c, DI_OK);
+}
+
+static void Device8_BuildActionMap(X86 *c) {
+    ComObj *d = this_device(c);
+    uint32_t fmt = arg(c, 1), flags = arg(c, 3);
+    uint32_t rg, n, asz;
+    if (!d || !action_format(fmt, &rg, &n, &asz)) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    if (d->dev_type != DIDEVTYPE_KEYBOARD) {
+        com_ret(c, DI8_UNSUPPORTED);
+        return;
+    }
+    // DIA_APPNOMAP keeps the mapper from choosing an object for a genre semantic; a DIKEYBOARD_* semantic already
+    // names its key, so it is mapped either way. NFS Underground sets DIA_APPNOMAP on its race Throttle action on
+    // DIK_UP (FUN_00405c60 writes 4 to that action's dwFlags before BuildActionMap) and the Up arrow drives on
+    // Windows; skipping it left the car without a throttle on the keyboard (run 3, r03-diag4).
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t act = rg + i * asz;
+        const int dik = keyboard_semantic_dik(rd32(act + DIA_OFF_dwSemantic));
+        if (dik < 0)
+            continue;
+        if ((flags & DIDBAM_PRESERVE) && rd32(act + DIA_OFF_dwHow))
+            continue;
+        memcpy(gm_ptr(act + DIA_OFF_guidInstance), GUID_SysKeyboard_, 16);
+        wr32(act + DIA_OFF_dwObjID, ((uint32_t)dik << 8) | 0x0cu); // DIDFT_BUTTON | DIDFT_MAKEINSTANCE(dik)
+        wr32(act + DIA_OFF_dwHow, DIAH_DEFAULT);
+    }
+    com_ret(c, DI_OK);
+}
+
+static void Device8_SetActionMap(X86 *c) {
+    ComObj *d = this_device(c);
+    uint32_t fmt = arg(c, 1);
+    uint32_t rg, n, asz;
+    if (!d || !action_format(fmt, &rg, &n, &asz) || !rd32(fmt + DIAF_OFF_dwDataSize)) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    if (d->dev_type != DIDEVTYPE_KEYBOARD) {
+        com_ret(c, DI8_UNSUPPORTED);
+        return;
+    }
+    if (d->acquired) {
+        com_ret(c, DIERR_ACQUIRED);
+        return;
+    }
+    d->action_dik.assign(n, 0xffff);
+    d->action_app.assign(n, 0);
+    uint32_t mapped = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t act = rg + i * asz;
+        d->action_app[i] = rd32(act + DIA_OFF_uAppData);
+        const uint32_t obj = rd32(act + DIA_OFF_dwObjID), how = rd32(act + DIA_OFF_dwHow);
+        if (how && !(how & 0x80000000u) && !memcmp(gm_ptr(act + DIA_OFF_guidInstance), GUID_SysKeyboard_, 16) &&
+            (obj & 0x0cu) && i < 256) {
+            d->action_dik[i] = (uint16_t)((obj >> 8) & 0xffu);
+            ++mapped;
+        }
+    }
+    // A key that drives more than one action sends one event per action (poll_device). Name each such key once per
+    // map shape, so a doubled press (UG2 run 2: the in-race pause closing itself) can be traced to its actions.
+    if (getenv("RECOMP_DINPUT_MAP_LOG")) {
+        // Every action of every map: index, key, application data (diagnostic, off by default).
+        for (uint32_t i = 0; i < n && i < d->action_dik.size(); ++i)
+            fprintf(stderr, "[recomp] dinput: map of %u actions: action %u key %02x app %08x\n", n, i,
+                    d->action_dik[i], d->action_app[i]);
+    }
+    static uint32_t s_shared_logged = 0;
+    for (uint32_t k = 0; k < 256 && s_shared_logged < 64; ++k) {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < n && i < d->action_dik.size(); ++i)
+            count += d->action_dik[i] == k;
+        if (count < 2)
+            continue;
+        char list[160];
+        size_t len = 0;
+        list[0] = 0;
+        for (uint32_t i = 0; i < n && i < d->action_dik.size() && len + 24 < sizeof list; ++i)
+            if (d->action_dik[i] == k)
+                len += (size_t)snprintf(list + len, sizeof list - len, " %u(app %08x)", i, d->action_app[i]);
+        fprintf(stderr, "[recomp] dinput: map of %u actions: key %02x drives %u actions:%s\n", n, k, count, list);
+        ++s_shared_logged;
+    }
+    d->action_mapped = true;
+    d->data_format_size = rd32(fmt + DIAF_OFF_dwDataSize);
+    if (uint32_t b = rd32(fmt + DIAF_OFF_dwBufferSize))
+        d->buffer_size = b > 4096 ? 4096 : b;
+    d->events.clear();
+    seed_held_state(d);
+    log_once("dinput.actionmap", "dinput: the keyboard is action-mapped (first map: %u actions, %u on keys)", n,
+             mapped);
+    LOGV("dinput: action map of %u actions (%u on keys), %u bytes of data, buffer %u", n, mapped,
+         d->data_format_size, d->buffer_size);
+    com_ret(c, DI_OK);
 }
 void DI8_ConfigureDevices(X86 *c) {
     com_ret(c, DI8_UNSUPPORTED);
@@ -941,8 +1163,8 @@ const ComMethod g_didevice8[] = {
     {"SendDeviceData", 5, Device_SendDeviceData},
     {"EnumEffectsInFile", 5, Device8_Unsupported},
     {"WriteEffectToFile", 5, Device8_Unsupported},
-    {"BuildActionMap", 4, Device8_Unsupported},
-    {"SetActionMap", 4, Device8_Unsupported},
+    {"BuildActionMap", 4, Device8_BuildActionMap},
+    {"SetActionMap", 4, Device8_SetActionMap},
     {"GetImageInfo", 2, Device8_Unsupported},
 };
 
@@ -1097,6 +1319,7 @@ uint32_t di_scratch(uint32_t n) {
 }
 
 void dinput_reset() {
+    dinput_ff_reset();
     g_scratch = 0;
     g_scratch_size = 0;
     // The devices these handles belonged to are gone with the arena, and the
@@ -1124,6 +1347,7 @@ void dinput_register() {
                std::size(g_didevice8));
     com_bind(IF_DINPUT8, K_DINPUT);
     com_bind(IF_DINPUTDEVICE8, K_DIDEVICE);
+    dinput_ff_register();
     // {BF798030-483A-4DA2-AA99-5D64ED369700}, {54D41080-DC15-4833-A41B-748F73A38179}
     static const uint8_t iid8[16] =
         IID_BYTES(0xBF798030, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00);

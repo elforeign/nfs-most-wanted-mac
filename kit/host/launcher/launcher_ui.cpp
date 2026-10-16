@@ -723,9 +723,9 @@ void Launcher::draw(Canvas &c, int s) {
         break;
     case State::WrongVersion:
         accent = kWarn;
-        headline = "Wrong version of " + spec_.executable;
-        detail =
-            display(status_.exe) + "\nFound SHA-256 " + status_.digest + "\nNeeded " + spec_.sha256;
+        headline = "This " + spec_.executable + " cannot be used";
+        detail = display(status_.exe) + "\nIt is not the version of " + spec_.title +
+                 " this port is made for. Nothing was changed.\nSHA-256 " + status_.digest;
         break;
     case State::Incomplete: {
         accent = kWarn;

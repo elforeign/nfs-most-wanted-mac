@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import game_config  # noqa: E402
 
 STRINGS = (("id", "RECOMP_GAME_ID"), ("name", "RECOMP_GAME_NAME"), ("app_name", "RECOMP_APP_NAME"),
+           ("data_dir_name", "RECOMP_DATA_DIR_NAME"),
            ("bundle_id", "RECOMP_BUNDLE_ID"), ("executable", "RECOMP_EXECUTABLE"),
            ("sha256", "RECOMP_EXE_SHA256"), ("guest_root", "RECOMP_GUEST_ROOT"))
 ADDRESSES = (("image_base", "RECOMP_IMAGE_BASE"), ("entry_point", "RECOMP_ENTRY_POINT"),
@@ -45,8 +46,16 @@ def render_header(cfg):
     for field, value in zip(("MAJOR", "MINOR", "BUILD", "PLATFORM"),
                             game_config.windows_version(game["windows_version"])):
         lines.append("#define RECOMP_WINDOWS_%s %du" % (field, value))
+    lines.append("#define RECOMP_CPUID_FEATURES_EDX 0x%08xu" % game_config.cpu_features_edx(game["cpu_features"]))
+    lines.append("#define RECOMP_CPUID_BRAND_INDEX 0x%02xu" % game["cpu_brand_index"])
+    lines.append("#define RECOMP_QPC_US %d" % game["qpc_us"])
     if game.get("frame_cap"):
         lines.append("#define RECOMP_GAME_FRAME_CAP_ADDR %s" % c_hex(game["frame_cap"]))
+    # The display adapter D3D9 names (GetAdapterIdentifier); games pick their detail by its ids ([game] adapter).
+    lines.append("#define RECOMP_ADAPTER_VENDOR 0x%04xu" % game["adapter"]["vendor"])
+    lines.append("#define RECOMP_ADAPTER_DEVICE 0x%04xu" % game["adapter"]["device"])
+    lines.append("#define RECOMP_ADAPTER_NAME %s" % c_string(game["adapter"]["name"]))
+    lines.append("#define RECOMP_ADAPTER_MODE_LIST %d" % (game["adapter"]["modes"] == "list"))
     # Absolute: the developer's game lives beside game.toml, not under the kit.
     lines.append("#define RECOMP_DEVELOPER_EXE %s" % c_string(cfg["developer_exe_path"].as_posix()))
     lines.append("#define RECOMP_DEVELOPER_GAME_DIR %s" % c_string(cfg["developer_exe_path"].parent.as_posix()))
@@ -88,11 +97,14 @@ def render_header(cfg):
     lines.append("#define RECOMP_SETTINGS_FILTERING_DEFAULT %d" % cfg["settings"]["filtering_default"])
     lines.append("#define RECOMP_SETTINGS_FILTERING_KEY %s" % c_string(cfg["settings"]["filtering_key"]))
     lines.append("#define RECOMP_SETTINGS_PAGE_TABS %d" % (cfg["settings"]["page"] == "tabs"))
+    lines.append("#define RECOMP_SETTINGS_CORE_MOD %s" % c_string(cfg["settings"]["core_mod"]))
     # The launcher's data: what to call the game, where to get it, where an
     # install may be, and what an import copies (host/launcher/).
     launcher = cfg["launcher"]
     lines.append("#define RECOMP_LAUNCHER_TITLE %s" % c_string(launcher["title"]))
     lines.append("#define RECOMP_LAUNCHER_STORE_URL %s" % c_string(launcher["store"]))
+    lines.append("#define RECOMP_RELEASES_REPO %s" % c_string(launcher["releases_repo"]))
+    lines.append("#define RECOMP_SETUP_LOG %s" % c_string(launcher["setup_log"]))
     lines.append("#define RECOMP_LAUNCHER_INSTALL_NAMES %s" % c_string_list(launcher["install_names"]))
     lines.append("#define RECOMP_LAUNCHER_GOG_IDS %s" % c_string_list(launcher["gog_ids"]))
     lines.append("#define RECOMP_LAUNCHER_STEAM_IDS %s" % c_string_list(launcher["steam_ids"]))
@@ -112,6 +124,13 @@ def render_header(cfg):
         for field in ("size", "stride", "count"):
             if field in entry:
                 lines.append("#define %s_%s %du" % (macro, field.upper(), entry[field]))
+        # Any other number is a layout fact the reader of that global needs (fe_root's offsets): hex, by name.
+        for field, value in sorted(entry.items()):
+            if field not in ("addr", "size", "stride", "count") and isinstance(value, int):
+                lines.append("#define %s_%s %s" % (macro, field.upper(), c_hex(value)))
+            # A list of names is a set the reader matches against (fe_root's `skip`: overlay packages).
+            elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+                lines.append("#define %s_%s %s" % (macro, field.upper(), c_string_list(value)))
     return "\n".join(lines) + "\n"
 
 

@@ -359,6 +359,12 @@ void recomp_rdtsc(X86 *c) {
 // Deterministic CPUID per the plan: GenuineIntel, family 6, model 3, and only
 // FPU, TSC and CMOV. No MMX, so the guest cannot pick a path the translator
 // does not cover.
+#ifndef RECOMP_CPUID_FEATURES_EDX
+#define RECOMP_CPUID_FEATURES_EDX 0u
+#endif
+#ifndef RECOMP_CPUID_BRAND_INDEX
+#define RECOMP_CPUID_BRAND_INDEX 0u
+#endif
 void recomp_cpuid(X86 *c) {
     switch (c->r[R_EAX]) {
     case 0:
@@ -369,9 +375,9 @@ void recomp_cpuid(X86 *c) {
         break;
     case 1:
         c->r[R_EAX] = 0x00000633; // family 6, model 3, stepping 3
-        c->r[R_EBX] = 0;
+        c->r[R_EBX] = RECOMP_CPUID_BRAND_INDEX; // brand index, [game] cpu_brand_index (default 0 = none)
         c->r[R_ECX] = 0;
-        c->r[R_EDX] = 0x00008011; // FPU | TSC | CMOV, nothing else
+        c->r[R_EDX] = 0x00008011u | RECOMP_CPUID_FEATURES_EDX; // FPU | TSC | CMOV + the game's [game] cpu_features
         break;
     default:
         c->r[R_EAX] = c->r[R_EBX] = c->r[R_ECX] = c->r[R_EDX] = 0;

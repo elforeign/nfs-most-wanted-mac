@@ -175,8 +175,21 @@ struct PixelVariant {
     // matches stay as they are. The draw side sets it only on draws into the jittered scene backing while upscaling.
     // Unchanged source when 0.
     uint8_t mipbias = 0;
+    // UG1 run 6 Xbox-style fog (MSL only; review/run06/research-fog.md, our formula with the Xbox values): 1 = the
+    // generic D3D fog block becomes depth x screen-height fog: f = clamp((d - start) x inv, 0, max) x
+    // sat(1 - |y_ndc| x falloff), d = 1 / pos.w (view depth), y_ndc = vin.fog x pos.w (clip y from the VertexVariant
+    // xfog), col.rgb = mix(col.rgb, colour, f), alpha kept. P.fog_start = start, P.fog_end = inv = 1 / (end - start),
+    // P.fog_density = falloff, P.fog_color = (rgb, max). Pair it with VertexVariant xfog. Unchanged source when 0.
+    uint8_t xfog = 0;
+    // UG1 run 6 Xbox headlight distance fade (MSL only; review/run06/research-headlight.md, headlight_patch): the
+    // headlight clip sample t[2] of the world-headlight programs (pixel_is_headlight) is faded with the depth along the
+    // beam (tc[1].w, metres): 1 = t[2] x sat(1 - w / R) on top of the PC clip ramp; 2 = the Xbox profile, the PC near
+    // cut x sat(1 - w / R) and the Xbox headlight colour ratio. R = hlfade_range() metres. Unchanged source when 0;
+    // pixel_source fails if the patch does not apply.
+    uint8_t hlfade = 0;
     uint64_t key() const {
-        return (mipbias ? 0x6f4a3c2b1d0e9f87ull * mipbias : 0) ^ (raindrop ? 0x5851f42d4c957f2dull * raindrop : 0) ^ (alphak ? 0x3b9aca07d1b54a33ull * alphak : 0) ^ (surf ? 0x7f4a7c159e3779b9ull * surf : 0) ^ (reactive ? 0x2c1b3c6d58f1a3e5ull * reactive : 0) ^
+        return (xfog ? 0x2f6b8c1e5d3a9047ull * xfog : 0) ^ (hlfade ? 0x6c8e9cf570932bd5ull * hlfade : 0) ^
+               (mipbias ? 0x6f4a3c2b1d0e9f87ull * mipbias : 0) ^ (raindrop ? 0x5851f42d4c957f2dull * raindrop : 0) ^ (alphak ? 0x3b9aca07d1b54a33ull * alphak : 0) ^ (surf ? 0x7f4a7c159e3779b9ull * surf : 0) ^ (reactive ? 0x2c1b3c6d58f1a3e5ull * reactive : 0) ^
                (smoke ? 0x4cf5ad432745937full * smoke : 0) ^ (hdr ? 0x7c4a7d9f3e1b2c55ull * hdr : 0) ^((uint64_t)sky * 0x3956c25bb9b0e2d3ull) ^ ((uint64_t)parallax * 0x2545f4914f6cdd1dull) ^ ((uint64_t)carpaint * 0x8cb92ba72f3d8dd7ull) ^ ((uint64_t)alpha_mask << 48 | (uint64_t)depth_mask << 32 | (uint64_t)cube_mask << 16 |
                 projected_mask) ^
                ((uint64_t)a2c * 0x9e3779b97f4a7c15ull) ^ ((uint64_t)soft * 0xc2b2ae3d27d4eb4full) ^
@@ -214,8 +227,11 @@ struct VertexVariant {
     // at vertex buffer(20) (three float4, surface.h normal_rows). vertex_source fails if t<surf> is written or there is
     // no NORMAL0 input. Unchanged source when 0.
     uint8_t surf = 0;
+    // UG1 run 6 Xbox-style fog: 1 = the fog interpolant carries the clip-space y (o.fog = opos.y) for PixelVariant
+    // xfog. vertex_source fails if the program writes oFog. Unchanged source when 0.
+    uint8_t xfog = 0;
     uint64_t key() const {
-        return (surf ? 0x3a8f05c5d1b2e4a7ull * surf : 0) ^ (smoke ? 0x8f1bbcdcbfa53e0bull : 0) ^ (sky ? 0x59f111f1923f82a4ull : 0) ^(pool ? 0x6a09e667f3bcc908ull + pool : 0) ^ (pbr ? 0xbb67ae8584caa73bull : 0) ^
+        return (xfog ? 0x4d2c6dfc5ac42aedull : 0) ^ (surf ? 0x3a8f05c5d1b2e4a7ull * surf : 0) ^ (smoke ? 0x8f1bbcdcbfa53e0bull : 0) ^ (sky ? 0x59f111f1923f82a4ull : 0) ^(pool ? 0x6a09e667f3bcc908ull + pool : 0) ^ (pbr ? 0xbb67ae8584caa73bull : 0) ^
                (carenv ? 0x3c6ef372fe94f82bull : 0) ^ (carenv == 2 ? 0x5be0cd19137e2179ull : 0) ^ (glass ? 0xa54ff53a5f1d36f1ull : 0) ^ (glass == 2 ? 0x1f83d9abfb41bd6bull : 0) ^
                (fefloor ? 0x9b05688c2b3e6c1full : 0);
     }
@@ -229,6 +245,11 @@ bool vertex_source(const d9sh::Program &p, const VertexVariant &v, std::string *
 int surf_slot(const d9sh::Program &vs, const d9sh::Program &ps, const VertexVariant &vv, const PixelVariant &pv);
 // Remaster R2: true when the default translation of `p` contains the road effect's reflection lines (wet roads).
 bool pixel_is_wetroad(const d9sh::Program &p);
+// UG1 run 6: true when the default translation of `p` is a world-headlight pixel program (ps 1.x: one t[1] and one
+// t[2] sample, and t[1] x t[2] used later), the lines the headlight fade patch needs (headlight_find).
+bool pixel_is_headlight(const d9sh::Program &p);
+// UG1 run 6: the headlight fade range in metres, RECOMP_UG1_HEADLIGHT_FADE_M (default 100, the Xbox value; 20..400).
+float hlfade_range();
 // Remaster run 13 front-end floor shadows: true when the default translation of vertex shader `p` writes the clip
 // position as four dot products of one input with c[clip..clip+3] and exactly one texture coordinate as four dot
 // products of the same input with c[shadow..shadow+3] (the WORLD receivers: WVP and the shadow matrix W x S).

@@ -13,6 +13,7 @@
 #include "../discovery.h"
 #include "../memory.h"
 #include "../win32.h"
+#include "../guest_pause.h"
 #include "../../platform/os.h"
 #include "game_config.h"
 
@@ -25,6 +26,7 @@
 #include <map>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <set>
 #include <string>
@@ -368,6 +370,20 @@ static void test_modules_and_wide() {
           "gm_put_wstr reserves a terminator at the arena boundary");
     check(gm_put_wstr(0xfffffffeu, "abc", 8) == 0,
           "gm_put_wstr rejects addresses outside the arena");
+}
+
+// CPUID leaf 1: the kit's FPU | TSC | CMOV plus exactly the game's [game] cpu_features (run 2: UG1 reports MMX).
+static void test_cpuid_features() {
+    section("cpuid features");
+    X86 c;
+    loader_init_context(&c);
+    c.r[R_EAX] = 1;
+    recomp_cpuid(&c);
+    check(c.r[R_EDX] == (0x00008011u | RECOMP_CPUID_FEATURES_EDX), "leaf 1 EDX %08x = base | game features %08x",
+          c.r[R_EDX], RECOMP_CPUID_FEATURES_EDX);
+    check((c.r[R_EDX] & 0x02000000u) == 0, "no SSE is reported");
+    check(c.r[R_EBX] == RECOMP_CPUID_BRAND_INDEX, "leaf 1 EBX %08x = the game's brand index %02x (run 7: UG1 0x0c)",
+          c.r[R_EBX], RECOMP_CPUID_BRAND_INDEX);
 }
 
 static void test_session_notification_service_unavailable() {
@@ -1140,8 +1156,32 @@ static void readonly_test_fault(const char *what) {
     fprintf(stderr, "runtime_tests: unexpected %s in the read-only page test\n", what);
     _exit(3);
 }
+static void test_heap_kit_span() {
+    section("heap kit span");
+    uint32_t k = heap_alloc_kit(0x10000, true, 16);
+    uint32_t g = heap_alloc(0x10000, true, 16);
+    const uint32_t top = GUEST_HEAP_EXTRA_BASE + GUEST_HEAP_EXTRA_SIZE;
+    if (GUEST_HEAP_EXTRA_SIZE < 0x08000000u) {
+        check(k != 0, "no extra span: a kit object comes from the shared heap (%08x)", k);
+    } else {
+        check(k >= top - 0x02000000u && k < top, "a kit object is in the kit span at the top (%08x)", k);
+        check(g && (g < top - 0x02000000u), "a guest block is outside the kit span (%08x)", g);
+        uint32_t big = heap_alloc(GUEST_HEAP_EXTRA_SIZE - 0x01000000u);
+        check(big == 0 || big + GUEST_HEAP_EXTRA_SIZE - 0x01000000u <= top - 0x02000000u,
+              "a guest block never reaches into the kit span (%08x)", big);
+        if (big)
+            heap_free(big);
+    }
+    uint32_t r = heap_realloc(g, 0x20000, true);
+    check(r && !(r >= top - 0x02000000u && r < top), "a grown guest block stays out of the kit span (%08x)", r);
+    heap_free(r);
+    heap_free(k);
+    check(heap_check().empty(), "the heap is consistent after the kit span checks");
+}
+
 static void test_heap_readonly() {
     section("heap read-only pages");
+    setenv("RECOMP_READONLY_PAGES", "1", 1); // opt-in from 3.0.4
     if (!heap_readonly_enabled()) {
         ++g_skips;
         printf("  [skip] read-only pages need macOS on arm64\n");
@@ -1167,6 +1207,7 @@ static void test_heap_readonly() {
     check(rd32(again) == 7, "memory allocated after the free takes writes");
     heap_free(again);
     check(heap_check().empty(), "the heap is consistent after the read-only checks");
+    unsetenv("RECOMP_READONLY_PAGES");
 }
 
 static void test_heap_shims(X86 *c) {
@@ -1335,6 +1376,28 @@ static void test_memory_shims_2(X86 *c) {
           "QueryPerformanceFrequency reports 1 MHz");
     check(call_import(c, "KERNEL32.dll", "QueryPerformanceCounter", {li}) == 1,
           "QueryPerformanceCounter");
+    // Run 5 (UG1): with game.toml [game] qpc_us the counter moves in microseconds, not 1000-tick steps (a frame
+    // limiter spinning on it rounded every frame up to 17 ms), and it never goes back. Up to 20 ms of reads must show
+    // a step that is not a whole millisecond. Without it (NFSMW, D-203) every reading is a whole millisecond.
+    if (!host_time_source_is_pinned()) {
+        auto qpc = [&] {
+            call_import(c, "KERNEL32.dll", "QueryPerformanceCounter", {li});
+            return (uint64_t)rd32(li) | ((uint64_t)rd32(li + 4) << 32);
+        };
+        uint64_t first = qpc(), prev = first;
+        bool fine = false, monotonic = true;
+        while (!fine && prev - first < 20000) {
+            uint64_t now = qpc();
+            monotonic = monotonic && now >= prev;
+            fine = now != prev && (now - first) % 1000 != 0;
+            prev = now;
+        }
+        if (RECOMP_QPC_US)
+            check(fine && monotonic, "QueryPerformanceCounter moves in microseconds and never goes back");
+        else
+            check(!fine && monotonic && first % 1000 == 0,
+                  "QueryPerformanceCounter keeps whole-millisecond steps without [game] qpc_us");
+    }
 
     // The wide environment block must be UTF-16, not ANSI bytes.
     uint32_t wenv = call_import(c, "KERNEL32.dll", "GetEnvironmentStringsW", {});
@@ -1699,6 +1762,98 @@ static void test_midi(X86 *c) {
 // "monotonic" about a pinned run makes two incomparable runs look comparable,
 // and installing a time source is not the same as pinning one - the boot hosts
 // install a source that reads the real clock.
+// NFSMW 3.0.4 (D-202 item 4, runtime/guest_pause.h): the settings menu pausing the game. The guest clock hold stops
+// GetTickCount, timeGetTime and the microsecond counter and lets them carry on from there; it never steps back, a
+// pinned clock is never held, and the park loop holds, parks, releases and logs in that order.
+static void test_guest_pause(X86 *c) {
+    section("guest pause: clock hold and the park loop");
+    host_clear_time_source();
+    const auto ms = [](int n) { std::this_thread::sleep_for(std::chrono::milliseconds(n)); };
+    const uint32_t before = host_millis();
+    host_guest_clock_hold(true);
+    check(host_guest_clock_held(), "the hold is on");
+    const uint32_t frozen = host_millis();
+    const uint32_t tick0 = call_import(c, "KERNEL32.dll", "GetTickCount", {});
+    const uint32_t tgt0 = call_import(c, "WINMM.dll", "timeGetTime", {});
+    const uint64_t us0 = host_guest_clock_us(os_monotonic_ns() / 1000ull);
+    ms(300);
+    const uint32_t tick1 = call_import(c, "KERNEL32.dll", "GetTickCount", {});
+    const uint32_t tgt1 = call_import(c, "WINMM.dll", "timeGetTime", {});
+    const uint64_t us1 = host_guest_clock_us(os_monotonic_ns() / 1000ull);
+    check(host_millis() - frozen < 2, "300 ms held: the clock stood still (%u ms)", host_millis() - frozen);
+    check(tick1 - tick0 < 2 && tgt1 - tgt0 < 2, "GetTickCount (%u) and timeGetTime (%u) stood still", tick1 - tick0,
+          tgt1 - tgt0);
+    check(us1 - us0 < 2000, "the microsecond counter stood still (%llu us)", (unsigned long long)(us1 - us0));
+    host_guest_clock_hold(false);
+    const uint32_t after = host_millis();
+    check(!host_guest_clock_held() && after - frozen < 5, "released, it carries on from where it stopped (+%u ms)",
+          after - frozen);
+    check(frozen - before < 50, "and the hold began where the clock was (+%u ms)", frozen - before);
+    ms(60);
+    check(host_millis() - after >= 50, "then it runs again (+%u ms in 60)", host_millis() - after);
+    // Control: the same wait without a hold shows on the clock.
+    const uint32_t r0 = host_millis();
+    ms(300);
+    check(host_millis() - r0 >= 250, "control: 300 ms unheld show (%u ms)", host_millis() - r0);
+    // Never a step back, with readers on other threads while the hold goes on and off.
+    std::atomic<bool> stop{false}, backwards{false};
+    std::thread reader([&] {
+        uint32_t last = host_millis();
+        while (!stop.load()) {
+            const uint32_t now = host_millis();
+            if ((int32_t)(now - last) < 0)
+                backwards.store(true);
+            last = now;
+        }
+    });
+    for (int i = 0; i < 40; ++i) {
+        host_guest_clock_hold(true);
+        ms(2);
+        host_guest_clock_hold(false);
+        ms(1);
+    }
+    stop.store(true);
+    reader.join();
+    check(!backwards.load(), "40 holds with a reader running: the clock never went back");
+    // A pinned clock is its owner's: never held.
+    host_set_time_source_pinned(1000, 50);
+    host_guest_clock_hold(true);
+    check(!host_guest_clock_held(), "a pinned clock is not held");
+    host_pinned_clock_advance();
+    check(host_millis() == 1050u, "and still steps (%u)", host_millis());
+    host_clear_time_source();
+    check(!host_guest_clock_held(), "clearing the clock leaves no hold behind");
+
+    // The park loop with fakes: nothing when not wanted; else hold, log, slices while wanted, release, log.
+    struct Fake {
+        int wanted_for = 0, slices = 0;
+        double t = 10.0;
+        std::string ev;
+    } f;
+    GuestPauseOps o;
+    o.ctx = &f;
+    o.wanted = [](void *p) { return static_cast<Fake *>(p)->wanted_for > 0; };
+    o.hold = [](void *p, bool on) { static_cast<Fake *>(p)->ev += on ? "H" : "h"; };
+    o.slice = [](void *p) {
+        Fake &x = *static_cast<Fake *>(p);
+        ++x.slices;
+        --x.wanted_for;
+        x.t += 0.016;
+        x.ev += "s";
+    };
+    o.now = [](void *p) { return static_cast<Fake *>(p)->t; };
+    o.log = [](void *p, bool paused, double) { static_cast<Fake *>(p)->ev += paused ? "P" : "R"; };
+    check(guest_pause_run(o) == 0.0 && f.ev.empty(), "not wanted: no hold, no log, no slice (\"%s\")", f.ev.c_str());
+    f.wanted_for = 3;
+    const double parked = guest_pause_run(o);
+    check(f.ev == "HPssshR" && f.slices == 3, "wanted for 3 slices: \"%s\" (hold, log, 3 slices, release, log)",
+          f.ev.c_str());
+    check(parked > 0.047 && parked < 0.049, "the seconds parked are the slices' (%.3f)", parked);
+    // Without the mods module (this suite) the menu never wants a pause: the real park point returns at once.
+    host_guest_pause_point();
+    check(!host_guest_clock_held(), "the park point with no menu: no hold");
+}
+
 static void test_pinned_clock(X86 *c) {
     section("pinned clock");
     (void)c;
@@ -3704,7 +3859,9 @@ static void test_callbacks(X86 *c) {
           "a second ResumeThread reports no suspend count");
 
     // Multimedia timer callbacks fire through the same path. A fake clock keeps
-    // the test independent of how long the host takes to get here.
+    // the test independent of how long the host takes to get here. The timer
+    // service thread is off so host_pump_timers is the path under test.
+    setenv("RECOMP_MM_TIMER_THREAD", "0", 1);
     g_callback_hits = 0;
     g_fake_time = 1000;
     host_set_time_source(fake_clock);
@@ -4191,6 +4348,13 @@ static void test_import_coverage(X86 *c) {
     call_import(c, "TAPI32.dll", "lineOpen", {0, 0, 0, 0, 0, 0, 0, 0, 0});
     check(c->r[R_ESP] == esp_before,
           "unavailable serial, Winsock ordinal and TAPI calls preserve the caller stack");
+
+    // WS2_32 byte order (ordinals 8, 9, 14, 15 and by name; NFS Underground): swapped values, one argument popped.
+    check(call_import(c, "WS2_32.dll", "ord8", {0x11223344u}) == 0x44332211u, "htonl (ordinal 8) swaps four bytes");
+    check(call_import(c, "WS2_32.dll", "ord9", {0xabcd1234u}) == 0x3412u, "htons (ordinal 9) swaps the low two");
+    check(call_import(c, "WS2_32.dll", "ntohl", {0x44332211u}) == 0x11223344u, "ntohl is htonl");
+    check(call_import(c, "WS2_32.dll", "ord15", {0x3412u}) == 0x1234u, "ntohs (ordinal 15) is htons");
+    check(c->r[R_ESP] == esp_before, "the byte-order shims pop their argument");
 
     uint32_t impl = 0, log_only = 0, unknown = 0;
     imports_coverage(&impl, &log_only, &unknown);
@@ -5065,6 +5229,11 @@ class VersionResourceFixture {
     explicit VersionResourceFixture(bool present = true) {
         uint32_t image = loader_image_base(), opt = image + rd32(image + 0x3c) + 24;
         root = image + rd32(opt + 112);
+        if (!rd32(opt + 112)) { // UG1's Speed.exe has no resource section
+            printf("  [skip] image has no resource directory (version fixture)\n");
+            ++g_skips;
+            return;
+        }
         if (!check(rd32(opt + 116) >= 0x200 && gm_valid(root, 0x200),
                    "mapped resource directory can hold the version fixture"))
             return;
@@ -5482,7 +5651,10 @@ static void test_kernel32_wide() {
     // corrupt offsets that need not occur in a particular game's resources.
     uint32_t image = loader_image_base(), opt = image + rd32(image + 0x3c) + 24;
     uint32_t root = image + rd32(opt + 112), directory_size = rd32(opt + 116);
-    if (check(directory_size >= 0x300 && gm_valid(root, directory_size),
+    if (!rd32(opt + 112)) {
+        printf("  [skip] image has no resource directory (synthetic fixture)\n");
+        ++g_skips;
+    } else if (check(directory_size >= 0x300 && gm_valid(root, directory_size),
               "resource directory can hold the synthetic fixture")) {
         std::vector<uint8_t> saved(g_mem + root, g_mem + root + 0x300);
         memset(g_mem + root, 0, 0x300);
@@ -7073,6 +7245,7 @@ int main(int argc, char **argv) {
     }
 
     test_loader();
+    test_cpuid_features();
     test_discovery_recorder();
     test_pe_exports();
     test_dll_lifetime();
@@ -7116,11 +7289,13 @@ int main(int argc, char **argv) {
     test_allocator();
     test_heap_guard();
     test_heap_readonly();
+    test_heap_kit_span();
     test_heap_shims(c);
     test_memory_shims_2(c);
     test_files(c);
     test_version_resource(c);
     test_pinned_clock(c);
+    test_guest_pause(c);
     test_cadence_trace(c);
     test_misc_shims(c);
     test_windows_version(c);

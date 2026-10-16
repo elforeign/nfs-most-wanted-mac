@@ -144,6 +144,10 @@ enum ComIface : uint16_t {
     IF_DINPUTDEVICE8,
     IF_D3DVOLUMETEXTURE9,
     IF_D3DVOLUME9,
+    IF_D3DVERTEXSHADER9,
+    IF_D3DPIXELSHADER9,
+    IF_D3DSTATEBLOCK9,
+    IF_DIEFFECT, // IDirectInputEffect (dinput_effect.cpp), made by IDirectInputDevice2+::CreateEffect
     IF_COUNT
 };
 
@@ -212,7 +216,12 @@ enum ComKind : uint16_t {
     K_D3D9DECL,       // a vertex declaration
     K_D3D9QUERY,      // an occlusion or event query
     K_D3D9VOLUMETEXTURE,
-    K_D3D9VOLUME, // one mip volume, owned by its texture
+    K_D3D9VOLUME,     // one mip volume, owned by its texture
+    K_D3D9VSHADER,    // a vertex shader made by IDirect3DDevice9::CreateVertexShader
+    K_D3D9PSHADER,    // a pixel shader made by IDirect3DDevice9::CreatePixelShader
+    K_D3D9STATEBLOCK, // a state block (CreateStateBlock, or BeginStateBlock/EndStateBlock)
+    K_DIEFFECT,       // a DirectInput force-feedback effect on the virtual pad (dinput_effect.cpp)
+    K_COUNT           // bounds the per-kind tables (com.cpp g_dtor)
 };
 
 // A DirectInput joystick axis's DIPROP_RANGE, DIPROP_DEADZONE and
@@ -323,6 +332,13 @@ struct ComObj {
     std::vector<uint8_t> blob;
     uint32_t handle = 0; // material handle the guest sees
 
+    // --- K_D3D9VSHADER / K_D3D9PSHADER: the token stream through D3DSIO_END, shared with the
+    // pipeline that binds it, and its d9sh::code_key.
+    std::shared_ptr<const std::vector<uint8_t>> shader_code;
+    uint64_t shader_key = 0;
+    // --- K_D3D9STATEBLOCK: the D9StateBlock (d3d9.cpp), opaque here.
+    std::shared_ptr<void> state_block;
+
     // --- K_DSOUND
     uint32_t ds_coop = 0;
     uint32_t ds_hwnd = 0;
@@ -332,6 +348,7 @@ struct ComObj {
     uint32_t buf_bytes = 0;
     uint32_t buf_pixels = 0; // guest address of the PCM data
     uint32_t buf_flags = 0;
+    uint32_t ds_owner = 0;  // the IDirectSound that made it; its release ends this buffer's sound
     uint32_t rate = 22050, nchannels = 1, bits = 16, block_align = 2;
     int32_t volume = 0, pan = 0;
     uint32_t frequency = 0; // 0 = the format's own rate
@@ -357,6 +374,12 @@ struct ComObj {
     int32_t last_x = 0, last_y = 0, last_z = 0;
     uint32_t sequence = 0;
     std::vector<uint32_t> events; // packed dwOfs/dwData pairs
+    // DirectInput 8 action map (keyboard, SetActionMap): per action index, the DIK scan code it reads (0xffff for
+    // an action this device does not serve) and its uAppData. While mapped, the device's data is one DWORD per
+    // action and a buffered event's packed offset is the action index.
+    bool action_mapped = false;
+    std::vector<uint16_t> action_dik;
+    std::vector<uint32_t> action_app;
     // Joystick only. Ranges are per DIJOYSTATE axis slot (lX..lRz). An empty
     // format means DIJOYSTATE or DIJOYSTATE2, by data_format_size.
     JoyAxisRange joy_ranges[6];

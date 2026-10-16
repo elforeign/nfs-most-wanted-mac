@@ -9,6 +9,13 @@ The game app it builds is made on your Mac and opens normally.
 **The Setup app stopped with an error** — click **Show the log**; the last lines of `setup.log` say why. Building
 again continues from the one-time analysis if that finished.
 
+**"older than this game needs" (the compiler)** — every Mac builds the game with its own Apple compiler (the Xcode
+Command Line Tools). Since 3.0.4 the setup log names it (`toolchain: Apple clang ...`) and says whether it is the one
+the release was tested with; another recent one builds normally. One older than Apple clang 16 (macOS 15 SDK) stops
+the setup: update the Command Line Tools in **System Settings → General → Software Update**, or run
+`xcode-select --install`, then build again. Command Line Tools 16 need macOS 14.5 (Sonoma) or later: on an older
+macOS, update macOS first (the Setup app itself needs 14.5 from 3.0.4 on).
+
 **"This speed.exe can't be used"** — the port is a translation of the PC Black Edition's `speed.exe` (version 1.3,
 English), so it needs that exe from your game. Other versions and languages contain different code, and the app
 would not work with them. The setup changed nothing.
@@ -60,7 +67,8 @@ file, and the defaults return.
 
 **Stutter on the first drive** — Metal prepares shaders the first time it sees each one. The setup's shader warm-up
 (step 6, off unless you tick *Prepare the shaders now* or pass `--shader-seed`) prepares them ahead; if the setup log
-says "shader warm-up: skipped", run the setup again with it ticked. Without it the stutter settles after a few minutes and does not come back on later launches.
+says "shader warm-up: skipped", run the setup again with it ticked. The game's log ends with a "shader warm final"
+line: its "compiled in the draw" count is how many shaders were still prepared while you played (3.0.4). Without it the stutter settles after a few minutes and does not come back on later launches.
 
 **The HD textures step takes hours** — that is expected: Make HD textures upscales a few thousand textures on the
 GPU (about 1¼ hours on an M5 Pro, much longer on a base M1). You can stop it (Stop in the Setup app) and run the
@@ -114,5 +122,7 @@ the log line starting `core.nfsmw: light pools` says whether the setup built the
 ## Reporting a bug
 
 Open an issue with: your Mac model and macOS version, what you did, what you expected, and the log from `Logs/`
-(or ask in #help on the [Discord](https://discord.gg/d6HfMwdM9v)).
+(or ask in #help on the [Discord](https://discord.gg/d6HfMwdM9v)). **Settings → Mods → Help → Save bug report** in the game
+gathers the logs and the setup log for you. The log's `[host] built with clang ...` line and the setup log's
+`toolchain:` line say which compiler built your copy: please keep them in.
 Please do **not** attach game files or saves that contain game data.

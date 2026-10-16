@@ -1,0 +1,10 @@
+# The compiler the releases built from this kit are tested with, and the oldest one the kit's code needs (NFSMW
+# run 37, owner D-203a: a compiler CHECK, not a pin; Apple's SDK licence rules out shipping a toolchain). A game's
+# Setup logs whether the player's /usr/bin/clang is the tested one and refuses one below the minimum. Every player's
+# Setup compiles the game with their own compiler; the game's own log says which ("[host] built with ...").
+# Minimum: the host calls macOS 15 APIs (behind @available), which needs the macOS 15 SDK; that SDK comes with
+# Apple clang 16 (Command Line Tools 16), which also has the C++20 the kit uses (<format>, std::bit_cast, std::span).
+tested_clang = Apple clang 21.0.0 (clang-2100.3.34.2)
+tested_sdk = 27.0
+minimum_clang = 16
+minimum_sdk = 15

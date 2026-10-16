@@ -317,6 +317,11 @@ struct PopModApi {
      * dumps and replacement. The pointer is resolved to the device's own object id at once; no guest address
      * is kept. Guest thread only. POP_E_NOTFOUND when it is not a live 2D texture of this device. */
     PopModStatus (*d3d9_texture_tag)(const PopModApi *api, uint32_t tex_iface, uint64_t key);
+    /* Optional v1 tail (NFSU1 run 9). Where the game draws its menus inside its own frame, as fractions of the frame
+     * (x0, y0, w, h; 0,0,1,1 = the whole frame, the default): the host maps the pointer into that box before it
+     * places the game's cursor, so a 4:3 menu centred in a wide frame follows the mouse. Any thread.
+     * POP_E_INVAL for a box outside the frame. */
+    PopModStatus (*pointer_box)(const PopModApi *api, float x0, float y0, float w, float h);
 };
 
 #define POP_AUDIO_OUTPUT_MIXER 0u

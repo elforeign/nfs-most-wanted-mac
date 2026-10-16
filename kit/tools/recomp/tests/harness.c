@@ -15,8 +15,9 @@
 uint8_t *g_mem;
 const int recomp_resumable_stacks = 0;
 /* No watchpoint is armed and no DirectDraw lock is open here: both stay
- * empty, and a store costs the runtime's two compares. */
+ * empty, and g_store_hooks (x86.h's one store-path flag) stays 0. */
 uint32_t g_watch_base, g_watch_len;
+uint32_t g_store_hooks = 0;
 void recomp_watch_hit(uint32_t addr, uint32_t n, uint64_t value) {
     (void)addr;
     (void)n;

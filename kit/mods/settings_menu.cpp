@@ -1,9 +1,11 @@
 // settings_menu.cpp - see settings_menu.h. Test72 (NFSMW graphics/mods plan, Revision 3, slice 1).
 #include "settings_menu.h"
+#include "../runtime/help_seam.h"
 #include "controls_settings.h"
 #include "display_settings.h"
 #include "game_config.h"
 #include "mods_internal.h"
+#include "../runtime/mods_seam.h"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +33,8 @@ enum Source : uint8_t {
     SRC_RESTORE_GFX,  // Test85: Restore graphics defaults (every picture section, not display/resolution)
     SRC_RESTORE_GROUP, // Test85: a section's Restore defaults (index: kSections entry)
     SRC_ADVANCED,      // Remaster run 13: shows or hides the Graphics page's Advanced section (index: its row count)
+    SRC_BUG_REPORT,    // NFSMW 3.0.4: Help > Save bug report (host/bug_report.cpp)
+    SRC_UPDATES,       // NFSMW 3.0.4: Help > Check for updates (host/update_check.cpp; opt-in, one request)
 };
 struct Item {
     Source src;
@@ -264,6 +268,13 @@ std::vector<Item> build(int tab) {
         for (size_t si = 0; si < kSectionCount; ++si)
             if (kSections[si].tab == tab)
                 section(si);
+        if (tab == MENU_TAB_MODS && (host_bug_report_available() || host_update_available())) {
+            header("Help");
+            if (host_bug_report_available())
+                v.push_back({SRC_BUG_REPORT, 0, {}});
+            if (host_update_available())
+                v.push_back({SRC_UPDATES, 0, {}});
+        }
         header("Changes");
     }
     // Every page that can hold a waiting change ends with Apply and Discard (also buttons beside the status line
@@ -443,6 +454,21 @@ MenuLine line_for(const Item &it) {
         l.help = std::string("Marks the default values of \"") + kSections[it.index].title +
                  "\" as changes; Apply commits them, Discard forgets them. Other sections stay as they are.";
         break;
+    case SRC_BUG_REPORT:
+        l.kind = MenuLine::ACTION;
+        l.label = "Save bug report";
+        l.help = "Saves one zip file to your Desktop (if macOS says no, to the game's profile folder) with the newest "
+                 "logs, your settings, the mod reports and the Setup log, to attach to a bug report. Nothing is uploaded: you decide what to send. No saves or game files.";
+        break;
+    case SRC_UPDATES: {
+        char status[96];
+        host_update_status(status, sizeof status);
+        l.label = "Check for updates";
+        l.value = status;
+        l.help = "Asks GitHub once whether a newer version is out (the only thing this game sends online, and only "
+                 "when you press it). If one is, press again to open its page and download the new Setup.";
+        break;
+    }
     case SRC_RESTORE_GFX:
         l.kind = MenuLine::ACTION;
         l.label = "Restore graphics defaults";
@@ -530,9 +556,21 @@ void adjust(const Item &it, int delta, bool from_enter) {
     }
 }
 
+#ifdef POPM_TESTING
+double g_test_seconds = -1;   // mods_menu_clock_for_test: a set clock for the watchdog tests
+int g_test_pause_setting = -1;
+#endif
 double menu_seconds() {
+#ifdef POPM_TESTING
+    if (g_test_seconds >= 0)
+        return g_test_seconds;
+#endif
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// NFSMW 3.0.4 (D-202 item 4, runtime/guest_pause.h): when the current pause began (0: not paused). The Apply
+// watchdog below counts only time the game ran: it does not fire during a pause, and a pause moves the Apply's
+// time forward by the paused part, so 20 s of running still prove it.
+double g_paused_since = 0;
 // Test85: last-known-good. When the Apply that recorded them happened (0: none pending).
 double g_pending_since = 0;
 void record_previous() {
@@ -683,6 +721,16 @@ void activate(const Item &it) {
         restore_group(it.index);
         return;
     }
+    if (it.src == SRC_BUG_REPORT) {
+        char msg[256];
+        host_save_bug_report(msg, sizeof msg);
+        g_status = msg;
+        return;
+    }
+    if (it.src == SRC_UPDATES) {
+        host_update_activate();
+        return;
+    }
     if (it.src == SRC_APPLY)
         request_apply();
     else if (it.src == SRC_DISCARD) {
@@ -742,6 +790,27 @@ void mods_menu_close() {
 bool mods_menu_is_open() {
     std::lock_guard lock(g_mu);
     return g_open;
+}
+
+extern "C" bool mods_menu_pause_wanted(void) {
+    if (!mods_host_on_main_thread() || !mods_menu_is_open())
+        return false;
+#ifdef POPM_TESTING
+    if (g_test_pause_setting >= 0)
+        return g_test_pause_setting != 0;
+#endif
+    return mods_core_setting("pause_in_menu", 0) != 0;
+}
+
+extern "C" void mods_menu_note_pause(bool paused) {
+    const double now = menu_seconds();
+    if (paused) {
+        g_paused_since = now > 0 ? now : 1e-9;
+        return;
+    }
+    if (g_pending_since > 0 && g_paused_since > 0)
+        g_pending_since += now - std::max(g_pending_since, g_paused_since);
+    g_paused_since = 0;
 }
 
 int mods_menu_pending_count() {
@@ -897,7 +966,7 @@ void mods_menu_main_thread_call(std::function<void()> fn) {
 
 void mods_menu_main_thread_drain() {
     // Test85: 20 s of game frames after an Apply prove it; the recorded previous values are dropped.
-    if (g_pending_since > 0 && menu_seconds() - g_pending_since > 20.0) {
+    if (g_pending_since > 0 && g_paused_since == 0 && menu_seconds() - g_pending_since > 20.0) {
         g_pending_since = 0;
         mods_settings_clear_pending();
         fflush(stdout);
@@ -921,7 +990,19 @@ void mods_menu_main_thread_drain() {
 void mods_menu_enable_for_test(bool on) {
     g_force_enabled = on;
 }
+void mods_menu_clock_for_test(double seconds) {
+    g_test_seconds = seconds;
+}
+void mods_menu_pause_setting_for_test(int on) {
+    g_test_pause_setting = on;
+}
+double mods_menu_pending_since_for_test() {
+    return g_pending_since;
+}
 void mods_menu_reset_for_test() {
+    g_paused_since = 0;
+    g_test_seconds = -1;
+    g_test_pause_setting = -1;
     std::lock_guard lock(g_mu);
     g_open = false;
     g_advanced = false;

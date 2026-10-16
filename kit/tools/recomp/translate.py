@@ -50,6 +50,12 @@ FUNCTION_ALIGNMENT = 16
 #: free address, and the words the loader seeds before the game runs.
 OPERAND_REDIRECTS = {}
 INSTRUCTION_PATCHES = {}
+#: [translate] poll_checkpoints: {at, to} branch edges of a title's verified busy-wait loops. When the branch
+#: at `at` is taken toward `to`, the guest thread first passes a scheduler checkpoint, so a polling loop
+#: with no import call in it still lets the baton reach the thread it is waiting for. Guest state is
+#: untouched; the branch and every instruction of the next iteration are as the listing has them.
+POLL_CHECKPOINTS = {}
+POLL_CHECKPOINTS_APPLIED = set()
 PATCHES_APPLIED = set()
 DATA_SEEDS = []
 
@@ -137,6 +143,8 @@ def configure(cfg):
                          for r in cfg["translate"].get("operand_redirects", ())}
     INSTRUCTION_PATCHES = {int(r["at"]): str(r["text"])
                            for r in cfg["translate"].get("instruction_patches", ())}
+    global POLL_CHECKPOINTS
+    POLL_CHECKPOINTS = {int(r["at"]): int(r["to"]) for r in cfg["translate"].get("poll_checkpoints", ())}
     DATA_SEEDS = []
     for r in cfg["translate"].get("data_seeds", ()):
         if "float" in r:
@@ -1654,6 +1662,10 @@ def seh_frame_sites(fn, image=None):
 
 NORETURN_IMPORTS = frozenset(("RaiseException", "ExitProcess", "TerminateProcess",
                               "ExitThread", "FatalAppExitA", "FatalExit"))
+#: The ones a `CALL dword ptr [IAT slot]` may end its block on: RaiseException is left out, because a continuable
+#: exception (dwExceptionFlags 0) returns when a handler continues execution, and code follows the call (NFSMW's
+#: C runtime raises floating-point exceptions at 007da5bc and reads the record back after it; run 37).
+NORETURN_IAT_IMPORTS = NORETURN_IMPORTS - {"RaiseException"}
 
 
 def noreturn_callees_from(parsed, iat_names, image=None):
@@ -1734,6 +1746,11 @@ class Translator(object):
         #: A CALL to one ends its block: the emitter leaves a trap in place of
         #: the fall-through instead of a jump onto the padding that follows.
         self.noreturn_callees = set()
+        #: IAT slots of imports that never return (NORETURN_IAT_IMPORTS). A
+        #: `CALL dword ptr [slot]` to one ends its block the same way, so a
+        #: listing that stops on `CALL [ExitProcess]` does not fall through
+        #: into the INT3 padding behind it (MSVC 7 ___crtExitProcess).
+        self.noreturn_iat = set()
         self.seh_helpers = set()
         #: Does a pointer to this address name data rather than code? The
         #: driver installs its judgement before the first translation pass
@@ -1792,9 +1809,14 @@ class Translator(object):
                 break
 
     def never_returns(self, ins):
-        """Is `ins` a direct CALL to a callee the listings show never returning?"""
+        """Is `ins` a CALL that never returns: a direct call to a callee the
+        listings show never returning, or an IAT call to a no-return import?"""
         if ins.mnem != "CALL":
             return False
+        if self.noreturn_iat and ins.ops:
+            m = re.match(r"dword ptr \[(0x[0-9a-fA-F]+)\]$", ins.ops[0].strip())
+            if m and int(m.group(1), 16) in self.noreturn_iat:
+                return True
         t = self.branch_target(ins)
         return t is not None and t in self.noreturn_callees
 
@@ -3166,11 +3188,18 @@ class Translator(object):
             t = self.branch_target(ins)
             if t is None:
                 raise TranslateError("indirect conditional jump")
-            return ["if (%s) { %s }" % (cond, " ".join(self.goto_target(fn, t, ins)))]
+            body = self.goto_target(fn, t, ins)
+            if POLL_CHECKPOINTS.get(ins.addr) == t:
+                POLL_CHECKPOINTS_APPLIED.add(ins.addr)
+                body = ["recomp_poll_checkpoint(c);"] + body
+            return ["if (%s) { %s }" % (cond, " ".join(body))]
 
         if m == "JMP":
             t = self.branch_target(ins)
             if t is not None:
+                if POLL_CHECKPOINTS.get(ins.addr) == t:
+                    POLL_CHECKPOINTS_APPLIED.add(ins.addr)
+                    return ["recomp_poll_checkpoint(c);"] + self.goto_target(fn, t, ins)
                 return self.goto_target(fn, t, ins)
             return self.emit_indirect_jump(fn, i, ins, ops[0])
 
@@ -4218,6 +4247,8 @@ def main():
     rejected = set()
     tr = Translator(image, all_addrs, args)
     tr.noreturn_callees = image.noreturn_callees
+    tr.noreturn_iat = {slot for slot, name in getattr(image, "iat_names", {}).items()
+                       if name in NORETURN_IAT_IMPORTS}
 
     if args.check_flags:
         for fn in parsed:
@@ -5706,6 +5737,10 @@ def main():
             "%d literal dispatch targets are not entry points; every direct "
             "call and jump has to reach translated code" % len(dangling))
 
+    missing_checkpoints = sorted(set(POLL_CHECKPOINTS) - POLL_CHECKPOINTS_APPLIED)
+    if missing_checkpoints:
+        raise TranslateError("[translate] poll_checkpoints: no branch %s found (address or target wrong for "
+                             "this executable)" % ", ".join("%08x" % a for a in missing_checkpoints))
     missing_patches = sorted(set(INSTRUCTION_PATCHES) - PATCHES_APPLIED)
     if missing_patches:
         raise TranslateError("instruction patches matched no instruction: " +

@@ -246,6 +246,11 @@ struct Service : std::enable_shared_from_this<Service> {
     CaptureMarker cached_diagnostic;
     uint64_t unique = 0, repeats = 0, drops = 0, waits = 0, last_id = 0;
     uint64_t settings_pages = 0; // sealed frames that carried the settings page
+    // NFSMW 3.0.4 (run 39): the menu redrawn while the guest is parked (host_present_menu_refresh); the next repeat
+    // composes again instead of reusing the cached composition, so the new page shows over the held frame.
+    bool recompose_pending = false;
+    uint64_t menu_refreshes = 0, recomposed_repeats = 0;
+    int fake_menu_w = 0, fake_menu_h = 0; // a fake service keeps no texture: the size its menu_generation is for
     double cached_sealed_ts = 0;
     bool cached_screen_class_valid = true;
     uint64_t epoch = 0;
@@ -459,13 +464,25 @@ struct Service : std::enable_shared_from_this<Service> {
                 }
                 cached_diagnostic = f->diagnostic;
                 cached = f->composed;
-                cached_settings = f->settings_page;
+                // Run 39: only a sealed frame brings a new menu page. A repeat carries the page it was made with, and
+                // a menu refresh (host_present_menu_refresh, guest parked) may have replaced it since: a retiring
+                // repeat must not put the older page back, or the next repeat composes the old menu (the paused
+                // menu stayed frozen on screen while a repeat was always in flight).
+                const gpu::Texture page = cached_input.settings_page;
+                const int page_w = cached_input.settings_page_w, page_h = cached_input.settings_page_h;
+                if (!f->repeat)
+                    cached_settings = f->settings_page;
                 last_id = f->frame_id;
                 cached_sealed_ts = f->sealed_ts;
                 cached_screen_class_valid = f->screen_class_valid;
                 cached_ui = f->ui;
                 cached_input = f->input;
                 cached_input.ui = &cached_ui;
+                if (f->repeat) {
+                    cached_input.settings_page = page;
+                    cached_input.settings_page_w = page_w;
+                    cached_input.settings_page_h = page_h;
+                }
                 if (!f->repeat)
                     cached_target = f->input.legacy ? f->target : f->scene_lease;
                 if (fake && f->target && !f->target->test_pixels.empty())
@@ -985,6 +1002,12 @@ struct Service : std::enable_shared_from_this<Service> {
                 f->ui = cached_ui;
                 f->input.ui = &f->ui;
                 f->target = cached_target;
+                // Run 39: the repeat holds the page it shows (a refresh may replace cached_settings while this frame
+                // is in flight; the Composite owns the texture), and takes a pending recompose.
+                f->settings_page = cached_settings;
+                f->recompose = recompose_pending;
+                recomposed_repeats += recompose_pending;
+                recompose_pending = false;
                 // Retain the original guest domain and source texture. The
                 // cached composite is already drawable-sized; declaring that
                 // size to be guest coordinates corrupts picking on repeats.
@@ -1086,7 +1109,7 @@ struct Service : std::enable_shared_from_this<Service> {
             const gpu::TextureDesc drawable_desc =
                 drawable ? device->describe(drawable) : gpu::TextureDesc{};
             const gpu::Format out_format = offscreen ? gpu::Format::RGBA8 : drawable_desc.format;
-            bool reuse_composition = f->repeat && cached && cached->w == w && cached->h == h &&
+            bool reuse_composition = f->repeat && !f->recompose && cached && cached->w == w && cached->h == h &&
                                      cached->format == out_format;
             std::shared_ptr<Composite> out =
                 reuse_composition ? cached : composite(w, h, out_format);
@@ -1111,6 +1134,15 @@ struct Service : std::enable_shared_from_this<Service> {
             f->input.hdr_desat = hdr_desat;
             static const bool hdr_pattern = [] { const char *e = recomp_env("TEST_HDR_PATTERN"); return e && std::atoi(e) != 0; }();
             f->input.hdr_pattern = hdr_pattern;   // R2 #10 TEST: the bars (compositor mode 5)
+            {   // 3.0.4 Brightness (core mod brightness, -5..+5): read every 30 compositions, as the HDR settings are
+                static uint64_t polls = 0;
+                static float exponent = 1.0f;
+                if (polls++ % 30 == 0) {
+                    const int64_t b = std::clamp<int64_t>(mods_core_setting("brightness", 0), -5, 5);
+                    exponent = std::exp2(-0.12f * float(b));
+                }
+                f->input.brightness = exponent;
+            }
             if (!reuse_composition)
                 compositor_compose(device, &f->input, out->texture, cb);
             f->composed = out;
@@ -1491,6 +1523,7 @@ extern "C" void host_present_stop() {
         s->cached.reset();
         s->cached_settings.reset();
         s->menu_page.reset();
+        s->recompose_pending = false;
         s->cached_input = {};
         s->cached_ui = {};
         s->targets = {};
@@ -1728,7 +1761,9 @@ void host_present_track_command(gpu::CommandBuffer cb) {
 // The tabbed menu is drawn at the game rectangle's own size, so its text is sharp at any
 // resolution, and only when something on it changed: the last texture rides on every frame
 // in between. False when it is not showing, and the 640x480 page above it is asked instead.
-bool attach_menu_page(const std::shared_ptr<Service> &s) {
+// The menu page at the game rectangle's size (4K at most), drawn only when it changed since the texture the
+// service holds: host_page_menu's 0 hidden, 1 unchanged, 2 drawn into *pixels. Called without s->mutex.
+int draw_menu_page(const std::shared_ptr<Service> &s, int *pw, int *ph, uint64_t *generation, const uint8_t **pixels) {
     HostGameRect r = Service::unpack_rect(s->published_rect.load(std::memory_order_relaxed));
     int w = r.w, h = r.h;
     if (w <= 0 || h <= 0)
@@ -1737,14 +1772,23 @@ bool attach_menu_page(const std::shared_ptr<Service> &s) {
         const double k = std::min(3840.0 / w, 2160.0 / h);
         w = std::max(1, int(w * k)), h = std::max(1, int(h * k));
     }
-    uint64_t generation = 0;
+    *generation = 0;
     {
         std::lock_guard lock(s->mutex);
-        if (s->menu_page && s->menu_page->w == w && s->menu_page->h == h)
-            generation = s->menu_generation;
+        if ((s->menu_page && s->menu_page->w == w && s->menu_page->h == h) ||
+            (s->fake && s->fake_menu_w == w && s->fake_menu_h == h))
+            *generation = s->menu_generation;
     }
+    *pw = w, *ph = h;
+    *pixels = nullptr;
+    return host_page_menu(w, h, generation, pixels);
+}
+
+bool attach_menu_page(const std::shared_ptr<Service> &s) {
+    int w = 0, h = 0;
+    uint64_t generation = 0;
     const uint8_t *pixels = nullptr;
-    const int drawn = host_page_menu(w, h, &generation, &pixels);
+    const int drawn = draw_menu_page(s, &w, &h, &generation, &pixels);
     std::lock_guard lock(s->mutex);
     if (drawn == 0) {
         s->menu_page.reset();
@@ -1791,6 +1835,48 @@ void attach_settings_page(const std::shared_ptr<Service> &s) {
         s->writing->input.settings_page_w = 640;
         s->writing->input.settings_page_h = 480;
     }
+}
+
+// NFSMW 3.0.4 (run 39, D-202 item 4): while the settings menu has the guest parked (runtime host_guest_pause_point)
+// nothing is sealed, so the page above never ran and the menu froze on screen although it took keys. The parked
+// main guest thread - the thread that seals, so host_page_menu keeps one caller - asks here each slice; when the page
+// changed, its new texture replaces the cached one and the next repeat composes it over the held frame. No new frame
+// id, nothing of the game's runs. Unchanged or hidden: no texture, no recompose.
+extern "C" void host_present_menu_refresh() {
+    auto s = active.load();
+    if (!s)
+        return;
+    int w = 0, h = 0;
+    uint64_t generation = 0;
+    const uint8_t *pixels = nullptr;
+    const int drawn = draw_menu_page(s, &w, &h, &generation, &pixels);
+    std::lock_guard lock(s->mutex);
+    if (drawn != 2 || !pixels)
+        return;
+    ++s->settings_pages;
+    ++s->menu_refreshes;
+    if (!s->fake) {
+        auto texture = s->composite(w, h, gpu::Format::RGBA8);
+        if (!texture)
+            return;
+        s->device->upload(texture->texture, {0, 0, w, h}, pixels, w * 4);
+        s->menu_page = texture;
+        s->menu_generation = generation;
+        s->cached_settings = texture;
+        s->cached_input.settings_page = texture->texture;
+        s->cached_input.settings_page_w = w;
+        s->cached_input.settings_page_h = h;
+    } else {
+        s->menu_generation = generation;
+        s->fake_menu_w = w, s->fake_menu_h = h;
+        // No texture in a fake: a handle made from the page's generation stands for it (tests).
+        s->cached_input.settings_page.id = 0xfa4e000000000000ull | (generation & 0xffffffffffffull);
+        s->cached_input.settings_page_w = w;
+        s->cached_input.settings_page_h = h;
+    }
+    s->recompose_pending = true;
+    s->tick_pending = true;
+    s->wake.notify_one();
 }
 
 extern "C" void host_frame_seal() {
@@ -1893,6 +1979,7 @@ PRESENT_COUNTER(host_present_repeats, repeats)
 PRESENT_COUNTER(host_present_drops, drops)
 PRESENT_COUNTER(host_present_waits, waits)
 PRESENT_COUNTER(host_present_settings_pages, settings_pages)
+PRESENT_COUNTER(host_present_menu_refreshes, menu_refreshes)
 PRESENT_COUNTER(host_present_faults, faults)
 PRESENT_COUNTER(host_present_scene_reused, history.scene_reused)
 PRESENT_COUNTER(host_present_transition_epoch, epoch)
@@ -1972,6 +2059,16 @@ bool host_present_test_released(uint64_t id) {
         return false;
     std::lock_guard lock(s->mutex);
     return s->test_released.count(id) != 0;
+}
+uint64_t host_present_test_page_id() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->cached_input.settings_page.id;
+}
+uint64_t host_present_test_recomposed() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->recomposed_repeats;
 }
 uint64_t host_present_test_last_id() {
     auto s = active.load();

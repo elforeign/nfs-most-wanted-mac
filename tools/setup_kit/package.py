@@ -87,6 +87,16 @@ def hd_pack_line(index):
     return [lines[0] if lines else "", sum(1 for line in lines if line and not line.startswith("#"))]
 
 
+def seed_matches(seed):
+    """3.0.4 (run 38, D-202): a seed goes in only when its stamp names this source's shader fingerprint (warmseed.py),
+    as the developers' packager already required (harness make_warm_seed.sh)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("warmseed", ROOT / "tools/warm_seed/warmseed.py")
+    ws = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ws)
+    return ws.stamp_of(seed).get("fingerprint") == ws.fingerprint()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", type=Path, required=True)
@@ -142,7 +152,10 @@ def main():
             if subprocess.run(["/bin/cp", "-c", str(p), str(t)], capture_output=True).returncode != 0:
                 shutil.copyfile(p, t)
     if a.warm_seed and (a.warm_seed / "order.txt").is_file():
-        clone_tree(a.warm_seed, res / "ShaderWarmSeed", set())
+        if seed_matches(a.warm_seed):
+            clone_tree(a.warm_seed, res / "ShaderWarmSeed", set())
+        else:   # 3.0.4 (run 38, D-202): a seed kept from an earlier version that this build draws differently
+            print("shader warm-up: the kept seed does not match this version; left out", flush=True)
     if a.hd_pack and (a.hd_pack / "index.tsv").is_file():
         # 2.1: the core mod finds Resources/Game/../RemasterPack/index.tsv by itself (remaster_tex.h).
         clone_tree(a.hd_pack, res / "RemasterPack", set())

@@ -16,9 +16,11 @@
 #include "../host_api.h"
 #include "../../runtime/memory.h"
 #include "guest_abi.h"
+#include "../../platform/os.h"
 
 #include <initializer_list>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <vector>
 
@@ -664,6 +666,8 @@ static void test_joy_objects() {
     CHECK_EQ(type & 0xFF, 4u);          // DIDFT_PSHBUTTON
     CHECK_EQ((type >> 8) & 0xFFFF, 1u); // instance 1
     CHECK(rd8(o + SDK_DIDOI_OFF_tszName) != 0);
+    // The name is the pad's own: the test order puts cross at button 1.
+    CHECK(!strcmp((const char *)gm_ptr(o + SDK_DIDOI_OFF_tszName), "Cross"));
     // ... and by id, which is that dwType.
     gm_zero(o + 4, SDK_DIDEVICEOBJECTINSTANCEA - 4);
     CHECK_EQ(call_method(dev, DID_GetObjectInfo, {o, type, PH_BYID}), DI_OK);
@@ -671,6 +675,10 @@ static void test_joy_objects() {
     // X axis carries GUID_XAxis.
     CHECK_EQ(call_method(dev, DID_GetObjectInfo, {o, 0, PH_BYOFFSET}), DI_OK);
     CHECK(!memcmp(gm_ptr(o + 4), kGuidXAxis, 16));
+    CHECK(!strcmp((const char *)gm_ptr(o + SDK_DIDOI_OFF_tszName), "Left Stick X"));
+    // Rz is the right stick's Y in the test order (x,y,z,rz,...): offset 20.
+    CHECK_EQ(call_method(dev, DID_GetObjectInfo, {o, 20, PH_BYOFFSET}), DI_OK);
+    CHECK(!strcmp((const char *)gm_ptr(o + SDK_DIDOI_OFF_tszName), "Right Stick Y"));
     CHECK(call_method(dev, DID_GetObjectInfo, {o, 7, PH_BYOFFSET}) != DI_OK);
 
     // A wide DirectInput hands out the W record.
@@ -863,6 +871,216 @@ static const uint32_t XI_ERROR_SUCCESS = 0, XI_ERROR_BAD_ARGUMENTS = 160,
                       XI_ERROR_DEVICE_NOT_CONNECTED = 1167, XI_ERROR_EMPTY = 4306;
 static const uint32_t XUSER_INDEX_ANY = 0xFF;
 
+
+// ---------------------------------------------------------------------------
+// Force feedback (dinput_effect.cpp), in NFS Underground's order (run 8 research): the X/Y actuator count from
+// EnumObjects, SETACTUATORSON, then effects made, started, polled and updated through IDirectInputEffect.
+// ---------------------------------------------------------------------------
+enum { DID_CreateEffect = 18, DID_GetForceFeedbackState = 21, DID_SendForceFeedbackCommand = 22 };
+enum { EFF_Release = 2, EFF_GetEffectGuid = 4, EFF_SetParameters = 6, EFF_Start = 7, EFF_Stop = 8,
+       EFF_GetEffectStatus = 9, EFF_Unload = 11 };
+static uint32_t g_ff_axes = 0, g_ff_flagged = 0;
+static void ff_objects_cb(X86 *c) {
+    uint32_t o = arg(c, 0);
+    if (rd32(o + 24) & 3) {
+        ++g_ff_axes;
+        if (rd32(o + 28) & 1) // DIDOI_FFACTUATOR
+            ++g_ff_flagged;
+    }
+    set_eax(c, 1);
+}
+static void ff_guid(uint32_t at, uint32_t data1) {
+    static const uint8_t tail[12] = {0x33, 0x8E, 0xD0, 0x11, 0x9A, 0xD0, 0x00, 0xA0, 0xC9, 0xA0, 0x6E, 0x35};
+    wr32(at, data1);
+    for (uint32_t i = 0; i < 12; ++i)
+        wr8(at + 4 + i, tail[i]);
+}
+// UG1's DIEFFECT (0x38 bytes, cartesian, object offsets, X/Y, no trigger) at sc(0x1000); envelope at sc(0x1080),
+// type-specific parameters at sc(0x10a0).
+static uint32_t ff_effect(uint32_t duration, uint32_t fade_time, uint32_t cb, std::initializer_list<uint32_t> params) {
+    uint32_t e = sc(0x1000), env = sc(0x1080), ts = sc(0x10a0), axes = sc(0x10e0), dirs = sc(0x10f0);
+    gm_zero(e, 0x38);
+    wr32(e, 0x38);
+    wr32(e + 4, 0x12);
+    wr32(e + 8, duration);
+    wr32(e + 0x10, 10000);
+    wr32(e + 0x14, 0xFFFFFFFFu);
+    wr32(e + 0x1c, 2);
+    wr32(axes, 0);
+    wr32(axes + 4, 4);
+    wr32(e + 0x20, axes);
+    wr32(dirs, 1);
+    wr32(dirs + 4, 0);
+    wr32(e + 0x24, dirs);
+    gm_zero(env, 0x14);
+    wr32(env, 0x14);
+    wr32(env + 16, fade_time);
+    wr32(e + 0x28, fade_time ? env : 0);
+    gm_zero(ts, 48);
+    uint32_t i = 0;
+    for (uint32_t v : params)
+        wr32(ts + 4 * i++, v);
+    wr32(e + 0x2c, cb);
+    wr32(e + 0x30, ts);
+    return e;
+}
+static uint32_t ff_make(uint32_t dev, uint32_t data1, uint32_t eff) {
+    ff_guid(sc(0x1100), data1);
+    wr32(sc(0x1110), 0);
+    CHECK_EQ(call_method(dev, DID_CreateEffect, {sc(0x1100), eff, sc(0x1110), 0}), DI_OK);
+    return rd32(sc(0x1110));
+}
+static uint32_t ff_status(uint32_t eff) {
+    wr32(sc(0x1120), 0xAAAA);
+    CHECK_EQ(call_method(eff, EFF_GetEffectStatus, {sc(0x1120)}), DI_OK);
+    return rd32(sc(0x1120));
+}
+static void ff_sleep_ms(uint64_t ms) {
+    uint64_t until = os_monotonic_ns() + ms * 1000000ull;
+    while (os_monotonic_ns() < until) {
+    }
+}
+
+static void test_force_feedback() {
+    cpu_reset();
+    pad_reset();
+    static uint32_t cb = imports_alloc_trampoline("TEST", "FFObjectsCb", ff_objects_cb, 2);
+
+    // Off (the default): no actuators, no command, no effects - exactly the joystick before force feedback.
+    unsetenv("RECOMP_DINPUT_FF");
+    uint32_t dev = make_joystick(SDK_DIJOYSTATE2);
+    g_ff_axes = g_ff_flagged = 0;
+    CHECK_EQ(call_method(dev, DID_EnumObjects, {cb, 0, 0}), DI_OK);
+    CHECK_EQ(g_ff_axes, 6u);
+    CHECK_EQ(g_ff_flagged, 0u);
+    CHECK_EQ(call_method(dev, DID_SendForceFeedbackCommand, {0x10}), DIERR_UNSUPPORTED);
+    uint32_t sq = ff_effect(150000, 20000, 16, {10000, 0, 0, 75000});
+    ff_guid(sc(0x1100), 0x13541C22u);
+    CHECK_EQ(call_method(dev, DID_CreateEffect, {sc(0x1100), sq, sc(0x1110), 0}), DIERR_UNSUPPORTED);
+
+    // On: X and Y are the actuators (UG1 counts them, capped at 2), and the actuators switch on.
+    setenv("RECOMP_DINPUT_FF", "1", 1);
+    g_ff_axes = g_ff_flagged = 0;
+    CHECK_EQ(call_method(dev, DID_EnumObjects, {cb, 0, 0}), DI_OK);
+    CHECK_EQ(g_ff_flagged, 2u);
+    CHECK_EQ(call_method(dev, DID_SendForceFeedbackCommand, {0x10}), DI_OK);
+    uint32_t caps = sc(0x200);
+    gm_zero(caps, SDK_DIDEVCAPS);
+    wr32(caps, SDK_DIDEVCAPS);
+    CHECK_EQ(call_method(dev, DID_GetCapabilities, {caps}), DI_OK);
+    CHECK_EQ(rd32(caps + 4) & 0x100u, 0x100u); // DIDC_FORCEFEEDBACK
+    // An effect that is not one of the standard twelve.
+    ff_guid(sc(0x1100), 0x13541C2Cu);
+    CHECK_EQ(call_method(dev, DID_CreateEffect, {sc(0x1100), 0, sc(0x1110), 0}), DIERR_DEVICENOTREG);
+
+    // The collision jolt: Square, 150 ms, a 20 ms fade. Not playing until started; then both motors, low heavier.
+    uint32_t jolt = ff_make(dev, 0x13541C22u, ff_effect(150000, 20000, 16, {10000, 0, 0, 75000}));
+    CHECK(jolt != 0);
+    // QueryInterface(IID_IDirectInputEffect) finds the same object (its kind is bound past the old 64-kind mask).
+    static const uint8_t kIidEffect[16] = {0xC0, 0xF7, 0xE1, 0xE7, 0xD2, 0x88, 0xD0, 0x11,
+                                           0x9A, 0xD0, 0x00, 0xA0, 0xC9, 0xA0, 0x6E, 0x35};
+    put_guid(sc(0x1130), kIidEffect);
+    wr32(sc(0x1140), 0);
+    CHECK_EQ(call_method(jolt, 0, {sc(0x1130), sc(0x1140)}), 0u);
+    CHECK_EQ(rd32(sc(0x1140)), jolt);
+    call_method(jolt, EFF_Release, {});
+    CHECK_EQ(ff_status(jolt), 0u);
+    CHECK_EQ(g_rumble_low, 0);
+    CHECK_EQ(call_method(jolt, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(ff_status(jolt), 1u);
+    CHECK_EQ(g_rumble_low, 65535);
+    CHECK_EQ(g_rumble_high, 39321); // 0.6
+    // It runs out by itself: the status reads 0 (UG1 fires the next jolt only then) and the motors rest.
+    ff_sleep_ms(170);
+    CHECK_EQ(ff_status(jolt), 0u);
+    CHECK_EQ(g_rumble_low, 0);
+    CHECK_EQ(g_rumble_high, 0);
+    // Fired again, it plays again.
+    CHECK_EQ(call_method(jolt, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(ff_status(jolt), 1u);
+    CHECK_EQ(call_method(jolt, EFF_Stop, {}), DI_OK);
+    CHECK_EQ(ff_status(jolt), 0u);
+
+    // A road surface: an infinite Sine on the high motor; steering load (ConstantForce) and centering (Spring, two
+    // DICONDITIONs) play and report their status but drive no motor.
+    uint32_t surface = ff_make(dev, 0x13541C23u, ff_effect(0xFFFFFFFFu, 0, 16, {5000, 0, 0, 40000}));
+    uint32_t steer = ff_make(dev, 0x13541C20u, ff_effect(0xFFFFFFFFu, 0, 4, {(uint32_t)-8627}));
+    uint32_t spring = ff_make(dev, 0x13541C27u, ff_effect(0xFFFFFFFFu, 0, 48, {0, 7058, 7058, 7058, 7058, 0}));
+    CHECK(surface && steer && spring);
+    CHECK_EQ(call_method(steer, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(call_method(spring, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(ff_status(steer), 1u);
+    CHECK_EQ(ff_status(spring), 1u);
+    CHECK_EQ(g_rumble_low, 0);
+    CHECK_EQ(g_rumble_high, 0);
+    CHECK_EQ(call_method(surface, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(g_rumble_low, 0);
+    CHECK_EQ(g_rumble_high, 26214); // 0.8 x 5000
+    // UG1 updates a surface with SetParameters(DIEP_DIRECTION | DIEP_TYPESPECIFICPARAMS): it keeps playing.
+    ff_effect(0xFFFFFFFFu, 0, 16, {10000, 0, 0, 20000});
+    CHECK_EQ(call_method(surface, EFF_SetParameters, {sc(0x1000), 0x140}), DI_OK);
+    CHECK_EQ(ff_status(surface), 1u);
+    CHECK_EQ(g_rumble_high, 52428);
+    // A wrong type-specific size is refused and changes nothing.
+    ff_effect(0xFFFFFFFFu, 0, 4, {1});
+    CHECK_EQ(call_method(surface, EFF_SetParameters, {sc(0x1000), 0x140}), DIERR_INVALIDPARAM);
+    CHECK_EQ(g_rumble_high, 52428);
+
+    // The device gain scales every effect.
+    uint32_t pd = sc(0x300);
+    gm_zero(pd, SDK_DIPROPDWORD);
+    wr32(pd, SDK_DIPROPDWORD);
+    wr32(pd + 4, 16);
+    wr32(pd + 16, 5000);
+    CHECK_EQ(call_method(dev, DID_SetProperty, {7 /* DIPROP_FFGAIN */, pd}), DI_OK);
+    CHECK_EQ(g_rumble_high, 26214);
+    wr32(pd + 16, 0);
+    CHECK_EQ(call_method(dev, DID_GetProperty, {7, pd}), DI_OK);
+    CHECK_EQ(rd32(pd + 16), 5000u);
+    wr32(pd + 16, 10000);
+    CHECK_EQ(call_method(dev, DID_SetProperty, {7, pd}), DI_OK);
+
+    // A pause menu: the game keeps reading the pad but stops calling its effects. After 200 ms the motors rest;
+    // the next effect call brings them back (the effect never stopped).
+    ff_sleep_ms(230);
+    CHECK_EQ(call_method(dev, DID_Poll, {}), DI_OK);
+    CHECK_EQ(g_rumble_high, 0);
+    CHECK_EQ(ff_status(surface), 1u);
+    CHECK_EQ(g_rumble_high, 52428);
+
+    // SETACTUATORSOFF mutes, ON restores; STOPALL stops every effect.
+    CHECK_EQ(call_method(dev, DID_SendForceFeedbackCommand, {0x20}), DI_OK);
+    CHECK_EQ(g_rumble_high, 0);
+    CHECK_EQ(call_method(dev, DID_SendForceFeedbackCommand, {0x10}), DI_OK);
+    CHECK_EQ(g_rumble_high, 52428);
+    uint32_t st = sc(0x320);
+    CHECK_EQ(call_method(dev, DID_GetForceFeedbackState, {st}), DI_OK);
+    CHECK_EQ(rd32(st) & 0x13u, 0x10u); // not empty, not stopped, actuators on
+    CHECK_EQ(call_method(dev, DID_SendForceFeedbackCommand, {0x02}), DI_OK);
+    CHECK_EQ(ff_status(surface), 0u);
+    CHECK_EQ(g_rumble_high, 0);
+
+    // Unacquire stops a device's effects, as DirectInput does.
+    CHECK_EQ(call_method(surface, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(g_rumble_high, 52428);
+    CHECK_EQ(call_method(dev, DID_Unacquire, {}), DI_OK);
+    CHECK_EQ(ff_status(surface), 0u);
+    CHECK_EQ(g_rumble_high, 0);
+
+    // Unload stops; Release frees (a released playing effect leaves the motors).
+    CHECK_EQ(call_method(dev, DID_Acquire, {}), DI_OK);
+    CHECK_EQ(call_method(surface, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(call_method(surface, EFF_Unload, {}), DI_OK);
+    CHECK_EQ(g_rumble_high, 0);
+    CHECK_EQ(call_method(surface, EFF_Start, {1, 0}), DI_OK);
+    CHECK_EQ(g_rumble_high, 52428);
+    CHECK_EQ(call_method(surface, EFF_Release, {}), 0u);
+    CHECK_EQ(g_rumble_high, 0);
+    for (uint32_t e : {jolt, steer, spring})
+        call_method(e, EFF_Release, {});
+    unsetenv("RECOMP_DINPUT_FF");
+}
+
 static void test_xinput() {
     cpu_reset();
     pad_reset();
@@ -1037,6 +1255,7 @@ int main() {
         {"joystick objects", test_joy_objects},
         {"joystick buffered data", test_joy_device_data},
         {"joystick custom format", test_joy_custom_format},
+        {"force feedback", test_force_feedback},
         {"xinput", test_xinput},
     };
     for (const auto &t : tests) {

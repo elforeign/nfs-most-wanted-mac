@@ -9,7 +9,7 @@ namespace gpu::metal {
 inline const char *const kCompositorSource = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
-struct Quad { float4 rect; float4 uv; float2 drawable; uint opaque; uint pad; };
+struct Quad { float4 rect; float4 uv; float2 drawable; uint opaque; float brightness; }; // brightness: 0 = unchanged (3.0.4)
 struct Varying { float4 position [[position]]; float2 uv; };
 vertex Varying compositor_vertex(uint id [[vertex_id]], constant Quad& q [[buffer(0)]]) {
     const float2 corners[4]={float2(0,0),float2(1,0),float2(0,1),float2(1,1)};
@@ -25,6 +25,7 @@ fragment float4 compositor_fragment(Varying v [[stage_in]],
     constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
     float4 c=tex.sample(nearest,v.uv);
     if(q.opaque) c.a=1;
+    if(q.brightness>0.0) c.rgb=pow(max(c.rgb,0.0),q.brightness);   // 3.0.4 Brightness: black and white stay
     return c;
 }
 // Test86 HDR output (RGBA16F linear extended sRGB drawable, 1.0 = SDR white). mode 0: decode the sRGB
@@ -56,6 +57,7 @@ fragment float4 compositor_hdr_fragment(Varying v [[stage_in]],
     float4 c=tex.sample(nearest,v.uv);
     const float mask=c.a;
     if(q.opaque) c.a=1;
+    if(q.brightness>0.0 && (h.mode<1.5 || h.mode>2.5)) c.rgb=pow(max(c.rgb,0.0),q.brightness);   // 3.0.4, encoded colour
     if(h.mode>4.5 && v.uv.y<0.1) {   // R2 #10 TEST bars: 1, 2, 4, 8 x SDR white through the mode-3 shoulder
         const float bar=exp2(floor(saturate(v.uv.x)*3.999));
         return float4(hdr_shoulder(float3(bar),h.headroom,h.desat),1.0);

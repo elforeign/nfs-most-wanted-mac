@@ -1,16 +1,37 @@
+#include "game_config.h"
+#include <stdio.h>
 #include <atomic>
+#include <cmath>
 #include "../mods/pop_mod_api.h"
 // mods_seam.cpp - the weak defaults. Each one is what an unmodded build does.
 #include "mods_seam.h"
+#include "help_seam.h"
 #include "display_seam.h"
 #include "native_seam.h"
 
 extern "C" {
 
 __attribute__((weak)) void mods_present_level_end(void) {}
+// NFSMW 3.0.4: without the mods module there is no settings menu to pause the game for.
+__attribute__((weak)) bool mods_menu_pause_wanted(void) {
+    return false;
+}
+__attribute__((weak)) void mods_menu_note_pause(bool) {}
 // Test86: without the mods module there are no settings.
 __attribute__((weak)) int64_t mods_setting_value(const char *, int64_t fallback) {
     return fallback;
+}
+#ifndef RECOMP_SETTINGS_CORE_MOD
+#define RECOMP_SETTINGS_CORE_MOD ""
+#endif
+int64_t mods_core_setting(const char *key, int64_t fallback) {
+    static const char kCore[] = RECOMP_SETTINGS_CORE_MOD;
+    if (!kCore[0] || !key || !*key)
+        return fallback;
+    char full[128];
+    if (snprintf(full, sizeof full, "%s/%s", kCore, key) >= (int)sizeof full)
+        return fallback;
+    return mods_setting_value(full, fallback);
 }
 // A host with no display reports none.
 __attribute__((weak)) int host_display_screen_size(int *, int *) {
@@ -132,6 +153,18 @@ int host_display_screen(int32_t *w, int32_t *h) {
     *h = g_screen_h.load();
     return 1;
 }
+static std::atomic<float> g_ui_box[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+void host_display_set_ui_box(float x0, float y0, float w, float h) {
+    const bool ok = std::isfinite(x0) && std::isfinite(y0) && std::isfinite(w) && std::isfinite(h) && w > 0.01f &&
+                    h > 0.01f && x0 >= 0 && y0 >= 0 && x0 + w <= 1.001f && y0 + h <= 1.001f;
+    const float v[4] = {ok ? x0 : 0.0f, ok ? y0 : 0.0f, ok ? w : 1.0f, ok ? h : 1.0f};
+    for (int i = 0; i < 4; ++i)
+        g_ui_box[i].store(v[i]);
+}
+void host_display_ui_box(float box[4]) {
+    for (int i = 0; i < 4; ++i)
+        box[i] = g_ui_box[i].load();
+}
 __attribute__((weak)) uint64_t host_display_epoch() {
     return 0;
 }
@@ -194,3 +227,21 @@ extern "C" __attribute__((weak)) uint32_t ddraw_gdi_begin_primary() {
 extern "C" __attribute__((weak)) void ddraw_gdi_end_primary(uint32_t) {}
 // Test90: the presenter reopens the audio output after a display HDR switch; without the audio module, nothing.
 extern "C" __attribute__((weak)) void host_audio_restart_output(const char *) {}
+
+// NFSMW 3.0.4: the Help rows' defaults for hosts without them (pop_smoke, headless, tests): no rows.
+__attribute__((weak)) int host_save_bug_report(char *msg, size_t cap) {
+    if (msg && cap)
+        snprintf(msg, cap, "Bug reports are not available here.");
+    return 0;
+}
+__attribute__((weak)) int host_bug_report_available(void) {
+    return 0;
+}
+__attribute__((weak)) int host_update_available(void) {
+    return 0;
+}
+__attribute__((weak)) void host_update_activate(void) {}
+__attribute__((weak)) void host_update_status(char *text, size_t cap) {
+    if (text && cap)
+        text[0] = 0;
+}

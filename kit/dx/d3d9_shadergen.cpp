@@ -1522,6 +1522,11 @@ bool vertex_source(const Program &p, const VertexVariant &vv, std::string *out, 
         s += "    vv[" + std::to_string(i) + "] = vin.v" + std::to_string(i) + " * P.ascale[" +
              std::to_string(i) + "];\n";
     s += g.body;
+    if (vv.xfog && g.body.find("ofog") != std::string::npos) {   // UG1 run 6: the fog interpolant must be free
+        if (why)
+            *why = "xfog variant: the program writes oFog";
+        return false;
+    }
     if (vv.smoke) {   // Remaster run 14 lit smoke: the world position (particle quads are world space) for the PS
         uint32_t sreg[4] = {};
         if (!pool_inputs(p, sreg, 1) || g.body.find("ot[7]") != std::string::npos) {
@@ -1600,8 +1605,9 @@ bool vertex_source(const Program &p, const VertexVariant &vv, std::string *out, 
          std::string(p.major >= 3 ? "od[1]" : "saturate(od[1])") +
          ";\n"
          "    o.t0 = ot[0]; o.t1 = ot[1]; o.t2 = ot[2]; o.t3 = ot[3];\n"
-         "    o.t4 = ot[4]; o.t5 = ot[5]; o.t6 = ot[6]; o.t7 = ot[7];\n"
-         "    o.fog = ofog.x;\n"
+         "    o.t4 = ot[4]; o.t5 = ot[5]; o.t6 = ot[6]; o.t7 = ot[7];\n" +
+         std::string(vv.xfog ? "    o.fog = opos.y;   // UG1 run 6 xfog: clip y for the screen-height falloff\n"
+                             : "    o.fog = ofog.x;\n") +
          "    o.fogz = opos.z;\n";
     if (vv.pool) {
         s += "    o.pool_p = vv[" + std::to_string(pool_reg[0]) + "]; o.pool_n = vv[" + std::to_string(pool_reg[1]) +
@@ -1638,6 +1644,61 @@ bool vertex_source(const Program &p, const VertexVariant &vv, std::string *out, 
 const char *kWetR = "    r[0] = (tx3.sample(sm3, (((t[1].xyzw) / ((t[1].xyzw)).w)).xy));\n";
 const char *kWetM = "    { float4 w_ = ((r[1].wwww) * (iv[0].wwww)); r[0].w = w_.w; }\n";
 const char *kWetA = "    { float4 w_ = ((r[0].xyzw) * (c[1].wwww) + (r[1].xyzw)); r[0].xyz = w_.xyz; }\n";
+// UG1 run 6 Xbox headlight distance fade (review/run06/research-headlight.md). The PC world-headlight program
+// (worldheadlight.efx ps_1_1: tex t0..t2, then t1 x t2 x HeadlightColor + v0, x t0 x 2) samples the headlight
+// projector at t1 (projected: tc[1].w is the depth along the beam, metres) and the 64x1 clip ramp at t2. The fade
+// scales the t[2] sample right after its line, so it multiplies the headlight light and nothing else.
+// headlight_find: the end of the one t[2] sample line, after one t[1] sample, with t[1] and t[2] read later.
+static bool headlight_find(const std::string &src, size_t *at) {
+    const std::string l1 = "    t[1] = (tx1.sample(sm1, ", l2 = "    t[2] = (tx2.sample(sm2, ";
+    const size_t a = src.find(l1), b = src.find(l2);
+    if (a == std::string::npos || b == std::string::npos || b < a || src.find(l1, a + 1) != std::string::npos ||
+        src.find(l2, b + 1) != std::string::npos)
+        return false;
+    const size_t e = src.find(";\n", b);
+    if (e == std::string::npos || src.find('\n', b) != e + 1)
+        return false;
+    const std::string rest = src.substr(e);
+    if (rest.find("t[1].") == std::string::npos || rest.find("t[2].") == std::string::npos)
+        return false;
+    *at = e + 2;
+    return true;
+}
+
+float hlfade_range() {
+    static const float r = [] {
+        const char *e = getenv("RECOMP_UG1_HEADLIGHT_FADE_M");
+        float v = e && *e ? (float)atof(e) : 100.0f;
+        return v < 20.0f ? 20.0f : v > 400.0f ? 400.0f : v;
+    }();
+    return r;
+}
+
+static bool headlight_patch(std::string *s, int mode) {
+    size_t at = 0;
+    if ((mode != 1 && mode != 2) || !headlight_find(*s, &at))
+        return false;
+    char k[32];
+    snprintf(k, sizeof k, "%.6g", 1.0 / hlfade_range());
+    std::string add;
+    if (mode == 1)   // the Xbox fade on top of the PC clip ramp
+        add = std::string("    t[2] *= saturate(1.0 - tc[1].w * ") + k + ");   // UG1 run 6 headlight fade 1\n";
+    else   // the Xbox profile: the PC near cut, no flat stretch, the Xbox headlight colour ratio (0.9/0.8, 0.95/0.9)
+        add = std::string("    t[2] = float4(saturate((tc[1].w - 1.6) * 0.32) * saturate(1.0 - tc[1].w * ") + k +
+              "));   // UG1 run 6 headlight fade 2\n"
+              "    t[2].xyz *= float3(1.125, 1.125, 1.056);\n";
+    s->insert(at, add);
+    return true;
+}
+
+bool pixel_is_headlight(const Program &p) {
+    std::string src, why;
+    if (!p.pixel || p.major != 1 || !pixel_source(p, PixelVariant{}, &src, &why))
+        return false;
+    size_t at = 0;
+    return headlight_find(src, &at);
+}
+
 void wetroad_patch(std::string *s) {
     const size_t r = s->find(kWetR), m = s->find(kWetM), a = s->find(kWetA);
     if (r == std::string::npos || m == std::string::npos || a == std::string::npos)
@@ -2956,17 +3017,24 @@ bool pixel_source(const Program &p, const PixelVariant &v, std::string *out, std
              "        !d9_cmp(P.alpha_func, floor(saturate(col.a) * 255.0 + 0.5), floor(P.alpha_ref * "
              "255.0 + 0.5)))\n"
              "        discard_fragment();\n";
-    s += "    if (" +
-         std::string(p.major >= 3 ? "false && " : "") +
-         "P.fog_mode != 0) {\n"
-         "        float f;\n"
-         "        float z = vin.fogz;\n"
-         "        if (P.fog_mode == 1) f = vin.fog;\n"
-         "        else if (P.fog_mode == 2) f = (P.fog_end - z) / (P.fog_end - P.fog_start);\n"
-         "        else if (P.fog_mode == 3) f = exp(-P.fog_density * z);\n"
-         "        else f = exp(-(P.fog_density * z) * (P.fog_density * z));\n"
-         "        col.rgb = mix(P.fog_color.rgb, col.rgb, saturate(f));\n"
-         "    }\n";
+    if (v.xfog)   // UG1 run 6 Xbox-style fog (d3d9_msl.h PixelVariant xfog): our formula, the Xbox values
+        s += "    {\n"
+             "        float fd = clamp((1.0 / vin.pos.w - P.fog_start) * P.fog_end, 0.0, P.fog_color.a);\n"
+             "        float f = fd * saturate(1.0 - abs(vin.fog * vin.pos.w) * P.fog_density);\n"
+             "        col.rgb = mix(col.rgb, P.fog_color.rgb, f);\n"
+             "    }\n";
+    else
+        s += "    if (" +
+             std::string(p.major >= 3 ? "false && " : "") +
+             "P.fog_mode != 0) {\n"
+             "        float f;\n"
+             "        float z = vin.fogz;\n"
+             "        if (P.fog_mode == 1) f = vin.fog;\n"
+             "        else if (P.fog_mode == 2) f = (P.fog_end - z) / (P.fog_end - P.fog_start);\n"
+             "        else if (P.fog_mode == 3) f = exp(-P.fog_density * z);\n"
+             "        else f = exp(-(P.fog_density * z) * (P.fog_density * z));\n"
+             "        col.rgb = mix(P.fog_color.rgb, col.rgb, saturate(f));\n"
+             "    }\n";
     if (v.pool)
         s += "    col.rgb += pool_add;\n";
     // Remaster S3 soft particles: view depth from the D3D projection z = A + B / w with A taken as 1 (far plane much
@@ -2996,6 +3064,11 @@ bool pixel_source(const Program &p, const PixelVariant &v, std::string *out, std
         s += "    o.mask = a2c_mask;\n";
     s += "    return o;\n"
          "}\n";
+    if (v.hlfade && !headlight_patch(&s, v.hlfade)) {   // UG1 run 6: never "counted as faded, drawn plain"
+        if (why)
+            *why = "hlfade: the headlight samples are not as expected";
+        return false;
+    }
     if (v.wetroad)
         wetroad_patch(&s);
     if (v.wetroad == 2 && !wetroad_x360_patch(&s)) {   // run 13 Xbox 360 rain splash: never "counted as 360", drawn plain

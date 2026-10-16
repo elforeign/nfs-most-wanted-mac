@@ -27,6 +27,7 @@ int os_window_notch_pixels(void *ns_window); // host/sdl/os_display_macos.mm (NF
 #endif
 #include "../../mods/display_settings.h"
 #include "game_config.h"
+#include "../focus_note.h"
 #include "../../runtime/layout.h"
 #include "../../platform/os.h"
 #include "../audio.h"
@@ -115,8 +116,7 @@ SDL_Window *g_window = nullptr;
 void *g_surface = nullptr; // the native surface the presenter draws into
 std::unique_ptr<gpu::Device> g_gpu;
 bool g_close_requested = false; // the user asked to close
-bool g_guest_activated = false; // WM_ACTIVATEAPP(1) has been delivered
-bool g_focused = false;
+FocusNote g_focus; // host/focus_note.h: the focus as the guest has been told it
 int g_mode_w = 640, g_mode_h = 480;
 bool g_mode_dirty = false;
 int g_window_mode = 0, g_wanted_window_mode = 0;
@@ -247,6 +247,19 @@ void note_screen_size() {
         fprintf(stderr, "[host] display pixel size: %dx%d\n", w, h);
     g_screen_w.store(w);
     g_screen_h.store(h);
+}
+
+// NFSMW 3.0.4: every player's Setup compiles the game on their own Mac, so two players' apps can come from different
+// compilers and SDKs; the log says which built this one (the macros of the compiler that compiled this file, the
+// same build as the game's code).
+void log_build_toolchain() {
+#if defined(__clang_version__) && defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && defined(__MAC_OS_X_VERSION_MIN_REQUIRED)
+    fprintf(stderr, "[host] built with clang %s, macOS SDK %d.%d, for macOS %d.%d and later (kit %s)\n",
+            __clang_version__, __MAC_OS_X_VERSION_MAX_ALLOWED / 10000, (__MAC_OS_X_VERSION_MAX_ALLOWED / 100) % 100,
+            __MAC_OS_X_VERSION_MIN_REQUIRED / 10000, (__MAC_OS_X_VERSION_MIN_REQUIRED / 100) % 100, POP_RECOMP_VERSION);
+#elif defined(__VERSION__)
+    fprintf(stderr, "[host] built with %s (kit %s)\n", __VERSION__, POP_RECOMP_VERSION);
+#endif
 }
 
 // The window's size in points and in drawable pixels.
@@ -510,7 +523,7 @@ bool pointer_capture_wanted() {
     // the player with nothing to aim.
     if (!ddraw_gdi_primary_active())
         return false;
-    if (!g_focused || !g_window || !window_focused() || g_escape_held)
+    if (!g_focus.focused || !g_window || !window_focused() || g_escape_held)
         return false;
     if (window_minimized_or_hidden())
         return false;
@@ -584,8 +597,7 @@ void apply_motion(int32_t x, int32_t y, double drawable_dx, double drawable_dy) 
     const double now = (double(os_monotonic_ns()) / 1e9);
     if (trace && now - last_trace >= 0.1) {
         last_trace = now;
-        const auto guest =
-            host_guest_pointer_resolve(g_mem, GUEST_SIZE, RECOMP_HOOK_MOUSE_DEVICE_PTR);
+        const auto guest = host_guest_pointer_current();
         fprintf(stderr,
                 "[pointer-game] drawable %d,%d hit %d at %d,%d delivered %d guest %d,%d bounds "
                 "%d,%d,%d,%d\n",
@@ -861,10 +873,12 @@ void handle_key(const SDL_KeyboardEvent &event, bool down) {
 // the focus changed and records WHEN, relative to the input around it; nothing
 // guest-visible happens here.
 void note_focus(bool focused) {
-    if (focused == g_focused && g_guest_activated)
+    // NFSMW 3.0.4: Audio > Mute in background (core mod mute_in_background, off by default). Read at each change,
+    // and back on whenever the window returns, so switching the setting off never leaves the game silent.
+    host_audio_set_background_mute(!focused && mods_core_setting("mute_in_background", 0) != 0);
+    // Delivered only once the guest has a window to receive it (host/focus_note.h).
+    if (!g_focus.note(focused, host_main_window() != 0))
         return;
-    g_focused = focused;
-    g_guest_activated = true;
     PendingInput e;
     e.kind = PendingInput::FOCUS;
     e.down = focused;
@@ -913,6 +927,8 @@ void apply_input(const PendingInput &e) {
 void apply_focus(bool focused, uint32_t modifier_flags) {
     if (!host_main_window())
         return; // the guest has no window yet
+    // Shared kit (run 37): one line per delivered change, so a log shows the start-up activation arrived.
+    fprintf(stderr, "[host] focus %d delivered to guest window %08x\n", focused ? 1 : 0, host_main_window());
     recomp_media_focus(focused ? 1 : 0);
     post(WM_ACTIVATEAPP_, focused ? 1 : 0, 0);
     post(WM_ACTIVATE_, focused ? 1 : 0, 0);
@@ -1707,6 +1723,14 @@ uint32_t app_guest_u32(uint32_t a) {
     return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
 }
 
+// Run 39 (TEST ONLY): what the runner counts as the game's input reads when it decides a release. A guest parked
+// under the settings menu (pause_in_menu) reads no input until it resumes, while the menu takes the key at the pump:
+// two more reads then, so a scripted release goes after its usual press time instead of the 3 s fallback. The press
+// records the plain count (adding the two there as well cancelled them out).
+uint32_t app_script_reads() {
+    return host_input_read_count() + (host_guest_clock_held() ? 2u : 0u);
+}
+
 void app_script_key(const HostScriptStep &step, bool down) {
     const HostKeyMapping m = host_key_mapping_for_dik(step.dik);
     if (!m.dik)
@@ -1729,7 +1753,7 @@ int app_script_keyuntil(AppScript &s, const HostScriptStep &step, uint32_t now) 
         s.ku_presses = 0;
     }
     if (s.ku_down) {
-        if (host_script_key_release_ready(s.ku_pressed_at, s.ku_pressed_reads, now, host_input_read_count())) {
+        if (host_script_key_release_ready(s.ku_pressed_at, s.ku_pressed_reads, now, app_script_reads())) {
             app_script_key(step, false);
             s.ku_down = false;
         }
@@ -1827,7 +1851,7 @@ void app_script_tick() {
         }
         if (s.steps[s.next].op == HOST_SCRIPT_KEY && !s.steps[s.next].down) {
             // run 33: a release waits until the game has read the press; the script clock waits with it
-            if (!host_script_key_release_ready(s.key_down_ms, s.key_down_reads, now, host_input_read_count())) {
+            if (!host_script_key_release_ready(s.key_down_ms, s.key_down_reads, now, app_script_reads())) {
                 if (!s.release_waiting_since)
                     s.release_waiting_since = now;
                 return;
@@ -2201,6 +2225,7 @@ int web_main(int argc, char **argv) {
     }
     g_surface = gpu::native_surface_for_window(g_window);
     fprintf(stderr, "GPU backend: %s\n", gpu::default_backend_name());
+    log_build_toolchain();
     int bw, bh, dw, dh;
     window_sizes(&bw, &bh, &dw, &dh);
     if (dw <= 0 || dh <= 0) {
@@ -2251,6 +2276,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--version") == 0) {
             printf(RECOMP_APP_NAME " %s (%s)\n", POP_RECOMP_VERSION, gpu::default_backend_name());
+            log_build_toolchain();
             return 0;
         }
         if (strcmp(argv[i], "--probe-layout") == 0) {
@@ -2392,6 +2418,7 @@ int main(int argc, char **argv) {
         return 3;
     }
     fprintf(stderr, "GPU backend: %s\n", gpu::default_backend_name());
+    log_build_toolchain();
     // The launcher: when the game is missing or not the supported build, or the
     // player asked for it. Mobile shows it briefly even when the game is ready,
     // so a touch can open it.
@@ -2419,7 +2446,13 @@ int main(int argc, char **argv) {
             if (chosen != game.exe && !game_path_save(chosen))
                 fprintf(stderr, RECOMP_APP_NAME ": could not remember the game path\n");
             game.exe = chosen;
+            game.source = GamePathSource::None; // the launcher's choice
         }
+    }
+    {
+        static const char *const kSource[] = {"flag", "environment", "checkout",
+                                              "saved",  "data root",   "launcher"};
+        fprintf(stderr, "[host] game: %s (%s)\n", game.exe.c_str(), kSource[int(game.source)]);
     }
     std::string exe = game.exe;
 
@@ -2469,6 +2502,10 @@ int main(int argc, char **argv) {
     printf(RECOMP_APP_NAME ": window %dx%d points, %dx%d pixels, focus %s\n", bw, bh, dw, dh,
            window_focused() ? "yes" : "no");
     fflush(stdout);
+
+    // NFSMW 3.0.4 (D-202 item 4): the settings menu's pause stops the mixer too (the play cursors stand still, so
+    // the game's streams wait and carry on where they were).
+    host_guest_pause_set_audio(host_audio_pause);
 
     BootOptions options;
     options.name = "windowed";

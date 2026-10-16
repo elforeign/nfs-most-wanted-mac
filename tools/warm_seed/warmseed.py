@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -62,6 +63,14 @@ PATH = [("RETURN", "MC_Main.fng", 3000, 90000, 1500),        # the title (presse
         ("RETURN", "Track_Select.fng", 5000, 30000, 2500)]  # Circuit
 RACE = [("RETURN", "Track_Options.fng", 5000, 30000, 2000), ("RETURN", "Car_Select.fng", 5000, 30000, 2500),
         ("RETURN", "Dialog.fng", 5000, 30000, 1500), ("RETURN", "Loading.fng", 5000, 30000, 20000)]
+# 3.0.4 (run 39): the screens whose next keys are timed presses (no screen change to wait for). On a cold Metal cache
+# (a player's first warm-up: nothing of this build's shader text compiled on that Mac yet) the main menu held one frame
+# 1.7 s compiling 19 shaders and stalled for seconds after, and the two RIGHT presses were lost: the drive circled
+# Career / alias and never raced (T3, reproduced with RECOMP_D3D9_SHADER_SALT). `await ... for` counts its hold in
+# PRESENTED frames (script.h; unpinned 50 ms nominal, so 6000 = 120 frames), so it lasts until the burst is over on any
+# Mac, and about 2 s on a warm one.
+STEADY = ("MainMenu.fng", "MainMenu_Sub.fng", "Track_Select.fng")
+STEADY_MS = 6000
 KEY = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -78,7 +87,10 @@ def script(track, race_ms):
         for k, screen, *rest in path:
             if screen:   # pressed until that screen has the input, then its settle time
                 every, within, settle = rest
-                lines.extend([f"keyuntil {k} fe:{screen}>0 every {every} within {within}", f"wait {settle}"])
+                lines.append(f"keyuntil {k} fe:{screen}>0 every {every} within {within}")
+                if screen in STEADY:
+                    lines.append(f"await fe:{screen}>0 for {STEADY_MS} within 60000")
+                lines.append(f"wait {settle}")
             else:
                 lines.extend([f"key {k} down", "wait 160", f"key {k} up", f"wait {rest[0]}"])
     steps(PATH)
@@ -178,14 +190,55 @@ def merge(folders, out):
     return len(order), len(pipes)
 
 
+def warm_format():
+    """The runtime's key namespace and pipeline line format (d3d9_metal.mm "msl-v1", "-safe" from macOS 15;
+    pipeline_warm_spec.h "p1"): a seed made under another namespace matches nothing."""
+    try:
+        major = int(platform.mac_ver()[0].split(".")[0] or 0)
+    except ValueError:
+        major = 0
+    return ("msl-v1-safe" if major >= 15 else "msl-v1") + "/p1"
+
+
 def parts():
-    """The shader generator's sources: a seed belongs to the build made from exactly these."""
-    files = ["kit/dx/d3d9_shadergen.cpp", "kit/dx/d3d9_msl.h", "kit/dx/d3d9_shader.cpp", "kit/dx/d3d9_shader.h"]
-    return [(f, hashlib.sha256((ROOT / f).read_bytes()).hexdigest()) for f in files if (ROOT / f).is_file()]
+    """What the seed's shaders are made from: a seed belongs to the build made from exactly these. Run 38 (D-202): the
+    shader generator's sources, the pipeline line format, the effects programs Setup made (build/generated) and the
+    runtime's key namespace; the renderer itself (d3d9_metal.mm) is left out on purpose, as it changes with every fix:
+    a variant it selects differently is compiled once in the draw, as without a seed. 3.0.4 (run 39, challenge review):
+    also kit/host/gpu/metal/surface.h, whose surf_ps_patch edits the generated pixel shaders (the generator includes it;
+    tests/test_warm_seed.py checks that every header the generator includes for its MSL is listed here)."""
+    files = ["kit/dx/d3d9_shadergen.cpp", "kit/dx/d3d9_msl.h", "kit/dx/d3d9_shader.cpp", "kit/dx/d3d9_shader.h",
+             "kit/host/gpu/metal/surface.h", "kit/host/gpu/metal/pipeline_warm_spec.h"]
+    gen = ROOT / "build/generated"
+    if gen.is_dir():
+        files += sorted(str(p.relative_to(ROOT)) for p in gen.iterdir()
+                        if p.is_file() and (p.suffix == ".fx" or p.name == "clean-chain.txt"))
+    out = [(f, hashlib.sha256((ROOT / f).read_bytes()).hexdigest()) for f in files if (ROOT / f).is_file()]
+    fmt = warm_format()
+    return out + [("format " + fmt, hashlib.sha256(fmt.encode()).hexdigest())]
 
 
 def fingerprint():
     return hashlib.sha256("".join(f"{h}  {f}\n" for f, h in parts()).encode()).hexdigest()
+
+
+def stamp_of(seed):
+    """The kept seed's stamp as {"fingerprint", "generated", "libraries", "pipelines"}; {} without one."""
+    f = seed / "stamp.txt"
+    if not f.is_file():
+        return {}
+    info = {}
+    for line in f.read_text(errors="replace").splitlines()[:4]:
+        k, _, v = line.partition(" ")
+        if k == "fingerprint":
+            info["fingerprint"] = v.strip()
+        elif k == "generated":
+            info["generated"] = " ".join(v.split()[:2])
+        elif k == "libraries":
+            w = v.split()
+            if len(w) == 3 and w[1] == "pipelines":
+                info["libraries"], info["pipelines"] = w[0], w[2]
+    return info
 
 
 def pack_env(hd, materials, relief):
@@ -223,21 +276,38 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     fp = fingerprint()
     packs = pack_env(a.hd_pack, a.materials, a.relief)
-    exe = smoke()
-    core = core_dir(cache)
+    # run 28 review F2: a drive is reused only if the shaders' sources AND its own script and settings are the same (a
+    # corrected menu path must drive again; the earlier marks keyed only the shader sources)
+    mids = [hashlib.sha256(f"{fp}|{script(track, a.race_seconds * 1000)}|{sorted(settings.items())}|"
+                           f"{sorted({**packs, **extra}.items())}".encode()).hexdigest()
+            for _, track, settings, extra in rows]
+    marks = [(work / name / "done").read_text().split() if (work / name / "done").is_file() else []
+             for name, *_ in rows]
+    kept = stamp_of(out)
+    # Run 38 (D-202): Setup keeps build/warm across updates; a version that draws its shaders the same way reuses them
+    # in seconds instead of driving again (the 30 minutes are the drives, not the compiling).
+    if kept.get("fingerprint") == fp and all(m[:1] == [mid] for m, mid in zip(marks, mids)) \
+            and (out / "order.txt").is_file():
+        say(f"reused the prepared shaders (fingerprint {fp[:12]}, {kept.get('libraries', '?')} libraries, "
+            f"{kept.get('pipelines', '?')} pipelines, made {kept.get('generated', '?')})")
+        return
+    if kept:
+        if kept.get("fingerprint") != fp:
+            say("the shaders changed in this version: preparing them again (about 35 minutes)")
+        shutil.rmtree(out, ignore_errors=True)   # never left behind for the packager if the drives below fail
+    exe = core = None
     done, raced, unconfirmed = [], 0, []
     for i, (name, track, settings, extra) in enumerate(rows):
         extra = {**packs, **extra}
         run = work / name
         mark = run / "done"
-        # run 28 review F2: a drive is reused only if the shaders' sources AND its own script and settings are the
-        # same (a corrected menu path must drive again; the earlier marks keyed only the shader sources)
-        mid = hashlib.sha256(f"{fp}|{script(track, a.race_seconds * 1000)}|{sorted(settings.items())}|"
-                             f"{sorted(extra.items())}".encode()).hexdigest()
-        if mark.is_file() and mark.read_text().split()[:1] == [mid]:
+        mid = mids[i]
+        if marks[i][:1] == [mid]:
             done.append(run / "ShaderWarm")
-            raced += track is not None and mark.read_text().split()[2:3] == ["race"]
+            raced += track is not None and marks[i][2:3] == ["race"]
             continue
+        if exe is None:   # the offscreen runner and the core mod only when a drive is needed
+            exe, core = smoke(), core_dir(cache)
         say(f"drive {i + 1} of {len(rows)} ({name})")
         n, world = drive(exe, core, run, track, settings, extra, a.race_seconds)
         if n == 0:

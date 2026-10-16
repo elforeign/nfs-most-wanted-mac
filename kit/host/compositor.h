@@ -76,6 +76,9 @@ struct CompositorInput {
     // R2 #10 TEST (RECOMP_TEST_HDR_PATTERN=1): mode 3 also draws four bars at 1, 2, 4 and 8 x SDR white across the top
     // tenth of the frame, through the same shoulder (mode 5), so the owner can count how many the TV tells apart.
     bool hdr_pattern = false;
+    // NFSMW 3.0.4 Brightness (core mod brightness -5..+5; idea: SpeedBreaker's Brightness setting, no code taken): an exponent on the game picture's encoded colour, 1 = as
+    // it is; only the opaque game-frame draws get it (Quad.pad), so menus and HUD elements are never changed.
+    float brightness = 1.0f;
 };
 
 // Encode only: never commits, waits or presents. The caller supplies an open

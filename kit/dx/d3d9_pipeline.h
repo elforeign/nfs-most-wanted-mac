@@ -82,6 +82,7 @@ struct D9Pipeline {
     Stream stream[8];
     uint32_t index_buffer = 0;
     uint32_t declaration = 0;
+    uint32_t vs_obj = 0, ps_obj = 0; // device-bound shader objects (Set*Shader), held by the device
     uint32_t color_target[4] = {}; // render target 0 lives on the device too
     int32_t scissor[4] = {};       // left, top, right, bottom
     const char *label = nullptr;   // effect/technique/pass that bound the shaders, for diagnostics

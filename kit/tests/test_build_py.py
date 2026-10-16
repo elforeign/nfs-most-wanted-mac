@@ -89,6 +89,14 @@ class BuildPyTests(unittest.TestCase):
         self.assertEqual(command[command.index("--build") + 1], str(Path("/g/build/cmake/macos")))
         self.assertEqual(command[command.index("--config") + 1], "Release")  # Xcode is multi-config
 
+    def test_version_reaches_cmake_only_when_given(self):
+        # Run 37 (D-203a): a Setup build from a source archive has no git history, so the host's "[host] built with"
+        # line said "(kit unknown)"; Setup passes its release version.
+        self.assertFalse(any("POP_RECOMP_VERSION" in d for d in build_py.game_defines(Path("/g"), Path("/g/b"))))
+        self.assertIn("-DPOP_RECOMP_VERSION=3.0.4", build_py.game_defines(Path("/g"), Path("/g/b"), "3.0.4"))
+        args, _ = build_py.parse_args(["--version", "3.0.4"], system="Darwin")
+        self.assertEqual(args.version, "3.0.4")
+
     def test_stub_selects_the_stub_preset_and_rejects_debug(self):
         args, _ = build_py.parse_args(["--stub"], system="Linux")
         self.assertEqual(build_py.preset_name(args.preset, args.config, stub=args.stub), "linux-stub")

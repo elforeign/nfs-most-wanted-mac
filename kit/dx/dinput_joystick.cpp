@@ -12,6 +12,7 @@
 // delivered (ComObj::last_sequence). A gap between that and the oldest edge
 // the host still holds means edges were lost, which is DirectInput's
 // DI_BUFFEROVERFLOW.
+#include "dinput_effect.h"
 #include "dinput_joystick.h"
 #include "dx.h"
 
@@ -258,20 +259,48 @@ int find_object(const ComObj *d, uint32_t obj, uint32_t how) {
     return -1;
 }
 
+// What a controls screen shows for object `index`: the pad's own name for the
+// button or stick the configured order puts there ("Cross", "Right Stick Y"),
+// so a rebind screen says which physical control it means; the generic
+// DirectInput name when the order leaves that place empty.
+const char *object_label(uint32_t index) {
+    static const char *const kButtonLabels[] = {"Cross", "Circle", "Square", "Triangle", "L1",
+                                                "R1",    "L2",     "R2",     "L3",       "R3",
+                                                "Create", "Options", "PS"};
+    static const char *const kAxisLabels[JOY_AXES] = {"Left Stick X",  "Left Stick Y", "Right Stick X",
+                                                      "Right Stick Y", "L2",           "R2"};
+    const NativeOrder o = native_order();
+    if (index >= kObjButton0 && index < kObjButton0 + JOY_BUTTONS) {
+        int bit = o.button_bit[index - kObjButton0];
+        if (bit >= 0 && bit < (int)std::size(kButtonLabels))
+            return kButtonLabels[bit];
+    } else if (index < JOY_AXES) {
+        for (int a = 0; a < JOY_AXES; ++a)
+            if (o.axis_slot[a] == (int)index)
+                return kAxisLabels[a];
+    }
+    return joy_objects()[index].name;
+}
+
 // One DIDEVICEOBJECTINSTANCE{A,W} of `size` bytes for object `index`.
 void write_object_instance(uint32_t at, uint32_t size, bool wide, const ComObj *d, uint32_t index) {
     const JoyObject &o = joy_objects()[index];
+    const char *label = object_label(index);
     gm_zero(at, size);
     wr32(at, size);
     memcpy(gm_ptr(at + DIDOI_OFF_guidType), o.guid, 16);
     uint32_t ofs = guest_ofs(d, index);
     wr32(at + DIDOI_OFF_dwOfs, ofs == 0xFFFFFFFFu ? o.ofs : ofs);
     wr32(at + DIDOI_OFF_dwType, o.type);
+    // X and Y are the force-feedback actuators while force feedback is served (dinput_effect.cpp): NFS Underground
+    // counts these to decide it has a force-feedback device at all.
+    if (index < 2 && dinput_ff_served())
+        wr32(at + DIDOI_OFF_dwFlags, 1u); // DIDOI_FFACTUATOR
     uint32_t tail = DIDOI_OFF_tszName + DIDOI_NAME_CHARS * (wide ? 2u : 1u);
     if (wide)
-        di_put_wide(at + DIDOI_OFF_tszName, o.name, DIDOI_NAME_CHARS);
+        di_put_wide(at + DIDOI_OFF_tszName, label, DIDOI_NAME_CHARS);
     else
-        gm_put_str(at + DIDOI_OFF_tszName, o.name, DIDOI_NAME_CHARS);
+        gm_put_str(at + DIDOI_OFF_tszName, label, DIDOI_NAME_CHARS);
     if (size < tail + DIDOI_TAIL_OFF_wUsage + 2)
         return;
     uint16_t page = kPageGenericDesktop, usage = kHatUsage;
@@ -435,7 +464,7 @@ void joy_write_device_instance(uint32_t at, uint32_t size, bool wide, uint32_t d
 }
 
 uint32_t joy_get_capabilities(ComObj *d, uint32_t out, uint32_t size) {
-    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED);
+    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED | (dinput_ff_served() ? 0x100u /* DIDC_FORCEFEEDBACK */ : 0u));
     wr32(out + DIDC_OFF_dwDevType, joy_devtype(d->di_version));
     if (size >= DIDEVCAPS_DX3_SIZE) {
         wr32(out + DIDC_OFF_dwAxes, JOY_AXES);

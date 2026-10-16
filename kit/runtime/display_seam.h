@@ -13,6 +13,11 @@ float host_display_aspect(void);
 /* The screen the window lives on, in pixels; 0 when unknown. */
 int host_display_screen(int32_t *w, int32_t *h);
 void host_display_set_screen(int32_t w, int32_t h);
+/* Where the game draws its menus inside its frame, as fractions of the frame (x0, y0, w, h); the whole frame by
+ * default. A game that draws a 4:3 menu centred in a wide frame (NFS Underground) sets it, so the pointer maps
+ * into that box. */
+void host_display_set_ui_box(float x0, float y0, float w, float h);
+void host_display_ui_box(float box[4]);
 uint64_t host_display_epoch(void);
 int host_display_offer_mode(int w, int h, int bpp);
 void host_display_request_window(int mode); /* queued; 0 windowed, 1 borderless, 2 fullscreen */

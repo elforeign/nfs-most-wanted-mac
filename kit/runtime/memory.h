@@ -14,6 +14,9 @@ void mem_shutdown();
 // of 16 and every block is at least 16-byte aligned; `align` may request more
 // (VirtualAlloc uses 4096). `zero` clears the usable bytes.
 uint32_t heap_alloc(uint32_t size, bool zero = false, uint32_t align = 16);
+// The kit's own objects (NFSMW issue 8, 3.0.4): a block from the kit span at the top of the extra heap span, which
+// heap_alloc never hands to the guest; the shared heap when there is no span or it is full. Freed with heap_free.
+uint32_t heap_alloc_kit(uint32_t size, bool zero = false, uint32_t align = 16);
 // Grows or shrinks in place when possible, otherwise allocates and copies.
 // Returns the new address or 0 (in which case the old block is untouched).
 uint32_t heap_realloc(uint32_t addr, uint32_t new_size, bool zero = false);
@@ -47,7 +50,7 @@ uint64_t heap_guard_hits();
 // host pages of its own, writable until heap_seal_readonly. A guest write to a sealed page is stopped in the fault
 // handler (the store is stepped over, so the object stays intact and the game goes on) and recorded with the guest
 // EIP, stack and the host pc; heap_readonly_report logs new records from a normal context. heap_free_guarded frees
-// these too. RECOMP_READONLY_PAGES=0 turns it off (heap_readonly_enabled false: callers allocate as before).
+// these too. 3.0.4: opt-in, RECOMP_READONLY_PAGES=1 (a stopped store leaves the guest's own data half-written).
 bool heap_readonly_enabled();
 uint32_t heap_alloc_readonly(uint32_t size, const char *what, uint32_t tag);
 bool heap_seal_readonly(uint32_t addr);

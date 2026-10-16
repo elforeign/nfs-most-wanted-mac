@@ -62,7 +62,8 @@ int main() {
     CHECK(host_layout().resources_dir == root + "/portable/resources");
     CHECK(!host_layout().developer);
     CHECK(host_resource("mods/core") == root + "/portable/resources/mods/core");
-    CHECK(host_layout().profile_dir.find(RECOMP_APP_NAME) != std::string::npos);
+    // The per-user folder is [game] data_dir_name (default app_name; NFS Underground: "NFS Underground Native").
+    CHECK(host_layout().profile_dir.find(RECOMP_DATA_DIR_NAME) != std::string::npos);
     CHECK(host_layout().profile_dir.find(root) ==
           std::string::npos); // per-user, not beside the exe
     // 2. A macOS bundle.

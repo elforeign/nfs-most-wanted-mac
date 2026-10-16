@@ -189,11 +189,16 @@ void draw(Pass &pass, const CompositorInput &in, gpu::Texture tex, CompositeRect
     gpu::Pipeline p = pipeline(pass.device, pass.format, blend);
     if (!p)
         return;
+    // pad: the Brightness exponent's bits for the game picture (Metal reads it as a float; 0 = unchanged, and the
+    // Vulkan and WebGPU shaders do not read it).
+    uint32_t brightness_bits = 0;
+    if (blend == Opaque && in.brightness > 0.0f && std::fabs(in.brightness - 1.0f) > 1e-4f)
+        memcpy(&brightness_bits, &in.brightness, sizeof brightness_bits);
     Quad q{{float(dst.x), float(dst.y), float(dst.w), float(dst.h)},
            {float(uv.x), float(uv.y), float(uv.w), float(uv.h)},
            {float(in.drawable_w), float(in.drawable_h)},
            uint32_t(blend == Opaque),
-           0};
+           brightness_bits};
     pass.device->set_pipeline(pass.cb, p);
     pass.device->set_bytes(pass.cb, gpu::Stage::Vertex, 0, &q, sizeof q);
     pass.device->set_bytes(pass.cb, gpu::Stage::Fragment, 0, &q, sizeof q);

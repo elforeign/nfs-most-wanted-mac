@@ -737,3 +737,66 @@ MOD_TEST_SUITE(menu_tab_bar_fits_and_clicks) {
     mods_menu_enable_for_test(false);
     teardown();
 }
+
+// NFSMW 3.0.4 (D-202 item 4, runtime/guest_pause.h): the menu asks for the pause only on the main thread, while open,
+// with pause_in_menu on; the Apply watchdog (Test85: 20 s of the game running prove an Apply) does not count paused
+// time, whether the Apply came before the pause or during it. Control: the same clock without a pause clears it.
+MOD_TEST_SUITE(menu_pause_in_menu) {
+    setup();
+    mods_settings_declare(MODS_OWNER_FIRST_MOD, "a.mod", "aa", "Anti-aliasing", POP_SETTING_INT, 0, 0, 2);
+    mods_settings_set_meta(MODS_OWNER_FIRST_MOD, "aa", "graphics", "help", "renderer", "Game|Off|4x");
+    mods_menu_enable_for_test(true);
+    mods_menu_reset_for_test();
+    MOD_CHECK(!mods_menu_pause_wanted());   // closed
+    mods_menu_open(0);
+    MOD_CHECK(!mods_menu_pause_wanted());   // open, pause_in_menu off (no core mod here: its default)
+    mods_menu_pause_setting_for_test(1);
+    MOD_CHECK(mods_menu_pause_wanted());
+    bool off_main = true;
+    std::thread([&] { off_main = mods_menu_pause_wanted(); }).join();
+    MOD_CHECK(!off_main);                   // a worker never parks
+    MenuSnapshot m;
+    MOD_CHECK(mods_menu_snapshot(&m));
+    const size_t aa = menu_line(m, "Anti-aliasing"), apply = menu_line(m, "Apply");
+    MOD_CHECK(aa != size_t(-1) && apply != size_t(-1));
+    auto apply_at = [&](double t) {
+        mods_menu_clock_for_test(t);
+        int64_t v = 0;
+        mods_settings_get(MODS_OWNER_FIRST_MOD, "aa", &v);
+        mods_menu_pointer_line(0, aa, v ? MENU_POINT_DECREASE : MENU_POINT_INCREASE);
+        MOD_CHECK(mods_menu_pointer_line(0, apply, MENU_POINT_PRESS));
+        MOD_CHECK_EQ(mods_menu_pending_since_for_test(), t);
+    };
+    auto drain_at = [](double t) {
+        mods_menu_clock_for_test(t);
+        mods_menu_main_thread_drain();
+        return mods_menu_pending_since_for_test();
+    };
+    // Applied at 100, paused 105-135: the drain at 130 (25 s after, but paused) keeps it; 20 s of running = 150.
+    apply_at(100);
+    mods_menu_clock_for_test(105);
+    mods_menu_note_pause(true);
+    MOD_CHECK_EQ(drain_at(130), 100.0);
+    mods_menu_clock_for_test(135);
+    mods_menu_note_pause(false);
+    MOD_CHECK_EQ(mods_menu_pending_since_for_test(), 130.0);
+    MOD_CHECK_EQ(drain_at(149), 130.0);
+    MOD_CHECK_EQ(drain_at(151), 0.0);
+    // Control: applied at 200, no pause: cleared at 221.
+    apply_at(200);
+    MOD_CHECK_EQ(drain_at(221), 0.0);
+    // Applied during a pause (300-340, Apply at 310): its 20 s start at the resume.
+    mods_menu_clock_for_test(300);
+    mods_menu_note_pause(true);
+    apply_at(310);
+    mods_menu_clock_for_test(340);
+    mods_menu_note_pause(false);
+    MOD_CHECK_EQ(mods_menu_pending_since_for_test(), 340.0);
+    MOD_CHECK_EQ(drain_at(359), 340.0);
+    MOD_CHECK_EQ(drain_at(361), 0.0);
+    mods_menu_close();
+    MOD_CHECK(!mods_menu_pause_wanted());
+    mods_menu_reset_for_test();
+    mods_menu_enable_for_test(false);
+    teardown();
+}

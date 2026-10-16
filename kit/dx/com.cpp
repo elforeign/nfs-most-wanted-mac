@@ -2,6 +2,7 @@
 #include "com.h"
 #include "../runtime/memory.h"
 
+#include <bitset>
 #include <string.h>
 #include <deque>
 
@@ -44,9 +45,9 @@ void bury(uint32_t id) {
 }
 
 uint32_t g_vtable[IF_COUNT] = {0};
-uint64_t g_kind_mask[IF_COUNT] = {0}; // bit per ComKind
-void (*g_dtor[64])(ComObj *) = {nullptr};
-ComQiHook g_qi_hook[64] = {nullptr};
+std::bitset<K_COUNT> g_kind_mask[IF_COUNT]; // bit per ComKind (a uint64_t until kind 64, K_DIEFFECT)
+void (*g_dtor[K_COUNT])(ComObj *) = {nullptr}; // was [64]: kind 64 (K_DIEFFECT) fell off it
+ComQiHook g_qi_hook[K_COUNT] = {nullptr};
 const char *g_iface_name[IF_COUNT] = {nullptr};
 
 struct IidEntry {
@@ -153,12 +154,12 @@ uint32_t com_view(ComObj *o, ComIface iface) {
         LOGW("dx: %s has no vtable; was com_define called?", com_iface_name(iface));
         return 0;
     }
-    // NFSMW issue 8 (3.0.3): a DirectSound buffer's view gets a sealed page of its own; a guest write to it is stopped
-    // and logged (heap_alloc_readonly), so the game keeps calling a view the kit made. Others as before.
+    // NFSMW issue 8 (3.0.3): with RECOMP_READONLY_PAGES=1 a DirectSound buffer's view gets a sealed page of its own; a
+    // guest write to it is stopped and logged (heap_alloc_readonly). Others as before.
     const bool sealed = iface == IF_DSBUFFER && heap_readonly_enabled();
     uint32_t a = sealed ? heap_alloc_readonly(COM_VIEW_SIZE, "dsound buffer object", o->id) : 0;
-    if (!a)
-        a = heap_alloc(COM_VIEW_SIZE, true, 16);
+    if (!a) // a DirectSound buffer's view lives in the kit span, away from the game's blocks (3.0.4, issue 8)
+        a = iface == IF_DSBUFFER ? heap_alloc_kit(COM_VIEW_SIZE, true, 16) : heap_alloc(COM_VIEW_SIZE, true, 16);
     if (!a) {
         LOGW("dx: out of guest memory for a %s view", com_iface_name(iface));
         return 0;
@@ -268,11 +269,11 @@ void com_register_ole32() {
 }
 
 bool com_iface_binds(ComIface iface, ComKind kind) {
-    return (size_t)iface < IF_COUNT && (g_kind_mask[iface] & (uint64_t(1) << (unsigned)kind)) != 0;
+    return (size_t)iface < IF_COUNT && (size_t)kind < K_COUNT && g_kind_mask[iface].test(kind);
 }
 
 void com_set_destructor(ComKind kind, void (*fn)(ComObj *)) {
-    if ((size_t)kind < 64)
+    if ((size_t)kind < K_COUNT)
         g_dtor[kind] = fn;
 }
 
@@ -298,7 +299,7 @@ void com_destroy(ComObj *o) {
     if (!o || !o->alive)
         return;
     o->refs = 0;
-    if ((size_t)o->kind < 64 && g_dtor[o->kind])
+    if ((size_t)o->kind < K_COUNT && g_dtor[o->kind])
         g_dtor[o->kind](o);
     for (uint32_t i = 0; i < IF_COUNT; ++i) {
         if (o->views[i]) {
@@ -341,8 +342,8 @@ uint32_t com_vtable_of(ComIface iface) {
 }
 
 void com_bind(ComIface iface, ComKind kind) {
-    if (iface < IF_COUNT && (uint32_t)kind < 64)
-        g_kind_mask[iface] |= uint64_t(1) << (uint32_t)kind;
+    if (iface < IF_COUNT && (uint32_t)kind < K_COUNT)
+        g_kind_mask[iface].set(kind);
 }
 
 const char *com_iface_name(ComIface iface) {
@@ -684,7 +685,7 @@ ComIface com_iface_for_iid(uint32_t addr) {
 }
 
 void com_set_qi_hook(ComKind kind, ComQiHook hook) {
-    if ((size_t)kind < 64)
+    if ((size_t)kind < K_COUNT)
         g_qi_hook[kind] = hook;
 }
 
@@ -749,13 +750,12 @@ void com_QueryInterface(X86 *c) {
     }
 
     ComObj *target = o;
-    if ((size_t)o->kind < 64 && g_qi_hook[o->kind]) {
+    if ((size_t)o->kind < K_COUNT && g_qi_hook[o->kind]) {
         ComObj *alt = g_qi_hook[o->kind](o, want);
         if (alt)
             target = alt;
     }
-    if ((uint32_t)target->kind < 64 &&
-        !(g_kind_mask[want] & (uint64_t(1) << (uint32_t)target->kind))) {
+    if ((uint32_t)target->kind < K_COUNT && !g_kind_mask[want].test(target->kind)) {
         char key[64];
         snprintf(key, sizeof key, "qi.kind.%u.%u", (unsigned)target->kind, (unsigned)want);
         log_once(key, "dx: %s is not an interface on this %s object: E_NOINTERFACE",

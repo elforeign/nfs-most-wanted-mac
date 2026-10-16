@@ -74,5 +74,8 @@ void mods_menu_main_thread_call(std::function<void()> fn);
 void mods_menu_main_thread_drain(void);
 #ifdef POPM_TESTING
 void mods_menu_reset_for_test(void);
+void mods_menu_clock_for_test(double seconds);   // the Apply watchdog's clock; -1 = the real one
+void mods_menu_pause_setting_for_test(int on);    // pause_in_menu without a core mod; -1 = the real setting
+double mods_menu_pending_since_for_test(void);
 void mods_menu_enable_for_test(bool on); // off by default, so the older page's tests keep it
 #endif

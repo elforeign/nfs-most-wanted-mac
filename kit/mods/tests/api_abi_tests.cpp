@@ -24,7 +24,8 @@ MOD_TEST_SUITE(api_abi) {
     MOD_CHECK_EQ(offsetof(PopModApi, rumble_pulse), 392u);
     MOD_CHECK_EQ(offsetof(PopModApi, audio_output), 400u);
     MOD_CHECK_EQ(offsetof(PopModApi, d3d9_texture_tag), 408u); // NFSMW Remaster A1 tail (e6c5bb1)
-    MOD_CHECK_EQ(sizeof(PopModApi), 416u);
+    MOD_CHECK_EQ(offsetof(PopModApi, pointer_box), 416u);      // NFSU1 run 9 tail (shared kit, run 37)
+    MOD_CHECK_EQ(sizeof(PopModApi), 424u);
 
     pop_cpu_v1 cpu;
     pop_cpu_v1_init(&cpu);

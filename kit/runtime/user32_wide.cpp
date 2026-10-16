@@ -363,6 +363,28 @@ void case_bytes(X86 *c, bool upper) {
 void upper_buff_a(X86 *c) {
     case_bytes(c, true);
 }
+// CharUpperA/CharLowerA(lpsz): a pointer whose high word is zero is one character, converted and returned in
+// place of the pointer; otherwise the NUL-terminated string is converted in place and the pointer returned.
+void case_string_a(X86 *c, bool upper) {
+    uint32_t p = arg(c, 0);
+    if (!(p >> 16)) {
+        set_eax(c, (uint32_t)case_unit(p & 0xff, upper) & 0xff);
+        return;
+    }
+    for (uint32_t i = 0; gm_valid(p + i, 1); ++i) {
+        uint8_t ch = rd8(p + i);
+        if (!ch)
+            break;
+        wr8(p + i, (uint8_t)case_unit(ch, upper));
+    }
+    set_eax(c, p);
+}
+void upper_a(X86 *c) {
+    case_string_a(c, true);
+}
+void lower_a(X86 *c) {
+    case_string_a(c, false);
+}
 void lower_buff_a(X86 *c) {
     case_bytes(c, false);
 }
@@ -532,6 +554,8 @@ const ImportShim shims[] = {
     W("CharUpperBuffW", 2, upper_buff),
     W("CharLowerBuffW", 2, lower_buff),
     W("CharUpperBuffA", 2, upper_buff_a),
+    W("CharUpperA", 1, upper_a),
+    W("CharLowerA", 1, lower_a),
     W("CharLowerBuffA", 2, lower_buff_a),
     W("CharNextW", 1, next_char),
     W("MapVirtualKeyW", 2, map_key),

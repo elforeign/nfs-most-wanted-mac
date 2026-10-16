@@ -53,3 +53,17 @@ def test_a_new_version_or_mod_api_is_rebuilt(tmp_path):
     tree(tmp_path, '2.0.1', api=b'struct PopModApi { int a; int b; };')
     setup.fresh_build_tree(tmp_path)
     assert not (tmp_path / 'build/cmake').exists()
+
+
+def test_a_new_version_keeps_the_prepared_shaders(tmp_path):
+    """3.0.4 (run 38, D-202): the warm-up's drives and seed stay for warmseed.py to check; its runner goes."""
+    tree(tmp_path, '3.0.3')
+    built(tmp_path)
+    for d in ('build/warm/seed', 'build/warm/drives/default'):
+        (tmp_path / d).mkdir(parents=True)
+    (tmp_path / 'build/warm/seed/order.txt').write_text('x\n')
+    (tmp_path / 'build/recomp/pop_smoke').write_text('runner')
+    tree(tmp_path, '3.0.4')
+    setup.fresh_build_tree(tmp_path)
+    assert not (tmp_path / 'build/cmake').exists() and not (tmp_path / 'build/recomp/pop_smoke').exists()
+    assert (tmp_path / 'build/warm/seed/order.txt').is_file() and (tmp_path / 'build/warm/drives/default').is_dir()

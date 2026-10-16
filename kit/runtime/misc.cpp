@@ -9,6 +9,8 @@
 #include "win32.h"
 #include "loader.h"
 #include "resources.h"
+#include "guest_pause.h"
+#include "mods_seam.h"
 #include <algorithm>
 
 #include <stdio.h>
@@ -25,6 +27,11 @@
 // ---------------------------------------------------------------------------
 // Clock
 // ---------------------------------------------------------------------------
+// kernel32.cpp: the runtime's own service threads and the scheduler's sleep (multimedia timer thread).
+uint32_t recomp_spawn_service_thread(void (*fn)(X86 *, uint32_t), uint32_t param, const char *what);
+void recomp_service_sleep_ms(uint32_t ms);
+void mm_fire_due_timers(X86 *c);
+
 namespace {
 uint64_t g_epoch_us = 0;
 uint32_t (*g_time_source)() = nullptr;
@@ -38,15 +45,129 @@ uint64_t now_us() {
 }
 } // namespace
 
-uint32_t host_millis() {
+namespace {
+uint32_t raw_host_millis() {
     if (g_time_source)
         return g_time_source();
     if (!g_epoch_us)
         g_epoch_us = now_us();
     return (uint32_t)((now_us() - g_epoch_us) / 1000ull);
 }
+
+// NFSMW 3.0.4 (D-202 item 4, guest_pause.h): the guest clock hold. While held, host_millis() reads the value it had
+// when the hold began; on release the held span becomes an offset, so the clock carries on from where it stopped.
+// One writer (the main guest thread at its pause point, under g_hold_m); readers on every guest thread take no lock.
+// A reader can pair a clock read from just before a release with the new offset, so once a hold has happened every
+// reading is kept from going back (g_hold_last): a game's unsigned "now - then" must never see a step backwards.
+// Nothing here runs until the first hold, and a pinned clock is never held (it is its owner's).
+std::mutex g_hold_m;
+std::atomic<bool> g_hold_ever{false}, g_held{false};
+std::atomic<uint32_t> g_hold_frozen{0}, g_hold_raw{0}, g_hold_off{0}, g_hold_last{0};
+std::atomic<uint64_t> g_hold_mono_us{0}, g_hold_off_us{0};
+
+void hold_reset() {
+    std::lock_guard<std::mutex> l(g_hold_m);
+    g_held.store(false);
+    g_hold_ever.store(false);
+    g_hold_frozen.store(0);
+    g_hold_raw.store(0);
+    g_hold_off.store(0);
+    g_hold_last.store(0);
+    g_hold_mono_us.store(0);
+    g_hold_off_us.store(0);
+}
+} // namespace
+
+uint32_t host_millis() {
+    const uint32_t raw = raw_host_millis();   // always read: a boot host's source services the host on a new ms
+    if (!g_hold_ever.load(std::memory_order_acquire) || host_time_source_is_pinned())
+        return raw;
+    const uint32_t t = g_held.load(std::memory_order_acquire) ? g_hold_frozen.load(std::memory_order_relaxed)
+                                                              : raw - g_hold_off.load(std::memory_order_relaxed);
+    uint32_t last = g_hold_last.load(std::memory_order_relaxed);
+    while ((int32_t)(t - last) > 0 && !g_hold_last.compare_exchange_weak(last, t, std::memory_order_relaxed))
+        ;
+    return (int32_t)(t - last) > 0 ? t : last;
+}
 void host_set_time_source(uint32_t (*fn)()) {
     g_time_source = fn;
+    hold_reset();   // a new clock: the old one's held span means nothing to it
+}
+
+void host_guest_clock_hold(bool on) {
+    if (host_time_source_is_pinned())
+        return;
+    std::lock_guard<std::mutex> l(g_hold_m);
+    if (on == g_held.load())
+        return;
+    const uint32_t raw = raw_host_millis();
+    const uint64_t mono_us = os_monotonic_ns() / 1000ull;
+    if (on) {
+        g_hold_raw.store(raw);
+        g_hold_mono_us.store(mono_us);
+        g_hold_frozen.store(raw - g_hold_off.load());
+        g_hold_ever.store(true, std::memory_order_release);
+        g_held.store(true, std::memory_order_release);
+    } else {
+        g_hold_off.store(g_hold_off.load() + (raw - g_hold_raw.load()));
+        g_hold_off_us.store(g_hold_off_us.load() + (mono_us - g_hold_mono_us.load()));
+        g_held.store(false, std::memory_order_release);
+    }
+}
+bool host_guest_clock_held() {
+    return g_held.load(std::memory_order_acquire);
+}
+uint64_t host_guest_clock_us(uint64_t mono_us) {
+    if (!g_hold_ever.load(std::memory_order_acquire))
+        return mono_us;
+    if (g_held.load(std::memory_order_acquire))
+        mono_us = std::min(mono_us, g_hold_mono_us.load(std::memory_order_relaxed));
+    return mono_us - g_hold_off_us.load(std::memory_order_relaxed);
+}
+
+// The park point (guest_pause.h): Present calls it once per frame on whatever thread presents; the menu's answer is
+// "no" off the main thread, so only the main guest thread parks.
+// Run 39: the presenter redraws a changed menu over the held frame (host/present_thread.cpp; weak no-op below).
+extern "C" void host_present_menu_refresh(void);
+namespace {
+std::atomic<bool> g_pause_closed{false};
+std::atomic<void (*)(bool)> g_pause_audio{nullptr};
+} // namespace
+void host_guest_pause_set_audio(void (*fn)(bool paused)) {
+    g_pause_audio.store(fn);
+}
+void host_guest_pause_cancel() {
+    g_pause_closed.store(true);
+}
+void host_guest_pause_point() {
+    if (g_pause_closed.load(std::memory_order_relaxed) || !mods_menu_pause_wanted())
+        return;
+    GuestPauseOps o;
+    o.wanted = [](void *) { return !g_pause_closed.load() && mods_menu_pause_wanted(); };
+    o.hold = [](void *, bool on) {
+        host_guest_clock_hold(on);
+        if (void (*audio)(bool) = g_pause_audio.load())
+            audio(on);
+        mods_menu_note_pause(on);
+    };
+    // The sleep gives up the baton and its checkpoint drains the menu's deferred Apply calls; the clock read is the
+    // host's heartbeat (a boot host services its window and applies queued input on it), so menu keys arrive. Run 39:
+    // then the menu is redrawn over the held frame when those keys changed it (nothing is sealed while parked, so
+    // without this the menu froze on screen).
+    o.slice = [](void *) {
+        recomp_service_sleep_ms(16);
+        (void)host_millis();
+        host_present_menu_refresh();
+    };
+    o.now = [](void *) { return (double)os_monotonic_ns() / 1e9; };
+    o.log = [](void *, bool paused, double seconds) {
+        if (paused)
+            printf("mods: settings menu paused the game\n");
+        else
+            printf("mods: settings menu resumed the game after %.1f s (guest clock held)\n", seconds);
+        fflush(stdout);
+    };
+    guest_pause_run(o);
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +213,7 @@ void host_clear_time_source() {
     g_pin_step = 0;
     g_time_source = nullptr;
     g_clock_desc = nullptr; // back to "monotonic"
+    hold_reset();
 }
 
 bool host_time_source_is_pinned() {
@@ -1034,6 +1156,17 @@ void i_ImmSetCompositionWindow(X86 *c) {
 // -------------------------------------------------------------------------
 // WSOCK32: enough for startup probing; real networking is a later task.
 // -------------------------------------------------------------------------
+// Byte-order helpers (WS2_32 ordinals 8, 9, 14, 15; NFS Underground imports them by ordinal). Pure functions,
+// stdcall with one argument; unregistered, they returned 0 and left the argument on the guest stack.
+void w_htonl(X86 *c) {
+    uint32_t v = arg(c, 0);
+    set_eax(c, (v >> 24) | ((v >> 8) & 0xff00u) | ((v << 8) & 0xff0000u) | (v << 24));
+}
+void w_htons(X86 *c) {
+    uint32_t v = arg(c, 0) & 0xffffu;
+    set_eax(c, ((v >> 8) | (v << 8)) & 0xffffu);
+}
+
 void w_WSAStartup(X86 *c) {
     uint32_t version = arg(c, 0), pdata = arg(c, 1);
     if (pdata) {
@@ -1103,6 +1236,27 @@ void m_timeGetTime(X86 *c) {
     set_eax(c, host_millis());
 }
 
+// Windows runs timeSetEvent callbacks on its own multimedia timer thread, on time, whatever the game's
+// threads are doing. A game that busy-waits for its first tick (NFS Underground's TIMER_init polls
+// GetTickCount and SleepEx(1) until its timer thread counts) never pumps messages, so the timers are
+// serviced here by a runtime thread with the same contract: it sleeps until the soonest timer is due,
+// then calls it. While it exists, host_pump_timers leaves the timers to it.
+static bool g_mm_timer_service = false;
+static void mm_timer_service(X86 *c, uint32_t) {
+    for (;;) {
+        mm_fire_due_timers(c);
+        uint32_t now = host_millis(), wait = 5;
+        for (auto &kv : timers()) {
+            if (!kv.second.alive)
+                continue;
+            int32_t d = (int32_t)(kv.second.next_due - now);
+            if (d < (int32_t)wait)
+                wait = d < 1 ? 1 : (uint32_t)d;
+        }
+        recomp_service_sleep_ms(wait);
+    }
+}
+
 void m_timeSetEvent(X86 *c) {
     uint32_t delay = arg(c, 0), callback = arg(c, 2), user = arg(c, 3), flags = arg(c, 4);
     MmTimer t;
@@ -1117,6 +1271,13 @@ void m_timeSetEvent(X86 *c) {
     t.event_mode = cb_mode != 0; // TIME_CALLBACK_EVENT_SET/_PULSE
     t.event_pulse = cb_mode == 0x20;
     timers()[t.id] = t;
+    // RECOMP_MM_TIMER_THREAD=0 keeps the older behaviour (timers fire only from host_pump_timers).
+    static const bool service_allowed = [] {
+        const char *v = recomp_env("MM_TIMER_THREAD");
+        return !(v && strcmp(v, "0") == 0);
+    }();
+    if (!g_mm_timer_service && service_allowed)
+        g_mm_timer_service = recomp_spawn_service_thread(mm_timer_service, 0, "multimedia timer") != 0;
     LOGV("timeSetEvent(%u ms, %s, %s=%08x) -> id %u", delay, t.periodic ? "periodic" : "one-shot",
          t.event_mode ? "event" : "callback", callback, t.id);
     set_eax(c, t.id);
@@ -1871,6 +2032,8 @@ std::string win32_midi_soundfont_path() {
 // nothing, which is what the shims above already report.
 // ---------------------------------------------------------------------------
 extern "C" {
+// Run 39: a host without the presentation thread has no menu picture to refresh.
+__attribute__((weak)) void host_present_menu_refresh(void) {}
 __attribute__((weak)) int host_midi_open(const char *) {
     return 0;
 }
@@ -1924,6 +2087,12 @@ void host_pump_timers(X86 *c) {
     for (int i = 0; i < g_frame_pump_count; ++i)
         g_frame_pumps[i](c);
 
+    if (g_mm_timer_service)
+        return; // mm_timer_service calls them, on time
+    mm_fire_due_timers(c);
+}
+
+void mm_fire_due_timers(X86 *c) {
     if (timers().empty())
         return;
     uint32_t now = host_millis();
@@ -2188,6 +2357,14 @@ const ImportShim g_misc_shims[] = {
     {"WS2_32.dll", "ord16", 4, nullptr},  // recv
     {"WS2_32.dll", "ord17", 6, nullptr},  // recvfrom
     {"WS2_32.dll", "ord18", 5, nullptr},  // select
+    {"WS2_32.dll", "ord8", 1, w_htonl},   // htonl
+    {"WS2_32.dll", "ord9", 1, w_htons},   // htons
+    {"WS2_32.dll", "ord14", 1, w_htonl},  // ntohl
+    {"WS2_32.dll", "ord15", 1, w_htons},  // ntohs
+    {"WS2_32.dll", "htonl", 1, w_htonl},
+    {"WS2_32.dll", "htons", 1, w_htons},
+    {"WS2_32.dll", "ntohl", 1, w_htonl},
+    {"WS2_32.dll", "ntohs", 1, w_htons},
     {"WS2_32.dll", "ord19", 4, nullptr},  // send
     {"WS2_32.dll", "ord20", 6, nullptr},  // sendto
     {"WS2_32.dll", "ord21", 5, nullptr},  // setsockopt

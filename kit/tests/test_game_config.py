@@ -54,6 +54,90 @@ class LoadTests(unittest.TestCase):
                 for field, value in zip(("MAJOR", "MINOR", "BUILD", "PLATFORM"), expected):
                     self.assertIn("#define RECOMP_WINDOWS_%s %du" % (field, value), header)
 
+    def test_cpu_features_default_mmx_and_rejects_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            for setting, edx in (("", 0), ('cpu_features = ["mmx"]\n', 0x00800000), ("cpu_features = []\n", 0)):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\n" + setting))
+                header = gen_game_config.render_header(game_config.load(game))
+                self.assertIn("#define RECOMP_CPUID_FEATURES_EDX 0x%08xu" % edx, header)
+            for bad in ('["sse"]', '"mmx"', "[1]"):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\ncpu_features = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "cpu_features"):
+                    game_config.load(game)
+
+    def test_cpu_brand_index_default_override_and_rejects_bad(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            for setting, index in (("", 0), ("cpu_brand_index = 0x0c\n", 0x0c), ("cpu_brand_index = 255\n", 255)):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\n" + setting))
+                header = gen_game_config.render_header(game_config.load(game))
+                self.assertIn("#define RECOMP_CPUID_BRAND_INDEX 0x%02xu" % index, header)
+            for bad in ("256", "-1", "true", '"12"'):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\ncpu_brand_index = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "cpu_brand_index"):
+                    game_config.load(game)
+
+    def test_qpc_us_default_off_and_bool_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            for setting, value in (("", 0), ("qpc_us = true\n", 1), ("qpc_us = false\n", 0)):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\n" + setting))
+                self.assertIn("#define RECOMP_QPC_US %d" % value, gen_game_config.render_header(game_config.load(game)))
+            for bad in ("1", '"yes"'):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\nqpc_us = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "qpc_us"):
+                    game_config.load(game)
+
+    def test_data_dir_name_defaults_to_app_name_and_rejects_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            (game / "game.toml").write_text(stub)
+            cfg = game_config.load(game)
+            self.assertEqual(cfg["game"]["data_dir_name"], cfg["game"]["app_name"])
+            self.assertIn('#define RECOMP_DATA_DIR_NAME "%s"' % cfg["game"]["app_name"],
+                          gen_game_config.render_header(cfg))
+            (game / "game.toml").write_text(stub.replace("[game]\n", '[game]\ndata_dir_name = "NFS Underground Native"\n'))
+            self.assertIn('#define RECOMP_DATA_DIR_NAME "NFS Underground Native"',
+                          gen_game_config.render_header(game_config.load(game)))
+            for bad in ('""', '"a/b"', '".."', '" x"', '"a:b"', "1"):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\ndata_dir_name = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "data_dir_name"):
+                    game_config.load(game)
+
+    def test_core_mod_and_releases_repo_default_empty_and_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            (game / "game.toml").write_text(stub)
+            header = gen_game_config.render_header(game_config.load(game))
+            self.assertIn('#define RECOMP_SETTINGS_CORE_MOD ""', header)
+            self.assertIn('#define RECOMP_RELEASES_REPO ""', header)
+            self.assertIn('#define RECOMP_SETUP_LOG ""', header)
+            text = stub + '\n[settings]\ncore_mod = "core.nfsmw"\n' if "[settings]" not in stub else stub.replace("[settings]\n", '[settings]\ncore_mod = "core.nfsmw"\n')
+            text = text + '\n[launcher]\nreleases_repo = "elforeign/nfs-most-wanted-mac"\n' if "[launcher]" not in text else text.replace("[launcher]\n", '[launcher]\nreleases_repo = "elforeign/nfs-most-wanted-mac"\n')
+            (game / "game.toml").write_text(text)
+            header = gen_game_config.render_header(game_config.load(game))
+            self.assertIn('#define RECOMP_SETTINGS_CORE_MOD "core.nfsmw"', header)
+            self.assertIn('#define RECOMP_RELEASES_REPO "elforeign/nfs-most-wanted-mac"', header)
+            for bad in ('setup_log = "/etc/x"', 'setup_log = "a/../b"'):
+                (game / "game.toml").write_text(stub + "\n[launcher]\n" + bad + "\n" if "[launcher]" not in stub else stub.replace("[launcher]\n", "[launcher]\n" + bad + "\n"))
+                with self.assertRaisesRegex(ValueError, "setup_log"):
+                    game_config.load(game)
+            for bad in ('core_mod = "Core NFS"', 'core_mod = 3'):
+                (game / "game.toml").write_text(stub + "\n[settings]\n" + bad + "\n" if "[settings]" not in stub else stub.replace("[settings]\n", "[settings]\n" + bad + "\n"))
+                with self.assertRaisesRegex(ValueError, "core_mod"):
+                    game_config.load(game)
+
     def test_frame_cap_is_optional_and_rendered(self):
         with tempfile.TemporaryDirectory() as tmp:
             game = Path(tmp)
@@ -67,6 +151,30 @@ class LoadTests(unittest.TestCase):
             for bad in ('"x"', "true", "-1"):
                 (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\nframe_cap = %s\n" % bad))
                 with self.assertRaisesRegex(ValueError, "frame_cap"):
+                    game_config.load(game)
+
+    def test_adapter_default_override_and_rejects_bad(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp)
+            stub = (ROOT / "games/stub/game.toml").read_text()
+            (game / "globals.toml").write_text("")
+            for setting, ids, name in (("", (0x10de, 0x0091), "NVIDIA GeForce 7800 GTX"),
+                                       ('adapter = { device = 0x0391, name = "NVIDIA GeForce 7600 GT" }\n',
+                                        (0x10de, 0x0391), "NVIDIA GeForce 7600 GT"),
+                                       ("adapter = { vendor = 0x1002, device = 0x4e48 }\n", (0x1002, 0x4e48),
+                                        "NVIDIA GeForce 7800 GTX")):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\n" + setting))
+                header = gen_game_config.render_header(game_config.load(game))
+                self.assertIn("#define RECOMP_ADAPTER_VENDOR 0x%04xu" % ids[0], header)
+                self.assertIn("#define RECOMP_ADAPTER_DEVICE 0x%04xu" % ids[1], header)
+                self.assertIn('#define RECOMP_ADAPTER_NAME "%s"' % name, header)
+                self.assertIn("#define RECOMP_ADAPTER_MODE_LIST 0", header)
+            (game / "game.toml").write_text(stub.replace("[game]\n", '[game]\nadapter = { modes = "list" }\n'))
+            self.assertIn("#define RECOMP_ADAPTER_MODE_LIST 1", gen_game_config.render_header(game_config.load(game)))
+            for bad in ("{ device = 0x10000 }", "{ device = 0 }", "{ vendor = true }", '{ name = "" }',
+                        "{ revision = 1 }", '"7600"', '{ modes = "all" }'):
+                (game / "game.toml").write_text(stub.replace("[game]\n", "[game]\nadapter = %s\n" % bad))
+                with self.assertRaisesRegex(ValueError, "adapter"):
                     game_config.load(game)
 
     def test_windows_version_rejects_invalid_components(self):
@@ -392,6 +500,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn("#define RECOMP_GLOBAL_SIMULATION_TURN_ADDR 0x00700000u", self.header)
         self.assertIn("#define RECOMP_GLOBAL_ENTITY_BASE_STRIDE 179u", self.header)
         self.assertIn("#define RECOMP_GLOBAL_ENTITY_BASE_COUNT 2000u", self.header)
+
+    def test_global_layout_fields_render_as_hex(self):
+        cfg = dict(self.cfg, globals={"fe_root": {"addr": 0x73578c, "engine": 0x08, "control": 0x1c, "note": "x"}})
+        header = gen_game_config.render_header(cfg)
+        self.assertIn("#define RECOMP_GLOBAL_FE_ROOT_ADDR 0x0073578cu", header)
+        self.assertIn("#define RECOMP_GLOBAL_FE_ROOT_ENGINE 0x00000008u", header)
+        self.assertIn("#define RECOMP_GLOBAL_FE_ROOT_CONTROL 0x0000001cu", header)
+        self.assertNotIn("FE_ROOT_NOTE", header)
 
     def test_hook_lists_render_as_brace_lists_with_a_count(self):
         cfg = dict(self.cfg, hooks={"pair": [0x10, 0x20], "one": 0x30})

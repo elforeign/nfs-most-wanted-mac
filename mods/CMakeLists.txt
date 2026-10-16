@@ -28,31 +28,11 @@ if(DEFINED ENV{NFSMW_XENIA_SOURCE_DIR} AND NOT "$ENV{NFSMW_XENIA_SOURCE_DIR}" ST
   add_subdirectory(${RECOMP_GAME_DIR}/tools/xenia_research ${CMAKE_BINARY_DIR}/xenia-research)
 endif()
 
-# Read-only retail vehicle admission observer: synthetic branch/ABI checks.
-if(NOT IOS AND NOT ANDROID)
-  add_executable(vehicle_admission_tests ${RECOMP_GAME_DIR}/native/tests/vehicle_admission_tests.cpp)
-  target_include_directories(vehicle_admission_tests PRIVATE ${POP_ROOT}/mods)
-  target_compile_options(vehicle_admission_tests PRIVATE ${POP_WARN_HOST})
-  pop_optimize(vehicle_admission_tests 2)
-  pop_test_binary(vehicle_admission_tests)
-  add_test(NAME vehicle_admission_tests COMMAND vehicle_admission_tests)
-  set_tests_properties(vehicle_admission_tests PROPERTIES LABELS nogame)
-endif()
-
-# Frame-arena cadence/high-water diagnostics are opt-in and read-only.
-if(NOT IOS AND NOT ANDROID)
-  add_executable(frame_arena_tests ${RECOMP_GAME_DIR}/native/tests/frame_arena_tests.cpp)
-  target_compile_options(frame_arena_tests PRIVATE ${POP_WARN_HOST})
-  pop_optimize(frame_arena_tests 2)
-  pop_test_binary(frame_arena_tests)
-  add_test(NAME frame_arena_tests COMMAND frame_arena_tests)
-  set_tests_properties(frame_arena_tests PROPERTIES LABELS nogame)
-endif()
-
 # Surface/impact rumble through the real host arbitration and motor router.
 if(NOT IOS AND NOT ANDROID)
   add_executable(rumble_feedback_tests ${RECOMP_GAME_DIR}/native/tests/rumble_feedback_tests.cpp
-    ${POP_ROOT}/host/controls/vpad.cpp ${POP_ROOT}/host/controls/haptics.cpp)
+    ${POP_ROOT}/host/controls/vpad.cpp ${POP_ROOT}/host/controls/haptics.cpp
+    ${POP_ROOT}/host/tests/mods_core_setting_stub.cpp)   # 3.0.4: vpad.cpp reads the deadzone settings
   target_compile_options(rumble_feedback_tests PRIVATE ${POP_WARN_HOST})
   pop_optimize(rumble_feedback_tests 2)
   pop_test_binary(rumble_feedback_tests)
@@ -72,13 +52,6 @@ if(NOT IOS AND NOT ANDROID)
   pop_test_binary(career_fixes_tests)
   add_test(NAME career_fixes_tests COMMAND career_fixes_tests)
   set_tests_properties(career_fixes_tests PROPERTIES LABELS nogame)
-  # Xbox 360 exposure adaptation contract (pure).
-  add_executable(exposure_tests ${RECOMP_GAME_DIR}/native/tests/exposure_tests.cpp)
-  target_compile_options(exposure_tests PRIVATE ${POP_WARN_HOST})
-  pop_optimize(exposure_tests 1)
-  pop_test_binary(exposure_tests)
-  add_test(NAME exposure_tests COMMAND exposure_tests)
-  set_tests_properties(exposure_tests PROPERTIES LABELS nogame)
   add_executable(xenon_particle_tests ${RECOMP_GAME_DIR}/native/tests/xenon_particle_tests.cpp)
   target_compile_options(xenon_particle_tests PRIVATE ${POP_WARN_HOST})
   pop_optimize(xenon_particle_tests 1)

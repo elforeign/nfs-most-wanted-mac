@@ -38,10 +38,13 @@ inline void tick() {
 // Run 29 (D-167, review/run29/opt-design.md): 64 bits (bit 29 was the last free one); bits 32+ are the optimisation
 // pass's switches. Unset env = every switch takes part, as before.
 enum : uint64_t {
-    // Bits 0-8 (stride, sampler, imports, view, preshader, audio, consts, mirrors, aabb: the Test71-75 CPU A/Bs) FREE
+    // Bits 3-8 (sampler, imports, view, preshader, audio, consts, mirrors, aabb: the Test71-75 CPU A/Bs; bit 0 was stride, now QPCFINE) FREE
     // since run 29 (D-167): their earlier code paths were removed; the measured side is the only one.
     // 512u (bit 9, was COMMIT), 8192u (bit 13, SDELTA) and 16384u (bit 14, BATCH) FREE since run 31 (D-176): the A4-lite
     // experiments (commit delta, state-table deltas, hand-over size) were deleted after R31U measured no clear saving.
+    UG1FOG = 2u,    // UG1 run 6: Xbox-style fog (OLD: none; needs RECOMP_UG1_FOG=1, d3d9_metal.mm); name ug1fog
+    HLFADE = 4u,    // UG1 run 6: headlight distance fade (OLD: the PC ramp; needs RECOMP_UG1_HEADLIGHT_FADE); name hlfade
+    QPCFINE = 1u,   // UG1 run 5: QueryPerformanceCounter in microseconds (OLD: 1000-tick millisecond steps, kernel32.cpp); name qpcfine
     A2C = 1024u,    // Remaster A3 step A: alpha-to-coverage variant (d3d9_metal.mm; needs RECOMP_REMASTER_A2C=1)
     NULLDRAW = 2048u, // Remaster A4 gate: draws skipped in OLD periods (d3d9.cpp null_draw); opt-in only
     NULLFX = 4096u,   // Remaster A4 gate: effect passes not applied in OLD periods (d3dx9.cpp apply_pass); opt-in only
@@ -76,6 +79,12 @@ inline uint64_t switches() {
         if (!e || !*e)
             return ~0ull & ~(uint64_t)(NULLDRAW | NULLFX | POOLNULL); // nulldraw, nullfx and poolnull must be named explicitly
         uint64_t bits = 0;
+        if (strstr(e, "qpcfine"))
+            bits |= QPCFINE;
+        if (strstr(e, "ug1fog"))
+            bits |= UG1FOG;
+        if (strstr(e, "hlfade"))
+            bits |= HLFADE;
         if (strstr(e, "a2c"))
             bits |= A2C;
         if (strstr(e, "nulldraw"))

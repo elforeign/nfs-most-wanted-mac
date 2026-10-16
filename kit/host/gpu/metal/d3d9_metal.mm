@@ -842,6 +842,25 @@ static bool d9_fade_on() {
 static NSString *d9_msl_source(const std::string &src) {
     return [NSString stringWithUTF8String:src.c_str()];
 }
+// Run 38 (D-202, prepared shaders kept across updates): one line at every normal exit, whatever the warm-up, the
+// witness that a drive compiled nothing in the draw. The renderer is never torn down at quit (run 18 F7), so the
+// counts are copied here each frame (report_shader_work) and printed by an exit handler.
+struct ShaderWarmFinal {
+    std::atomic<uint32_t> used{0}, draw{0}, draw_slow{0}, draw_pipelines{0}, draw_pipelines_unwarmable{0}, background{0},
+        held_frames{0};
+    std::atomic<bool> warm{false};
+};
+static ShaderWarmFinal g_warm_final;
+static std::once_flag g_warm_final_once;
+static void shader_warm_final_print() {
+    const ShaderWarmFinal &f = g_warm_final;
+    fprintf(stderr,
+            "d3d9 metal: shader warm final: %u pre-compiled used, %u compiled in the draw (%u over 50 ms), %u pipelines "
+            "created in the draw (%u the warm-up cannot prepare), %u compiled in the background; %u frames held 50 ms "
+            "or more%s\n",
+            f.used.load(), f.draw.load(), f.draw_slow.load(), f.draw_pipelines.load(), f.draw_pipelines_unwarmable.load(),
+            f.background.load(), f.held_frames.load(), f.warm.load() ? "" : " (no warm-up)");
+}
 class ShaderWarm {
   public:
     ShaderWarm(id<MTLDevice> dev, std::string dir, std::string seed, std::string identity)
@@ -972,12 +991,22 @@ class ShaderWarm {
                 pipe_claimed_.insert(spec);
             return nil;
         }
+        // NFSMW 3.0.4 (run 39, D-208): kept, not erased. The draw path caches pipelines by its own key, which holds
+        // more than the spec, so the same spec is asked for again (a race asked ~200 times); erased, each of those
+        // built the pipeline in the draw (one held a tunnel frame 148 ms). A pipeline state is immutable: share it.
         id<MTLRenderPipelineState> pso = it->second;
-        pipe_ready_.erase(it);
         if (++pipe_hits_ == 1 || pipe_hits_ == 10 || pipe_hits_ == 100 || pipe_hits_ == 1000)
             fprintf(stderr, "d3d9 metal: pipeline warm-up: %u pre-built pipelines used so far (at %.3f s monotonic)\n",
                     pipe_hits_, os_monotonic_ns() / 1e9);
         return pso;
+    }
+    // NFSMW 3.0.4 (run 39, D-208): a pipeline the draw path had to build is kept under its spec too, so the next draw
+    // asking for the same spec under another key uses it instead of building it again.
+    void offer_pipeline(const std::string &spec, id<MTLRenderPipelineState> pso) {
+        if (!pso)
+            return;
+        std::lock_guard<std::mutex> lock(pipe_mutex_);
+        pipe_ready_.emplace(spec, pso);
     }
     // Test70: called after the draw path created a pipeline itself; a new identity is appended to
     // the profile's pipelines.txt (at most 8192; the read-only seed is never written).
@@ -1273,6 +1302,8 @@ class Renderer final : public D9Backend {
                 identity += "-safe";
             warm_ = std::make_unique<ShaderWarm>(mtl_, warm ? warm : "", seed ? seed : "", identity);
         }
+        g_warm_final.warm.store(warm_ != nullptr);
+        std::call_once(g_warm_final_once, [] { std::atexit(shader_warm_final_print); });
         MTLVertexDescriptor *vd = nil;
         (void)vd;
         zero_ = [mtl_ newBufferWithLength:64 options:MTLResourceStorageModeShared];
@@ -3091,6 +3122,29 @@ class Renderer final : public D9Backend {
             if (shadowpcf_on_ && !recomp_ab::old(recomp_ab::SHADOWPCF))
                 variant.shadowpcf = 1;
         }
+        // UG1 run 6 Xbox-style fog: depth-tested, depth-writing, unblended 3D draws of ps 1.x/2.x programs while the
+        // game's own D3D fog is off (the Xbox skips fog on blended and additive draws; no depth write keeps the sky
+        // out). Both halves or neither (the VS half carries clip y in the fog interpolant).
+        if (ug1fog_.on && !d.render_state[28] && d.render_state[7] && d.render_state[14] && !d.render_state[27] &&
+            pp.major < 3 && !recomp_ab::old(recomp_ab::UG1FOG)) {
+            variant.xfog = 1;
+            vvariant.xfog = 1;
+            ++ug1fog_draws_;
+        }
+        // UG1 run 6 headlight fade: the world-headlight programs (pixel_is_headlight, once per program) with stages 1
+        // and 2 projected (only the two headlight effects set TEXTURETRANSFORMFLAGS[1] and [2]).
+        if (hlfade_mode_ && (variant.projected_mask & 6u) == 6u && !recomp_ab::old(recomp_ab::HLFADE)) {
+            auto hp = hlfade_ps_.find(ps_key);
+            if (hp == hlfade_ps_.end()) {
+                hp = hlfade_ps_.emplace(ps_key, d9msl::pixel_is_headlight(pp)).first;
+                fprintf(stderr, "[ug1] headlight fade: ps %016llx (ps %d.%d) %s\n", (unsigned long long)ps_key,
+                        (int)pp.major, (int)pp.minor, hp->second ? "headlight" : "not headlight");
+            }
+            if (hp->second) {
+                variant.hlfade = hlfade_mode_;
+                ++hlfade_draws_;
+            }
+        }
         auto pool_variant = [&](uint32_t form, bool minimal, d9msl::PixelVariant &pv, d9msl::VertexVariant &vv) {
             const uint16_t st = form == 1 ? 3u : 1u;   // the stages the pool form samples
             if (form < 1 || form > 2 || (variant.depth_mask & st) || (variant.cube_mask & st) || pp.major < 2)
@@ -3175,6 +3229,19 @@ class Renderer final : public D9Backend {
                             (unsigned long long)vs_key, (unsigned long long)ps_key, (unsigned)variant.smoke);
                 variant.smoke = 0;
                 vvariant.smoke = 0;
+                pso = build(variant, vvariant, &vfn, &ffn);
+            }
+            if ((!vfn || !ffn || !pso) && (variant.xfog || vvariant.xfog)) {   // UG1 run 6 fog: drawn as today
+                if (++ug1fog_fallback_ <= 4)
+                    fprintf(stderr, "[ug1] fog: vs %016llx ps %016llx: variant failed, drawn without fog\n",
+                            (unsigned long long)vs_key, (unsigned long long)ps_key);
+                variant.xfog = 0;
+                vvariant.xfog = 0;
+                pso = build(variant, vvariant, &vfn, &ffn);
+            }
+            if ((!vfn || !ffn || !pso) && variant.hlfade) {   // UG1 run 6 headlight fade: drawn as today
+                ++hlfade_fallback_;
+                variant.hlfade = 0;
                 pso = build(variant, vvariant, &vfn, &ffn);
             }
             if ((!vfn || !ffn || !pso) && variant.parallax) {   // run 13 wall parallax: drawn as today
@@ -3433,6 +3500,14 @@ class Renderer final : public D9Backend {
             memcpy(&pparams.fog_start, &rs[36], 4);
             memcpy(&pparams.fog_end, &rs[37], 4);
             memcpy(&pparams.fog_density, &rs[38], 4);
+        } else if (variant.xfog) {   // UG1 run 6 Xbox-style fog (d3d9_msl.h PixelVariant xfog: field reuse)
+            pparams.fog_start = ug1fog_.start;
+            pparams.fog_end = 1.0f / (ug1fog_.end - ug1fog_.start);
+            pparams.fog_density = ug1fog_.falloff;
+            pparams.fog_color[0] = ug1fog_.r;
+            pparams.fog_color[1] = ug1fog_.g;
+            pparams.fog_color[2] = ug1fog_.b;
+            pparams.fog_color[3] = ug1fog_.max;
         }
         [enc_ setFragmentBytes:&pparams length:sizeof pparams atIndex:1];
         set_constants(false, d.pconst, d.pconst_count, pp);
@@ -4312,6 +4387,16 @@ class Renderer final : public D9Backend {
         ++(library ? shader_frame_libs_ : shader_frame_psos_);
     }
     void report_shader_work() {
+        if (shader_frame_ns_ >= 50000000ull)
+            g_warm_final.held_frames.fetch_add(1, std::memory_order_relaxed);
+        g_warm_final.draw.store(draw_compiles_, std::memory_order_relaxed);
+        g_warm_final.draw_slow.store(draw_compiles_slow_, std::memory_order_relaxed);
+        g_warm_final.draw_pipelines.store(draw_pipelines_, std::memory_order_relaxed);
+        g_warm_final.draw_pipelines_unwarmable.store(draw_pipelines_unwarmable_, std::memory_order_relaxed);
+        if (warm_) {
+            g_warm_final.used.store(warm_->hits(), std::memory_order_relaxed);
+            g_warm_final.background.store(warm_->async_started(), std::memory_order_relaxed);
+        }
         if (shader_frame_ns_ >= 50000000ull && shader_reports_ < 200) {
             ++shader_reports_;
             fprintf(stderr,
@@ -4406,6 +4491,11 @@ class Renderer final : public D9Backend {
             fprintf(stderr, "[remaster] parallax: frame %llu parallax draws %llu no-alpha draws %llu fallbacks %llu\n",
                     (unsigned long long)parallax_frames_, (unsigned long long)parallax_draws_,
                     (unsigned long long)parallax_noalpha_, (unsigned long long)parallax_fallback_);
+        if ((ug1fog_.on || hlfade_mode_) && ++ug1fog_frames_ % 600 == 0)
+            fprintf(stderr, "[ug1] looks: frame %llu fog draws %llu (fallbacks %llu) headlight-fade draws %llu (fallbacks %llu)\n",
+                    (unsigned long long)ug1fog_frames_, (unsigned long long)ug1fog_draws_,
+                    (unsigned long long)ug1fog_fallback_, (unsigned long long)hlfade_draws_,
+                    (unsigned long long)hlfade_fallback_);
         if (glass_on_ && ++glass_frames_ % 600 == 0) {
             size_t n = 0;
             for (const auto &kv : glass_ps_)
@@ -7597,11 +7687,19 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
         id<MTLRenderPipelineState> pso = [mtl_ newRenderPipelineStateWithDescriptor:pd
                                                                               error:&error];
         note_shader_work(os_monotonic_ns() - pso_t0, false);
+        ++draw_pipelines_;   // run 38: the counterpart of draw_compiles_ for the final line
+        // NFSMW run 39: of those, the ones no seed can hold (a surface pass's colours 4-6, a shader without a warm key,
+        // a format the spec cannot name). In a real-app race this was 0 of 164: the rest are seeded specs asked for
+        // again under another pipelines_ key after take_pipeline handed out (and erased) the pre-built one; cheap,
+        // since their functions are compiled (0 frames held 50 ms). Keeping taken pipelines for reuse: for later.
+        draw_pipelines_unwarmable_ += spec.empty();
         if (!pso)
             fprintf(stderr, "d3d9 metal: pipeline failed: %s\n",
                     error.localizedDescription.UTF8String);
-        else if (!spec.empty())
+        else if (!spec.empty()) {
             warm_->record_pipeline(spec);
+            warm_->offer_pipeline(spec, pso);
+        }
         pipelines_[key] = pso;
         return pso;
     }
@@ -8976,6 +9074,40 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     // Remaster run 16 glass pop: the ps_1_x window program is patched too (RECOMP_TEST_GLASS1=0, TEST ONLY: not).
     const bool glass1_on_ = [] { const char *e = getenv("RECOMP_TEST_GLASS1"); return !(e && *e == '0'); }();
     uint64_t glass1_draws_ = 0, glass1_draws_at_present_ = 0;
+    // UG1 run 6 Xbox-style fog (RECOMP_UG1_FOG=1; review/run06/research-fog.md, our formula; the defaults are the Xbox
+    // city zone, research-xbox-fog-values.md: start 1.67 m, end 416.7 m, max 0.753, falloff 2.36, sodium haze
+    // 120,105,85). RECOMP_UG1_FOG_PARAMS="start,end,max,falloff,r,g,b" (TEST, tuning). A/B switch ug1fog. Off by default.
+    struct Ug1Fog { bool on = false; float start = 1.67f, end = 416.7f, max = 0.753f, falloff = 2.36f,
+                    r = 0.471f, g = 0.412f, b = 0.333f; };
+    const Ug1Fog ug1fog_ = [] {
+        Ug1Fog f;
+        const char *e = getenv("RECOMP_UG1_FOG");
+        f.on = e && *e == '1';
+        if (const char *pv = getenv("RECOMP_UG1_FOG_PARAMS")) {
+            Ug1Fog t = f;
+            if (sscanf(pv, "%f,%f,%f,%f,%f,%f,%f", &t.start, &t.end, &t.max, &t.falloff, &t.r, &t.g, &t.b) == 7 &&
+                t.end > t.start)
+                f = t;
+            else
+                fprintf(stderr, "[ug1] fog: RECOMP_UG1_FOG_PARAMS \"%s\" ignored (want 7 numbers, end > start)\n", pv);
+        }
+        if (f.on)
+            fprintf(stderr, "[ug1] fog: on (Xbox-style), start %.2f end %.1f max %.3f falloff %.2f colour %.3f %.3f %.3f\n",
+                    f.start, f.end, f.max, f.falloff, f.r, f.g, f.b);
+        return f;
+    }();
+    uint64_t ug1fog_draws_ = 0, ug1fog_frames_ = 0, ug1fog_fallback_ = 0;
+    // UG1 run 6 Xbox headlight distance fade (RECOMP_UG1_HEADLIGHT_FADE=1|2, range RECOMP_UG1_HEADLIGHT_FADE_M;
+    // review/run06/research-headlight.md). A/B switch hlfade. Off by default.
+    const uint8_t hlfade_mode_ = [] {
+        const char *e = getenv("RECOMP_UG1_HEADLIGHT_FADE");
+        const uint8_t m = e && (*e == '1' || *e == '2') ? uint8_t(*e - '0') : 0;
+        if (m)
+            fprintf(stderr, "[ug1] headlight fade: on, mode %u, range %.0f m\n", (unsigned)m, d9msl::hlfade_range());
+        return m;
+    }();
+    std::unordered_map<uint64_t, bool> hlfade_ps_;
+    uint64_t hlfade_draws_ = 0, hlfade_fallback_ = 0;
     const char *const test_skip_label_ = [] { const char *e = getenv("RECOMP_TEST_SKIP_LABEL"); return e && *e ? e : nullptr; }();
     // Remaster run 13 natural water (RECOMP_REMASTER_WATER=1; A/B switch water).
     // 1 = Definitive, 2 = Xbox 360 (the patch's mode, PixelVariant.water); anything else = off.
@@ -9060,6 +9192,7 @@ fragment float4 hdr_addback_fs(HV i [[stage_in]], float4 dst [[color(0)]], textu
     std::unordered_map<uint64_t, std::string> deferred_src_;   // function key -> source compiling in the background
     uint32_t deferred_logged_ = 0, slow_logged_ = 0;
     uint32_t draw_compiles_ = 0, draw_compiles_slow_ = 0, warm_report_used_ = 0, warm_report_draw_ = 0, warm_report_bg_ = 0;
+    uint32_t draw_pipelines_ = 0, draw_pipelines_unwarmable_ = 0;
     uint64_t warm_report_ns_ = 0;
     bool msaa_fallback_logged_ = false;   // owner 8 Oct (Off/2x/4x): a refused sample count, once
     std::set<uint64_t> msaa_logged_;   // Test70: multisampled target sizes already reported   // Test70: function -> recorded library key

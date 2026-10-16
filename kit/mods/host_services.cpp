@@ -19,6 +19,7 @@
 #include "../platform/os.h"
 #include "../dx/host_api.h"
 
+#include <cmath>
 #include <map>
 #include <stdio.h>
 #include <string>
@@ -314,6 +315,13 @@ void mods_fill_host_api(PopModApi *api) {
     };
     api->ui_elements = [](const PopModApi *, uint64_t *ids, uint32_t max) {
         return host_display_elements(ids, max);
+    };
+    api->pointer_box = [](const PopModApi *, float x0, float y0, float w, float h) -> PopModStatus {
+        if (!(std::isfinite(x0) && std::isfinite(y0) && std::isfinite(w) && std::isfinite(h)) || w <= 0.01f ||
+            h <= 0.01f || x0 < 0 || y0 < 0 || x0 + w > 1.001f || y0 + h > 1.001f)
+            return POP_E_INVAL;
+        host_display_set_ui_box(x0, y0, w, h);
+        return POP_OK;
     };
     api->screen_size = [](const PopModApi *, uint32_t *w, uint32_t *h) -> PopModStatus {
         int32_t sw = 0, sh = 0;

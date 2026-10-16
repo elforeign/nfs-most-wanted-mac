@@ -200,6 +200,11 @@ void render_player(int32_t id, Player &p, float *const *out, uint32_t frames) {
     }
 }
 
+// NFSMW 3.0.4 (an idea from SpeedBreaker, github.com/SpeedBreakerProject/speedbreaker; no code taken): silence while the window is in the background (the core mod's mute_in_background, set by the host's
+// focus events). The mix still runs and the device still pulls, so every cursor and stream keeps time; only what
+// goes out is zero.
+std::atomic<bool> g_background_mute{false};
+
 // The whole mix for one block, into deinterleaved buffers that arrive zeroed.
 // Voices, then the music, then the clipper, then the capture.
 void render_block(float *const *out, uint32_t frames) {
@@ -246,6 +251,9 @@ void render_block(float *const *out, uint32_t frames) {
     if (host_capture_active())
         host_capture_write(out[0], out[1], frames,
                            int(busy)); // legacy capture is front stereo only
+    if (g_background_mute.load(std::memory_order_relaxed))
+        for (unsigned c = 0; c < 6; ++c)
+            memset(out[c], 0, frames * sizeof(float));
 }
 
 struct Channel {
@@ -1735,6 +1743,10 @@ extern "C" int32_t host_audio_is_playing(int32_t id) {
     bool playing = false;
     audio_advance(id, &playing);
     return playing ? 1 : 0;
+}
+
+void host_audio_set_background_mute(bool muted) {
+    g_background_mute.store(muted, std::memory_order_relaxed);
 }
 
 void host_audio_pause(bool paused) {

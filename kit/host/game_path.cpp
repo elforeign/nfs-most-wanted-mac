@@ -64,13 +64,15 @@ GamePath game_path_resolve(const char *flag, const char *data_root) {
         g.source = GamePathSource::Environment;
         return g;
     }
-    // The build's own copy of the game: game.toml names it by an absolute
-    // path (a game repository's original/), so it is found from wherever the
-    // app runs; a relative spelling is taken from the checkout root.
+    // The build's own copy of the game, for developer runs only (a checkout
+    // above the app): game.toml names it by an absolute path (a game
+    // repository's original/) or relative to the checkout root. A packaged app
+    // never uses it, so it finds the player's game on this Mac as on any other
+    // (the saved path, else the launcher).
     const HostLayout &l = host_layout();
-    std::string candidate = RECOMP_DEVELOPER_EXE;
-    if (candidate.empty() || candidate[0] != '/')
-        candidate = l.developer ? l.checkout_root + "/" + candidate : std::string();
+    std::string candidate = l.developer ? std::string(RECOMP_DEVELOPER_EXE) : std::string();
+    if (!candidate.empty() && candidate[0] != '/')
+        candidate = l.checkout_root + "/" + candidate;
     OsStat st;
     if (!candidate.empty() && os_stat(candidate.c_str(), &st) == 0) {
         g.exe = candidate;

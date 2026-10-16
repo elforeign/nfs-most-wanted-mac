@@ -131,6 +131,7 @@ If the game does not keep a smooth 60 fps, change these first, in this order:
 | **Picture height (0 = auto)** `height` | 0 to 16384 | 0 | after a restart | The height of the 3D picture in pixels. 0 matches your screen, which is best. Weaker Mac: keep 0 and use Upscaling instead. |
 | **How much you see to the sides** `fov_scaling` | Original / Xbox 360 / Exact | Xbox 360 | after a restart | How much of the road you see to the sides. Xbox 360 (the default): a little wider, like the console. Original: the PC game's view. Exact: matched to your screen's shape. |
 | **Menu size %** `fe_scale` | 50 to 150 | 100 | after a restart | Makes the game's menus bigger or smaller. 100 is normal; raise it if menu text is hard to read on a TV. |
+| **Brightness** `brightness` | -5 to 5 | 0 | at once | Makes the shadows and mid-tones a little lighter (+) or darker (-), like a TV's brightness; black and white stay as they are, and the menus are not changed. 0 shows the picture as it is. Cost: none. |
 
 ### Sharpness and upscaling
 
@@ -154,6 +155,7 @@ If the game does not keep a smooth 60 fps, change these first, in this order:
 | Setting | Choices | Default | Takes effect | What it does |
 |---|---|---|---|---|
 | **5.1 surround sound** `surround_audio` | Off / On | off | at the next screen or load | Sends 5.1 surround sound to your speakers or receiver. Off: stereo. |
+| **Mute in background** `mute_in_background` | Off / On | off | at once | Silences the game while its window is not in front (another app is active), and brings the sound back when you return. Off keeps the sound playing. Cost: none. |
 | **Dolby Digital (for TVs and receivers)** `audio_dolby_digital` | Off / On | on | at the next screen or load | Sends surround as Dolby Digital over HDMI to a TV or receiver. Turn off if 5.1 sound comes out of the wrong speakers. |
 | **Fix swapped centre/subwoofer** `audio_center_lfe_swap` | Off / On | off | at the next screen or load | Swaps the centre and subwoofer channels, for setups where voices come from the subwoofer. |
 
@@ -175,7 +177,7 @@ If the game does not keep a smooth 60 fps, change these first, in this order:
 | Setting | Choices | Default | Takes effect | What it does |
 |---|---|---|---|---|
 | **Xbox 360 front end** `x360_frontend` | Off / On | on | after a restart | The Xbox 360 menus, title and loading art and garages from the Xbox 360 Stuff Pack, when Setup added it. Off: the PC menus (and any menu mod in your game folder). |
-| **Xbox 360 start screen** `splash_xbox` | Off / On | on | after a restart | Shows the Xbox 360 start screen with the EA and HD logos, when the USA videos are installed. Off: the PC start screen. |
+| **Xbox 360 start screen** `splash_xbox` | Off / On | off | after a restart | Shows the Xbox 360 start screen (dark, the logo to the right). Off: the PC start screen, the BMW picture with the EA and HD logos. |
 | **Fit movies to the screen** `movie_fit` | Off / On | on | at the next screen or load | Shows the full widescreen movies without cutting off the sides. |
 | **Skip intro movies** `skip_movies` | Off / On | off | after a restart | Skips the movies at start-up and in the story (logos and story videos). |
 | **Skip cut-scenes** `skip_nis` | Off / On | off | after a restart | Skips the in-game cut-scenes. |
@@ -188,6 +190,7 @@ If the game does not keep a smooth 60 fps, change these first, in this order:
 
 | Setting | Choices | Default | Takes effect | What it does |
 |---|---|---|---|---|
+| **Settings menu pauses the game** `pause_in_menu` | Off / On | on | at once | The game stops while this settings menu (F10) is open: race clock, traffic, police and music wait, and carry on when you close it. Off keeps the game running behind the menu. Cost: none. |
 | **Black Edition extras** `black_edition` | Off / On | on | after a restart | Adds the Black Edition cars, races and content. |
 | **Race beaten Blacklist rivals again** `replay_blacklist` | Off / On | on | after a restart | Lets you race Blacklist rivals you already beat. |
 | **Special vinyls** `special_vinyls` | Off / On | on | after a restart | Adds the special vinyls category in the paint shop. |
@@ -249,6 +252,8 @@ If the game does not keep a smooth 60 fps, change these first, in this order:
 |---|---|---|---|---|
 | **PlayStation-style buttons** `ps2_controls` | Off / On | on | at once | The default controller layout: Cross accelerates and Triangle goes back, like the PlayStation version. Change any driving button in the game's Options, Controls. |
 | **Triggers as pedals** `trigger_pedals` | Off / On | off | at once | R2 accelerates and L2 brakes, both analog, like most modern racing games. Off: the face-button layout. |
+| **Stick deadzone** `stick_deadzone` | 0 to 30 | 8 | at once | How far a stick must move before the game sees it, in percent. Raise it if the car steers by itself with the stick at rest; lower it for a quicker response. 8 is the default. Cost: none. |
+| **Trigger deadzone** `trigger_deadzone` | 0 to 30 | 0 | at once | How far a trigger must be pressed before it counts, in percent; past it the full range is kept. Raise it if the car creeps forward or brakes with the triggers released. 0 is the default. Cost: none. |
 | **L3 skips music track** `l3_skip_track` | Off / On | on | at once | Clicking the left stick skips to the next music track, like the T key. |
 | **PlayStation button icons** `ps_icons` | Off / On | on | after a restart | Shows PlayStation button symbols in the menus when you use a controller. Needs XtendedInputButtons.tpk (the XtendedInput mod) in your game folder's GLOBAL folder; without it, or Off, the PC game's prompts show. |
 | **Shift up button** `shift_up` | -1 to 11 | 7 | at once | Controller button for shifting up with manual gears. 7 is R2; -1 turns it off. The settings guide lists the other numbers. |

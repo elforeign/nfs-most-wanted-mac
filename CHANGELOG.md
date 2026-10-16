@@ -1,5 +1,48 @@
 # Changelog
 
+## 3.0.4 — a pausing settings menu, faster updates, Brightness, deadzones, mute in background, a bug report button and update checks
+
+- **Brightness** (Display): -5 to +5 makes the shadows and mid-tones a little lighter or darker, like a TV's
+  brightness. Black and white stay as they are, and the menus are not changed. 0 (the default) is the picture as it is.
+- **Stick deadzone** and **Trigger deadzone** (Controls), in percent: raise them if the car steers, accelerates or
+  brakes by itself with the controller at rest. The defaults (8 and 0) are the behaviour so far.
+- **Mute in background** (Audio, off by default): silence while the game's window is not in front.
+- **Settings > Mods > Help:** **Save bug report** puts one zip on your Desktop with the newest logs, your settings and
+  the mod reports, to attach to an issue (nothing is uploaded; no saves or game files). **Check for updates** asks
+  GitHub once whether a newer version is out, only when you press it, and opens its page if there is one.
+- **The settings menu pauses the game** (Gameplay > **Settings menu pauses the game**, on by default): while the F10
+  menu is open the race clock, the traffic, the police and the music wait, and they carry on where they were when it
+  closes. Settings still change and apply under the paused menu. Switch it off to keep the game running behind the
+  menu, as before.
+- **Updates keep the prepared shaders:** with "Prepare the shaders" ticked, an update no longer drives the game for
+  about 35 minutes again when the new version draws its shaders the same way; Setup checks them and reuses them in
+  seconds ("Shaders reused from the earlier build"). When a version changes how the shaders are made, it prepares
+  them again, as before. The game's log ends with a line saying how many shaders were ready and how many were still
+  made while you drove.
+- **Prepare the shaders works on a first Setup:** on a Mac that had never compiled this game's shaders, the warm-up's
+  drive could lose its menu keys while the main menu compiled, never reach a race, and skip the shaders ("the first
+  drive will stutter once"). It now waits until each menu has settled before it presses on.
+- **The PC start screen is back:** "Click to continue" shows the BMW picture with the EA | HD line again. The Xbox 360
+  start screen (dark, the logo to the right) is now off by default; switch it on in Interface > Xbox 360 start screen.
+- **Fewer hitches:** the game keeps the render pipelines it prepared and reuses them; before, it could build one again
+  mid-race (a frame held for about 150 ms in a tunnel).
+- **Compiler check:** Setup says which compiler and macOS SDK it builds with, and whether that is the one the game was
+  tested with (any version 16 or later builds it). The game's log names the same, with the kit's version.
+- **Needs macOS 14.5 or later:** the game is built with Command Line Tools 16 or later (the macOS 15 SDK, as 3.0.3
+  already needed), and those need macOS 14.5 (Sonoma). The Setup app now says so before it starts, instead of
+  stopping at the compiler check.
+- **Shared code with the other ports:** the Mac port's engine code is now the same for Most Wanted and the
+  Underground ports, so fixes reach all three.
+- **Checksums:** each Setup DMG on the release page now has a `.sha256` file beside it
+  (`shasum -a 256 -c NFS-Most-Wanted-Native-Setup-v3.0.4.dmg.sha256`).
+- **Start-up crash (#8), continued:** the game's sound banks were being written over the memory of the sound output on
+  some Macs. The sound output's own memory now lives apart from the game's (as DirectSound's does on Windows), and the
+  write-blocking of 3.0.3, which left the game at a black screen, is off. The log now also says where the game puts
+  its sound banks, and which compiler and macOS SDK built your game (Setup builds it on your Mac).
+- **Credit:** the Brightness, deadzone and mute settings, the bug report button, the update check and the checksum
+  files are ideas from **SpeedBreaker** (https://github.com/SpeedBreakerProject/speedbreaker), the Xbox 360
+  recompilation of this game. Thanks to its authors. No code was taken from it.
+
 ## 3.0.3 — the right resolution for your screen, 120 Hz on any screen, and a crash guard
 
 - **Auto resolution sees your screen:** Auto (and the list's own entry for your screen) now reads the screen the game

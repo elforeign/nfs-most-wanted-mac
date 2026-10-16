@@ -12,6 +12,9 @@ void host_present_test_presented(uint64_t id, double ts);
 void host_present_test_prefix_done(uint64_t id);
 bool host_present_test_released(uint64_t id);
 uint64_t host_present_test_last_id();
+// Run 39: repeats that composed again because the menu was redrawn while the guest was parked.
+uint64_t host_present_test_recomposed();
+uint64_t host_present_test_page_id();   // run 39: the cached menu page (a fake service's stand-in handle)
 uint8_t host_present_test_last_pixel();
 bool host_present_test_class_valid();
 void host_present_test_fail_allocations(unsigned count);

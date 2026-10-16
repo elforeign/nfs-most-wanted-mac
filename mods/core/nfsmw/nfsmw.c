@@ -464,6 +464,7 @@ static PopModStatus install_at(uint32_t addr, uint32_t ret, PopHookFn fn, int32_
 #include "x360_frontend.h"   /* 2.0.4: the Stuff Pack front end (overlay); ported run 29 */
 #include "datamods.h"        /* run 29 modding stage 1: the DataMods folder (overlay) */
 #include "snd_stall.h"       /* run 32 issue 8: no DirectSound restart when the output starts slowly */
+#include "snd_bank_log.h"    /* 3.0.4 issue 8: where the game puts its sound banks (diagnostics) */
 #include "eo_extra.h"          /* Remaster EO batch 1: unlock all, barriers, LOD (owner, 5 Oct) */
 #include "mirror_props.h"       /* knocked-over props in the mirror (Test137) */
 
@@ -772,6 +773,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
     x360fe_init(api);          /* 2.0.4: the Stuff Pack front end (ported run 29) */
     datamods_init(api);        /* run 29 modding stage 1: DataMods layers, after the front end so a data mod wins */
     snd_stall_init(api);       /* run 32 issue 8: the sound thread's restart guard */
+    snd_bank_log_init(api);    /* 3.0.4 issue 8: each sound bank's address (the first 16) */
     smoke_init(api);           /* denser tyre smoke (run 14): slot 152, same function as the spark hook */
     smoke_light_init(api);     /* lit smoke (run 14 stage 1): slot 153, the per-emitter particle draw */
     /* x360_exposure (label "Glow and auto brightness"; the key name is historical) gates the rebuilt effects. */

@@ -1033,6 +1033,15 @@ void add_bottles(std::vector<std::string> *bases, const std::string &bottles) {
 
 std::vector<std::string> detect_installs(const Spec &spec) {
     std::vector<std::string> bases;
+    // Tests: RECOMP_LAUNCHER_SEARCH=<dir>:<dir> replaces the places searched,
+    // so a run does not depend on what this machine has installed.
+    if (const char *search = recomp_env("LAUNCHER_SEARCH"); search && *search) {
+        std::istringstream dirs(search);
+        for (std::string dir; std::getline(dirs, dir, ':');)
+            if (!dir.empty())
+                bases.push_back(dir);
+        return detect_under(spec, bases);
+    }
 #ifdef _WIN32
     char buf[4096];
     for (const std::string &id : spec.gog_ids)
@@ -1054,7 +1063,11 @@ std::vector<std::string> detect_installs(const Spec &spec) {
     const std::string home = env("HOME");
     bases.push_back(join(home, "Games"));
     bases.push_back(join(home, "Downloads"));
+    bases.push_back(join(home, "Documents"));
+    bases.push_back(join(home, "Desktop"));
+    bases.push_back(join(home, "Applications"));
     bases.push_back("/Applications");
+    add_drive_c(&bases, join(home, ".wine/drive_c"));
     add_bottles(&bases, join(home, "Library/Application Support/CrossOver/Bottles"));
     add_bottles(&bases, join(home, "Library/Containers/com.isaacmarovitz.Whisky/Bottles"));
     add_steam_libraries(&bases, join(home, "Library/Application Support/Steam"));

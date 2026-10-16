@@ -189,8 +189,16 @@ struct HostGuestPointer {
     bool arena_available = false;
     uint32_t arena_size = 0, object = 0, vtable = 0, context = 0;
     int32_t x = 0, y = 0, left = 0, top = 0, right = 0, bottom = 0;
+    uint32_t x_addr = 0, y_addr = 0; // where x and y live (placement writes them): object+0x20/+0x24, or the pair
 };
 HostGuestPointer host_guest_pointer_resolve(const uint8_t *arena, uint32_t size, uint32_t object);
+// A game whose cursor is a plain x/y pair of globals ([hooks] mouse_pair_x / mouse_pair_y, NFS Underground run 2):
+// ready once the guard dword is non-zero (the game's mouse exists); the bounds are the display mode, 0..w-1 x 0..h-1,
+// and the coordinates may sit on w or h (the game clamps to its client rectangle inclusively).
+HostGuestPointer host_guest_pointer_resolve_pair(const uint8_t *arena, uint32_t size, uint32_t guard, uint32_t x_addr,
+                                                 uint32_t y_addr, int32_t mode_w, int32_t mode_h);
+// The game's pointer by whichever form its hooks name (the pair when [hooks] mouse_pair_x is set, else the object).
+HostGuestPointer host_guest_pointer_current(void);
 const char *host_guest_pointer_failure_name(HostGuestPointer::Failure failure);
 
 // Task 9 compositor mapping. Except set_layout (presenter publication), these

@@ -69,6 +69,34 @@ def fail(msg):
 ENV = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"))
 
 
+def toolchain_module():
+    """The kit's compiler check (kit/tools/toolchain.py, 3.0.4, owner D-203a)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("toolchain", KIT / "tools/toolchain.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_toolchain():
+    """3.0.4 (D-203a): every player's Setup compiles the game with their own compiler. Log whether it is the one the
+    release was tested with (Save bug report attaches this log), stop below the kit's minimum, and make CMake use
+    the same /usr/bin/clang the check read (not a Homebrew clang earlier on PATH)."""
+    tc = toolchain_module()
+    ok, line = tc.check(tc.read_spec(), *tc.probe())
+    say("  " + line)
+    if not ok:
+        fail(line.split(": ", 1)[1])
+    ENV.update(tc.COMPILER_ENV)
+
+
+def release_version():
+    """The version this source is ("## 3.0.4 — ..." at the top of CHANGELOG.md), baked into the game so its log
+    says "(kit 3.0.4)": a source archive has no git history for CMake to describe."""
+    top = next((l for l in (ROOT / "CHANGELOG.md").read_text().splitlines() if l.startswith("## ")), "")
+    return top[3:].split()[0] if top[3:].split() else "unknown"
+
+
 def run(args, **kw):
     say("  $ " + " ".join(str(a) for a in args))
     with LOG.open("a") as log:
@@ -342,9 +370,13 @@ def fresh_build_tree(root):
     if not stamp.is_file() or stamp.read_text() != ident:
         if (root / "build/cmake").exists():
             say("  new source version: rebuilding from scratch (the earlier build is not reused)")
-        # run 28 review F1: the warm-up's offscreen runner and its drives belong to the earlier version too
+        # run 28 review F1: the warm-up's offscreen runner belongs to the earlier version too. 3.0.4 (run 38, D-202):
+        # the prepared shaders (build/warm) are kept: warmseed.py reuses them only when this version's shader
+        # generator, effects and formats are the ones they were made with (its fingerprint), else drives again
+        if (root / "build/warm/seed/order.txt").is_file():
+            say("  shader warm-up: the earlier version's prepared shaders are kept for checking")
         for p in (root / "build/cmake", root / "build/SpeedRecomp.app", root / "build/recomp/mods",
-                  root / "build/recomp/pop_smoke", root / "build/warm"):
+                  root / "build/recomp/pop_smoke"):
             if p.is_dir():
                 shutil.rmtree(p, ignore_errors=True)
             elif p.exists():
@@ -391,6 +423,7 @@ def main():
     if args.check_only:
         say("Check passed. Nothing was changed.")
         return
+    check_toolchain()
     say("2/7 Linking the game")
     link_game(game, image)
 
@@ -405,8 +438,9 @@ def main():
 
     say("4/7 Translating and building")
     stamp, ident = fresh_build_tree(ROOT)
-    run([PY, "tools/build.py", "--regenerate", "--allow-table-gaps", ALLOW_GAPS])
-    run([PY, "tools/build.py", "--target", "plugins"])
+    version = release_version()
+    run([PY, "tools/build.py", "--regenerate", "--allow-table-gaps", ALLOW_GAPS, "--version", version])
+    run([PY, "tools/build.py", "--target", "plugins", "--version", version])
     if not (ROOT / "build/SpeedRecomp.app/Contents/MacOS/SpeedRecomp").is_file():
         fail("the build finished without build/SpeedRecomp.app")
     stamp.write_text(ident)
@@ -553,7 +587,8 @@ def main():
         say("  shader warm-up: skipped" + (" (--no-shader-seed)" if WARM_DEFAULT_ON else " (turn on Prepare the shaders, "
             "or pass --shader-seed, to make it)") + "; the first drive will stutter once")
     else:
-        say("  shader warm-up: preparing the game's shaders (about 35 minutes; offscreen, no window)")
+        say("  shader warm-up: preparing the game's shaders (reused in seconds when an earlier build made them the same "
+            "way; otherwise about 35 minutes, offscreen, no window)")
         warm_cmd = [PY, "tools/warm_seed/warmseed.py", "--cache", ROOT / "build/warm", "--out", seed]
         if have_hd:
             warm_cmd += ["--hd-pack", hd_pack, "--materials", materials, "--relief", relief]

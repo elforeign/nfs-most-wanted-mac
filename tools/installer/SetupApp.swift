@@ -140,8 +140,9 @@ func startingTicks(saved: (hd: Bool?, seed: Bool?), found: (hd: Bool, seed: Bool
 }
 
 /// Made before: the HD stages resume (a few minutes for the material set and the wall relief). The shader warm-up is
-/// counted in full: a new version clears the earlier warm-up (setup.py source_stamp, run 28 review F1), so an update
-/// prepares the shaders again; only a rerun of the same version reuses its drives.
+/// counted in full: 3.0.4 (run 38, D-202) keeps it across updates and reuses it in seconds when the new version draws
+/// its shaders the same way (warmseed.py's fingerprint, known only once this Mac has built the effects), else prepares
+/// them again; the estimate is the longer case.
 func firstBuildEstimate(hd: Bool, shaders: Bool, hdMade: Bool = false, seedMade: Bool = false) -> String {
     let minutes = 10 + (hd ? (hdMade ? 10 : 75) : 0) + (shaders ? 35 : 0)
     if minutes < 60 { return "\(minutes) minutes" }
@@ -171,6 +172,9 @@ func logProgress(_ text: Substring) -> (fraction: Double?, detail: String?) {
             break
         }
         if line.contains("shader warm-up: seed ready") { fraction = 1; detail = "Shaders prepared"; break }
+        if line.contains("shader warm-up: reused the prepared shaders") {   // 3.0.4 (run 38, D-202)
+            fraction = 1; detail = "Shaders reused from the earlier build"; break
+        }
         // 2.1: "HD textures: N of M (model 2.1 s/tex; about 48 min left)"
         if line.contains("min left"), let r = line.range(of: "HD textures: "),
            let of = line.range(of: " of ", options: [], range: r.upperBound..<line.endIndex),
@@ -572,7 +576,7 @@ struct ContentView: View {
                     if s.fromEarlierWork {
                         Text("Ticked because an earlier build made \(s.madeBefore.hd ? "the HD textures" : "")"
                              + "\(s.madeBefore.hd && s.madeBefore.seed ? " and " : "")\(s.madeBefore.seed ? "the shaders" : ""): "
-                             + "the HD textures are reused (minutes, not hours); the shaders are prepared again for this version (about 35 minutes). Untick to leave them out.")
+                             + "the HD textures are reused (minutes, not hours); the shaders are reused when this version draws them the same way (seconds), otherwise prepared again (about 35 minutes). Untick to leave them out.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
