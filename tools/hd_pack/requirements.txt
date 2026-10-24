@@ -14,7 +14,7 @@ networkx==3.7
 numpy==2.5.3
 pillow==12.3.0
 safetensors==0.8.0
-setuptools==84.0.0
+setuptools==84.1.0
 spandrel==0.4.2
 sympy==1.14.0
 torch==2.14.1
