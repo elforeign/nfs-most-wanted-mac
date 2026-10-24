@@ -5,7 +5,7 @@
 archspec==0.2.6
 einops==0.8.2
 etcpak==0.9.15
-filelock==4.0.12
+filelock==4.2.1
 fsspec==2026.9.0
 Jinja2==3.1.6
 MarkupSafe==3.0.4
