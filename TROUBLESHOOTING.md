@@ -21,14 +21,14 @@ names the Intel-only tool it found. Install Apple's Command Line Tools (`xcode-s
 Update**, or run `xcode-select --install`, then build again. The macOS SDK must be version 14 or newer.
 
 **"The PC folder has no ... directory" / "is missing ..."** — choose the installed game folder that holds `speed.exe`
-together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or the Black Edition `.zip` that contains that folder. A PC
+together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` that contains that folder. A PC
 installer or PC disc image is not enough (an Xbox 360 `.iso` is fine for the Xbox 360 copy).
 
 **"The .zip contains an unsafe path" / "a link" / "is far larger than the game" / "can't be read"** — Setup only
 unpacks a `.zip` that holds plain game files. Download it again, or unzip it yourself and choose the folder.
 
 **"Not available yet; choose an installed PC game folder"** — building from a PC disc image is not available yet.
-Install the game first and choose its folder, or choose the Black Edition `.zip`. (Your Xbox 360 `.iso` works.)
+Install the game first and choose its folder, or choose a `.zip` of that folder. (Your Xbox 360 `.iso` works.)
 
 **The `speed.exe` can't be used** — the port is a translation of the PC game's version 1.3 code. Other versions contain
 different code and would not work. Any `speed.exe` that has the 1.3 code is accepted; the log shows the code region

@@ -495,7 +495,7 @@ def validate_pc(root, source_root=ROOT):
     return exe, fingerprint
 
 
-ZIP_MAX_BYTES = 8 * 1024**3   # the Black Edition download unpacks to 2.8 GB
+ZIP_MAX_BYTES = 8 * 1024**3   # a full game folder unpacks to about 2.8 GB
 ZIP_MAX_FILES = 20000         # it has about 1,500 entries
 PC_DIRS = ("GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND")
 
@@ -1094,7 +1094,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     dependencies = dependency_identity(source_root, toolchain) if args.build else None
     events.progress()
     events.stage("pc")
-    if is_pc_zip(pc):  # the community download "Need For Speed Most Wanted Black Edition.zip": only read
+    if is_pc_zip(pc):  # a .zip of the game folder: only read
         pc = extract_pc_zip(pc, paths.work, events)
     exe, fingerprint = validate_pc(pc, source_root)
     pc_hash = digest_tree(pc)
@@ -1221,7 +1221,7 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--build", action="store_true")
-    ap.add_argument("--pc", required=True, help="installed PC game folder, or the Black Edition .zip (unpacked into --work; disc images are not supported)")
+    ap.add_argument("--pc", required=True, help="installed PC game folder, or a .zip of it (unpacked into --work; disc images are not supported)")
     ap.add_argument("--x360", help="your Xbox 360 game folder or ISO")
     ap.add_argument("--dest", required=True, help="directory that receives NFS Most Wanted Native.app")
     ap.add_argument("--work", required=True, help="disposable build/staging directory")

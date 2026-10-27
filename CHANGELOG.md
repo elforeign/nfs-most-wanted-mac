@@ -16,7 +16,7 @@ See [Getting started](GETTING_STARTED.md#coming-from-3x).
 
 ### New
 
-- **Setup builds the game on your Mac** from your own PC game folder, or the Black Edition `.zip` you downloaded, version 1.3. Any `speed.exe` with the 1.3 code is
+- **Setup builds the game on your Mac** from your own PC game folder, or a `.zip` of that folder, version 1.3. Any `speed.exe` with the 1.3 code is
   accepted. Setup checks it first and changes nothing if it can't be used. No game files are shipped.
 - **Optional Xbox 360 features from your own Xbox 360 copy** (a folder or an `.iso`): world, audio, reverb, music,
   police, nis (cutscenes), vinyls, textures and movies. Setup reports which it could add. Without the copy the PC game
@@ -37,7 +37,7 @@ installed PC game, version 1.3.
 
 ### Not available yet
 
-- Building from a PC disc image. Choose an installed game folder or the Black Edition `.zip`. (The Xbox 360 `.iso`
+- Building from a PC disc image. Choose an installed game folder or a `.zip` of it. (The Xbox 360 `.iso`
   is supported.)
 
 ### Earlier versions

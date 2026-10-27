@@ -407,8 +407,8 @@ final class Setup: ObservableObject {
     }
 
     func choosePC() {
-        // The game folder, or the Black Edition .zip as downloaded (Setup unpacks a copy; the .zip is only read).
-        guard let url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), or the Black Edition .zip you downloaded.",
+        // The game folder, or a .zip of it (Setup unpacks a copy; the .zip is only read).
+        guard let url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), or a .zip of that folder.",
                                    files: true, types: [.zip]) else { return }
         pc = url; features = nil; x360 = nil; x360Status = ""
         runCheck(forX360: false)
@@ -651,7 +651,7 @@ struct ContentView: View {
                     Text("PC disc image: Not available yet; choose an installed PC game folder.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Text(s.pc?.path ?? "The folder with speed.exe, or the Black Edition .zip (version 1.3).")
+                        Text(s.pc?.path ?? "The folder with speed.exe, or a .zip of it (version 1.3).")
                             .lineLimit(2).truncationMode(.middle).foregroundStyle(s.pc == nil ? .secondary : .primary)
                         Spacer()
                         Button("Choose…") { s.choosePC() }.disabled(s.checking)

@@ -958,8 +958,8 @@ class SaveMigrationTests(Fixture):
 
 
 class PCZipTests(Fixture):
-    """--pc accepts the community download 'Need For Speed Most Wanted Black Edition.zip' (the game one level down)."""
-    def make_zip(self, path, extra=(), top="Need For Speed Most Wanted Black Edition/"):
+    """--pc accepts a .zip of the game folder (the game one level down)."""
+    def make_zip(self, path, extra=(), top="Need For Speed Most Wanted/"):
         import zipfile
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
             for f in sorted(self.pc.rglob("*")):
@@ -977,10 +977,10 @@ class PCZipTests(Fixture):
         return sorted(str(p) for p in self.home.rglob("*") if work not in p.parents and p != work)
 
     def test_zip_validates_like_the_folder_and_source_untouched(self):
-        archive = self.make_zip(self.home / "Need For Speed Most Wanted Black Edition.zip")
+        archive = self.make_zip(self.home / "Need For Speed Most Wanted.zip")
         before = (b.sha_file(archive), archive.stat().st_mtime_ns)
         root = b.extract_pc_zip(archive, self.paths.work, self.events)
-        self.assertEqual(root, self.paths.work / "pc_src/Need For Speed Most Wanted Black Edition")
+        self.assertEqual(root, self.paths.work / "pc_src/Need For Speed Most Wanted")
         self.assertEqual(b.validate_pc(root, self.source)[1], b.validate_pc(self.pc, self.source)[1])
         self.assertEqual(ins.digest_tree(root), ins.digest_tree(self.pc))
         self.assertFalse((self.paths.work / "pc_src/__MACOSX").exists())
@@ -1021,9 +1021,9 @@ class PCZipTests(Fixture):
             return (info, data)
         cases = {
             "parent": [entry("../../escaped.txt")],
-            "nested parent": [entry("Need For Speed Most Wanted Black Edition/GLOBAL/../../../escaped.txt")],
+            "nested parent": [entry("Need For Speed Most Wanted/GLOBAL/../../../escaped.txt")],
             "absolute": [entry("/tmp/escaped-nfsmw-test.txt")],
-            "symlink": [entry("Need For Speed Most Wanted Black Edition/link", str(self.home).encode(), 0o120777)],
+            "symlink": [entry("Need For Speed Most Wanted/link", str(self.home).encode(), 0o120777)],
         }
         outside = self.outside_work()
         for name, extra in cases.items():
