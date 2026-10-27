@@ -14,7 +14,7 @@ Details: [NOTICE](NOTICE).
 
 ## Play it on your Mac
 
-1. Have your own installed copy of the PC game, **version 1.3**, on your Mac.
+1. Have your own PC game, **version 1.3**, on your Mac: the installed game folder or the Black Edition .zip.
 2. Download the **Setup app** (the disk image) from the
    [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest) and open it.
 3. Choose your game folder, or the Black Edition .zip you downloaded, optionally your Xbox 360 copy, and click **Build**. Setup compiles the game on your Mac and
@@ -33,9 +33,9 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 - An Apple Silicon Mac (M1 or later) with macOS 14.5 or later (provisional).
 - Xcode Command Line Tools (free; Setup offers to install them).
 - About 12 GB free disk space while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy).
-- Your own installed PC game, version 1.3. Any `speed.exe` that has the 1.3 code is accepted.
-- Optional: your own Xbox 360 copy of the game (a folder or an `.iso`) for the Xbox 360 features.
-- Not available yet: building from a PC disc image.
+- Your own PC game, version 1.3: the installed game folder or the Black Edition `.zip`. Any `speed.exe` that has the 1.3
+  code is accepted. A PC disc image (`.iso`) isn't supported yet.
+- Optional: your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features.
 
 ## What you get
 

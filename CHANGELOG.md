@@ -37,7 +37,8 @@ installed PC game, version 1.3.
 
 ### Not available yet
 
-- Building from a PC disc image. Choose an installed game folder.
+- Building from a PC disc image. Choose an installed game folder or the Black Edition `.zip`. (The Xbox 360 `.iso`
+  is supported.)
 
 ### Earlier versions
 

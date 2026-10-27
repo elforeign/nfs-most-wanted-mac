@@ -9,10 +9,10 @@ nothing it makes is meant to be shared.
 | | |
 |---|---|
 | **Mac** | Apple Silicon (M1 or later) with **macOS 14.5 or later** (provisional). |
-| **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC, **version 1.3**, installed: the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or the Black Edition `.zip` you downloaded (Setup unpacks a copy into its work folder and only reads the `.zip`). Any `speed.exe` that has the 1.3 code is accepted; Setup checks it first and changes nothing if it can't be used. Building from a PC disc image is **not available yet**. |
+| **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC, **version 1.3**, installed: the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or the Black Edition `.zip` you downloaded (Setup unpacks a copy into its work folder and only reads the `.zip`). Any `speed.exe` that has the 1.3 code is accepted; Setup checks it first and changes nothing if it can't be used. A **PC** disc image (`.iso`) isn't supported yet (the Xbox 360 `.iso` is, below). |
 | **Xcode Command Line Tools** | Apple's free developer tools. Setup offers to install them; in Terminal, `xcode-select --install`. |
 | **Disk space** | About 12 GB free while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy). |
-| **Optional: Xbox 360 copy** | Your own Xbox 360 copy of the game, as a folder or an `.iso`, for the Xbox 360 features (below). |
+| **Optional: Xbox 360 copy** | Your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features (below). |
 
 This project does not provide, link to, or explain how to obtain any game file. Use your own copy.
 
