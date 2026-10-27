@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NFSMW Setup JSON-line event",
+  "description": "One object per stdout line with --events. Child output goes only to the run log. --check ends after preflight, pc, x360 with exit 0 and no done event; --build emits done only after verified transactional install. Stages in order: preflight, pc, x360, recompile, tables, audio, shaders, ffmpeg, runtime, assets, bundle, install. Audio builds its FFmpeg prerequisite before compiling media.cpp. Cancellation exits 130; every other failed stage exits nonzero. work/run-log.txt contains the current log path. Environment overrides: NFSMW_SETUP_HOME (state/logs/cache/data beneath it), NFSMW_SETUP_STATE, NFSMW_SETUP_LOGS, NFSMW_SETUP_CACHE, NFSMW_SETUP_DATA, NFSMW_SETUP_LEGACY (the 3.x profile whose career saves install copies into a 4.0 profile without saves; warn event on copy or refusal). --check logs only in work/logs. setup.sh uses TOOLS_PY, else deps/python/bin/python3, python/bin/python3 or .venv/bin/python3 in the payload. Public bundle: NFS Most Wanted Native.app (executable NFSMostWanted; an existing 3.x app there is renamed NFS Most Wanted Native 3.x.app and kept); io.github.nfsmw-native-mac; version 4.0.0.",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "id", "title"],
+      "properties": {"ev": {"const": "stage"}, "id": {"$ref": "#/$defs/stage"}, "title": {"type": "string"}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "id", "done", "total"],
+      "properties": {"ev": {"const": "progress"}, "id": {"$ref": "#/$defs/stage"}, "done": {"type": "integer", "minimum": 0}, "total": {"type": "integer", "minimum": 0}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "id", "msg"],
+      "properties": {"ev": {"const": "warn"}, "id": {"$ref": "#/$defs/stage"}, "msg": {"type": "string"}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "id", "msg", "fix", "log"],
+      "properties": {"ev": {"const": "error"}, "id": {"$ref": "#/$defs/stage"}, "msg": {"type": "string"}, "fix": {"type": "string"}, "log": {"type": "string"}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "x360", "missing"],
+      "properties": {"ev": {"const": "features"}, "x360": {"type": "boolean"}, "missing": {"type": "array", "items": {"type": "string"}}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["ev", "app"],
+      "properties": {"ev": {"const": "done"}, "app": {"type": "string"}}
+    }
+  ],
+  "$defs": {"stage": {"enum": ["preflight", "pc", "x360", "recompile", "tables", "audio", "shaders", "ffmpeg", "runtime", "assets", "bundle", "install"]}}
+}

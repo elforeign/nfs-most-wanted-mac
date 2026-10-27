@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "comment": "Everything Setup bundles that is not this project's own source. build_installer.sh downloads each entry whose url is set into build/installer/dl, refuses any whose sha256 does not match, and refuses to release while any value is still null. Pins recorded 2026-10-26 from the publishers' own listings (python-build-standalone release digests, PyPI sha256, FFmpeg tarball hashed after download).",
+  "python": {
+    "kind": "relocatable CPython (arm64, macOS)",
+    "version": "3.12.15+20261013",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.12.15%2B20261013-aarch64-apple-darwin-install_only.tar.gz",
+    "sha256": "ba32036ad8f4c434d97a1ee7feef8b7edc0fac16777639b97e39c74a108e4440"
+  },
+  "wheels": [
+    {
+      "name": "capstone",
+      "version": "5.0.9",
+      "url": "https://files.pythonhosted.org/packages/42/9a/4eecfbc94961cda70301fd13de69042be1943bee456e37bc1369840601b1/capstone-5.0.9-py3-none-macosx_11_0_arm64.whl",
+      "sha256": "fc269c5082e17d7f9f265cd6980e2fdc6ab572df913951d76db0357e06b8001d"
+    },
+    {
+      "name": "numpy",
+      "version": "2.0.2",
+      "url": "https://files.pythonhosted.org/packages/46/92/1b8b8dee833f53cef3e0a3f69b2374467789e0bb7399689582314df02651/numpy-2.0.2-cp312-cp312-macosx_11_0_arm64.whl",
+      "sha256": "8df823f570d9adf0978347d1f926b2a867d5608f434a7cff7f7908c6570dcf5e"
+    },
+    {
+      "name": "pillow",
+      "version": "11.3.0",
+      "url": "https://files.pythonhosted.org/packages/2c/32/7e2ac19b5713657384cec55f89065fb306b06af008cfd87e572035b27119/pillow-11.3.0-cp312-cp312-macosx_11_0_arm64.whl",
+      "sha256": "921bd305b10e82b4d1f5e802b6850677f965d8394203d182f078873851dada69"
+    }
+  ],
+  "sources": [
+    {
+      "name": "ffmpeg",
+      "version": "7.1.1",
+      "file": "ffmpeg-7.1.1.tar.xz",
+      "dest": "third_party/dl/ffmpeg-7.1.1.tar.xz",
+      "sha256": "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1",
+      "url": "https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz"
+    }
+  ]
+}

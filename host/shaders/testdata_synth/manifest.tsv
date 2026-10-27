@@ -1,0 +1,17 @@
+effect	file	profile	bytes	used_by
+synth	vs20_flow.bin	vs_2_0	616	synthetic
+synth	vs20_math.bin	vs_2_0	496	synthetic
+synth	vs30_pred_tex.bin	vs_3_0	408	synthetic
+synth	vs11_misc.bin	vs_1_1	248	synthetic
+synth	ps11_bump.bin	ps_1_1	144	synthetic
+synth	ps11_m3x2.bin	ps_1_1	80	synthetic
+synth	ps13_m3x3.bin	ps_1_3	92	synthetic
+synth	ps13_m3x3v.bin	ps_1_3	68	synthetic
+synth	ps13_misc.bin	ps_1_3	96	synthetic
+synth	ps13_m3x3tex.bin	ps_1_3	84	synthetic
+synth	ps14_phase.bin	ps_1_4	168	synthetic
+synth	ps14_kill.bin	ps_1_4	64	synthetic
+synth	ps20_misc.bin	ps_2_0	340	synthetic
+synth	ps2x_pred.bin	ps_2_x	284	synthetic
+synth	ps30_loop.bin	ps_3_0	300	synthetic
+synth	vs30_rel_out.bin	vs_3_0	184	synthetic
