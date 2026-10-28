@@ -409,7 +409,9 @@ final class Setup: ObservableObject {
     func choosePC() {
         // The game folder, or a .zip of it (Setup unpacks a copy; the .zip is only read).
         guard let url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), or a .zip of that folder.",
-                                   files: true, types: [.zip]) else { return }
+                                   // .folder too: with allowedContentTypes set, the panel greys out "Choose" for any
+                                   // folder that is not listed (issue #19: the 3.x game folder could not be chosen).
+                                   files: true, types: [.folder, .zip]) else { return }
         pc = url; features = nil; x360 = nil; x360Status = ""
         runCheck(forX360: false)
     }
