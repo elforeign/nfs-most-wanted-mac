@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.0.1 — Setup fix
+
+- **Setup accepts your game folder again.** In 4.0.0 the folder picker only enabled Choose for a `.zip`, so a game
+  folder (for example the one you used with 3.x) could not be selected
+  ([#19](https://github.com/elforeign/nfs-most-wanted-mac/issues/19)). Both a folder and a `.zip` work now.
+- Setup's text describes the `.zip` option as a `.zip` of your game folder.
+
+If 4.0.0 is already built and running for you, nothing changes: 4.0.1 only fixes Setup.
+
 ## 4.0.0 — a new native version, built on your Mac
 
 4.0.0 replaces 3.x. It is a new native recompilation and runtime, not an update of 3.x, so there is nothing to patch:
