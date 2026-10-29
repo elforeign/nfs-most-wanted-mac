@@ -107,6 +107,16 @@ static Setting s_overlay = {.id = "display.overlay", .category = SET_DISPLAY, .o
     .apply = overlay_apply, .get = overlay_level};
 
 // ---------------- Graphics ----------------
+// Restart: hc_transform specializes world shaders for float_scene_on, while
+// get_shader_variant caches by bytecode/options/material, not that mode.
+static const char *const kHdr[] = {"Off", "On"}, *const kHdrV[] = {"off", "edr"};
+static Setting s_hdr = {.id = "graphics.hdr_output", .category = SET_PICTURE, .order = 20, .label = "HDR output",
+    .help = "Uses HDR highlights when the screen supports them, with SDR fallback otherwise. Restart game to apply.",
+    .type = SET_CHOICE, .choices = kHdr, .values = kHdrV, .nchoices = 2, .def = 0, .env = "NFS_HDR_OUTPUT", .restart = 1};
+static void hdr_status(char *buf, int n) { snprintf(buf, (size_t)n, "%s", render_hdr_output_status()); }
+static Setting s_hdr_status = {.id = "graphics.hdr_status", .category = SET_PICTURE, .order = 21, .label = "HDR status",
+    .help = "The current output. SDR fallback keeps your HDR preference for when the screen has HDR headroom; split screen uses SDR.",
+    .type = SET_INFO, .value_text = hdr_status};
 static const char *const kFrameLimit[] = {"Off", "120", "60", "40"};
 static const char *const kFrameLimitV[] = {"off", "120", "60", "40"};
 static void presentation_apply(int v) { (void)v; RenderPresentation ps; render_presentation_stats(&ps); }
@@ -126,6 +136,29 @@ static void tone_apply(int v) { x360_set_tone_curve(v == 1); }
 static Setting s_tone = {.id = "graphics.tone_curve", .category = SET_PICTURE, .order = 40, .label = "Tone curve",
     .help = "PC keeps the PC's colour-bloom curve with a brighter sky; X360 uses the X360's black-bloom curve for both terms.",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .env = "NFS_TONE_CURVE", .apply = tone_apply};
+// BEGIN private car settings
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+#include "private_cars.h"
+static Setting s_later_cars = {.id="cars.later_games", .category=SET_CARS, .order=50,
+    .label="Cars from later games", .help="Use approved installed cars. Takes effect after restart.",
+    .type=SET_TOGGLE, .def=1, .restart=1};
+static Setting h_original_cars = {.id="cars.original_models", .category=SET_CARS, .order=60,
+    .label="Use original MW model", .type=SET_HEADING};
+static const char *const original_car_names[] = {PRIVATE_CARS_SWAP_NAMES};
+static Setting s_original_cars[14];
+static char original_car_ids[14][64];
+static void register_private_car_settings(void) {
+    settings_add(&s_later_cars); settings_add(&h_original_cars);
+    for (unsigned i=0;i<14;++i) {
+        snprintf(original_car_ids[i],sizeof original_car_ids[i],"cars.original.%s",original_car_names[i]);
+        s_original_cars[i]=(Setting){.id=original_car_ids[i], .category=SET_CARS, .order=61+(int)i,
+            .label=original_car_names[i], .help="On uses the original MW model. Takes effect after restart.",
+            .type=SET_TOGGLE, .restart=1};
+        settings_add(&s_original_cars[i]);
+    }
+}
+#endif
+// END private car settings
 static void paint_apply(int v) { materials_set_car_paint(v == 0); }
 static Setting s_paint = {.id = "graphics.car_paint", .category = SET_CARS, .order = 10, .label = "Car paint",
     .help = "X360 gives the console's sun-coloured paint highlight, while PC uses a fixed highlight.",
@@ -321,10 +354,15 @@ static Setting s_menubtn = {.id = "controls.menu_button", .category = SET_CONTRO
     .type = SET_CHOICE, .choices = kMenuBtn, .values = kMenuBtnV, .nchoices = N(kMenuBtn), .env = "NFS_MENU_BUTTON"};
 static const char *const kLayout[] = {"PlayStation", "Xbox"}, *const kLayoutV[] = {"playstation", "xbox"};
 static void layout_apply(int v) { user32_set_pad_layout_xbox(v); }
+static Setting s_layout;
+static int layout_get(void) {                 // with no pick, the active pad's own console layout: also the row's default
+    s_layout.def = !user32_pad_native();
+    return user32_pad_layout_xbox();
+}
 static Setting s_layout = {.id = "controls.pad_layout", .category = SET_CONTROLS, .order = 20, .label = "Button layout",
-    .help = "PlayStation follows the PS2 manual's layout and Xbox the Xbox manual's, and menus show each console's buttons and prompts.",
+    .help = "PlayStation follows the PS2 manual's layout and Xbox the Xbox manual's, and menus show each console's buttons and prompts. Until you pick one, each controller gets its own console's.",
     .type = SET_CHOICE, .choices = kLayout, .values = kLayoutV, .nchoices = 2, .env = "NFS_PAD_LAYOUT", .pref = "pad_layout",
-    .own_pref = 1, .apply = layout_apply, .get = user32_pad_layout_xbox};
+    .own_pref = 1, .apply = layout_apply, .get = layout_get};
 static const char *const kPrompts[] = {"Automatic", "Console glyphs", "PC keycaps"}, *const kPromptsV[] = {"auto", "console", "pc"};
 static Setting s_prompts = {.id = "controls.prompts", .category = SET_CONTROLS, .order = 30, .label = "Button prompts",
     .help = "Automatic shows console glyphs while a controller is in use and keycaps after a key press or the mouse.",
@@ -515,6 +553,9 @@ const char *settings_game_language(void) {
 }
 
 __attribute__((constructor)) static void settings_port_register(void) {
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    register_private_car_settings();
+#endif
     {   // mark the X360's mirror brightness (default.xex, X360E_MIRROR_WORLD) among the 10 % steps
         static char x360_label[24];
         int k = (int)lroundf(X360E_MIRROR_WORLD * 10.0f) - 5;
@@ -525,7 +566,7 @@ __attribute__((constructor)) static void settings_port_register(void) {
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
     REG(s_window); REG(s_overlay); REG(s_lan);
-    REG(s_framelimit);
+    REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);
     REG(s_vrr);
     REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
     REG(s_audio); REG(s_limiter); REG(s_speaker_layout); REG(s_engine_sound); REG(s_audio_now);

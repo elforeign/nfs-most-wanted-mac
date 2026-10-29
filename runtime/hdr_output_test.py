@@ -7,6 +7,15 @@
 
 
 
+
+
+
+
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -153,6 +162,9 @@ def checked(args, **kwargs):
 
 
 def main():
+    if not (ROOT / 'gen/x360_shader_lits.inc').is_file():
+        print('SKIP: HDR composition proof needs generated shader tables (runtime/build.sh)')
+        return 3
     render = (ROOT / 'render.m').read_text()
     presenter = (ROOT / 'render_present.m').read_text()
     post = (ROOT / 'render_post.m').read_text()
@@ -173,9 +185,16 @@ def main():
     env = dict(os.environ)
     env.pop('NFS_HDR_OUTPUT', None)
     env.pop('NFS_TEST_GAMMA', None)
+    env.pop('NFS_PADS', None)
+    env.pop('NFS_FLOAT_SCENE', None)
     with tempfile.TemporaryDirectory(prefix='hdr-output-test-') as scratch:
         scratch = Path(scratch)
         (scratch / 'presenter.inc').write_text(production)
+        probe = (ROOT / 'probe.m').read_text()
+        probe_capture = section(probe, 'static id<MTLBuffer> capture(', '// BGRA8 pixels:').replace(' capture(', ' probe_capture(')
+        (scratch / 'probe.inc').write_text(probe_capture)
+        frame_end = section(presenter, '    cmd = nil;\n    render_float_scene_present_end();', '    // One frame in flight:')
+        (scratch / 'frame_end.inc').write_text(frame_end)
         post_code = (section(post, 'static const char *x360_src =', '#include "lampglow_shader.h"') +
                      section(post, 'static NSString *x_edr_source(', '// END HDR output M post variant') +
                      section(post, 'typedef struct { float off[16][4]', '// The visual treatment into a multisampled back buffer'))
@@ -198,6 +217,28 @@ def main():
                  '-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal', '-o', exe]
         checked(build)
         checked([exe, '--cpu'], env=env)
+        checked([exe, '--cpu-lifecycle'], env=env)
+        omitted_boundary = frame_end.replace('hdr_output_frame_boundary();', '')
+        assert omitted_boundary != frame_end
+        (scratch / 'frame_end.inc').write_text(omitted_boundary)
+        checked(build)
+        missing = subprocess.run([str(exe), '--cpu-lifecycle'], capture_output=True, text=True, env=env)
+        assert missing.returncode == 1 and 'FAIL: H=4 boundary sample' in missing.stderr, missing.stdout + missing.stderr
+        print('hdr_output_test: CPU omitted frame boundary rejected 1 vs 4 (exit 1) PASS', flush=True)
+        (scratch / 'frame_end.inc').write_text(frame_end)
+        for name, bad_source, failure in (
+            ('stale headroom', production.replace('hdr_frame_headroom=ceiling;', 'hdr_frame_headroom=1;'),
+             'FAIL: H=4 boundary sample'),
+            ('unlatched headroom', production.replace('return hdr_output_on ? hdr_frame_headroom : 1;',
+             'return hdr_output_on ? hdr_output_ceiling((float)hdr_output_screen().maximumExtendedDynamicRangeColorComponentValue) : 1;'),
+             'FAIL: headroom changed inside frame'),
+        ):
+            assert bad_source != production
+            (scratch / 'presenter.inc').write_text(bad_source)
+            checked(build)
+            bad = subprocess.run([str(exe), '--cpu-lifecycle'], capture_output=True, text=True, env=env)
+            assert bad.returncode == 1 and failure in bad.stderr, bad.stdout + bad.stderr
+            print(f'hdr_output_test: CPU broken {name} control rejected (exit 1) PASS', flush=True)
         broken_init = production.replace('if (!hdr_output_requested || !layer) return;',
             'if (!hdr_output_requested || !layer) { hdr_output_on = 1; return; }')
         assert broken_init != production
@@ -231,13 +272,46 @@ def main():
             return 3
         assert result.returncode == 0, 'SDR baseline failed'
         edr_env = {**env, 'NFS_HDR_OUTPUT': 'edr', 'MTL_DEBUG_LAYER': '1'}
+        for _ in range(8):
+            for on in (True, False, True):
+                checked([exe, '--startup'], env=edr_env if on else env)
+        print('hdr_output_test: restart On/Off/On x8 formats=24/24 stale=0 PASS', flush=True)
+        checked([exe, '--startup'], env={**edr_env, 'NFS_PADS': '2'})
+        stale_layer = production.replace('layer.pixelFormat = MTLPixelFormatRGBA16Float;',
+                                         'layer.pixelFormat = MTLPixelFormatBGRA8Unorm;')
+        assert stale_layer != production
+        (scratch / 'presenter.inc').write_text(stale_layer)
+        checked(build)
+        stale = subprocess.run([str(exe), '--startup'], capture_output=True, text=True, env=edr_env)
+        assert stale.returncode == 1 and 'FAIL: startup layer format 80 expected 115' in stale.stderr, stale.stdout + stale.stderr
+        print('hdr_output_test: stale startup format control rejected 80 vs 115 (exit 1) PASS', flush=True)
+        (scratch / 'presenter.inc').write_text(production)
+        checked(build)
         checked([exe, '--fallback'], env=edr_env)
         checked([exe, '--edr'], env=edr_env)
+        bad_probe = probe_capture.replace('[e endEncoding];',
+            '[e fillBuffer:b range:NSMakeRange(0,w*h*4) value:0]; [e endEncoding];')
+        assert bad_probe != probe_capture
+        (scratch / 'probe.inc').write_text(bad_probe)
+        checked(build)
+        probe_control = subprocess.run([str(exe), '--edr'], capture_output=True, text=True, env=edr_env)
+        assert probe_control.returncode == 1 and 'FAIL: probe SDR bytes differ mismatches=17' in probe_control.stderr, probe_control.stdout + probe_control.stderr
+        print('hdr_output_test: zeroed probe control rejected 17/20 bytes (exit 1) PASS', flush=True)
+        (scratch / 'probe.inc').write_text(probe_capture)
+        checked(build)
         broken = subprocess.run([str(exe), '--broken'], capture_output=True, text=True, env=edr_env)
         print(broken.stdout + broken.stderr, end='', flush=True)
         assert broken.returncode == 1 and 'FAIL: PATCH above_one=0 lost=2 bad_channels=6' in broken.stderr, 'BGRA8 mutant escaped or failed for another reason'
         checked([exe, '--composition'], env=edr_env)
         checked([exe, '--composition-msaa'], env=edr_env)
+        bad_capture = production.replace('show && present_graded ? present_tex : backbuffer_tex;',
+                                         'show && present_graded ? backbuffer_tex : backbuffer_tex;')
+        assert bad_capture != production
+        (scratch / 'presenter.inc').write_text(bad_capture)
+        checked(build)
+        capture = subprocess.run([str(exe), '--fallback'], capture_output=True, text=True, env=edr_env)
+        print(capture.stdout + capture.stderr, end='', flush=True)
+        assert capture.returncode == 1 and 'FAIL: SDR capture bytes differ grade=1 mismatches=2016' in capture.stderr, 'capture missing gamma control escaped'
         bad_fallback = production.replace('} else if (present_graded) gamma_blit();',
                                          '} else if (present_graded && !hdr_output_on) gamma_blit();')
         assert bad_fallback != production

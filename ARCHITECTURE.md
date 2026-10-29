@@ -72,4 +72,4 @@ Measured on `speed.exe` (Ghidra boundaries, capstone):
 | Movies (`runtime/movies.c`, `media/`) | X360 720p WMV + 5.1 WMA Pro through the game's `MoviePlayer`, PC VP6 fallback |
 | Input | DirectInput keyboard/mouse; game controllers through GameController (console-style button prompts, rumble, adaptive triggers) |
 | App (`runtime/app.m`, `bundle.sh`) | `NFSMW.app`: game folder panel (checked against the translated `speed.exe`'s code fingerprint, `recomp/exe_fingerprint.py`), full screen / windowed, Quit through the game's exit path, pause on focus loss, logs in `~/Library/Logs/NFSMW-port`, audio output picked for the device |
-| X360 assets | HD vinyls, HD textures, movies, audio mix and more from the player's own X360 copy (`runtime/README.md`, `HD_VINYLS.md`) |
+| X360 assets | HD vinyls, HD textures, movies, audio mix and more from the player's own X360 copy (`runtime/docs/`, `HD_VINYLS.md`) |

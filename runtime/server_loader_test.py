@@ -10,6 +10,8 @@
 
 
 
+
+
 """
 import os
 from pathlib import Path
@@ -101,12 +103,18 @@ def main():
             exe = tmp / name
             cmd = ['clang', '-O1', '-g', '-w', '-DNFS_SERVER_LINKED=1', '-I'+str(ROOT/'runtime'),
                    '-I'+str(ROOT/'recomp'), '-I'+str(ROOT/'recomp/out'), str(harness), str(loader),
-                   str(ROOT/'runtime/heap.c'), str(thread_file), str(ws_file), str(archive),
+                   str(ROOT/'runtime/heap.c'), str(ROOT/'runtime/private_cars_public.c'), str(thread_file), str(ws_file), str(archive),
                    '-Wl,-dead_strip', '-o', str(exe)]
             if name == 'attach_failure':
                 cmd.insert(1, '-DEXPECT_ATTACH_FAILURE=1')
             if name in ('normal', 'handle_release'):
                 cmd.insert(1, '-DTEST_REHOST_HANDLES=1')
+            if name == 'normal':
+                missing = [part for part in cmd if part != str(ROOT/'runtime/private_cars_public.c')]
+                broken = subprocess.run(missing, capture_output=True, text=True)
+                assert broken.returncode != 0, 'missing catalog object unexpectedly linked'
+                assert all(symbol in broken.stderr for symbol in ('_private_cars_count','_private_cars_get')), broken.stderr[-2000:]
+                print('missing catalog object: linker rejects both count/get symbols', flush=True)
             p = subprocess.run(cmd, capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-5000:]
             p = subprocess.run([str(exe), str(tmp), str(dll), str(tmp/'server.cfg'), str(tmp/'corrupt.dll')], capture_output=True, text=True, timeout=60)

@@ -155,6 +155,7 @@ typedef struct {
     int limit, vrr_available, native_fullscreen, display_sync, vrr_requested, adaptive_scheduling;
 } RenderPresentation;
 void render_presentation_stats(RenderPresentation *out);   // game thread; counters from Metal callbacks
+const char *render_hdr_output_status(void); // effective output for the current frame
 // overlay.m: the performance overlay (View > Performance Overlay, Cmd-Option-P; NFS_OVERLAY=off|compact|full)
 enum { OVERLAY_OFF, OVERLAY_COMPACT, OVERLAY_FULL };
 int overlay_level(void);

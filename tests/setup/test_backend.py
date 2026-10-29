@@ -12,6 +12,8 @@ T4 synthetic PE: metadata/case variants pass; layout/.text/.rdata/.data and
 missing folders fail. Ignoring .text breaks the rejection oracle.
 T8 real clang, AST-isolated build_all.main (no Unicorn): injected compile error
 fails and removes stale speed.a; good compilation succeeds. Old main fails oracle.
+T8 fixture verification: 1/1 passes; making the good translation broken exits 1
+with 1 failure. An unspecified future transform also passes with real compilation.
 T9 same content resumes; source/dependency/toolchain/player changes invalidate;
 corrupt/stale/missing outputs rebuild. Trusting existence breaks the oracle.
 T10 permission/disk-full/signing/rename/Cancel failures preserve existing app,
@@ -426,9 +428,20 @@ class BuildFailureTests(Fixture):
         ns = dict(argparse=__import__("argparse"), os=os, sys=sys, collections=collections,
                   concurrent=concurrent, subprocess=subprocess, OUT=str(out), HERE=str(out), CHUNK=800,
                   load_functions=lambda: [(1, 2, "fixture")], add_data_referenced=lambda x: x,
-                  load_hooks=lambda: {}, water_reflection_gates=lambda a, c: c,
-                  recomp=types.SimpleNamespace(Recompiler=RC, CFLAGS=["-O0"], exe_fingerprint=fp))
-        with mock.patch.object(sys, "argv", ["test", "--jobs", "1"]), mock.patch("sys.stdout", new=io.StringIO()):
+                  load_hooks=lambda: {},
+                  recomp=types.SimpleNamespace(Recompiler=RC, CFLAGS=["-O0"], exe_fingerprint=fp,
+                                               EXE=str(out / "speed.exe")))
+        # Keep translation transforms isolated as main grows; compilation and
+        # archive/error handling below still run for real.
+        functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+        referenced = {n.id for n in ast.walk(main) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        for name in (functions & referenced) - ns.keys() - {"main"}:
+            ns[name] = lambda *args, **kwargs: args[-1]
+        server = types.ModuleType("server_module")
+        server.build = mock.Mock()
+        with mock.patch.dict(sys.modules, server_module=server), \
+                mock.patch.object(sys, "argv", ["test", "--jobs", "1"]), \
+                mock.patch("sys.stdout", new=io.StringIO()):
             exec(compile(ast.Module(body=[main], type_ignores=[]), "build_all.py", "exec"), ns)
             try:
                 ns["main"]()

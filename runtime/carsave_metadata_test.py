@@ -1,10 +1,12 @@
 """WO3 scratch-only save/metadata transaction and restart proof (no game/Unicorn).
 Good: 53/53 transaction + 8/8 restart checks. Mutant failures: omitted journal
-2/17, omitted dependency comparison 1/53, omitted prepare 4/53, stale generation
+2/17, omitted dependency comparison 1/53, omitted prepare 2/53, stale generation
 1/2. The metadata record's generation/set/save hash/checksum are decoded below.
 The actual boot file layer links separate strong metadata hooks, with exact
 save-file bytes, write-ahead journal recovery, and fresh-process admission.
-All opens use the WO2 owner-directory interposer before libc.
+All opens use the WO2 owner-directory interposer before libc. Hard links are
+refused with EPERM by that fixture; the real metadata reader object supplies
+count/get and backup hooks. Exclusive-rename backups preserve 53/53 checks.
 """
 from pathlib import Path
 import hashlib

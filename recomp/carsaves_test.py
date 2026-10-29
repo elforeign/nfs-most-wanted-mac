@@ -1,6 +1,20 @@
-"""WO2/WO3: translated retail profile save/load, scratch-only admission contract.
+"""WO2/WO3/WO4: translated profile save/load and verified catalog activation.
+WO4 zero approvals: 21/21 (old generation-only CRC control fails 1/21).
+Sparse approved IDs: 65/65; two approvals: 73/73. Registration-Off fails
+2/5 before unavailable-source checks; compacted IDs fail 23/62; capacity
+refusal fails 20/70; omitted backup and denied-hard-link publication fail 6/70;
+repeated-backup and overwritten-backup controls each fail 1/73.
+Full dependent-profile admission: 11/11 (sparse) and 12/12 (two approvals);
+restoring the old dependent-capacity refusal fails 4/12.
+Capacity fallback performs zero filesystem writes, emits one stderr/diag line,
+keeps all 36,040 FE bytes, and admits the translated retail loader for MW-only
+and already dependent profiles. Existing stock/owned additions remain intact.
+First disk publication
+backs up original bytes; retry retains them; failed backup prevents a new
+dependency publication. Saves adding no dependencies succeed with backups
+unavailable, including capacity-fallback MW serialization.
 New MW profile/create/autosave: good 53/53, zero private lookups; restoring
-unconditional private save validation fails 12/53 and denies MW autosaves.
+unconditional private save validation fails 9/53 and denies MW autosaves.
 WO3 production serializer/file/completion/load: 23/23; omitted metadata staging
 and omitted own-slot dependency mutants each fail 4/23. Swap-only saves are
 marked while retail payload bytes [16:] remain identical.
@@ -35,6 +49,7 @@ spec.loader.exec_module(fixtures)
 
 GUARD = r'''
 #include <fcntl.h>
+#include <errno.h>
 #include <dirent.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -42,21 +57,27 @@ GUARD = r'''
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+static unsigned filesystem_writes;
 static void forbid_owner(const char *p) {
     if (p && (strstr(p,"/Library/Application Support/NFSMW-port") || !strcmp(p,"NFSMW-port"))) _exit(90);
 }
 static int guarded_open(const char *p,int flags,...) {
-    forbid_owner(p); mode_t mode=0;
+    forbid_owner(p); if(flags&(O_WRONLY|O_RDWR)) ++filesystem_writes; mode_t mode=0;
     if(flags&O_CREAT) { va_list v; va_start(v,flags); mode=va_arg(v,int); va_end(v); }
     return open(p,flags,mode);
 }
 static int guarded_openat(int fd,const char *p,int flags,...) {
-    forbid_owner(p); mode_t mode=0;
+    forbid_owner(p); if(flags&(O_WRONLY|O_RDWR)) ++filesystem_writes; mode_t mode=0;
     if(flags&O_CREAT) { va_list v; va_start(v,flags); mode=va_arg(v,int); va_end(v); }
     return openat(fd,p,flags,mode);
 }
-static FILE *guarded_fopen(const char *p,const char *mode) { forbid_owner(p); return fopen(p,mode); }
+static FILE *guarded_fopen(const char *p,const char *mode) { forbid_owner(p); if(strpbrk(mode,"wa+")) ++filesystem_writes; return fopen(p,mode); }
 static DIR *guarded_opendir(const char *p) { forbid_owner(p); return opendir(p); }
+// Match the post-run filesystem policy: hard-link aliases are unavailable.
+static int denied_linkat(int a,const char *b,int c,const char *d,int flags) {
+    (void)a; (void)b; (void)c; (void)d; (void)flags; errno=EPERM; return -1;
+}
+#define linkat denied_linkat
 #define open guarded_open
 #define openat guarded_openat
 #define fopen guarded_fopen
@@ -152,6 +173,21 @@ static void register_addition(void) {
         sources[nsources++]=(Source){ld,v,ld,life(v)->generation};
     }
 }
+
+static void fixture_selected_sources(void) {
+    for (unsigned i=0;i<nadditions;++i) {
+        Addition *a=&additions[i];
+        a->key=0x88888888u+i; a->pv=0x111+i*2; a->fe=a->menu_fe=0x222+i*2;
+        for (unsigned j=0;j<2;++j) {
+            uint32_t v=setup_vault(),ld=gmalloc(0x20),lay=gmalloc(0x60),col=gmalloc(0x28),cl=gmalloc(4);
+            life(v)->ready=1; M32(ld)=j?a->fe:a->pv; M32(ld+4)=j?FRONTEND:PVEHICLE;
+            M32(ld+0x1C)=lay; M32(lay+0x38)=0; M8(lay+0x58)=1;
+            M32(cl)=j?FRONTEND:PVEHICLE; M32(col+0x14)=cl;
+            M32(M32(v+0x2C))=col; M32(M32(v+0x30))=a->key; M32(v+0x34)=1;
+            sources[nsources++]=(Source){ld,v,ld,life(v)->generation};
+        }
+    }
+}
 int carsave_roundtrip_file(const char *root,const void *input,void *output);
 int main(int argc,char **argv) {
     assert(argc==2); G=calloc(1,0x4000000); assert(G);
@@ -238,6 +274,142 @@ int main(int argc,char **argv) {
         invoke(&c,self,buf,0,0); CHECK(c.eax&255); CHECK(retail_hashes==hashes+1);
         CHECK(M32(fe+8)==0x50607080); CHECK(M32(db+12)==0x10001);
         printf("retail-crc checks=%u failures=%u\n",checks-start,failures-failed);
+        return failures?1:0;
+    }
+
+    if (getenv("SHIP_ACTIVATION")) {
+        unsigned start=checks,failed=failures;
+        CHECK(!private_cars_init(argv[1],1,NULL,0));
+        configured=0; CHECK(on()==(private_cars_count()>1));
+        unsigned expected=atoi(getenv("SHIP_ACTIVATION"));
+        CHECK(nadditions==expected); CHECK(catalog_mode);
+        if (!expected) {
+            CHECK(car85_count()==84); CHECK(!private_cars_count());
+            // Generation existence alone must not override retail CRC or bytes.
+            for (unsigned mismatch=0;mismatch<2;++mismatch) {
+                M32(fe+8)=mismatch?0x10203041:0x10203040;
+                memcpy(before,G+self,sizeof before); Cpu input=c;
+                invoke(&c,self,buf,0,-1); Cpu retail=c;
+                unsigned char retail_profile[0xA000]; memcpy(retail_profile,G+self,sizeof retail_profile);
+                memcpy(G+self,before,sizeof before); c=input;
+                invoke(&c,self,buf,0,0);
+                CHECK(!memcmp(&retail,&c,sizeof c)); CHECK(!memcmp(retail_profile,G+self,sizeof retail_profile));
+                CHECK(!memcmp(bytes,G+buf,SAVE_SIZE)); CHECK(private_cars_save_allowed());
+            }
+            invoke_retail_save(&c,self,out,SAVE_SIZE,1);
+            invoke_retail_save(&c,self,buf,SAVE_SIZE,0); CHECK(!memcmp(G+buf,G+out,SAVE_SIZE));
+        } else {
+            CHECK(enabled && manifest_mode);
+            if (!enabled) { printf("activation-%u checks=%u failures=%u\n",expected,checks-start,failures-failed); return failures?1:0; }
+            CHECK(nadditions==2 ? addition_id(0)==84 && addition_id(1)==85 : addition_id(0)==85);
+            // Exercise the real type-table hook and translated lookups, including
+            // a hole at frozen ID 84 when only the second entry is approved.
+            uint32_t chunk=gmalloc(16+84*STRIDE); M32(chunk)=0x34600;
+            uint32_t table=chunk+16;
+            for (unsigned i=0;i<84;++i) { snprintf((char *)G+table+i*STRIDE,16,"RET%u",i); M32(table+i*STRIDE+0x90)=i; }
+            strcpy((char *)G+table,"RX7"); strcpy((char *)G+table+STRIDE,"CTS");
+            unsigned char original[84*STRIDE]; memcpy(original,G+table,sizeof original);
+            c.esp-=8; M32(c.esp+4)=chunk; f_00756A90(&c); c.esp+=4;
+            CHECK(!memcmp(original,G+M32(TABLE),sizeof original)); CHECK(car85_count()==86);
+            for (unsigned j=0;j<nadditions;++j) {
+                uint32_t hash=parts_hash(additions[j].name);
+                CHECK(call_guest(&c,0x007398D0,1,&hash)==addition_id(j));
+                CHECK(!strcmp((char *)G+M32(TABLE)+addition_id(j)*STRIDE,additions[j].name));
+            }
+            if (expected==1) CHECK(M32(M32(TABLE)+84*STRIDE+0x90)==~0u);
+            char routed[4096],guest[128];
+            for (unsigned j=0;j<nadditions;++j) {
+                snprintf(guest,sizeof guest,"CARS/%s/GEOMETRY.BIN",additions[j].name);
+                CHECK(private_car_path(guest,routed,sizeof routed)); CHECK(strstr(routed,additions[j].directory)==routed);
+                snprintf(guest,sizeof guest,"CARS/%s/SHADOW.BIN",additions[j].name);
+                CHECK(private_car_path(guest,routed,sizeof routed)); CHECK(strstr(routed,"/CARS/")!=NULL);
+                CHECK(strstr(routed,private_cars_generation())==NULL);
+            }
+            CHECK(private_car_path("CARS/FORDGT/GEOMETRY.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[81].geometry));
+            CHECK(private_car_path("CARS/FORDGT/TEXTURES.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[81].textures));
+            CHECK(!private_car_path("CARS/FORDGT/../GEOMETRY.BIN",routed,sizeof routed));
+            CHECK(!private_car_path("CARS/RX7/GEOMETRY.BIN",routed,sizeof routed));
+            fixture_selected_sources();
+            // A capacity-short MW profile must admit with no added rows, no
+            // source-buffer changes and no disk writes or refusal latch.
+            originals(db);
+            for (unsigned i=0;i<200;++i) { uint32_t r=db+i*20; M32(r)=i; M32(r+4)=0x10000; M32(r+8)=0x20000; M32(r+12)=0x10001; M16(r+16)=0xFFFF; }
+            invoke(&c,self,buf,0,1); memcpy(bytes,G+buf,SAVE_SIZE);
+            unsigned char full[0x8CC8]; memcpy(full,G+db,sizeof full);
+            unsigned writes_before=filesystem_writes;
+            invoke(&c,self,buf,0,0); CHECK(c.eax&255); CHECK(private_cars_save_allowed()); CHECK(filesystem_writes==writes_before); CHECK(capacity_diags==1);
+            CHECK(!memcmp(full,G+db,sizeof full)); CHECK(!memcmp(bytes,G+buf,SAVE_SIZE)); CHECK(dialogs==0);
+
+            // A full verified profile retains its existing stock/owned additions
+            // when a newly approved stock row cannot fit. Exercise real admission.
+            unsigned dep_start=checks, dep_failed=failures, dep_diags=capacity_diags;
+            M32(db+199*20+4)=M32(db+199*20+8)=additions[0].key; M32(db+199*20+12)=0x10002;
+            if (nadditions==2) {
+                M32(db+198*20+4)=M32(db+198*20+8)=additions[0].key;
+                M32(db+198*20+12)=0x10001;
+            }
+            unsigned char dependent[0x8CC8],dependent_save[SAVE_SIZE],existing_used[PRIVATE_CARS_MASK_SIZE]={0};
+            memcpy(dependent,G+db,sizeof dependent);
+            invoke(&c,self,out,0,1); memcpy(dependent_save,G+out,SAVE_SIZE);
+            unsigned frozen=addition_id(0)-84; existing_used[frozen/8]|=1u<<(frozen%8);
+            CHECK(!private_cars_metadata_admit(G+out,SAVE_SIZE,existing_used));
+            writes_before=filesystem_writes;
+            invoke(&c,self,out,0,0);
+            CHECK(c.eax&255); CHECK(private_cars_save_allowed()); CHECK(dialogs==0);
+            CHECK(!memcmp(dependent,G+db,sizeof dependent));
+            CHECK(!memcmp(dependent_save,G+out,SAVE_SIZE)); CHECK(filesystem_writes==writes_before);
+            CHECK(capacity_diags==dep_diags+1);
+            CHECK(M32(db+199*20+8)==additions[0].key);
+            if (nadditions==2) CHECK(M32(db+198*20+8)==additions[0].key);
+            printf("dependent-capacity-%u checks=%u failures=%u\n",expected,checks-dep_start,failures-dep_failed);
+            if (getenv("SHIP_DEP_CAPACITY_ONLY")) return failures?1:0;
+            memcpy(G+db,full,sizeof full);
+            // Exact fit inserts every selected stock row, retaining linked pools.
+            for (unsigned j=0;j<nadditions;++j) M32(db+(199-j)*20)=~0u;
+            unsigned inserted=0; CHECK(!reconcile_stock(db,&inserted)); CHECK(inserted==nadditions);
+            for (unsigned j=0;j<nadditions;++j) CHECK(M32(db+(199-j)*20+8)==additions[nadditions-1-j].key);
+            CHECK(!memcmp(full+4000,G+db+4000,sizeof full-4000));
+            // First dependent disk publication must preserve its previous bytes.
+            private_cars_metadata_userdata(getenv("BOOT_USERDATA"));
+            char target[4096]; snprintf(target,sizeof target,"%s/roundtrip",getenv("BOOT_USERDATA"));
+            unsigned char disk_original[SAVE_SIZE+36]={0}; memcpy(disk_original+36,bytes,SAVE_SIZE);
+            FILE *old=fopen(target,"wb"); assert(old); fwrite(disk_original,1,sizeof disk_original,old); fclose(old);
+            invoke(&c,self,buf,0,1); CHECK(!memcmp(G+buf,"NFSCAR3",7));
+            CHECK(!carsave_roundtrip_file(getenv("BOOT_USERDATA"),G+buf,G+out));
+            char backups[4096]; snprintf(backups,sizeof backups,"%s/backups",getenv("BOOT_USERDATA"));
+            DIR *dir=opendir(backups); unsigned files=0; struct dirent *entry;
+            if (dir) { while ((entry=readdir(dir))) if (entry->d_name[0]!='.') {
+                ++files; CHECK(strstr(entry->d_name,private_cars_generation())!=NULL);
+                char path[8192]; snprintf(path,sizeof path,"%s/%s",backups,entry->d_name);
+                unsigned char data[SAVE_SIZE+37]; FILE *f=fopen(path,"rb"); CHECK(f && fread(data,1,sizeof data,f)==sizeof disk_original && !memcmp(data,disk_original,sizeof disk_original)); if(f) fclose(f);
+            } closedir(dir); }
+            CHECK(files==1);
+            // Restoring a previous MW file must retain the first backup bytes.
+            old=fopen(target,"wb"); assert(old); fputc(0xA5,old);
+            fwrite(disk_original+1,1,sizeof disk_original-1,old); fclose(old);
+            CHECK(!carsave_roundtrip_file(getenv("BOOT_USERDATA"),G+buf,G+out));
+            dir=opendir(backups); files=0;
+            if (dir) { while ((entry=readdir(dir))) if (entry->d_name[0]!='.') {
+                ++files; char path[8192]; unsigned char data[SAVE_SIZE+37]; snprintf(path,sizeof path,"%s/%s",backups,entry->d_name);
+                FILE *f=fopen(path,"rb"); CHECK(f && fread(data,1,sizeof data,f)==sizeof disk_original && !memcmp(data,disk_original,sizeof disk_original)); if(f) fclose(f);
+            } closedir(dir); } CHECK(files==1);
+            // A failed backup must prevent publication, retaining the old file.
+            char held[4096]; snprintf(held,sizeof held,"%s/backups-held",getenv("BOOT_USERDATA"));
+            CHECK(!rename(backups,held)); CHECK(!symlink("missing-backup-target",backups));
+            // An unchanged dependency set must save despite unavailable backups.
+            CHECK(!carsave_roundtrip_file(getenv("BOOT_USERDATA"),G+buf,G+out));
+            CHECK(!memcmp(G+buf,G+out,SAVE_SIZE));
+            old=fopen(target,"wb"); assert(old); fwrite("KEEP THIS PROFILE",1,17,old); fclose(old);
+            CHECK(carsave_roundtrip_file(getenv("BOOT_USERDATA"),G+buf,G+out)!=0);
+            char protected_bytes[32]={0}; old=fopen(target,"rb");
+            CHECK(old && fread(protected_bytes,1,sizeof protected_bytes,old)==17 && !memcmp(protected_bytes,"KEEP THIS PROFILE",17)); if(old) fclose(old);
+            // Capacity fallback carries no addition dependencies and needs no backup.
+            CHECK(!carsave_roundtrip_file(getenv("BOOT_USERDATA"),bytes,G+out));
+            CHECK(!memcmp(bytes,G+out,SAVE_SIZE));
+            CHECK(!unlink(backups)); CHECK(!rename(held,backups));
+
+        }
+        printf("activation-%u checks=%u failures=%u\n",expected,checks-start,failures-failed);
         return failures?1:0;
     }
     int unavailable=getenv("SHIP_EXPECT_REFUSAL")!=NULL;
@@ -374,15 +546,25 @@ def main():
     wrapper = private[private.index('// Profile admission precedes'):private.index('// UserProfile::SaveToBuffer')]
     wrapper += private[private.index('// UserProfile::SaveToBuffer'):private.index('// ---------------- shuffle')]
     prefix = suite.HARNESS.split('int main(int argc, char **argv)', 1)[0]
-    prefix = prefix.replace('#include "car85.c"', '#include "car85.c"\n#define load catalog_load\n#include "private_cars.c"\n#undef load')
+    prefix = prefix.replace('#include "car85.c"', '#define CAR85_VERIFIED_CATALOG 1\n#include "car85.c"\n#define load catalog_load\n#include "private_cars.c"\n#undef load')
     prefix = prefix.replace('void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }',
-                            'void f_005816B0_orig(Cpu *c) { c->eax=retail_type_sentinel||M32(c->ecx+8)==0x88888888?84:0; c->esp+=4; }')
+                            'void f_005816B0_orig(Cpu *c) { c->eax=retail_type_sentinel?84:0; for(unsigned j=0;j<nadditions;++j) if(M32(c->ecx+8)==additions[j].key) c->eax=addition_id(j); c->esp+=4; }')
     prefix = prefix.replace('case 0x007398D0:', '''case 0x00455FD0: ++private_lookups; c->eax=!missing_class && !(missing_frontend && args[0]==FRONTEND); break;
     case 0x00747C00: c->eax=!missing_parts; break;
     case 0x00598590: ++dialogs; c->eax=1; break;
     case 0x007398D0:''', 1)
     prefix = prefix.replace('uint8_t *G;', 'static unsigned dialogs, missing_parts, missing_class, missing_frontend, retail_type_sentinel, private_lookups;\nuint8_t *G;')
+    prefix=prefix.replace('static unsigned failures, checks,','static unsigned capacity_diags;\nstatic unsigned failures, checks,')
+    prefix=prefix.replace('if (strstr(s,"redirect"))', 'if (strstr(s,"carsaves: capacity")) ++capacity_diags;\n    if (strstr(s,"redirect"))')
+
     proof = PROOF.replace('static unsigned dialogs, retail_hashes;', 'static unsigned retail_hashes;').replace('ADMISSION_WRAPPER', wrapper)
+    boot=(ROOT/'runtime/boot.c').read_text()
+    resolver=boot[boot.index('static int test_car_path('):boot.index('// FindFirstFileA / FindNextFileA:')]
+    start=boot.index('static int private_car_path(')
+    end=boot.index('\n}',start)+2
+    resolver+=boot[start:end]+'\n'
+    proof=proof.replace('int main(int argc,char **argv)',resolver+'int main(int argc,char **argv)')
+
     suite.HARNESS = prefix + proof
     # Delegate translator/fixture generation, but execute our admission main.
     # The driver supplies root as argv[1], replacing its numeric variant input.
@@ -399,6 +581,12 @@ def main():
         approvals = {r['source']: dict(evidence='synthetic admission contract', **{f:r['outputs'][f]['sha256'] for f in fixtures.pc.PACKS}) for r in data['cars'] if r['status']=='converted'}
         approval = root/'approvals.json'; approval.write_bytes(fixtures.pc.encoded(approvals))
         fixtures.pc.build(catalog_root,mw,src,approvals=approval,adapter=fixtures.adapter)
+        empty_root=root/'zero-catalog'
+        fixtures.pc.build(empty_root,mw,src,adapter=fixtures.adapter)
+        sparse_root=root/'sparse-catalog'
+        sparse_approval=root/'sparse-approvals.json'
+        sparse_approval.write_bytes(fixtures.pc.encoded({k:v for k,v in approvals.items() if k in ('C/300C','P/FORDGT')}))
+        fixtures.pc.build(sparse_root,mw,src,approvals=sparse_approval,adapter=fixtures.adapter)
         if not Path(suite.base.recomp.EXE).is_file():
             print('SKIP: private speed.exe absent'); return 3
         rc = suite.base.recomp.Recompiler(pe=suite.base.recomp.PE()); rc.calls = True
@@ -445,7 +633,7 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
         pointer=json.loads((stale/'current.json').read_bytes())
         pack=stale/pointer['generation']/'additions/240SX/GEOMETRY.BIN'
         pack.write_bytes(pack.read_bytes()+b'stale')
-        for variant in ("good","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save"):
+        for variant in ("good","activation_off","activation_ids","activation_capacity","activation_dependent_capacity","activation_backup","activation_hardlink","activation_repeat_backup","activation_overwrite","activation_zero_crc","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save"):
             mutant=variant!="good"
             actual=source
             if variant=="skip_admission":
@@ -455,7 +643,7 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
                 actual=actual.replace('_exit(90);','(void)p; /* deliberately bypass owner-open interposer */')
                 assert actual!=source
             if variant=="unconditional_crc":
-                actual=actual.replace("int private_crc = private_cars_generation()[0] != '\\0';", "int private_crc = 1; /* deliberately unconditional */")
+                actual=actual.replace("int private_crc = private_cars_count() != 0;", "int private_crc = 1; /* deliberately unconditional */")
                 assert actual!=source
             if variant=="skip_metadata_stage":
                 actual=actual.replace('if (!reason) reason = private_cars_metadata_stage(G + buffer, size, used);','/* deliberately omit metadata at the real serializer */')
@@ -463,11 +651,34 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
             if variant=='unguarded_mw_save':
                 actual=actual.replace('if (private_cars_count() || car85_count() > 84) {','if (1) { /* restore the broken unconditional MW validation */')
                 assert actual!=source
+            if variant=='activation_zero_crc':
+                actual=actual.replace('int private_crc = private_cars_count() != 0;','int private_crc = private_cars_generation()[0] != \'\\0\';')
             car_source=(ROOT/'runtime/car85.c').read_text()
+            if variant=='activation_off': car_source=car_source.replace('return enabled=nadditions!=0;','return 0;')
+            if variant=='activation_ids': car_source=car_source.replace('a->catalog_id=car->id;','a->catalog_id=TYPES+nadditions-1;')
+            if variant=='activation_capacity': car_source=car_source.replace('if (!catalog_mode) return','if (1) return')
+            if variant=='activation_dependent_capacity':
+                previous='''int dependent=0;
+        for (unsigned i=0;i<200;++i) if (M32(db+i*20)!=0xFFFFFFFFu)
+            for (unsigned j=0;j<nadditions;++j)
+                dependent |= M32(db+i*20+8)==additions[j].key || M32(db+i*20+4)==additions[j].key;
+        if (!catalog_mode || dependent) return'''
+                car_source=car_source.replace('if (!catalog_mode) return',previous)
+                assert car_source!=(ROOT/'runtime/car85.c').read_text()
             if variant=='skip_swap_dependency':
                 broken=car_source.replace('car->swap && car->selected && !strncmp(name,car->name,16)','0 /* deliberately omit own-slot dependency */')
                 assert broken!=car_source
                 car_source=broken
+            catalog_source=(ROOT/'runtime/private_cars.c').read_text()
+            if variant=='activation_backup':
+                catalog_source=catalog_source.replace('int private_cars_backup_before_write(const char *destination,const char *staged) {','int private_cars_backup_before_write(const char *destination,const char *staged) { return 1;')
+            if variant=='activation_hardlink':
+                catalog_source=catalog_source.replace('renameatx_np(dir,temp,dir,name,RENAME_EXCL)','linkat(dir,temp,dir,name,0)')
+            if variant=='activation_repeat_backup':
+                catalog_source=catalog_source.replace('if (!rc && !new_addition)', 'if (0)')
+            if variant=='activation_overwrite':
+                catalog_source=catalog_source.replace('if (prior>=0) {','if (prior>=0) { close(prior); unlinkat(dir,name,0); prior=-1; errno=ENOENT; }\n    if (prior>=0) {')
+            (root/'private_cars.c').write_text(catalog_source)
             (root/'car85.c').write_text(car_source)
             (root/'test.c').write_text(actual)
             exe=root/variant
@@ -475,6 +686,22 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
                 '-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                 str(root/'test.c'),str(root/'files.c'),'-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3000:]
+            if variant=='good' or variant.startswith('activation_'):
+                cases=[(0,empty_root),(1,sparse_root),(2,catalog_root)] if variant=='good' else [(0,empty_root)] if variant=='activation_zero_crc' else [(1,sparse_root)] if variant=='activation_ids' else [(2,catalog_root)]
+                for number,path in cases:
+                    user=root/f'activation-{variant}-{number}'; user.mkdir()
+                    case_env=dict(env,BOOT_USERDATA=str(user),SHIP_ACTIVATION=str(number))
+                    if variant=='activation_dependent_capacity': case_env['SHIP_DEP_CAPACITY_ONLY']='1'
+                    case=subprocess.run([str(exe),str(path)],env=case_env,capture_output=True,text=True)
+                    print(variant,case.stdout.strip(),flush=True)
+                    if variant=='good' and number:
+                        assert case.stderr.count('carsaves: capacity ')==2,case.stderr[-1500:]
+                        counts=re.findall(r'carsaves: capacity free=(\d+) required=(\d+) approved=(\d+)',case.stderr)
+                        assert counts==[('0',str(number),str(number)),('0','1',str(number))],counts
+
+                    if case.returncode!=int(mutant): print(case.stderr[-2500:])
+                    assert case.returncode==int(mutant),(variant,case.stderr[-2500:])
+                if variant!='good': continue
             if variant in ('good','unguarded_mw_save'):
                 user=root/('new-profile-'+variant); user.mkdir()
                 case=subprocess.run([str(exe),str(catalog_root)],env=dict(env,BOOT_USERDATA=str(user),SHIP_NEW_PROFILE_ONLY='1'),capture_output=True,text=True)

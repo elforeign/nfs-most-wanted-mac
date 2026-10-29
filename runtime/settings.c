@@ -58,7 +58,7 @@ static void x360_gate(Setting *s) {
 const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Diagnostics"};
 static const char *const kOffOn[] = {"Off", "On"};
 
-#define MAX_SETTINGS 128
+#define MAX_SETTINGS 160
 static Setting *all[MAX_SETTINGS];
 static int nall, inited;
 

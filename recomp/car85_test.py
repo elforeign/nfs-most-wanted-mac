@@ -67,6 +67,10 @@ HARNESS = r'''
 #include <stdlib.h>
 #include <stdio.h>
 #include "car85.c"
+#ifndef CAR85_VERIFIED_CATALOG
+size_t private_cars_count(void) { return 0; }
+const PrivateCar *private_cars_get(size_t i) { (void)i; return NULL; }
+#endif
 #define donor_record additions[0].record
 #define donor_hash additions[0].hash
 #define pv_key additions[0].pv
@@ -110,6 +114,12 @@ void f_0045C380_orig(Cpu *c) { c->esp += 4; }
 void f_0045C090_orig(Cpu *c) { c->esp += 4; }
 void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }
 void f_00581790_orig(Cpu *c) { c->eax=0; c->esp+=4; }
+void f_00751540_orig(Cpu *c) { c->eax=0; c->esp+=12; }
+void f_00751860_orig(Cpu *c) { c->esp+=4; }
+void f_00752940_orig(Cpu *c) { c->esp+=12; }
+void f_00752B60_orig(Cpu *c) { c->esp+=12; }
+void f_00755800_orig(Cpu *c) { c->esp+=4; }
+void f_0075F5D0_orig(Cpu *c) { c->esp+=8; }
 static uint32_t allocate(Cpu *c) { return gmalloc(M32(c->esp+4)); }
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {
     uint32_t sp=c->esp;
@@ -401,7 +411,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
         for variant in (["good"] if old else ["good", "count84", "asset_names", "collision", "metadata", "unrelated_vaults"]):
             modified = actual
             if variant == "count84":
-                modified = actual.replace("return TYPES + nadditions;", "return TYPES;")
+                modified = actual.replace("return count;", "return TYPES;")
             elif variant == "asset_names":
                 modified = actual.replace("if (off == 0 || off == 0x10)", "if (0)")
             elif variant == "collision":
@@ -410,6 +420,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
                 modified = actual.replace("uint32_t copy = gmalloc(bytes);", "uint32_t copy = ld;")
             elif variant == "unrelated_vaults":
                 modified = actual.replace("if (!relevant) { car85_vault_unloaded(vault); return; }", "if (!relevant) return;")
+            assert variant == "good" or old or modified != actual, variant
             (tmp / "car85.c").write_text(modified)
             binary = tmp / variant
             command = ["clang", "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),

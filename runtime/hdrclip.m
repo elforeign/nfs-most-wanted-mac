@@ -5,6 +5,7 @@
 // Plan/proof and observed game counts live in the runtime README row.
 #define HDRCLIP_IMPLEMENTATION
 #include "hdrclip.h"
+#include "hdr_output.h"
 #include <math.h>
 int hdrclip_on;
 int float_scene_on;
@@ -32,10 +33,11 @@ static NSString *hc_msl(void) { return @
 "inline void hc_count(float4 v,device atomic_uint *b,uint s){if(s>=306u)return;uint n[8];hc_values(v,n);hc_add(b,s,n);}\n"; }
 int hdrclip_test(int mutant);
 void hdrclip_init(void) {
-    const char *fs=getenv("NFS_FLOAT_SCENE"),*pads=getenv("NFS_PADS");
+    const char *fs=getenv("NFS_FLOAT_SCENE"),*hdr=getenv("NFS_HDR_OUTPUT"),*pads=getenv("NFS_PADS");
     // Shared split atlases require per-view phase routing (design step 7).
-    float_scene_on=fs && !strcmp(fs,"on") && !(pads && !strcmp(pads,"2"));
-    if(diag_on)diag_event("float scene: requested=%s enabled=%d pads=%s",fs?fs:"off",float_scene_on,pads?pads:"1");
+    // HDR owns its float-scene requirement even if a standalone override is Off.
+    float_scene_on=((fs && !strcmp(fs,"on")) || nfs_hdr_output_requested()) && !(pads && !strcmp(pads,"2"));
+    if(diag_on)diag_event("float scene: requested=%s hdr=%s enabled=%d pads=%s",fs?fs:"off",hdr?hdr:"off",float_scene_on,pads?pads:"1");
     const char *e=diag_on ? getenv("BOOT_DIAG_HDR_CLIP") : NULL;
     hdrclip_on=e && !strcmp(e,"1");
     if(diag_on && getenv("BOOT_DIAG_HDR_CLIP_TEST")) {

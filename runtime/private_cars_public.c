@@ -10,3 +10,7 @@ const PrivateCar *private_cars_inventory_get(size_t index) { (void)index; return
 const char *private_cars_generation(void) { return ""; }
 const char *private_cars_compatibility(void) { return ""; }
 const char *private_cars_error(void) { return ""; }
+
+int private_cars_backup_before_write(const char *destination,const char *staged) {
+    (void)destination; (void)staged; return 1;
+}

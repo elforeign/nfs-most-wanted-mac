@@ -13,6 +13,14 @@
 // Observed CPU: 5 unset mode/layer checks PASS (0); forced-On control fails (1).
 // Observed CPU: 9 power exponents + midpoint/ceiling PASS; constant-power control fails (1).
 // Frozen legacy post source: 13018 identical bytes / SHA-256 verified before GPU discovery.
+// Lifecycle CPU observed: H=1/4/1 x32, 96 samples + 64 stable-frame checks,
+// stale=0; frozen H fails 1 vs 4, live getter fails 4 vs 1 (exit 1 each).
+// Native restart sequence expected: On/Off/On x8 = 24/24 matching source/layer/
+// drawable formats; forced stale BGRA8 layer fails 80 vs expected 115 (exit 1).
+// Capture H=1/Off expected 8192 identical bytes each; omitted capture LUT fails
+// with 2016 differing bytes (exit 1). Native observations PENDING host GPU check.
+// Native probe: 20/20 converted bytes + 4/4 unchanged SDR bytes; zeroed readback
+// control differs in 17/20 converted bytes (exit 1); native observations pending.
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -22,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "hdr_output.h"
 
 static id<MTLDevice> mtl;
 static id<MTLCommandQueue> queue;
@@ -72,6 +81,7 @@ static float render_hdr_composition_headroom(void);
 static void ensure_cmd(void) {}
 static int gamma_active, present_graded;
 #include "presenter.inc"
+#include "probe.inc"
 #include "quad.inc"
 #include "legacy.inc"
 typedef struct { id<MTLTexture> tex,ms; int stale; } RenderTex;
@@ -99,6 +109,9 @@ static void blit_quad(id<MTLTexture> s,MTLRegion sr,id<MTLTexture> d,NSUInteger 
     quad_into(cmd,s,sr,d,l,sl,dr,linear);
 }
 #include "routing.inc"
+static void frame_boundary_test(void) {
+#include "frame_end.inc"
+}
 enum {HC_STAGES=25,HC_DOWN=5};
 static int hdrclip_on;
 #include "guard.inc"
@@ -159,12 +172,73 @@ static int cpu(void) {
     printf("hdr_output_test: CPU brightness 9 exponents PASS midpoint=%.12f\n",mid);return 0;
 }
 static double encode(double x);
+static void fixture_screen(float h) {
+    test_screen=[HDRTestScreen new];test_screen.maximumExtendedDynamicRangeColorComponentValue=h;
+    HDRTestWindow *window=[HDRTestWindow new];window.screen=(NSScreen *)test_screen;
+    if(!test_view)test_view=[HDRTestView new];
+    test_view.testWindow=(NSWindow *)window;layer.delegate=test_view;
+}
+static int lifecycle_cpu(void) {
+    layer=[CAMetalLayer layer];layer.pixelFormat=MTLPixelFormatRGBA16Float;
+    hdr_output_requested=hdr_output_on=1;fixture_screen(1);
+    unsigned samples=0,stable=0;
+    for(int n=0;n<32;++n) {
+        // H=1 -> 4 on the same screen, then move to a different H=1 screen.
+        // A changed screen or headroom cannot alter the frame already in flight.
+        frame_boundary_test();CHECK(render_hdr_headroom()==1,"initial H=1");++samples;
+        test_screen.maximumExtendedDynamicRangeColorComponentValue=4;
+        CHECK(render_hdr_headroom()==1,"headroom changed inside frame");++stable;
+        frame_boundary_test();CHECK(render_hdr_headroom()==4,"H=4 boundary sample");++samples;
+        fixture_screen(1);
+        CHECK(render_hdr_headroom()==4,"screen move changed inside frame");++stable;
+        frame_boundary_test();CHECK(render_hdr_headroom()==1,"H=1 boundary fallback");++samples;
+        CHECK(layer.pixelFormat==MTLPixelFormatRGBA16Float,"stale lifecycle format");
+    }
+    const float unavailable[]={0,NAN,INFINITY,-1};
+    for(unsigned i=0;i<sizeof unavailable/sizeof *unavailable;++i) {
+        test_screen.maximumExtendedDynamicRangeColorComponentValue=unavailable[i];
+        frame_boundary_test();CHECK(render_hdr_headroom()==1,"wake/unavailable fallback");
+    }
+    CHECK(!strcmp(render_hdr_output_status(),"SDR fallback"),"fallback status");
+    test_screen.maximumExtendedDynamicRangeColorComponentValue=4;hdr_output_frame_boundary();
+    CHECK(!strcmp(render_hdr_output_status(),"EDR active"),"active status");
+    hdr_output_on=hdr_output_requested=0;
+    CHECK(render_hdr_headroom()==1 && !strcmp(render_hdr_output_status(),"Off"),"Off status/headroom");
+    printf("hdr_output_test: CPU lifecycle H=1/4/1 samples=%u/96 stable=%u/64 stale_formats=0 unavailable=4 PASS\n",samples,stable);
+    return 0;
+}
+static int startup(void) {
+    int on=nfs_hdr_output_requested();
+    const char *pads=getenv("NFS_PADS");int split=pads && !strcmp(pads,"2");
+    MTLPixelFormat expected=on && !split ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+    render_hdr_output_init();
+    CHECK(layer.pixelFormat==expected,"startup layer format %lu expected %lu",(unsigned long)layer.pixelFormat,(unsigned long)expected);
+    CHECK(hdr_output_on==(on && !split),"startup mode");
+    // Environment changes cannot turn a pending preference into half a live
+    // switch. Only a fresh renderer/process may rebuild the matching shaders.
+    setenv("NFS_HDR_OUTPUT",on?"off":"edr",1);render_hdr_output_init();
+    CHECK(hdr_output_requested==on && layer.pixelFormat==expected,"mid-run request changed renderer");
+    layer.drawableSize=CGSizeMake(16,1);
+    id<CAMetalDrawable> drawable=[layer nextDrawable];CHECK(drawable,"startup drawable");
+    CHECK(drawable.texture.pixelFormat==expected,"stale startup drawable format");
+    backbuffer_tex=texture(MTLPixelFormatBGRA8Unorm,16,1);present_tex=texture(MTLPixelFormatBGRA8Unorm,16,1);
+    uint8_t input[64];for(int i=0;i<64;++i)input[i]=i%4==3?255:i*3;
+    [backbuffer_tex replaceRegion:MTLRegionMake2D(0,0,16,1) mipmapLevel:0 withBytes:input bytesPerRow:64];
+    cmd=[queue commandBuffer];CHECK(present_copy(),"startup present copy");
+    id<MTLTexture> source=hdr_output_on?hdr_present_tex:present_tex;
+    CHECK(source.pixelFormat==drawable.texture.pixelFormat,"stale startup source format");
+    quad_into(cmd,source,MTLRegionMake2D(0,0,16,1),drawable.texture,0,0,MTLRegionMake2D(0,0,16,1),0);
+    CHECK(!finish(),"startup frame finish");
+    printf("hdr_output_test: restart request=%s split=%d layer/source/drawable=%lu/%lu/%lu stale=0 PASS\n",on?"On":"Off",split,
+        (unsigned long)layer.pixelFormat,(unsigned long)source.pixelFormat,(unsigned long)drawable.texture.pixelFormat);
+    return 0;
+}
 static int sdr(int fallback) {
     CHECK(fallback || !getenv("NFS_HDR_OUTPUT"),"SDR switch must be unset");
     render_hdr_output_init();
     CHECK(fallback ? hdr_output_on : !hdr_output_on && layer.pixelFormat==MTLPixelFormatBGRA8Unorm,"SDR mode");
     enum {W=256,H=4,N=W*H*4};
-    uint8_t input[N],actual[N],expected[N];
+    uint8_t input[N],actual[N],expected[N],captured[N];
     __fp16 transported[N];
     id<CAMetalDrawable> drawable=nil;
     id<MTLBuffer> native=nil;
@@ -182,7 +256,7 @@ static int sdr(int fallback) {
     CHECK(fs_active && backbuffer_tex.pixelFormat==MTLPixelFormatRGBA16Float,"SDR floating world phase");
     render_float_scene_final(0);CHECK(!finish(),"SDR route finish");
     CHECK(backbuffer_tex==display && render_hdr_composition_headroom()==1,"SDR composition phase");
-    unsigned compared=0;
+    unsigned compared=0,capture_compared=0;
     for(int grade=0;grade<2;grade++) {
         uint16_t ramp[768];
         for(int i=0;i<768;i++)ramp[i]=grade?(uint16_t)lround(65535*pow((i&255)/255.,.8+(.2*(i/256)))):(i&255)*257;
@@ -195,6 +269,13 @@ static int sdr(int fallback) {
             MTLRegion r=MTLRegionMake2D(0,0,W,H);
             if(legacy)legacy_quad_into(cmd,present_tex,r,outputs[legacy],0,0,r,1);
             else quad_into(cmd,present_tex,r,outputs[legacy],0,0,r,1);
+            id<MTLTexture> capture=nil;
+            if(!legacy) {
+                // The production selector used by diagnostic and F10 report shots.
+                capture=hdr_shot_source(cmd,1);
+                CHECK(capture.pixelFormat==MTLPixelFormatBGRA8Unorm,"H=1/Off capture format");
+                CHECK(hdr_capture_source(cmd,backbuffer_tex)==backbuffer_tex,"SDR sequence bypass");
+            }
             if(fallback && !legacy) {
                 quad_into(cmd,hdr_present_tex,r,drawable.texture,0,0,r,1);
                 id<MTLBlitCommandEncoder> b=[cmd blitCommandEncoder];
@@ -202,12 +283,16 @@ static int sdr(int fallback) {
                     toBuffer:native destinationOffset:0 destinationBytesPerRow:W*8 destinationBytesPerImage:W*H*8];[b endEncoding];
             }
             CHECK(!finish(),"SDR finish");
+            if(!legacy)[capture getBytes:captured bytesPerRow:W*4 fromRegion:r mipmapLevel:0];
             if(fallback && !legacy)memcpy(transported,native.contents,sizeof transported);
         }
         [outputs[0] getBytes:actual bytesPerRow:W*4 fromRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0];
         [outputs[1] getBytes:expected bytesPerRow:W*4 fromRegion:MTLRegionMake2D(0,0,W,H) mipmapLevel:0];
         unsigned differences=0;for(int i=0;i<N;++i)differences+=actual[i]!=expected[i];
         CHECK(!differences,"SDR baseline bytes differ grade=%d mismatches=%u",grade,differences);
+        unsigned capture_differences=0;for(int i=0;i<N;++i)capture_differences+=captured[i]!=expected[i];
+        CHECK(!capture_differences,"SDR capture bytes differ grade=%d mismatches=%u",grade,capture_differences);
+        capture_compared+=N;
         if(fallback)for(int i=0;i<N;i+=4)for(int c=0;c<4;++c) {
             double v=transported[i+(c<3?2-c:c)];
             int byte=(int)lround(255*(c<3?encode(v):v));
@@ -215,10 +300,10 @@ static int sdr(int fallback) {
         }
         compared+=N;
     }
-    printf("hdr_output_test: SDR %s bytes_identical=%u/8192 drawable_roundtrip=%u gamma=identity/nonidentity PASS\n",fallback?"H=1":"unset",compared,fallback?compared:0);return 0;
+    printf("hdr_output_test: SDR %s bytes_identical=%u/8192 capture_bytes=%u/8192 drawable_roundtrip=%u gamma=identity/nonidentity PASS\n",fallback?"H=1":"unset",compared,capture_compared,fallback?compared:0);return 0;
 }
 static int edr(int broken) {
-    CHECK(getenv("NFS_HDR_OUTPUT") && !strcmp(getenv("NFS_HDR_OUTPUT"),"edr"),"EDR switch");
+    CHECK(nfs_hdr_output_requested(),"EDR switch");
     render_hdr_output_init();
     CHECK(hdr_output_on,"EDR initialization failed");
     CHECK(layer.pixelFormat==MTLPixelFormatRGBA16Float && layer.wantsExtendedDynamicRangeContent,"EDR layer properties");
@@ -264,11 +349,15 @@ static int edr(int broken) {
     puts("hdr_output_test: BGRA8 negative bytes=0,55,255,255,255 lost=2 PASS");
     // Both four-byte capture paths share this exact production conversion.
     cmd=[queue commandBuffer];id<MTLTexture> cap=hdr_capture_source(cmd,present_tex);
+    id<MTLBuffer> probe_bytes=probe_capture(cmd,present_tex);
     CHECK(cap.pixelFormat==MTLPixelFormatBGRA8Unorm,"capture format");
     b=[cmd blitCommandEncoder];
     [b copyFromTexture:cap sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(5,1,1)
                toBuffer:read destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256];[b endEncoding];
     CHECK(!finish(),"capture finish");memcpy(bytes,read.contents,sizeof bytes);
+    CHECK(probe_bytes.length==sizeof bytes,"probe SDR buffer length");
+    unsigned probe_differences=0;for(unsigned i=0;i<sizeof bytes;++i)probe_differences+=((const uint8_t *)probe_bytes.contents)[i]!=bytes[i];
+    CHECK(!probe_differences,"probe SDR bytes differ mismatches=%u",probe_differences);
     for(int i=0;i<5;i++){
         double x=patches[i];if(x>.75)x=.75+.25*(1-exp(-(x-.75)/.25));
         int expected=(int)lround(255*(x<=.0031308?12.92*x:1.055*pow(x,1/2.4)-.055));
@@ -278,7 +367,10 @@ static int edr(int broken) {
     id<MTLTexture> encoded=texture(MTLPixelFormatBGRA8Unorm,1,1),linear=texture(MTLPixelFormatRGBA16Float,1,1);
     uint8_t gray[]={128,128,128,255};[encoded replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:gray bytesPerRow:4];
     cmd=[queue commandBuffer];CHECK(hdr_output_blit(cmd,encoded,linear,0,0),"SDR decode");CHECK(hdr_capture_source(cmd,encoded)==encoded,"SDR capture bypass");
+    id<MTLBuffer> sdr_probe=probe_capture(cmd,encoded);
     CHECK(!finish(),"decode finish");__fp16 pixel[4];[linear getBytes:pixel bytesPerRow:8 fromRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0];
+    CHECK(sdr_probe.length==4 && !memcmp(sdr_probe.contents,gray,4),"SDR probe bytes changed");
+    puts("hdr_output_test: probe converted_bytes=20/20 SDR_bytes=4/4 PASS");
     CHECK(fabs((float)pixel[0]-.2158605)<.0002,"decode once: %.8f",(float)pixel[0]);
     puts("hdr_output_test: float LUT bypass, SDR decode once, SDR capture tone-map/sRGB encode PASS");return 0;
 }
@@ -306,6 +398,7 @@ static int composition(unsigned samples) {
     id<MTLTexture> depth=[mtl newTextureWithDescriptor:dd];
     id<MTLBuffer> read=[mtl newBufferWithLength:PITCH options:MTLResourceStorageModeShared];
     test_screen.maximumExtendedDynamicRangeColorComponentValue=4;
+    hdr_output_frame_boundary();
     float_scene_on=1;cmd=[queue commandBuffer];render_float_scene_begin();
     MTLRenderPassDescriptor *dp=[MTLRenderPassDescriptor renderPassDescriptor];
     dp.depthAttachment.texture=depth;dp.depthAttachment.loadAction=MTLLoadActionClear;dp.depthAttachment.clearDepth=0;dp.depthAttachment.storeAction=MTLStoreActionStore;
@@ -390,6 +483,7 @@ static int composition(unsigned samples) {
     // No-treatment path, and a new screen headroom on the next frame. Its
     // shoulder still precedes HUD; previous-frame state cannot select H=4.
     ++frame_serial;test_screen.maximumExtendedDynamicRangeColorComponentValue=2;
+    hdr_output_frame_boundary();
     uint16_t identity[768];for(int i=0;i<768;++i)identity[i]=(i&255)*257;render_set_gamma(identity);
     cmd=[queue commandBuffer];render_float_scene_begin();
     quad_into(cmd,world,full,bb_rt.ms?:backbuffer_tex,0,0,full,0);bb_rt.stale=bb_rt.ms!=nil;
@@ -409,17 +503,17 @@ static int composition(unsigned samples) {
 int main(int argc,const char **argv) {@autoreleasepool{
     if(argc==3 && !strcmp(argv[1],"--sources"))return sources(argv[2]);
     if(argc==2 && !strcmp(argv[1],"--cpu"))return cpu();
+    if(argc==2 && !strcmp(argv[1],"--cpu-lifecycle"))return lifecycle_cpu();
     mtl=MTLCreateSystemDefaultDevice();
     if(!mtl){puts("GPU PENDING: run on a Metal-capable host: runtime/offline_tests.sh hdr_output_test");return 3;}
     queue=[mtl newCommandQueue];
     layer=[CAMetalLayer layer];layer.device=mtl;layer.pixelFormat=MTLPixelFormatBGRA8Unorm;
     // A detached view/window/screen fixture supplies deterministic H to the
     // production layer.delegate -> window.screen sampler. No native window.
-    test_screen=[HDRTestScreen new];test_screen.maximumExtendedDynamicRangeColorComponentValue=1;
-    HDRTestWindow *window=[HDRTestWindow new];window.screen=(NSScreen *)test_screen;
-    test_view=[HDRTestView new];test_view.testWindow=(NSWindow *)window;layer.delegate=test_view;
+    fixture_screen(1);
     layer.drawableSize=CGSizeMake(5,1);layer.framebufferOnly=NO;
     INIT_BLIT
+    if(argc==2 && !strcmp(argv[1],"--startup"))return startup();
     if(argc==2 && !strcmp(argv[1],"--sdr"))return sdr(0);
     if(argc==2 && !strcmp(argv[1],"--fallback"))return sdr(1);
     if(argc==2 && !strcmp(argv[1],"--composition"))return composition(1);

@@ -27,6 +27,7 @@
 #include "funcs.h"
 #include "host.h"
 #include "private_cars.h"
+#include "settings.h"
 #include "server_loader.h"
 #include "x360audio.h"
 #include "x360copspeech.h"
@@ -468,6 +469,38 @@ static uint32_t find_first(const char *win, uint32_t data) {
 }
 static int find_handle(uint32_t h) { uint32_t k = (h - FIND_BASE) / 4; return h >= FIND_BASE && k < 32 && finds[k].d ? (int)k : -1; }
 // END offline save scan
+// One resolver, always using the requested identity. Donor fallback from an
+// addition returns immediately, so a donor's own-slot swap cannot leak into it.
+static int private_car_path(const char *guest, char *host, size_t n) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    return 0;
+#else
+    if (car85_path(guest,host,n)) return 1;
+    char rel[1024];
+    if (!guest || snprintf(rel,sizeof rel,"%s",guest)>=(int)sizeof rel) return 0;
+    for (char *p=rel;*p;++p) if (*p=='\\') *p='/';
+    char *r=rel;
+    if (strlen(r)>2 && r[1]==':') r+=2;
+    while (*r=='/') ++r;
+    if (!strncasecmp(r,"NFSMW/",6)) r+=6;
+    if (strncasecmp(r,"CARS/",5)) return 0;
+    char *name=r+5, *file=strchr(name,'/');
+    if (!file) return 0;
+    *file++=0;
+    int geometry=!strcasecmp(file,"GEOMETRY.BIN");
+    if (!geometry && strcasecmp(file,"TEXTURES.BIN")) return 0;
+    for (size_t i=0;i<private_cars_count();++i) {
+        const PrivateCar *car=private_cars_get(i);
+        if (!car->swap || strcasecmp(name,car->name)) continue;
+        const char *path=geometry?car->geometry:car->textures;
+        if (strlen(path)>=n) return 0;
+        snprintf(host,n,"%s",path);
+        return 1;
+    }
+    return test_car_path(guest,host,n);
+#endif
+}
+
 
 #define HANDLE_BASE 0x1000u
 // BEGIN offline file layer: auditfix_test.py compiles these exact helpers in a scratch-only C harness.
@@ -551,6 +584,9 @@ bad:;
 __attribute__((weak)) int private_cars_save_allowed(void) { return 1; }
 __attribute__((weak)) int private_cars_save_prepare(const char *path) { (void)path; return 1; }
 __attribute__((weak)) void private_cars_save_complete(int committed) { (void)committed; }
+__attribute__((weak)) int private_cars_backup_before_write(const char *destination, const char *staged) {
+    (void)destination; (void)staged; return 1;
+}
 static int profile_write_denied(const char *path) {
     return !private_cars_save_allowed() && (file_is_save(path) || !strcmp(path, userdata_dir()));
 }
@@ -666,6 +702,7 @@ static int file_close(uint32_t h) {
     if (s && profile_write_denied(file_info[k].path)) s->failed = 1;
     int ok = 1;
     if (commit && !s->failed && !private_cars_save_prepare(s->temp)) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+    if (commit && !s->failed && !private_cars_backup_before_write(s->dest,s->temp)) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
     if (commit && !s->failed && durable_sync(fd)) { s->failed = 1; ok = 0; file_error(); }
     if (close(fd)) { if (s) s->failed = 1; ok = 0; file_error(); }
     if (commit) {
@@ -1134,8 +1171,7 @@ static int win32(Cpu *c, const char *fn) {
         int x360_arrest_path(const char *guest, char *host, size_t n);   // x360_textures.m: NFS_X360_ARREST=x360
         if (file_flags(acc, disp) == O_RDONLY) {
             x360_arrest_path((char *)G + arg(c, 0), host, sizeof host);
-            car85_path((char *)G + arg(c, 0), host, sizeof host);       // NFS_TEST_CAR85: CARS/CAR85 -> donor
-            test_car_path((char *)G + arg(c, 0), host, sizeof host);    // NFS_TEST_CAR_DIR: converted car files win
+            private_car_path((char *)G + arg(c, 0), host, sizeof host);
         }
         uint32_t h = file_open((char *)G + arg(c, 0), host, acc, arg(c, 2), disp, arg(c, 5));
         if (boot_trace) fprintf(stderr, "      CreateFileA(%s) -> %s\n", (char *)G + arg(c, 0), h != 0xFFFFFFFF ? host : "not found");
@@ -1571,22 +1607,36 @@ static void deadline_start(void) {
     pthread_detach(t);
 }
 
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+// Restart-only values are pinned before guest registration or file I/O.
+static void private_cars_boot(void) {
+    char root[4096];
+    private_cars_metadata_userdata(userdata_dir());
+    const char *override = getenv("NFS_TEST_PRIVATE_CARS_ROOT");
+    if (override && *override) snprintf(root, sizeof root, "%s", override);
+    else snprintf(root, sizeof root, "%s/private-cars", userdata_dir());
+    const char *const names[]={PRIVATE_CARS_SWAP_NAMES};
+    const char *originals[14]; size_t count=0;
+    for (unsigned i=0;i<14;++i) {
+        char id[64]; snprintf(id,sizeof id,"cars.original.%s",names[i]);
+        Setting *setting=settings_find(id);
+        if (setting && setting->boot_value) originals[count++]=names[i];
+    }
+    Setting *master=settings_find("cars.later_games");
+    private_cars_init(root, master?master->boot_value:1, originals, count);
+    if (private_cars_error()[0]) {
+        fprintf(stderr,"cars: %s\n",private_cars_error());
+    }
+}
+#endif
+
 // ---------------- loader ----------------
 int main(int argc, char **argv) {
     game_dir = app_start(argc, argv);
     void settings_init(void), settings_dump(const char *), report_init(void);
     settings_init();                       // settings.c: the F10 menu's saved values, before anything reads its switch
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
-    // Inventory only; routing/registration and settings remain WO3/4. TEST roots
-    // are explicit and all fixtures set BOOT_USERDATA before this startup seam.
-    {
-        char root[4096];
-        private_cars_metadata_userdata(userdata_dir());
-        const char *override = getenv("NFS_TEST_PRIVATE_CARS_ROOT");
-        if (override && *override) snprintf(root, sizeof root, "%s", override);
-        else snprintf(root, sizeof root, "%s/private-cars", userdata_dir());
-        private_cars_init(root, 1, NULL, 0);
-    }
+    private_cars_boot();
 #endif
     void settings_language_setup(const char *);
     settings_language_setup(game_dir);     // settings_port.c: the language packs present; the Language row when > 1
@@ -1640,6 +1690,9 @@ int main(int argc, char **argv) {
     c->esp -= 4;
     M32(c->esp) = 0xDEADBEEF;              // entry's return address
     diag_init();
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    if (diag_on && private_cars_error()[0]) diag_event("cars: %s",private_cars_error());
+#endif
     threads_init();
     threads_set_main_cpu(c);
     x360copspeech_warm();                  // host-only CRC/conversion, before the loading screen needs speech

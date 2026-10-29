@@ -1,4 +1,4 @@
-// Private, scratch-profile manifest additions (legacy CAR85 remains supported). No asset or save files are changed.
+// Private verified catalog additions; legacy TEST manifests remain scratch-only.
                                                                                 
 // with the original Cpu restored. Valid stock data delegates unchanged OFF;
 // Legacy unavailable CAR85 and invalid type IDs are rejected before access.
@@ -36,15 +36,30 @@ static uint32_t owned_table;
 // The order in the manifest is the numeric identity. Never sort this array.
 typedef struct {
     char name[16], donor_folder[16], directory[PATH_MAX];
+    unsigned catalog_id;
     uint32_t key, model_key, record, type, hash, pv, fe, menu_fe, donor_model, string, logo, brand_string;
     int wheel_fit;
     uint32_t wheel_key, wheel_donor;
     float wheel_offsets[16], wheel_compressions[2], wheel_widths[4];
     uint8_t wheel_front[6], wheel_rear[6];
+    uint32_t *solid_map;
+    unsigned solid_count;
 } Addition;
 static Addition additions[MAX_ADDITIONS];
 static unsigned nadditions;
-static int manifest_mode;
+static _Thread_local Addition *model_namespace;
+static uint32_t parts_hash(const char *s);
+void f_00751540_orig(Cpu *c);
+void f_00752940_orig(Cpu *c);
+void f_00752B60_orig(Cpu *c);
+void f_00755800_orig(Cpu *c);
+void f_0075F5D0_orig(Cpu *c);
+static int manifest_mode, catalog_mode;
+static unsigned addition_id(unsigned j) { return additions[j].catalog_id ? additions[j].catalog_id : TYPES + j; }
+static Addition *addition_for_type(unsigned type) {
+    for (unsigned j=0;j<nadditions;++j) if (addition_id(j)==type) return &additions[j];
+    return NULL;
+}
 static int inserting;
 typedef struct { uint32_t ld, vault, original; uint64_t generation; } Source;
 static Source sources[2048];
@@ -210,12 +225,46 @@ static void load_wheel_fit(Addition *a) {
             fail("invalid render wheel width");
 }
 
+static void load_solid_map(Addition *a, const char *path) {
+    FILE *f=fopen(path,"rb");
+    if (!f) fail("cannot open verified solid map");
+    uint32_t h[4];
+    // Version 2 adds private image rows to the same sorted donor -> private table.
+    if (fread(h,1,16,f)!=16 || h[0]!=0x31504D53u || (h[1]!=1 && h[1]!=2) ||
+        h[2]!=parts_hash(a->name) || !h[3] || h[3]>8192) fail("invalid solid map header");
+    a->solid_count=h[3]; a->solid_map=malloc(8u*h[3]);
+    if (!a->solid_map || fread(a->solid_map,8,h[3],f)!=h[3] || fgetc(f)!=EOF || ferror(f))
+        fail("invalid solid map size");
+    fclose(f);
+    for (unsigned i=1;i<a->solid_count;++i)
+        if (a->solid_map[2*i]<=a->solid_map[2*i-2]) fail("unordered solid map");
+}
+
 static int on(void) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    return 0;
+#endif
     if (configured) return enabled;
     configured = 1;
     seed_scratch_profile();
     const char *legacy = getenv("NFS_TEST_CAR85"), *manifest = getenv("NFS_TEST_ADDCARS");
-    if ((!legacy || !*legacy) && (!manifest || !*manifest)) return 0;
+    if ((!legacy || !*legacy) && (!manifest || !*manifest)) {
+        catalog_mode = manifest_mode = 1;
+        for (size_t i=0;i<private_cars_count();++i) {
+            const PrivateCar *car=private_cars_get(i);
+            if (car->swap) continue;
+            Addition *a=&additions[nadditions++];
+            folder(a->name,car->name); folder(a->donor_folder,car->donor);
+            a->catalog_id=car->id;
+            snprintf(a->directory,sizeof a->directory,"%s",car->geometry);
+            char *slash=strrchr(a->directory,'/');
+            if (!slash) fail("verified addition has no pack directory");
+            *slash=0;
+            if (car->wheel_fit[0]) load_wheel_fit(a);
+            if (car->solid_map[0]) load_solid_map(a,car->solid_map);
+        }
+        return enabled=nadditions!=0;
+    }
     if (!scratch_profile()) fail("additions require guarded scratch BOOT_USERDATA=<BOOT_DIAG>.user");
     if (legacy && *legacy && manifest && *manifest) fail("use either NFS_TEST_ADDCARS or NFS_TEST_CAR85");
     if (manifest && *manifest) {
@@ -258,7 +307,10 @@ static int on(void) {
     return enabled = nadditions != 0;
 }
 
-uint32_t car85_count(void) { on(); return TYPES + nadditions; }
+uint32_t car85_count(void) {
+    on(); unsigned count=nadditions?addition_id(nadditions-1)+1:TYPES;
+    return count;
+}
 
 void car85_vault_begin(uint32_t address) {
     if (!on()) return;
@@ -290,7 +342,7 @@ uint32_t car85_asset_name(uint32_t address) {
     }
     if (on() && owned_table) {
         for (unsigned i = 0; i < nadditions; ++i) {
-            uint32_t off = address - (owned_table + (TYPES + i) * STRIDE);
+            uint32_t off = address - (owned_table + addition_id(i) * STRIDE);
             if (off == 0 || off == 0x10) return additions[i].record + off;
         }
     }
@@ -541,11 +593,13 @@ void f_00756A90(Cpu *c) {
             if (parts_hash(a->name) == M32(src + i * STRIDE + 0x50)) fail("addition part hash collides with original");
     }
     if (!owned_table) owned_table = gmalloc(car85_count() * STRIDE);
+    memset(G + owned_table, 0, car85_count() * STRIDE);
+    for (unsigned i=TYPES;i<car85_count();++i) M32(owned_table+i*STRIDE+0x90)=0xFFFFFFFFu;
     memcpy(G + owned_table, G + src, TYPES * STRIDE);
     for (unsigned j = 0; j < nadditions; ++j) {
         Addition *a = &additions[j];
         a->record = owned_table + a->record * STRIDE;
-        uint32_t extra = owned_table + (TYPES + j) * STRIDE;
+        uint32_t extra = owned_table + addition_id(j) * STRIDE;
         memcpy(G + extra, G + a->record, STRIDE);
         memset(G + extra, 0, 32);
         strcpy((char *)G + extra, a->name); strcpy((char *)G + extra + 0x10, a->name);
@@ -554,14 +608,14 @@ void f_00756A90(Cpu *c) {
             snprintf((char *)G + extra + 0x20, 0x30, "CARS\\%s\\GEOMETRY.BIN", a->name);
         }
         M32(extra + 0x50) = parts_hash(a->name);
-        M32(extra + 0x90) = TYPES + j;
+        M32(extra + 0x90) = addition_id(j);
     }
     M32(TABLE) = owned_table;
     Cpu saved = *c;
     for (unsigned j = 0; j < nadditions; ++j) {
         uint32_t hash = parts_hash(additions[j].name);
         uint32_t type = call_guest(c, 0x007398D0, 1, &hash);
-        if (type != TYPES + j) fail("GetCarType did not return manifest type");
+        if (type != addition_id(j)) fail("GetCarType did not return manifest type");
         if (diag_on) diag_event("addcars: name=%s type=%u donor=%s donor_type=%u types=%u originals_preserved=84",
             additions[j].name, type, additions[j].donor_folder, additions[j].type, car85_count());
     }
@@ -573,12 +627,12 @@ void f_00756A90(Cpu *c) {
 // flattened index intact; each addition uses its donor's slot overrides.
 void f_007399F0(Cpu *c) {
     uint32_t at = c->esp + 8, type = M32(at);
-    if (!M32(TABLE) || type >= car85_count()) {
+    if (!M32(TABLE) || type >= car85_count() || (type >= TYPES && !addition_for_type(type))) {
         static uint32_t empty_slots;
         if (!empty_slots) empty_slots = gmalloc(8);
         c->eax = empty_slots; c->esp += 4; return;
     }
-    if (on() && type >= TYPES) M32(at) = additions[type - TYPES].type;
+    if (on() && type >= TYPES) M32(at) = addition_for_type(type)->type;
     f_007399F0_orig(c);
     M32(at) = type;
     car_lot_probe(c, 0);
@@ -600,6 +654,81 @@ void f_00681340(Cpu *c) {
         if (additions[i].model_key && key == additions[i].model_key) { M32(at) = additions[i].donor_model; break; }
     f_00681340_orig(c);
     M32(at) = key;
+}
+
+// A donor CarPart is shared, while its solid belongs to a specific RideInfo.
+// Scope only model resolution; part IDs, serialization and physics stay retail.
+// Boot registration sets nadditions before model loading. With no additions,
+// each wrapper tail-delegates before configuration, guest reads or TLS access.
+// Keep the optional bodies out of line so call merging cannot impose their
+// register-save frame on the all-MW path.
+static Addition *solid_context(uint32_t ride) {
+    return on() && ride ? addition_for_type(M32(ride)) : NULL;
+}
+static uint32_t private_solid_hash(Addition *a, uint32_t hash) {
+    if (!a || !a->solid_count || !hash) return hash;
+    unsigned lo=0,hi=a->solid_count;
+    while (lo<hi) {
+        unsigned m=lo+(hi-lo)/2; uint32_t key=a->solid_map[2*m];
+        if (key<hash) lo=m+1; else hi=m;
+    }
+    return lo<a->solid_count && a->solid_map[2*lo]==hash ? a->solid_map[2*lo+1] : hash;
+}
+static __attribute__((noinline)) void model_00751540(Cpu *c) {
+    f_00751540_orig(c);
+    c->eax=private_solid_hash(model_namespace,c->eax);
+}
+void f_00751540(Cpu *c) {
+    if (!nadditions) { f_00751540_orig(c); return; }
+    model_00751540(c);
+}
+// GetUsedCarTextureInfo builds lamp/skin image names from the donor record
+// and donor CarParts. The texture cache is keyed by global hash alone, so a
+// resident donor image would win; map each built hash to the pack's own image.
+static __attribute__((noinline)) void model_00751860(Cpu *c) {
+    uint32_t info=M32(c->esp+4); Addition *a=solid_context(M32(c->esp+8));
+    f_00751860_orig(c);
+    if (a) for (uint32_t at=info;at<info+0xE0*4;at+=4) M32(at)=private_solid_hash(a,M32(at));
+}
+void f_00751860(Cpu *c) {
+    if (!nadditions) { f_00751860_orig(c); return; }
+    model_00751860(c);
+}
+static __attribute__((noinline)) void model_00752940(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->esp+4));
+    f_00752940_orig(c); model_namespace=saved;
+}
+void f_00752940(Cpu *c) {
+    if (!nadditions) { f_00752940_orig(c); return; }
+    model_00752940(c);
+}
+static __attribute__((noinline)) void model_00752B60(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->ecx+0xC));
+    f_00752B60_orig(c); model_namespace=saved;
+}
+void f_00752B60(Cpu *c) {
+    if (!nadditions) { f_00752B60_orig(c); return; }
+    model_00752B60(c);
+}
+static __attribute__((noinline)) void model_00755800(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->ecx+0x84));
+    f_00755800_orig(c); model_namespace=saved;
+}
+void f_00755800(Cpu *c) {
+    if (!nadditions) { f_00755800_orig(c); return; }
+    model_00755800(c);
+}
+static __attribute__((noinline)) void model_0075F5D0(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->esp+4));
+    f_0075F5D0_orig(c); model_namespace=saved;
+}
+void f_0075F5D0(Cpu *c) {
+    if (!nadditions) { f_0075F5D0_orig(c); return; }
+    model_0075F5D0(c);
 }
 
 void car85_collection_seen(uint32_t ld, uint32_t vault) {
@@ -946,7 +1075,12 @@ static const char *reconcile_stock(uint32_t db, unsigned *inserted) {
         flags[count] |= category == 3 || !M8(layout + 0x58) ? 0x20 : 1;
         missing[count++] = j;
     }
-    if (free_count < count) return "not enough free FE car rows; no additions inserted";
+    if (free_count < count) {
+        if (!catalog_mode) return "not enough free FE car rows; no additions inserted";
+        fprintf(stderr,"carsaves: capacity free=%u required=%u approved=%u; existing rows retained, inserted=0\n",free_count,count,nadditions);
+        if (diag_on) diag_event("carsaves: capacity free=%u required=%u approved=%u; existing rows retained, inserted=0",free_count,count,nadditions);
+        return NULL;
+    }
     for (unsigned j = 0; j < count; ++j)
         for (unsigned i = 0; i < 200; ++i)
             if (M32(db + i * 20) == slots[j])
@@ -963,7 +1097,7 @@ static const char *reconcile_stock(uint32_t db, unsigned *inserted) {
 }
 
 static int catalog_matches(const PrivateCar *car, const Addition *addition) {
-    if (!car || strcmp(car->name, addition->name) || strcmp(car->donor, addition->donor_folder)) return 0;
+    if (!car || !addition || strcmp(car->name, addition->name) || strcmp(car->donor, addition->donor_folder)) return 0;
     size_t n = strlen(addition->directory);
     return n && !strncmp(car->geometry, addition->directory, n) &&
         !strcmp(car->geometry + n, "/GEOMETRY.BIN") &&
@@ -1027,7 +1161,7 @@ const char *car85_profile_preflight(Cpu *c, uint32_t db, const PrivateCar *inven
             const PrivateCar *found = NULL;
             for (size_t k = 0; k < count; ++k)
                 if (!inventory[k].swap && inventory[k].selected && inventory[k].id == type) found = &inventory[k];
-            if (!catalog_matches(found, &additions[type - TYPES])) {
+            if (!catalog_matches(found, addition_for_type(type))) {
                 reason = "Required added car is absent from the verified catalog. Reinstall its catalog and packs."; break;
             }
         }
@@ -1048,7 +1182,7 @@ const char *car85_profile_preflight(Cpu *c, uint32_t db, const PrivateCar *inven
     for (unsigned j = 0; !reason && j < nadditions; ++j) {
         const PrivateCar *found = NULL;
         for (size_t k = 0; k < count; ++k)
-            if (!inventory[k].swap && inventory[k].selected && inventory[k].id == TYPES + j) found = &inventory[k];
+            if (!inventory[k].swap && inventory[k].selected && inventory[k].id == addition_id(j)) found = &inventory[k];
         if (!catalog_matches(found, &additions[j]))
             reason = "Active additions do not match the verified catalog. Restore its manifest and packs.";
     }
@@ -1071,7 +1205,8 @@ void f_005816B0(Cpu *c) {
 }
 
 void f_00739920(Cpu *c) {
-    if (!M32(TABLE) || M32(c->esp + 4) >= car85_count()) {
+    if (!M32(TABLE) || M32(c->esp + 4) >= car85_count() ||
+        (M32(c->esp + 4) >= TYPES && !addition_for_type(M32(c->esp + 4)))) {
         c->eax = 0; c->esp += 4; return;
     }
     f_00739920_orig(c);

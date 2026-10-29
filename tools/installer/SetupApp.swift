@@ -406,12 +406,23 @@ final class Setup: ObservableObject {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    // A file inside the game folder (speed.exe) stands for that folder; a .zip stays itself.
+    func pcRoot(_ url: URL) -> URL {
+        var dir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &dir), !dir.boolValue,
+           url.pathExtension.lowercased() != "zip" { return url.deletingLastPathComponent() }
+        return url
+    }
+
     func choosePC() {
         // The game folder, or a .zip of it (Setup unpacks a copy; the .zip is only read).
-        guard let url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), or a .zip of that folder.",
+        guard var url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), speed.exe itself, or a .zip of that folder.",
                                    // .folder too: with allowedContentTypes set, the panel greys out "Choose" for any
                                    // folder that is not listed (issue #19: the 3.x game folder could not be chosen).
-                                   files: true, types: [.folder, .zip]) else { return }
+                                   // .exe: once inside the game folder, "Choose" stays grey until a file is picked,
+                                   // and players then pick speed.exe.
+                                   files: true, types: [.folder, .zip, .exe]) else { return }
+        url = pcRoot(url)
         pc = url; features = nil; x360 = nil; x360Status = ""
         runCheck(forX360: false)
     }

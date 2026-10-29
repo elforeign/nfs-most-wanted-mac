@@ -32,7 +32,7 @@ static int is_depth_pf(MTLPixelFormat f) { return f == MTLPixelFormatDepth32Floa
 // ---------------- shared state (defined in render.m unless noted) ----------------
 extern id<MTLTexture> backbuffer_tex, present_tex, autodepth_tex;
 extern RenderTex bb_rt, ad_rt;               // the back buffer and auto depth buffer as render targets (.ms with AA on)
-float render_hdr_headroom(void);            // sampled once before the world's phase; Off returns 1
+float render_hdr_headroom(void);            // frame-latched ceiling; Off returns 1
 float render_hdr_composition_headroom(void); // >1 only while composing a float world/HUD frame
 void render_hdr_world_copy(id<MTLTexture> src, id<MTLTexture> dst);
 void render_float_scene_present_end(void);

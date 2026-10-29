@@ -239,7 +239,7 @@ def main(extra_addresses=(), variants=None):
         results=[]
         for variant in (variants or ("good","duplicate_id","missed_bound","missing_names","borrowed_name","missing_logos","lot_guard")):
             changed=actual
-            if variant=="duplicate_id": changed=actual.replace('M32(extra + 0x90) = TYPES + j;', 'M32(extra + 0x90) = TYPES;')
+            if variant=="duplicate_id": changed=actual.replace('M32(extra + 0x90) = addition_id(j);', 'M32(extra + 0x90) = TYPES;')
             if variant=="missing_names":
                 changed=actual.replace('M32(owned + n * 8 + 4) = a->string;', 'M32(owned + n * 8 + 4) = 0;')
                 assert changed!=actual
@@ -268,7 +268,7 @@ def main(extra_addresses=(), variants=None):
                 changed=actual.replace('if (!scratch_profile()) fail("save seeding requires guarded scratch userdata");', '/* deliberately omit scratch seed guard */')
                 assert changed!=actual
             if variant=="capacity_boundary":
-                changed=actual.replace('if (free_count < count) return', 'if (free_count <= count) return')
+                changed=actual.replace('if (free_count < count) {', 'if (free_count <= count) {')
                 assert changed!=actual
             if variant=="catalog_crc":
                 changed=actual.replace('M32(frontend + 8) = stored;', '/* deliberately retain incompatible running catalog CRC */')
@@ -279,6 +279,7 @@ def main(extra_addresses=(), variants=None):
             if variant=="ordinary_profile_guard":
                 changed=actual.replace('if (!on() && !scratch_profile()) return;', '/* deliberately validate ordinary profiles */',1)
                 assert changed!=actual
+            assert variant in ("good","loader_hook","missed_bound") or changed != actual, variant
             (tmp/"car85.c").write_text(changed)
             code=source
             if variant=="loader_hook":

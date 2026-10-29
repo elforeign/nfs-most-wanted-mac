@@ -58,6 +58,7 @@
 #include <string.h>
 
 #include "d3d9_internal.h"
+#include "hdr_output.h"
 
 int probe_sig;                           // PROBE_* bit of the feature drawing its signature in this pass
 static const char *const names[] = {"postfx", "msaa", "hdtex", "shadows", "carpaint", "mirror", "raindrops", "roadrefl", "ripples", "grass"};
@@ -100,6 +101,7 @@ static int probe_init(void) {
 }
 
 static id<MTLBuffer> capture(id<MTLCommandBuffer> cmd, id<MTLTexture> t) {
+    t = hdr_capture_source(cmd, t);
     NSUInteger w = t.width, h = t.height;
     id<MTLBuffer> b = [cmd.device newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> e = [cmd blitCommandEncoder];

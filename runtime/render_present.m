@@ -1,6 +1,7 @@
 // render_present.m - Present, frame timing and diag capture encoding (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 #include "brightness.h"
+#include "hdr_output.h"
 #import <Cocoa/Cocoa.h>
 #include "settings.h"
 #include "framecap.h"
@@ -198,6 +199,7 @@ static void gamma_blit(void) {
 // extended-sRGB values so HUD blending retains its legacy gamma-space contract.
 // The separate transport texture and native drawable are display-linear.
 static int hdr_output_requested, hdr_output_on;
+static float hdr_frame_headroom = 1;
 static id<MTLTexture> hdr_present_tex;
 static uint64_t hdr_nil_drawables, hdr_errors;
 static float hdr_brightness_exponent(unsigned channel) {
@@ -210,6 +212,9 @@ static float hdr_brightness_exponent(unsigned channel) {
     return fminf(8,fmaxf(.125f,logf(fmaxf(y,1.0f/65535))/logf(128.0f/255)));
 }
 int render_hdr_output_enabled(void) { return hdr_output_on; }
+const char *render_hdr_output_status(void) {
+    return !hdr_output_requested ? "Off" : hdr_output_on && hdr_frame_headroom>1 ? "EDR active" : "SDR fallback";
+}
 static NSScreen *hdr_output_screen(void) {
     NSWindow *w = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
     return w.screen ?: NSScreen.mainScreen;
@@ -222,13 +227,21 @@ static float hdr_output_ceiling(float h) {
     if((float)half>h) { uint16_t bits;memcpy(&bits,&half,2);--bits;memcpy(&half,&bits,2); }
     return (float)half;
 }
-float render_hdr_headroom(void) {
-    if(!hdr_output_on)return 1;
+static void hdr_output_frame_boundary(void) {
+    if(!hdr_output_on)return;
     __block float h=1;
     void (^sample)(void)=^{ h=(float)hdr_output_screen().maximumExtendedDynamicRangeColorComponentValue; };
     if(NSThread.isMainThread)sample();else dispatch_sync(dispatch_get_main_queue(),sample);
-    return hdr_output_ceiling(h);
+    // Poll the actual window.screen every frame: moves, HDR mode changes and
+    // wake need no asynchronous notification that could mutate a world frame.
+    // Transport stays linear/16F for this renderer's lifetime. H<=1 uses the
+    // exact SDR copy/LUT, then decodes those bytes for the linear layer.
+    float ceiling=hdr_output_ceiling(h);
+    if(diag_on && ceiling!=hdr_frame_headroom)
+        diag_event("hdr_output: frame headroom %.6f -> %.6f",hdr_frame_headroom,ceiling);
+    hdr_frame_headroom=ceiling;
 }
+float render_hdr_headroom(void) { return hdr_output_on ? hdr_frame_headroom : 1; }
 static void hdr_output_diag(const char *stage, MTLPixelFormat actual) {
     if (!diag_on || !hdr_output_requested) return;
     NSScreen *s = hdr_output_screen();
@@ -328,9 +341,10 @@ void render_hdr_output_init(void) {
     static int initialized;
     if (initialized) return;
     initialized = 1;
-    const char *value = getenv("NFS_HDR_OUTPUT");
-    hdr_output_requested = value && !strcmp(value, "edr");
+    hdr_output_requested = nfs_hdr_output_requested();
     if (!hdr_output_requested || !layer) return;   // unset: no layer/colour/PSO changes
+    const char *pads=getenv("NFS_PADS");
+    if(pads && !strcmp(pads,"2"))return;         // shared split atlas: retain the whole SDR frame
     void (^configure)(void) = ^{
         hdr_output_diag("before-enable", MTLPixelFormatInvalid);
         layer.wantsExtendedDynamicRangeContent = YES;
@@ -358,8 +372,9 @@ void render_hdr_output_init(void) {
         if (NSThread.isMainThread) restore();
         else dispatch_sync(dispatch_get_main_queue(), restore);
     }
+    hdr_output_frame_boundary();
 }
-static id<MTLTexture> hdr_capture_source(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
+id<MTLTexture> hdr_capture_source(id<MTLCommandBuffer> cb, id<MTLTexture> src) {
     if (src.pixelFormat != MTLPixelFormatRGBA16Float) return src;
     if(src==backbuffer_tex && render_hdr_composition_headroom()>1) {
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:src.width height:src.height mipmapped:NO];
@@ -373,6 +388,10 @@ static id<MTLTexture> hdr_capture_source(id<MTLCommandBuffer> cb, id<MTLTexture>
     id<MTLTexture> sdr = [mtl newTextureWithDescriptor:td];
     if (!sdr || !hdr_output_blit(cb, src, sdr, 1, 0)) abort();   // never copy FP16 into a four-byte row
     return sdr;
+}
+static id<MTLTexture> hdr_shot_source(id<MTLCommandBuffer> cb, int show) {
+    id<MTLTexture> src = show && hdr_output_on && render_hdr_composition_headroom()>1 ? hdr_present_tex : show && present_graded ? present_tex : backbuffer_tex;
+    return hdr_capture_source(cb, src);
 }
 // END HDR output S helpers.
 
@@ -486,8 +505,7 @@ void render_present(void) {
     if (due) snprintf(shot_path, sizeof shot_path, "%s/frame_%05llu.%s", diag_dir, (unsigned long long)dev.frames, due == 2 ? "png" : "jpg");
     if (due == 2) postfx_ab_shot(shot_path, sizeof shot_path);              // a full-size frame shot also starts a postfx A/B set (front end)
     if (shot_path[0]) {
-        id<MTLTexture> shot_src = show && hdr_output_on && render_hdr_composition_headroom()>1 ? hdr_present_tex : show && present_graded ? present_tex : backbuffer_tex;
-        shot_src = hdr_capture_source(cmd, shot_src);   // float -> SDR tone-map + sRGB, then four-byte copy
+        id<MTLTexture> shot_src = hdr_shot_source(cmd, show); // SDR bytes for BOOT_DIAG and F10 reports
         shot = [mtl newBufferWithLength:backbuffer_tex.width * backbuffer_tex.height * 4 options:MTLResourceStorageModeShared];
         id<MTLBlitCommandEncoder> b = gpt_blit(cmd, "blit diag shot");
         [b copyFromTexture:shot_src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
@@ -558,6 +576,7 @@ void render_present(void) {
     if (show) present_show();
     cmd = nil;
     render_float_scene_present_end();
+    hdr_output_frame_boundary();             // latch display state for the next complete frame
     // One frame in flight: wait for the previous frame, not this one. The upload ring of the next frame was last
     // used two frames ago, so it is free.
     uint64_t w0 = host_ticks();

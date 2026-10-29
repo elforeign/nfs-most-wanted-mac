@@ -1,5 +1,11 @@
 # triggers (I4, 2026-10-22): pass = "triggers PASS(analog, simultaneous, release)" (gate 9b4b460); broken (the old
 # pressure zeroing restored in pad_apply_layout) = "triggers FAIL: physical 0.00/1.00: DI 32768/32768, gas/brake 0/0, want 1.00/0.00".
+# Native triggers (player bindings, padbindps: Accelerate R2 = Rz+, Brake L2 = Z+): pass = gas 0.2500/0.5000/0.7500/
+# 1.0000 for R2 0.25/0.50/0.75/1 and brake 0.5000 for L2 0.50; broken (pad_native's old L2/R2 full press restored) =
+# "triggers FAIL: native physical 0.00/0.25: DI 32768/65535, gas/brake 1.0000/0.0000" (gas 1.0000 at every pressure).
+# Automatic layout (no NFS_PAD_LAYOUT, no pick): pass = "pad: layout xbox (automatic" for the Xbox pad, "playstation
+# (automatic" for the DualSense, Xbox pairs on nonps_xbox; broken (the old PS2 default for every pad) = "triggers FAIL:
+# physical 0.00/1.00: DI 32768/65535, gas/brake 0.0000/0.0000, want 1.00/0.00 (+/-0.01), native 0, layout nonps_ps2".
 # Launch reopen (0g): 7 offline fixtures passed: on/off accepted; extra open, interim PCM/stereo, duplicate result,
 # first-stream mismatch and lost parked reuse rejected. Full game smoke remains a separate game check.
 """smoke_check.py <diag dir> - the checks on runtime/smoke.sh's launch (runtime/README.md, "Audio and pad smoke").
@@ -12,7 +18,8 @@ pad: the simulated DualSense connected after the game's gamepad enumeration (the
   set, PS2 layout). Limits: Cross >= 15 m/s at release and >= 10 m/s gained; A >= 5 m/s gained.
   Physical trigger pairs enter BEFORE layout: gas/brake within 0.01 of RT/LT, DI raw within 2 of
   32767.5*(1+pressure). 0/0.30 must give 0.30/0, 0.50/0.75 -> 0.75/0.50, 1/1 -> 1/1, release -> 0/0.
-  RT-only 0/1 gains >= 1 m/s, then native DualSense Cross gains >= 0.5 m/s after the layout/type swaps.
+  RT-only 0/1 gains >= 1 m/s, then native DualSense Cross gains >= 0.5 m/s after the layout/type swaps; then with a
+  player's R2/L2 gas/brake bindings the native DualSense's R2 0.25/0.50/0.75/1 and L2 0.50 reach gas/brake within 0.01.
   Old code fails "physical 0.00/0.30": it digitizes gas to 1 and clears DI pressures (or combined Z cancels pairs).
   These are expected values; measured positive/negative I4 game runs remain a separate game check.
 audio: the first DirectSound device chose Dolby TrueHD automatically on the fake HDMI TV; the TV saw the initial output plus
@@ -125,7 +132,27 @@ def check_triggers(ev):
             break
     if down is None or up is None or up - down < 1:
         return False, f"RT-only acceleration {down} -> {up}, want +1 m/s", "triggers FAIL(acceleration)"
-    return True, f"8 physical pairs match DI and pre-Fetch gas/brake (+/-0.01), release 0/0; RT {down:.1f}->{up:.1f} m/s", "triggers PASS(analog, simultaneous, release)"
+    # No layout picked: each pad type gets its own console's layout (the Xbox pairs above checked nonps_xbox).
+    layouts = [(frame_of(l), l) for l in ev if re.search(r"pad: layout (xbox|playstation) \(automatic", l)]
+    first_native = next((frame_of(l) for l in ev if re.search(r"padtriggers: sample %d " % (2 * len(cases) + 1), l)), None)
+    last_auto = [l for f, l in layouts if first_native is not None and f <= first_native]
+    if not any("layout xbox (automatic" in l for _, l in layouts) or not last_auto or "layout playstation (automatic" not in last_auto[-1]:
+        return False, "automatic layout: want Xbox for the Xbox pad and PlayStation for the DualSense", "triggers FAIL(automatic layout)"
+    # Native DualSense with a player's bindings (padbindps: Accelerate R2 = Rz+, Brake L2 = Z+): pressure kept.
+    native_cases = [(0, .25), (0, .50), (0, .75), (0, 1), (.50, 0), (0, 0)]
+    for index, (lt, rt) in enumerate(native_cases):
+        step = 2 * (len(cases) + index) + 1
+        sample = next((s for s in samples if s[0] == step), None)
+        if sample is None:
+            return False, f"missing native physical {lt:.2f}/{rt:.2f} sample {step}", "triggers FAIL(native missing sample)"
+        _, got_lt, got_rt, z, rz, gas, brake, native, layout, base_z, base_rz = sample
+        if (abs(got_lt - lt) > .001 or abs(got_rt - rt) > .001 or not native or layout != "native_ps" or
+                abs(z - 32767.5 * (1 + lt)) > 2 or abs(rz - 32767.5 * (1 + rt)) > 2 or
+                abs(gas - rt) > .01 or abs(brake - lt) > .01):
+            return False, (f"native physical {lt:.2f}/{rt:.2f}: DI {z}/{rz}, gas/brake {gas:.4f}/{brake:.4f}, "
+                           f"want {rt:.2f}/{lt:.2f} (+/-0.01), native {native}, layout {layout}"), "triggers FAIL(native values)"
+    return True, (f"8 physical pairs match DI and pre-Fetch gas/brake (+/-0.01), release 0/0; RT {down:.1f}->{up:.1f} m/s; "
+                  f"automatic layouts Xbox/PlayStation; native DualSense R2/L2 player bindings 0.25/0.50/0.75/1 and L2 0.50 kept"), "triggers PASS(analog, simultaneous, release, auto layout, native)"
 
 
 def fields(line):

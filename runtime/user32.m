@@ -555,7 +555,8 @@ static char script_axis[32];               // BOOT_KEYS padaxis:NAME=V (lx ly rx
 // layout; pad2:MASK, pad2raw:MASK and pad2axis:NAME=V target slot 1 (NFS_PADS=2, BOOT_PAD2=sim);
 // padaxis:NAME=V one axis, after the layout (a stick also before it, as a real stick); each takes :N to be held
 // N ticks), padtriggers:LT/RT:N (both physical pressures BEFORE layout, cleared on release),
-// padlayout:xbox|playstation (run-only layout), padtype:WORD (BOOT_PAD=sim's identity from then on), pkg:NAME
+// padbindps (tests: on a PlayStation pad, Accelerate / Brake bound to R2 / L2 as a player's capture records them),
+// padlayout:xbox|playstation|auto (run-only layout; auto: back to the pick or the pad's own), padtype:WORD (BOOT_PAD=sim's identity from then on), pkg:NAME
 // (until the FE package in control starts with NAME, e.g. pkg:MainMenu.fng; at most 30 s; pkg:NAME:KEY presses KEY every
 // 150 ticks meanwhile), wait:N (N ticks), sim:S (until the race's sim time, Sim::GetTime since the race started,
 // reaches S seconds: steps keyed to the sim stay in step with BOOT_DIAG_SIMSHOTS and the probe's held passes, which
@@ -679,7 +680,12 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         if (diag_on) diag_event("script: %s %s", tok, done ? "handled by the menu" : "not a menu shortcut");
         ++step; step_start = 0;
     } else if (!strncmp(tok, "padlayout:", 10)) {
-        script_layout = !strcasecmp(tok + 10, "xbox");
+        script_layout = !strcasecmp(tok + 10, "auto") ? -1 : !strcasecmp(tok + 10, "xbox");
+        if (diag_on) diag_event("script: %s", tok);
+        ++step; step_start = 0;
+    } else if (!strcmp(tok, "padbindps")) {
+        void padbind_test_player_triggers(void);
+        padbind_test_player_triggers();
         if (diag_on) diag_event("script: %s", tok);
         ++step; step_start = 0;
     } else if (!strncmp(tok, "padtriggers:", 12)) {
@@ -1197,20 +1203,27 @@ enum { P_CROSS, P_CIRCLE, P_SQUARE, P_TRIANGLE, P_L1, P_R1, P_CREATE, P_OPTIONS,
        P_LPADDLE, P_RPADDLE };
 #define GAMEFLOW_STATE 0x00925E90u       // 6 racing
 #define SIM_INSTANCE 0x009885E0u         // Sim: +0x2C state, 4 paused
-static int pad_xbox = -1;
+static int pad_kinds[2];                  // set by set_identity, below
+static int kind_native(int kind);
+// NFS_PAD_LAYOUT, else the player's pick (app.txt pad_layout), else the active pad's own console: PlayStation for a
+// PlayStation pad, Xbox for every other pad; live, so a hot-plug or a pad of another type changes it.
 static int pad_layout_xbox(void) {
     if (script_layout >= 0) return script_layout;
-    if (pad_xbox < 0) {
-        const char *e = getenv("NFS_PAD_LAYOUT");
-        if (!e || !*e) e = app_pref("pad_layout");
-        pad_xbox = e && !strcasecmp(e, "xbox");
+    static const char *env;
+    static int env_read;
+    if (!env_read) { env_read = 1; env = getenv("NFS_PAD_LAYOUT"); }
+    const char *e = env && *env ? env : app_pref("pad_layout");
+    int xbox = e && *e ? !strcasecmp(e, "xbox") : !kind_native(pad_kinds[0]);
+    static int last = -1;
+    if (diag_on && xbox != last) {
+        last = xbox;
+        diag_event("pad: layout %s (%s)", xbox ? "xbox" : "playstation", e && *e ? (env && *env ? "NFS_PAD_LAYOUT" : "picked") : "automatic, the pad's own");
     }
-    return pad_xbox;
+    return xbox;
 }
 // The Controller menu (app.m): takes effect at the next pad read.
 int user32_pad_layout_xbox(void) { return pad_layout_xbox(); }
 void user32_set_pad_layout_xbox(int xbox) {
-    pad_xbox = xbox;
     app_pref_set("pad_layout", xbox ? "xbox" : "playstation");
     fprintf(stderr, "boot: controller layout %s\n", xbox ? "Xbox" : "PlayStation");
     if (diag_on) diag_event("pad: layout %s", xbox ? "xbox" : "playstation");
@@ -1318,7 +1331,7 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
 
 // The pad's identity: its kind and the name the game sees (DIDEVICEINSTANCE, the Controls screen's page title, and the
 // profile's binding set: padbind.c). Set by pad_read; a disconnected pad keeps the last one.
-static int pad_kinds[2];
+static int pad_kinds[2];                  // also declared above, for pad_layout_xbox
 static char pad_names[2][64];
 static void set_identity(int idx, int kind, const char *vendor) {
     char name[64];
@@ -1342,9 +1355,9 @@ int pad_identity(char *name, size_t n) { return pad_identity_n(0, name, n); }
 static int kind_native(int kind) { return kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_DUALSHOCK4 || kind == PAD_KIND_EDGE; }
 int user32_pad_native(void) { return kind_native(pad_kinds[0]); }   // padprompts.c: PlayStation glyphs whatever the layout
 // A PlayStation pad as itself: the physical buttons (L2/R2 only as their analog axes), nothing remapped.
+// L2 / R2 keep their pressure: their button bits (GCControllerButtonInput.pressed, true as soon as the value exceeds 0)
+// are dropped, never turned into a full press (that made remapped trigger gas / brake on / off).
 static void pad_native(PadState *st, uint32_t phys) {
-    if (phys & 1u << P_L2) st->lt = 1;      // BOOT_PAD buttons= / pad: steps with the L2 / R2 bits: a full press
-    if (phys & 1u << P_R2) st->rt = 1;
     st->buttons = phys & ~(1u << P_L2 | 1u << P_R2);
     st->native = 1;
     static uint32_t last = ~0u;
@@ -1504,6 +1517,10 @@ int pad_read_n(int idx, PadState *st) {
         if (!idx && script_trigger_pair) { st->lt = script_lt; st->rt = script_rt; }   // physical pair, before F10/layout
         st->buttons |= idx ? script_pad2 : script_pad;          // BOOT_KEYS pad: steps
         int kind = !idx && sim_kind >= 0 ? sim_kind : word_kind >= 0 ? word_kind : PAD_KIND_OTHER;
+        // As a real pad: a scripted L2 / R2 button on a PlayStation pad is a full press, and the trigger buttons read
+        // pressed whenever their value exceeds 0 (GCControllerButtonInput.pressed).
+        if (kind_native(kind)) { if (st->buttons & 1u << P_L2) st->lt = 1; if (st->buttons & 1u << P_R2) st->rt = 1; }
+        st->buttons |= (st->lt > 0 ? 1u << P_L2 : 0) | (st->rt > 0 ? 1u << P_R2 : 0);
         pad_presence(idx, 1, kind == PAD_KIND_DUALSENSE ? "simulated DualSense" : kind == PAD_KIND_DUALSHOCK4 ? "simulated DualShock 4" :
                         kind == PAD_KIND_EDGE ? "simulated DualSense Edge" : "simulated pad");
         set_identity(idx, kind, NULL);

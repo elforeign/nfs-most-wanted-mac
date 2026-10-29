@@ -621,12 +621,25 @@ static void follow_pad(Cpu *c) {
     dump(why);
 }
 void padbind_follow(Cpu *c) { follow_pad(c); }   // controltype.c, with the table as the user's own
+// BOOT_KEYS padbindps (tests): on a PlayStation pad, the joystick primaries a player's capture of R2 / L2 records on
+// Accelerate / Brake (FUN_00634490: Rz / Z above the centre), replacing Cross / Square; the rest of the set as it is.
+static volatile int test_player_triggers;
+void padbind_test_player_triggers(void) { test_player_triggers = 1; }
+static void player_triggers_apply(void) {
+    uint32_t dev = joy();
+    if (!test_player_triggers || !dev || !name_ps(joy_name(dev)) || controls_screen_open()) return;
+    test_player_triggers = 0;
+    set_rec(rec(A_GAS, 2), T_ROT_HI, 0, 2);
+    set_rec(rec(A_BRAKE, 2), T_AXIS_HI, 0, 2);
+    if (diag_on) dump("test: Accelerate R2, Brake L2 (player bindings)");
+}
 void padbind_sync(Cpu *c) {                    // dinput.c, each joystick read
     if (diag_on) { action_values(); trigger_sample_log(); }
     next_song_poll();
     // Startup and every type/layout change share the six-axis capture baseline, even with no pad attached yet.
     M32(BASELINE + 0x208) = M32(BASELINE + 0x214) = 32768;
     if (!swap_on) follow_pad(c);
+    player_triggers_apply();
 }
 
 // ---------------- bind capture (diagnostics) ----------------
