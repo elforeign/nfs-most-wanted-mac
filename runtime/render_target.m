@@ -38,6 +38,11 @@ id<MTLTexture> new_ms_texture(MTLPixelFormat pf, NSUInteger w, NSUInteger h, uin
     d.textureType = MTLTextureType2DMultisample;
     d.sampleCount = samples;
     d.usage = MTLTextureUsageRenderTarget;
+    // Soft smoke resolves the nearest covered depth sample in a separate pass.
+    // The Off path never reads it and keeps the existing resolve policy.
+    if (is_depth_pf(pf)) d.usage |= MTLTextureUsageShaderRead;
+    const char *hc=diag_on?getenv("BOOT_DIAG_HDR_CLIP"):NULL;
+    if (diag_on && (getenv("BOOT_DIAG_SOFT_SMOKE") || (hc && !strcmp(hc,"1")))) d.usage |= MTLTextureUsageShaderRead;
     d.storageMode = MTLStorageModePrivate;
     id<MTLTexture> t = [mtl newTextureWithDescriptor:d];
     msaa_bytes += (int64_t)t.allocatedSize;
@@ -102,6 +107,18 @@ void ms_attach(MTLRenderPassAttachmentDescriptor *a, RenderTex *r, int slot) {
     a.texture = r->ms;
     a.level = 0; a.slice = 0;
     enc_ms[slot] = r;
+    if (slot==4 && r==&ad_rt) {
+        int soft=render_soft_depth_store();
+        if(soft){
+            a.storeAction=MTLStoreActionStore;
+            if(soft==1){
+                a.resolveTexture=r->tex;a.storeAction=MTLStoreActionStoreAndMultisampleResolve;
+                ((MTLRenderPassDepthAttachmentDescriptor *)a).depthResolveFilter=MTLMultisampleDepthResolveFilterMin;
+                enc_resolve[slot]=1;r->stale=1;
+            }else{a.resolveTexture=nil;enc_resolve[slot]=0;r->stale=0;}
+            return;
+        }
+    }
     if (r->resolve_pass && slot < 4) {     // a texture draws sample: resolve at the end of every pass into it
         a.storeAction = MTLStoreActionStoreAndMultisampleResolve;
         a.resolveTexture = r->tex;

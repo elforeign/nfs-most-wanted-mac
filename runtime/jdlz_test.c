@@ -1,5 +1,5 @@
 // jdlz_test.c - standalone check of jdlz.h against every JDLZ blob in the X360 vinyl packs (no game needed).
-//   cc -O1 -o /tmp/jdlz_test runtime/jdlz_test.c && /tmp/jdlz_test ../x360/files/CARS
+//   cc -O1 -o /tmp/jdlz_test runtime/jdlz_test.c && /tmp/jdlz_test 'OWNER_X360_EXTRACT/files/CARS'
 // The reference is the byte-by-byte decoder that BOOT_DIAG runs proved identical to the game's LZDecompress
 // (vinyls.m checks its first 40 blobs against the guest call); jdlz_native's chunked match copies must give the
 // same bytes. Also prints the decode rate of both, and decodes every HUFF blob with huff.h (size against the table,

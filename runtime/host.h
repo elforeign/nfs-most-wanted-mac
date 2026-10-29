@@ -47,6 +47,7 @@ int win32_heap(Cpu *c, const char *fn);     // heap.c: Heap*, GlobalAlloc/Global
 int win32_d3d9(Cpu *c, const char *fn);     // d3d9.m
 int win32_dsound(Cpu *c, const char *fn);   // dsound.c
 int win32_dinput(Cpu *c, const char *fn);   // dinput.c
+int win32_ws2(Cpu *c, const char *fn);      // ws2_32.c (WS2_32 and NETAPI32)
 int threads_close(uint32_t h);
 void threads_init(void);
 void gil_maybe_yield(Cpu *c);
@@ -197,21 +198,67 @@ typedef struct {
 } X360PostParams;
 int render_x360_mirror(uint32_t texture, const X360PostParams *p, float exposure, int signature);
 float render_x360_post(uint32_t src_texture, uint32_t dst_surface, uint32_t vignette_texture, const X360PostParams *p);
+// Pixel rectangles are x,y,width,height. A null context preserves the single-player full-frame path.
+typedef struct {
+    uint32_t source_view, source_surface, depth_surface, generation;
+    uint32_t source[4], destination[4], depth[4], lamp[4];
+} X360PostView;
+float render_x360_post_view(uint32_t src_texture, uint32_t dst_surface, uint32_t vignette_texture,
+                            const X360PostParams *p, const X360PostView *view);
+void render_x360_post_reset(void);
+void split_post_mode(int active);
+void split_post_restart(void);
+void split_post_view(Cpu *c, uint32_t view, const uint32_t rect[4]);
+uint32_t split_fx_view(uint32_t original);
+uint32_t split_fx_player(uint32_t original);
+uint32_t split_fx_flare_step(uint32_t view, uint32_t car);
+uint32_t split_fx_dimension(uint32_t original, unsigned axis);
+double split_fx_rain_dt(double dt);
+float split_fx_rain_scale(float original);
+uint32_t split_fx_drop_count(uint32_t original);
+
 // Lens raindrops in the X360 order and look (x360_post.m drives it after the composite): one drop record of the game's
 // Rain object (FUN_0073CFA0's view of it, with the variant the PC ignores)
 typedef struct { float x, y, life, size; uint32_t variant; } RainDrop;
 void render_x360_raindrops_warm(uint32_t dst_surface, uint32_t displace_texture, uint32_t alpha_texture);   // once per sample count, from the composite
 int render_x360_raindrops(uint32_t dst_surface, const RainDrop *d, int n, uint32_t displace_texture, uint32_t alpha_texture, int signature);
+int render_x360_raindrops_view(uint32_t dst_surface, const RainDrop *d, int n, uint32_t displace_texture,
+                               uint32_t alpha_texture, int signature, const X360PostView *view);
+
 
 // Game controller state (user32.m), for dinput.c's game controller. native: a PlayStation pad, given to the game as
 // itself (buttons = the physical P_* mask, lt/rt the analog L2/R2); otherwise the emulated Xbox 360 controller (buttons
 // after user32.m's layout).
 typedef struct { int connected; float lx, ly, rx, ry, lt, rt; uint32_t buttons; int pov; int native; } PadState;
-int pad_read(PadState *st);
+int pad_count(void);                       // NFS_PADS=2 opts into two host pads; otherwise one
+void split_views_restore(void);            // before retail mode changes
+void split_views_reset(void);              // before rebuilding the target table
+void split_views_update(void);             // after mode setup, before matrices
+int split_view_rect(uint32_t view, uint32_t rect[4]); // active PC eView -> X/Y/W/H
+// Sequential offscreen captures. The real source stays 1/2; capture view IDs stay 4/18..23.
+void split_capture_begin(Cpu *c, uint32_t source, const uint32_t rect[4], uint32_t cull);
+void split_capture_end(Cpu *c);
+void split_capture_reset(Cpu *c);
+void split_capture_mode(Cpu *c, int active);
+uint32_t split_capture_source(void);       // zero outside the source's capture + receiver scope
+void split_capture_receiver_texture(unsigned stage, uint32_t texture); // diag-only actual sampled receiver bindings
+uint32_t split_capture_address(uint32_t original); // exact translated P1 operand aliases
+uint32_t split_capture_player(uint32_t original);  // retail local-player fallback, same source ordinal
+int split_capture_reflection_pending(void); // initialize water-only targets before their first receiver
+void x360_reflection_dimensions(uint32_t view_w, uint32_t view_h, uint32_t *w, uint32_t *h);
+void mat_water_reset(void);
+void mat_water_reset_view(uint32_t source);
+int split_hud_begin(uint32_t object);       // RenderObject scope; returns previous owner
+void split_hud_end(int saved);
+int pad_read_n(int idx, PadState *st);
+int pad_read(PadState *st);                 // index 0, including BOOT_PAD=sim
 enum { PAD_KIND_NONE, PAD_KIND_OTHER, PAD_KIND_DUALSENSE, PAD_KIND_DUALSHOCK4, PAD_KIND_EDGE };
+int pad_identity_n(int idx, char *name, size_t n);
 int pad_identity(char *name, size_t n);    // user32.m: the pad's kind and its DirectInput name ("Controller (DualSense)")
 void padbind_sync(Cpu *c);                  // padbind.c: the game's joystick follows the connected pad's type
 void padbind_follow(Cpu *c);                // padbind.c: the same change check, called by controltype.c just before its binding swap
+int padbind_port_begin(int idx);             // temporary P2 layout defaults; returns whether a restore is needed
+void padbind_port_end(int swapped);
 void padbind_swap(int on);                    // padbind.c: controltype.c has preset bindings in the table (padbind_sync leaves the pad alone)
 enum { PADBIND_ROLE_GAS = 1, PADBIND_ROLE_BRAKE, PADBIND_ROLE_SHIFT, PADBIND_ROLE_OTHER, PADBIND_ROLE_NONE };
 int padbind_trigger_role(int right);        // padbind.c: what L2 (0) / R2 (1) is bound to (a PlayStation pad's set)
@@ -220,6 +267,7 @@ int padbind_trigger_role(int right);        // padbind.c: what L2 (0) / R2 (1) i
 int lampglow_enabled(void);
 int postfx_look_variant(const char *v);
 int lampglow_type(void);
+unsigned lampglow_owner(void);          // real main eView ID 1/2, zero outside the selective flare call
 void lampglow_begin(Cpu *c);
 void lampglow_end(void);
 void lampglow_draw(float rgb_sum);

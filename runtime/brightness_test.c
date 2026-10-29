@@ -40,6 +40,7 @@ int prompts_pad_lost(void) { return 0; }
 uint32_t gstr(const char *s) { (void)s; abort(); }
 #define UNUSED_ORIG(name) void name(Cpu *c) { (void)c; }
 UNUSED_ORIG(f_00573960_orig)
+int padguest_connection(Cpu *c) { (void)c; return 0; }   // NFS_PADS=2 only; one pad here
 UNUSED_ORIG(f_00588570_orig)
 UNUSED_ORIG(f_006287D0_orig)
 UNUSED_ORIG(f_0056BB80_orig)

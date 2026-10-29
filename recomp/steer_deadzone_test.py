@@ -102,6 +102,9 @@ static const uint32_t lows[] = {LOWS}, entries[] = {ENTRIES}, records[] = {RECOR
 static unsigned checked, diag_count, changed;
 static char last_diag[512];
 void settings_add(Setting *s) { s->value = s->boot_value = s->def; }
+void car85_collection_seen(uint32_t ld, uint32_t vault) { (void)ld; (void)vault; }
+void car85_vault_loaded(Cpu *c, uint32_t vault) { (void)c; (void)vault; }
+void car85_vault_begin(uint32_t vault) { (void)vault; }
 void diag_event(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     vsnprintf(last_diag, sizeof last_diag, fmt, ap); va_end(ap); ++diag_count;

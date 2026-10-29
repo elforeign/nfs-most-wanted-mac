@@ -12,10 +12,14 @@
 // keeps a mask in alpha (specular, blend weights, cut-outs) that the X360 version lacks, the set has X360 colour + PC
 // alpha (DXT5); X360 art regraded for the X360 lighting is in the PC's tones, with the X360 grading in
 // <set>/x360_tone/ for NFS_X360_TEXTURES_TONE=x360 (default pc).
+// Private NFS_LATER_TEXTURES: exactly six owner-approved 2026-10-28 payloads,
+// pinned below. Changed art uses those pins instead of MW RGB similarity;
+// native tyre aliases preserve the MW rim UV region. All other art stays MW.
 #include <dirent.h>
 #include <dispatch/dispatch.h>
 #include <fcntl.h>
 #include <math.h>
+#include <mach-o/dyld.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +37,42 @@ enum { HD_NEW, HD_SWAP, HD_KEEP };                         // not looked at yet 
 typedef struct { uint32_t hash; char *path; int state; uint32_t ww, hh, mips, fmt; } HdTex;   // file header facts once looked at
 int x360_hd_creating;
 static HdTex *hd, *hd_tone;               // the set; its X360-tone variants (<set>/x360_tone/)
+static HdTex *hd_later;                  // private built-in overlay, preferred over the MW set
+static int nhd_later;
+static uint32_t hd_later_loaded;
+static uint32_t hd_later_applied_mask;
+static uint64_t hd_sum(const void *p, size_t n);
+#ifndef NFS_PUBLIC
+#include "later_textures_private.h"
+#else
+static int later_rule(uint32_t hash) { (void)hash; return -1; }
+static int later_tire(uint32_t hash, const char *name) { (void)hash; (void)name; return 0; }
+static int later_pin(const HdTex *hx, const uint8_t *p, size_t size) {
+    (void)hx; (void)p; (void)size; return 0;
+}
+#endif
 static int nhd = -1, nhd_tone;
 static uint32_t hd_loaded, hd_bytes, hd_tone_loaded;
+// The private builder emits a complete chain, with explicit BGRA alpha masks.
+// Validate before hd_verify (which assumes sane dimensions), including cached reads.
+static int later_header(const uint8_t *p, size_t size) {
+    if (size < 128 || memcmp(p, "DDS ", 4)) return 0;
+    uint32_t d[32]; memcpy(d, p, 128);
+    uint32_t w = d[4], h = d[3], mips = d[7], fmt = d[21];
+    if (d[1] != 124 || d[19] != 32 || w < 4 || h < 4 || w > 4096 || h > 4096 ||
+        (w & (w - 1)) || (h & (h - 1))) return 0;
+    int rgba = !fmt && d[20] == 0x41 && d[22] == 32 && d[23] == 0xFF0000 &&
+        d[24] == 0xFF00 && d[25] == 0xFF && d[26] == 0xFF000000;
+    if (!rgba && (d[20] != 4 || (fmt != 0x31545844 && fmt != 0x33545844 && fmt != 0x35545844))) return 0;
+    size_t need = 128; uint32_t levels = 0;
+    for (;;) {
+        need += rgba ? (size_t)w * h * 4 : (size_t)((w + 3) / 4) * ((h + 3) / 4) * (fmt == 0x31545844 ? 8 : 16);
+        ++levels;
+        if (w == 1 && h == 1) break;
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
+    return levels == mips && need == size;
+}
 static int hd_list(const char *dir, HdTex **out, int n) {    // <hash>_<name>.dds files in dir, appended after the n entries in *out
     DIR *d = opendir(dir);
     if (!d) return n ? n : -1;
@@ -51,6 +89,33 @@ static int hd_list(const char *dir, HdTex **out, int n) {    // <hash>_<name>.dd
     }
     closedir(d);
     return n;
+}
+// Private defaults follow the executable, never the cwd or the selected game folder.
+static const char *later_root(char *out, size_t size) {
+#ifdef NFS_PUBLIC
+    (void)out; (void)size;
+    return NULL;                         // other games' payloads are private, even with an override
+#else
+    const char *e = getenv("NFS_LATER_TEXTURES");
+    if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) return NULL;
+    if (e && *e) snprintf(out, size, "%s", e);
+    else {
+        char path[4096], absolute[4096];
+        uint32_t n = sizeof path;
+        if (_NSGetExecutablePath(path, &n) || !realpath(path, absolute)) return NULL;
+        char *slash = strrchr(absolute, '/');
+        if (!slash) return NULL;
+        *slash = 0;
+        const char *macos = "/Contents/MacOS";
+        size_t len = strlen(absolute), suffix = strlen(macos);
+        if (len >= suffix && !strcmp(absolute + len - suffix, macos))
+            snprintf(out, size, "%s/../Resources/later_textures", absolute);
+        else
+            snprintf(out, size, "%s/../recomp/out/later_textures", absolute);
+    }
+    struct stat st;
+    return !stat(out, &st) && S_ISDIR(st.st_mode) ? out : NULL;
+#endif
 }
 static void hd_scan(void) {
     nhd = 0;
@@ -72,8 +137,15 @@ static void hd_scan(void) {
         n = hd_list(uidir, &hd, n < 0 ? 0 : n);
         if (n > (nmain < 0 ? 0 : nmain)) fprintf(stderr, "boot: %d X360 UI textures (same size, better format) in %s\n", n - (nmain < 0 ? 0 : nmain), uidir);
     }
-    if (n < 0) { if (diag_on) diag_event("x360: no HD texture folder %s", dir); return; }
-    nhd = n;
+    if (n < 0 && diag_on) diag_event("x360: no HD texture folder %s", dir);
+    nhd = n < 0 ? 0 : n;
+    char later_dir[4096];
+    const char *later = later_root(later_dir, sizeof later_dir);
+    if (later) {
+        nhd_later = hd_list(later, &hd_later, 0);
+        if (nhd_later < 0) nhd_later = 0;
+        if (diag_on) diag_event("later: %d overlay textures in %s", nhd_later, later);
+    }
     const char *tone = getenv("NFS_X360_TEXTURES_TONE");
     if (tone && !strcmp(tone, "x360")) {
         char sub[1100];
@@ -667,6 +739,57 @@ static int smooth_art_init(Cpu *c, uint32_t ti, uint32_t pi) {
     if (diag_on) diag_event("mirror: art %s %ux%u -> %ux%u A8R8G8B8, %u levels (Catmull-Rom x%d)", name, w, h, ww, hh, levels, K);
     return 1;
 }
+// Opt-in upload evidence for the title atlas and HUD backing. The bytes here are
+// the same rows gpu_tex uploads; draw dumps identify the sampler that reads them.
+static int ui_diag_wanted(uint32_t hash) {
+    if (!diag_on) return 0;
+    const char *e = getenv("BOOT_DIAG_UI_TEXTURES");
+    if (!e || !*e || !strcmp(e, "0")) return 0;
+    return !strcmp(e, "1") ? hash == 0xE0463AFA || hash == 0x20865C0A || hash == 0xA87927BE : hash == (uint32_t)strtoul(e, NULL, 16);
+}
+static struct { uint32_t guest, hash; } ui_diag_textures[256];
+static unsigned ui_diag_count;
+uint32_t x360_ui_diag_hash(uint32_t guest) {
+    for (unsigned i = 0; i < ui_diag_count; ++i) if (ui_diag_textures[i].guest == guest) return ui_diag_textures[i].hash;
+    return 0;
+}
+static void ui_diag_bytes(uint32_t hash, const char *kind, const void *p, size_t n) {
+    char path[1200];
+    snprintf(path, sizeof path, "%s/ui_%08X_%s", diag_dir, hash, kind);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(p, 1, n, f); fclose(f); }
+}
+static void ui_diag_source(uint32_t ti, uint32_t pi) {
+    uint32_t hash = M32(ti + 0x24);
+    if (!pi || !M32(ti + 0x70) || !ui_diag_wanted(hash)) return;
+    char text[512];
+    int n = snprintf(text, sizeof text, "PC %08X %.24s %ux%u fmt=%08X levels=%u base=%u quality_drop=%u\n",
+                     hash, (char *)G + ti + 12, M16(ti + 0x44), M16(ti + 0x46), M32(pi + 0x14),
+                     M8(ti + 0x4E), M32(ti + 0x40), M32(0x00982AE0));
+    ui_diag_bytes(hash, "source.txt", text, (size_t)n);
+    ui_diag_bytes(hash, "pc.bin", G + M32(ti + 0x70), M32(ti + 0x40));
+    if (M32(ti + 0x74)) ui_diag_bytes(hash, "palette.bin", G + M32(ti + 0x74), 1024);
+}
+static void ui_diag_upload(uint32_t ti, uint32_t pi, uint32_t raw, uint32_t size) {
+    uint32_t hash = M32(ti + 0x24);
+    if (!ui_diag_wanted(hash)) return;
+    Obj *t = obj(M32(pi + 0x18));
+    if (!t) return;
+    unsigned i = 0;
+    while (i < ui_diag_count && ui_diag_textures[i].guest != t->guest) ++i;
+    if (i < sizeof ui_diag_textures / sizeof *ui_diag_textures) {
+        ui_diag_textures[i] = (typeof(ui_diag_textures[0])){t->guest, hash};
+        if (i == ui_diag_count) ++ui_diag_count;
+    }
+    if (raw && size) ui_diag_bytes(hash, "replacement.dds", G + raw, size);
+    char text[512];
+    int n = snprintf(text, sizeof text, "GPU tex=%08X %ux%u fmt=%08X levels=%u\n", t->guest, t->w, t->h, t->fmt, t->levels);
+    ui_diag_bytes(hash, "upload.txt", text, (size_t)n);
+    for (uint32_t l = 0; l < t->levels; ++l) {
+        char kind[64]; snprintf(kind, sizeof kind, "uploaded_%u.bin", l);
+        if (t->mem[l]) ui_diag_bytes(hash, kind, G + t->mem[l], (size_t)t->pitch[l] * level_rows(t->fmt, mipdim(t->h, l)));
+    }
+}
 void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInterface::Init (thiscall, TextureInfo* in ecx)
     if (!extra_done) {                                     // the X360-only textures, once, at the first pack load
         void prompts_textures(Cpu *c);
@@ -682,20 +805,28 @@ void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInt
     if (vinyls_init(c)) return;                            // X360 vinyls and the HD composite targets (vinyls.m)
     if (nhd < 0) { hd_scan(); hv_load(); }
     uint32_t ti = c->ecx, pi = M32(ti);
+    ui_diag_source(ti, pi);
     if (smooth_art_init(c, ti, pi)) return;                // the mirror's frame and mask, upscaled (above)
+hd_lookup: ;
     HdTex *hx = NULL;
-    if (nhd > 0 && pi && M32(ti + 0x70)) {
+    int is_later = 0;
+    if (pi && M32(ti + 0x70)) {
         uint32_t h = M32(ti + 0x24);
+        const char *name = (const char *)G + ti + 0x0C;
+        int tire = later_tire(h, name);
+        for (int i = 0; i < nhd_later && !hx; ++i)
+            if ((hd_later[i].hash == h || (tire && hd_later[i].hash == 0x52F745B1)) &&
+                later_rule(hd_later[i].hash) >= 0 && hd_later[i].state != HD_KEEP) { hx = &hd_later[i]; is_later = 1; }
         for (int i = 0; i < nhd && !hx; ++i) if (hd[i].hash == h) hx = &hd[i];
     }
-    if (!hx || hx->state == HD_KEEP) { f_006DDD90_orig(c); return; }   // decided already: no file is touched
+    if (!hx || hx->state == HD_KEEP) { f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return; }   // decided already: no file is touched
     // the DDS (header, 128 bytes, then the mips back to back) is read once, whole, into guest memory: the check
     // below and the swap both use that copy
     uint32_t size = 0, raw = 0;
     if (hx->state == HD_NEW) {                              // first look: the X360 mip at the PC size against the PC texture
         HdVerdict key, got;
         const HdVerdict *cv = NULL;
-        int haskey = hv_key(&key, ti, pi, hx->path);
+        int haskey = !is_later && hv_key(&key, ti, pi, hx->path); // MW verdict cache never authorizes changed art
         if (haskey && (cv = hv_find(&key))) {               // decided on an earlier run, nothing changed since
             got = *cv;                                      // copied: hv can be reallocated by a later add
             if (diag_on) {
@@ -705,43 +836,60 @@ void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInt
             }
             hx->ww = got.ww; hx->hh = got.hh; hx->mips = got.mips; hx->fmt = got.fmt;
             hx->state = got.verdict > 0 ? HD_SWAP : HD_KEEP;
-            if (got.verdict <= 0) { f_006DDD90_orig(c); return; }
+            if (got.verdict <= 0) { if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
         } else {
             raw = hd_read(hx->path, &size);
             const uint8_t *head = G + raw;
-            if (!raw || memcmp(head, "DDS ", 4)) { if (raw) gfree(raw); hx->state = HD_KEEP; f_006DDD90_orig(c); return; }
+            if (!raw || size < 128 || memcmp(head, "DDS ", 4) || (is_later && !later_header(head, size))) { if (raw) gfree(raw); hx->state = HD_KEEP; if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
             uint32_t fourcc;
             memcpy(&hx->hh, head + 12, 4); memcpy(&hx->ww, head + 16, 4); memcpy(&hx->mips, head + 28, 4); memcpy(&fourcc, head + 84, 4);
             if (!hx->mips) hx->mips = 1;
             hx->fmt = fourcc == 0x31545844 || fourcc == 0x33545844 || fourcc == 0x35545844 ? fourcc : (head[80] & 0x40) ? 21 : 0;
+            if (is_later && !later_pin(hx, head, size)) { gfree(raw); hx->state = HD_KEEP; goto hd_lookup; }
             float drgb, da;
             int verdict = hd_verify(ti, pi, head, size, hx->ww, hx->hh, hx->mips, hx->fmt, &drgb, &da);
+            if (is_later) {
+                verdict = verdict >= 0 && drgb >= 0 && da >= 0; // pinned art; covering mip still must decode
+                if (diag_on) diag_event("later: owner-approved %08X for %08X %s rgb=%.2f alpha=%.2f", hx->hash, M32(ti + 0x24), (const char *)G + ti + 12, drgb, da);
+            }
             if (haskey) {
                 key.ww = hx->ww; key.hh = hx->hh; key.mips = hx->mips; key.fmt = hx->fmt; key.drgb = drgb; key.da = da; key.verdict = verdict;
                 hv_add(&key);
             }
             hx->state = verdict > 0 ? HD_SWAP : HD_KEEP;
-            if (verdict <= 0) { gfree(raw); f_006DDD90_orig(c); return; }
+            if (verdict <= 0) { gfree(raw); if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
         }
     }
     uint32_t ww = hx->ww, hh = hx->hh, mips = hx->mips, fmt = hx->fmt;
+    // Same-size swaps improve the format, so retain the PC mip policy. Init
+    // drops quality mips (00982AE0) whenever a chain is present: adding a chain
+    // to one-level UI art otherwise turns a 512x512 atlas into 128x128 at detail 0.
+    uint32_t pc_mips = M8(ti + 0x4E);
+    if (!is_later && ww == M16(ti + 0x44) && hh == M16(ti + 0x46) && pc_mips && mips > pc_mips)
+        if (!(diag_on && getenv("BOOT_DIAG_UI_ADDED_MIPS"))) mips = pc_mips; // test only: reproduce the added-chain loss
     int bpb = fmt == 0x31545844 ? 8 : fmt == 21 ? 0 : 16;
     uint32_t pcfmt = M32(pi + 0x14);
     int pc_alpha = pcfmt == 0x33545844 || pcfmt == 0x35545844 || pcfmt == 21 || pcfmt == 0x29;
     if (!fmt || ww > 4096 || hh > 4096 || !strncmp((const char *)G + ti + 0x0c, "DUMMY_SKIN", 10) || (pc_alpha && fmt == 0x31545844)) {
         if (raw) gfree(raw);
+        if (is_later) { hx->state = HD_KEEP; goto hd_lookup; }
         f_006DDD90_orig(c); return;
     }
     // Init sizes level i as base >> 2i, which ignores the 4x4 block minimum: keep only levels with both sides >= 4
     uint32_t levels = 0, w = ww, h = hh;
-    while (levels < mips && (fmt == 21 || (w >= 4 && h >= 4))) { ++levels; w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1; }
+    while (levels < mips && (fmt == 21 || (w >= 4 && h >= 4))) {
+        // Init quarters byte sizes: stop a private rectangular RGBA chain before
+        // one side clamps to 1 and that arithmetic would truncate a texel.
+        if (is_later && fmt == 21 && (ww * hh * 4 >> (2 * levels)) != w * h * 4) break;
+        ++levels; w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
     uint32_t base = fmt == 21 ? ww * hh * 4 : (ww / 4) * (hh / 4) * (uint32_t)bpb, total = 0;
     for (uint32_t l = 0; l < levels; ++l) total += base >> (2 * l);
     if (!raw) raw = hd_read(hx->path, &size);               // a texture decided on an earlier load
-    if (!raw || 128 + (size_t)total > size) { if (raw) gfree(raw); f_006DDD90_orig(c); return; }
+    if (!raw || 128 + (size_t)total > size || (is_later && (!later_header(G + raw, size) || !later_pin(hx, G + raw, size)))) { if (raw) gfree(raw); if (is_later) { hx->state = HD_KEEP; goto hd_lookup; } f_006DDD90_orig(c); return; }
     // NFS_X360_TEXTURES_TONE=x360: a texture the converter regraded to the PC's tones was validated above in those
     // tones (same content); the X360's own grading of it is loaded instead
-    for (int i = 0; i < nhd_tone; ++i) {
+    for (int i = 0; !is_later && i < nhd_tone; ++i) {
         if (hd_tone[i].hash != hx->hash) continue;
         uint32_t tsize, traw = hd_read(hd_tone[i].path, &tsize);
         const uint8_t *gh = G + traw, *head = G + raw;      // same height, width, pitch, mip count and format
@@ -759,9 +907,15 @@ void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInt
     x360_hd_creating = 1;                                  // the texture Init creates is tagged (the probe's hdtex)
     f_006DDD90_orig(c);
     x360_hd_creating = 0;
+    ui_diag_upload(ti, pi, raw, size);
     M32(ti + 0x70) = s70; M32(ti + 0x40) = s40; M32(ti + 0x44) = s44; M32(ti + 0x4c) = s4c; M32(pi + 0x14) = sfmt;
     gfree(raw);
     ++hd_loaded; hd_bytes += total;
+    if (is_later && diag_on) {
+        uint32_t bit = 1u << later_rule(hx->hash);
+        if (!(hd_later_applied_mask & bit)) { hd_later_applied_mask |= bit; ++hd_later_loaded; }
+        diag_event("later: overlay %08X applied=%u %ux%u levels=%u", hx->hash, hd_later_loaded, ww, hh, levels);
+    }
     if (diag_on && (hd_loaded <= 20 || hd_loaded % 100 == 0))
         diag_event("x360: HD texture %08X %ux%u -> %ux%u, %u levels (%u loaded, %u in X360 tones, %u KB)", M32(ti + 0x24), s44 & 0xFFFF, s44 >> 16, ww, hh, levels, hd_loaded, hd_tone_loaded, hd_bytes >> 10);
 }

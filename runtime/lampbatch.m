@@ -51,6 +51,7 @@ static const char *enc_types(SEL s) {
         while (*ty == 'r' || *ty == 'n' || *ty == 'N' || *ty == 'o' || *ty == 'O' || *ty == 'R' || *ty == 'V') ++ty;
         if (*ty == '^' && s != @selector(setVertexBytes:length:atIndex:) && s != @selector(setFragmentBytes:length:atIndex:)) { ++unknown; return; }
     }
+    inv.target=nil; // queued calls own their arguments, never their recorder
     [inv retainArguments];
     [ops addObject:inv];
 }

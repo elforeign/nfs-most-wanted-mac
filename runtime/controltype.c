@@ -98,14 +98,66 @@ int controltype_passthrough(void) {             // user32.m: the driving buttons
     return ct_type > 1 && ct_variant(ct_type) != 0;
 }
 
+// Split-screen producer, item 1: creation of the second logical device is separate.
+// DI enumerates host pads in index order; 006283D0 appends these controller objects
+// to 0091F150 (keyboard/mouse have separate globals). Port 0 polls this shared
+// backend in the original update, before port 1 in IOModule's ordered device loop.
+void f_00634B50_orig(Cpu *c);
+void f_00634B50(Cpu *c) {
+    if (pad_count() != 2) { f_00634B50_orig(c); return; }
+    uint32_t dev = c->ecx;
+    int later = M32(0x009203C0u) != 0;
+    f_00634B50_orig(c);                         // scalar entries +0x34 are already per instance
+    if (!later) return;                       // first instance also enumerates the shared backend
+    M32(dev + 0x18) = dev + 0x34;
+    M32(dev + 0x1C) = dev + 0x1034;
+    M32(dev + 0x20) = dev + 0x1434;
+    memset(G + dev + 0x1034, 0, 0x800);
+    M8(dev + 0x183C) = 0;
+    M32(dev + 0x1840) = 1;
+    M32(dev + 0x1844) = M32(dev + 0x1848) = 0;
+}
+
 void f_006349B0_orig(Cpu *c);
+void f_00628940(Cpu *c);                      // the game's binding evaluator (translated)
+static void ct_update(Cpu *c) {
+    uint32_t dev = c->ecx;
+    if (pad_count() != 2 || M32(dev + 0x24) != 1) { f_006349B0_orig(c); return; }
+    // Capture remains owned by port 0. Never run the shared keyboard/mouse capture
+    // routine for port 1, nor poll/consume physical events a second time.
+    if (M32(0x00982BECu) && !M8(dev + 0x183C)) {
+        uint32_t out = M32(dev + 0x20);
+        memcpy(G + M32(dev + 0x1C), G + out, 0x400);
+        for (uint32_t a = 0; a < 76; ++a) {
+            float value = 0;
+            for (uint32_t b = 0; b < 4; ++b) {
+                uint32_t r = GA + 0x34 * a + 4 + 12 * b;
+                uint32_t type = M32(r);
+                if (type < 2 || type > 9) continue; // only controller button/POV/axis/rotation/slider
+                uint32_t saved = M32(r + 4);
+                M32(r + 4) = M32(dev + 0x24);      // explicit logical port -> physical controller slot
+                Cpu q = *c;
+                q.esp -= 12;
+                M32(q.esp) = 0; M32(q.esp + 4) = a; M32(q.esp + 8) = b;
+                f_00628940(&q);                    // original value/axis/diagonal-POV rules, x87 return
+                float v = (float)q.st[q.top];
+                M32(r + 4) = saved;
+                if (v > value) value = v;
+            }
+            MF32(out + 4 * a) = value;
+        }
+    }
+    c->esp += 4;                                   // fastcall ret; nonvolatile registers/x87 untouched
+}
 void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): every GameAction's value, each frame
     if (ct_type != s_type.value + 1) ct_apply(s_type.value);
     uint32_t dev = c->ecx;
-    if (ct_type < 2 || M8(dev + 0x183C)) { f_006349B0_orig(c); return; }   // Type 1, or a binding capture in progress
+    int port_swapped = pad_count() == 2 && M32(dev + 0x24) == 1 ? padbind_port_begin(1) : 0;
+    if (ct_type < 2 || M8(dev + 0x183C)) { ct_update(c); padbind_port_end(port_swapped); return; }   // Type 1, or a binding capture in progress
     // FUN_00628940 reads each non-empty binding and the largest wins: the controller slots of the actions this type
     // changes hold the preset's control for the call (slot 3 empty), then the user's own come back.
-    padbind_follow(c);                          // a changed controller is taken over with the user's table in place
+    if (pad_count() != 2 || M32(dev + 0x24) == 0)
+        padbind_follow(c);                      // only port 0 follows shared binding/identity changes
     uint32_t saved[12][6];
     int acts[12], ramp[12], n = 0;
     float lows[12];
@@ -120,7 +172,7 @@ void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): e
         acts[n] = a; lows[n] = low; ramp[n] = low > 0; ++n;
     }
     padbind_swap(1);                            // the joystick reads inside it must not see the preset
-    f_006349B0_orig(c);
+    ct_update(c);
     padbind_swap(0);
     uint32_t out = M32(dev + 0x20);
     for (int i = 0; i < n; ++i) {
@@ -137,5 +189,6 @@ void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): e
             last[acts[i]] = v;
         }
     }
+    padbind_port_end(port_swapped);
 }
 #endif

@@ -33,6 +33,8 @@
 
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "onscreen_keyboard.h"
+void osk_pass(Cpu *c);
 
 #define GAMEFLOW_STATE 0x00925E90u       // 3 front end, 6 racing
 #define SND_CTL_STATES 0x00911FE8u       // g_ActiveCtlStates (SetSoundControlState 004B9080)
@@ -141,7 +143,11 @@ static void change(Setting *s, int d) {
 static void activate(Setting *s) {
     if (!s) return;
     if (s->type == SET_ACTION) { if (s->apply) s->apply(0); if (diag_on) diag_event("menu: run %s", s->id); dirty = 1; }
-    else if (s->type == SET_TEXT) { editing = !editing; dirty = 1; }
+    else if (s->type == SET_TEXT) {
+        editing = !editing; dirty = 1;
+        if (editing) osk_note_begin(s->text, sizeof s->text, osk_last_pad());
+        else osk_note_end(0);
+    }
     else change(s, 1);
 }
 static void set_open(int o) {
@@ -167,6 +173,7 @@ void portmenu_toggle(void) { set_open(!is_open); }
 // ---------------- pause (pacing.c, every main-loop pass) ----------------
 int portmenu_hold(void) { return is_open && M32(GAMEFLOW_STATE) == 6; }
 void portmenu_pass(Cpu *c) {
+    osk_pass(c);
     feedback_poll_pause();                // even with no pad reads / DoFFB ticks while the game is paused
     static int sound_paused;             // we set the PauseMenu sound state (the game's pause menu hadn't)
     static uint32_t tag;
@@ -359,7 +366,7 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
     if ((edge || dir) && device != 2) { device = 2; dirty = 1; }
     if (trig) return ~0u;
     Setting *s = current();
-    if (edge & B_CROSS) { if (!(s && s->type == SET_TEXT)) activate(s); }   // typing needs the keyboard
+    if (edge & B_CROSS) activate(s);
     if (edge & B_CIRCLE) { if (editing) { editing = 0; dirty = 1; } else { set_open(0); hold_after_close = phys; } }
     if (edge & B_TRIANGLE) { if (s && !s->locked) { settings_reset(s); changed(s); } }
     if (edge & B_L1) set_tab(tab - 1);
@@ -622,8 +629,94 @@ static void layers(int show) {
     [CATransaction commit];
 }
 
+// A transparent upper half leaves the game's field visible above the keyboard.
+static CALayer *keyboard_layer;
+static CGContextRef keyboard_ctx;
+static void keyboard_update(void) {
+    int show = osk_visible();
+    if (!layer) return;
+    if (!keyboard_layer && show) {
+        keyboard_layer = [CALayer layer];
+        keyboard_layer.actions = @{@"contents": NSNull.null, @"bounds": NSNull.null, @"position": NSNull.null,
+                                   @"hidden": NSNull.null, @"contentsScale": NSNull.null};
+        keyboard_layer.zPosition = 4;
+        keyboard_layer.anchorPoint = CGPointZero;
+        [layer addSublayer:keyboard_layer];
+    }
+    if (!keyboard_layer) return;
+    keyboard_layer.hidden = !show;
+    if (!show) return;
+    const OskCapture *s = osk_capture();
+    // Redraw only when text, selection, geometry or input type changes.
+    static char previous[2048];
+    char signature[2048], keys[600] = "";
+    for (int r = 0; r < 5; ++r) for (int col = 0; col < osk_key_count(r); ++col) {
+        size_t n = strlen(keys);
+        snprintf(keys + n, sizeof keys - n, "%u%c,", osk_key(r, col), osk_selected(r, col) ? '*' : ' ');
+    }
+    CGSize view = layer.bounds.size;
+    id v = layer.delegate;
+    CGFloat backing = [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2;
+    double f = fmin(fit_scale(view), fmax(0.3, (view.height * 0.46 - 12) / (PH - 298)));
+    snprintf(signature, sizeof signature, "%llu:%u:%u:%d:%.0f:%.0f:%.2f:%s:%s", (unsigned long long)s->generation,
+             s->length, s->limit, osk_xbox(), view.width, view.height, backing, s->text, keys);
+    if (!strcmp(previous, signature)) return;
+    colors();
+    size_t W = (size_t)ceil(PW * f * backing), H = (size_t)ceil(PH * f * backing);
+    if (!W || !H) return;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(NULL, W, H, 8, W * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return;
+    CGContextScaleCTM(ctx, (double)W / PW, (double)H / PH);
+    fill(ctx, 12, 298, PW - 24, PH - 304, 12, c_bg);
+    char b[128];
+    snprintf(b, sizeof b, "%s  %u / %u", s->note ? "Note" : "Text", s->length, s->limit);
+    text(ctx, b, 32, 310, fnt(1, 16), c_accent, 0);
+    // UTF-8 text is clipped, rather than truncated through a multi-byte character.
+    CGContextSaveGState(ctx);
+    CGContextClipToRect(ctx, CGRectMake(215, PH - 339, PW - 245, 26));
+    text(ctx, s->text, 220, 309, fnt(0, 17), c_text, 0);
+    CGContextRestoreGState(ctx);
+    for (int r = 0; r < 5; ++r) {
+        int count = osk_key_count(r);
+        double width = r == 4 ? 240 : count > 10 ? 54 : 72;
+        double x = (PW - count * (width + 6) + 6) / 2;
+        for (int col = 0; col < count; ++col) {
+            unsigned key = osk_key(r, col);
+            double xx = x + col * (width + 6), y = 350 + r * 44;
+            int enabled = osk_key_enabled(key), selected = osk_selected(r, col);
+            fill(ctx, xx, y, width, 38, 5, selected ? c_accent : c_sel);
+            char label[16];
+            text(ctx, osk_key_label(key, label), xx + width / 2, y + 9, fnt(1, 16),
+                 enabled ? selected ? c_bg : c_text : c_faint, 2);
+        }
+    }
+    text(ctx, osk_xbox() ? "A  Type     B  Delete     X  Accept     Y  Cancel" : "✕  Type     ○  Delete     □  Accept     △  Cancel",
+         PW / 2, 578, fnt(1, 15), c_text, 2);
+    text(ctx, osk_xbox() ? "D-pad / Left stick  Move       LB  Shift       RB  Symbols" :
+                         "D-pad / Left stick  Move       L1  Shift       R1  Symbols", PW / 2, 606, fnt(0, 12), c_dim, 2);
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    if (img) {
+        double ox = (view.width - PW * f) / 2, oy = view.height - PH * f - 12;
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        keyboard_layer.contents = (__bridge id)img;
+        keyboard_layer.contentsScale = backing;
+        keyboard_layer.frame = CGRectMake(ox, oy, PW * f, PH * f);
+        [CATransaction commit];
+        CGImageRelease(img);
+        snprintf(previous, sizeof previous, "%s", signature);
+        if (diag_on) diag_event("osk: drawn generation=%llu length=%u owner=%d", (unsigned long long)s->generation, s->length, s->owner);
+    }
+    if (keyboard_ctx) CGContextRelease(keyboard_ctx);
+    keyboard_ctx = ctx;
+}
+
 // The panel follows: every Present (diag.c) and after each batch of input (user32.m pump). Nothing while closed.
 void portmenu_update(void) {
+    if (editing && !osk_note_active()) { editing = 0; dirty = 1; }
+    if (osk_note_active() && (!is_open || !editing)) osk_note_end(0);
+    keyboard_update();
     if (!is_open) { if (panel_layer && !panel_layer.hidden) layers(0); return; }
     // Keep the redraw pending until the window can hold a bitmap.
     if (!layer || layer.bounds.size.width <= 0 || layer.bounds.size.height <= 0) return;
@@ -653,6 +746,15 @@ void portmenu_update(void) {
 }
 void portmenu_frame(void) {
     portmenu_update();
+    if (osk_visible() && diag_on && keyboard_ctx && diag_shot_due(dev.frames) == 2) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/keyboard_%05llu.png", diag_dir, (unsigned long long)dev.frames);
+        diag_png(path, CGBitmapContextGetData(keyboard_ctx), (uint32_t)CGBitmapContextGetWidth(keyboard_ctx),
+                 (uint32_t)CGBitmapContextGetHeight(keyboard_ctx), (uint32_t)CGBitmapContextGetBytesPerRow(keyboard_ctx), 1);
+        if (diag_on) diag_event("osk: capture %s frame=(%.0f,%.0f,%.0f,%.0f)", path,
+                               keyboard_layer.frame.origin.x, keyboard_layer.frame.origin.y,
+                               keyboard_layer.frame.size.width, keyboard_layer.frame.size.height);
+    }
     if (is_open && diag_on && last_ctx && getenv("BOOT_DIAG_SHOTS") && diag_frame_wanted(dev.frames, "BOOT_DIAG_SHOTS")) {
         char path[1024];
         snprintf(path, sizeof path, "%s/menu_%05llu.png", diag_dir, (unsigned long long)dev.frames);

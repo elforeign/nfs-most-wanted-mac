@@ -10,6 +10,9 @@ and "GPU slow while draws unchanged" stretches: race seconds whose gpu_mean is o
 similar draw count (+-25%, at least 10 of them, else the race median), merged when under 6 s apart and listed from 4 s long,
 with the perf.tsv columns that tell the causes apart (thermal 0-3, low_power, app_active, occluded, fullscreen, gpu_wall =
 queue-to-end ms of the command buffers against gpu_mean; logs from before build 1592 have none of those columns).
+GPU telemetry adds other-client ms/s, totals of the recorded top clients, and mean MHz against the race median.
+Verdicts: contention when other-client ms/s is at least 30% of (gpu_mean - baseline) * fps; otherwise clock when
+numeric MHz is at most 70% of the race median; otherwise undecided. Missing counters and state labels stay unknown.
 """
 import math, os, re, sys
 
@@ -29,6 +32,46 @@ def kv(line):
 def median(v):
     v = sorted(v)
     return v[len(v) // 2] if v else 0.0
+
+
+def gpu_number(row, key):
+    """Optional telemetry: '-' and P-state labels are unknown, never zero MHz."""
+    try:
+        value = float(row.get(key, "-"))
+        return value if math.isfinite(value) and value >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+def gpu_cause(stretch, race_mhz, f):
+    others, clocks, rises, clients = [], [], [], {}
+    for row, base in stretch:
+        other = gpu_number(row, "gpu_other_ms")
+        if other is not None:
+            others.append(other)
+            # AGX time is ms/s; convert the per-frame rise with this second's FPS.
+            rises.append(max(0, f(row, "gpu_mean") - base) * f(row, "fps"))
+        mhz = gpu_number(row, "gpu_mhz")
+        if mhz is not None and mhz > 0:
+            clocks.append(mhz)
+        for item in row.get("gpu_top", "-").split(","):
+            name, sep, value = item.rpartition(":")
+            ms = gpu_number({"v": value}, "v")
+            if sep and name and ms is not None:
+                clients[name] = clients.get(name, 0) + ms
+    other = sum(others) / len(others) if others else None
+    mhz = sum(clocks) / len(clocks) if clocks else None
+    rise = sum(rises) / len(rises) if rises else None
+    verdict = "undecided"
+    if other is not None and rise and other >= 0.30 * rise:
+        verdict = "contention"
+    elif mhz is not None and race_mhz and mhz <= 0.70 * race_mhz:
+        verdict = "clock"
+    top = ",".join("%s:%.1f" % (name, ms) for name, ms in
+                   sorted(clients.items(), key=lambda item: (-item[1], item[0]))[:3]) or "-"
+    fmt = lambda value: "-" if value is None else "%.1f" % value
+    return "; gpu_other_ms mean %s, top other total ms %s; gpu_mhz mean %s vs race median %s; verdict %s" % (
+        fmt(other), top, fmt(mhz), fmt(race_mhz), verdict)
 
 
 def gpu_slow_stretches(rows, f):
@@ -56,6 +99,8 @@ def gpu_slow_stretches(rows, f):
     print("GPU slow while draws unchanged (race, gpu_mean > 2x the median at +-25%% draws; session median %.1f ms): %s" % (
         all_med, "none" if not stretches else "%d stretch(es), %d s" % (len(stretches), sum(len(c) for c in stretches))))
     has_cols = "thermal" in rs[0]
+    clocks = [v for r in rs if (v := gpu_number(r, "gpu_mhz")) is not None and v > 0]
+    race_mhz = median(clocks) if clocks else None
     for c in stretches:
         g = [r for r, _ in c]
         line = "  t=%.0f-%.0f (%d s): gpu %.1f ms (x%.1f of %.1f), draws %.0f-%.0f, busy %.1f, fps %.0f" % (
@@ -69,7 +114,7 @@ def gpu_slow_stretches(rows, f):
                 sum(int(r["occluded"]) for r in g), sum(int(r["fullscreen"]) for r in g), sum(f(r, "gpu_wall") for r in g) / len(g))
         else:
             line += "; (no thermal/low_power/active/gpu_wall columns in this log)"
-        print(line)
+        print(line + gpu_cause(c, race_mhz, f))
 
 
 def main():
@@ -92,7 +137,7 @@ def main():
     rows = []
     p = os.path.join(d, "perf.tsv")
     if os.path.exists(p):
-        h, *body = open(p).read().splitlines() or [""]
+        h, *body = open(p, errors="replace").read().splitlines() or [""]  # a label cut mid-UTF-8 must not abort the report
         h = h.split("\t")
         rows = [dict(zip(h, r.split("\t"))) for r in body if r.count("\t") == len(h) - 1] if len(h) > 1 else []
 

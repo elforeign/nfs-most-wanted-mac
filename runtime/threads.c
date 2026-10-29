@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "host.h"
+#include "server_loader.h"
 
 // ---------------- GIL ----------------
 static uint32_t cur_tid_diag(void);
@@ -85,23 +86,26 @@ void gil_yield(Cpu *c) {
     thread_checkpoint(c);
 }
 // Events signalled from host threads that don't hold the GIL (audio notifications): applied at the next import.
-static uint32_t pending_init[64], *pending_events = pending_init;   // grows past 64 (a burst of notifications must not be dropped)
+typedef struct { uint32_t handle; uint64_t generation; } PendingEvent;
+static PendingEvent pending_init[64], *pending_events = pending_init; // grows past 64; no dropped bursts
 static int npending, pending_cap = 64;
-void threads_set_event_async(uint32_t h) {
+void threads_set_event_generation_async(uint32_t h, uint64_t generation) {
     pthread_mutex_lock(&gm);
     if (npending == pending_cap) {
-        uint32_t *g = malloc((size_t)pending_cap * 2 * sizeof *g);
+        PendingEvent *g = malloc((size_t)pending_cap * 2 * sizeof *g);
         if (g) {
             memcpy(g, pending_events, (size_t)npending * sizeof *g);
             if (pending_events != pending_init) free(pending_events);
             pending_events = g; pending_cap *= 2;
         }
     }
-    if (npending < pending_cap) pending_events[npending++] = h;
+    if (npending < pending_cap) pending_events[npending++] = (PendingEvent){h, generation};
     ++change_seq;                                   // wake waiters: wait_handles applies the queue before re-checking
     pthread_cond_broadcast(&obj_cv);
     pthread_mutex_unlock(&gm);
 }
+// Audio's existing handle-only notifications; socket completions capture a generation when posted.
+void threads_set_event_async(uint32_t h) { threads_set_event_generation_async(h, 0); }
 static void apply_pending_events(void);
 // Called at every import: after 2 ms of holding the GIL with others waiting, hand it over.
 void gil_maybe_yield(Cpu *c) {
@@ -140,13 +144,14 @@ static void wait_change(uint64_t deadline) {
 enum { K_FREE, K_EVENT, K_MUTEX, K_SEM, K_THREAD, K_TIMER };
 typedef struct {
     int type;
+    uint64_t generation;
     int manual, signaled;         // event, timer
     uint32_t count, max;          // semaphore
     uint32_t owner, recursion;    // mutex
     uint64_t due, period;         // timer (host ns)
     // thread
     uint32_t tid, start, param, exit_code, teb, stack_lo, stack_size;
-    int suspend, terminate, running;
+    int suspend, terminate, running, module_attached;
     Cpu *cpu;
     pthread_t th;
     jmp_buf exit_jb;
@@ -154,6 +159,9 @@ typedef struct {
 #define KOBJ_BASE 0x2000u         // to 0x2800: find handles start there (boot.c lists all the handle ranges)
 #define MAX_KOBJ 512
 static KObj kobj[MAX_KOBJ];
+                                                                    
+static pthread_mutex_t cpu_snapshot_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t next_generation;
 static uint32_t next_tid = 2;
 static __thread KObj *self;       // NULL on the main thread
 #define MAIN_TEB 0x7FFDE000u
@@ -167,6 +175,7 @@ static uint32_t knew(int type, KObj **out) {
         if (!kobj[i].type) {
             memset(&kobj[i], 0, sizeof kobj[i]);
             kobj[i].type = type;
+            kobj[i].generation = ++next_generation;
             *out = &kobj[i];
             return KOBJ_BASE + 4 * (uint32_t)i;
         }
@@ -315,14 +324,28 @@ static void *thread_main(void *p) {
     guest_worker = 1;
     gil_acquire();
     if (!setjmp(t->exit_jb)) {
-        while (t->suspend > 0) wait_change(0);
+        while (t->suspend > 0 && !t->terminate) wait_change(0);
         if (!t->terminate) {
             uint32_t a = t->param;
             t->running = 1;
+#ifdef NFS_SERVER_LINKED
+            if (t->start >= SERVER_BASE && t->start < SERVER_RESERVED_END)
+                t->module_attached = server_thread_attach(t->cpu);
+#endif
             if (boot_trace) fprintf(stderr, "  [thread %u] start %08X(%08X)\n", t->tid, t->start, t->param);
             t->exit_code = call_guest(t->cpu, t->start, 1, &a);
         }
     }
+#ifdef NFS_SERVER_LINKED
+    if (t->module_attached) {
+        t->module_attached = 0;
+        t->terminate = 0; t->suspend = 0;
+                                                                            
+        // Give the CRT notification a fresh frame in the same TEB/stack.
+        t->cpu->esp = (t->stack_lo + t->stack_size) & ~15u;
+        server_thread_detach(t->cpu);
+    }
+#endif
     t->running = 0;
     t->signaled = 1;
     if (nfree_stacks < 32) { free_stacks[nfree_stacks].lo = t->stack_lo; free_stacks[nfree_stacks++].size = t->stack_size; }
@@ -332,7 +355,25 @@ static void *thread_main(void *p) {
     return NULL;
 }
 
+static void split_sound_worker_reap(uint32_t start) {
+    // Both modes leak this exact saved handle: shutdown joins but never closes
+                                                                                
+    if (start != 0x00820BD7u) return;
+    pthread_mutex_lock(&cpu_snapshot_mu);
+    uint32_t handle = M32(0x009C22E8u);
+    KObj *old = kget(handle);
+    if (!old || old->type != K_THREAD || old->start != start || old->running || !old->signaled) {
+        pthread_mutex_unlock(&cpu_snapshot_mu);
+        return;
+    }
+    free(old->cpu);
+    memset(old, 0, sizeof *old);
+    pthread_mutex_unlock(&cpu_snapshot_mu);
+    if (diag_on) diag_event("split lifecycle: reclaimed completed SNDREAL thread handle %04X (00820063/00820C64)", handle);
+}
+
 static uint32_t thread_create(uint32_t stack, uint32_t start, uint32_t param, uint32_t flags, uint32_t *tid_out) {
+    split_sound_worker_reap(start);
     KObj *t;
     uint32_t h = knew(K_THREAD, &t);
     if (stack < 0x100000) stack = 0x100000;
@@ -371,7 +412,7 @@ static uint32_t thread_create(uint32_t stack, uint32_t start, uint32_t param, ui
 }
 
 static void apply_pending_events(void) {
-    uint32_t ev[64];
+    PendingEvent ev[64];
     int n, any = 0;
     for (;;) {                                      // in chunks of 64; setting an event twice is the same as once
         pthread_mutex_lock(&gm);
@@ -381,7 +422,10 @@ static void apply_pending_events(void) {
         pthread_mutex_unlock(&gm);
         if (!n) break;
         any = 1;
-        for (int i = 0; i < n; ++i) { KObj *o = kget(ev[i]); if (o && o->type == K_EVENT) o->signaled = 1; }
+        for (int i = 0; i < n; ++i) {
+            KObj *o = kget(ev[i].handle);
+            if (o && o->type == K_EVENT && (!ev[i].generation || o->generation == ev[i].generation)) o->signaled = 1;
+        }
     }
     if (any) changed();
 }
@@ -418,12 +462,23 @@ void threads_wait_desc(uint32_t tid, char *buf, size_t n) {
 static pthread_t main_thread;
 static Cpu *main_cpu;
 void threads_set_main_cpu(Cpu *c) { main_cpu = c; }
-// For diagnostic reports: every guest thread (pthread, Cpu, thread id), main first.
+// Diagnostic callers own snapshots until their next threads_list call. Never
+                                                                                  
 int threads_list(pthread_t *ths, Cpu **cpus, uint32_t *tids, int cap) {
+    static __thread Cpu snapshots[MAX_KOBJ];
+    if (cap > MAX_KOBJ) cap=MAX_KOBJ;
     int n = 0;
-    if (n < cap) { ths[n] = main_thread; cpus[n] = main_cpu; tids[n] = 1; ++n; }
+    pthread_mutex_lock(&cpu_snapshot_mu);
+    if (n < cap) {
+        ths[n] = main_thread; cpus[n] = NULL; tids[n] = 1;
+        if (main_cpu) { snapshots[n]=*main_cpu; cpus[n]=&snapshots[n]; }
+        ++n;
+    }
     for (int i = 1; i < MAX_KOBJ && n < cap; ++i)
-        if (kobj[i].type == K_THREAD && kobj[i].running && kobj[i].cpu) { ths[n] = kobj[i].th; cpus[n] = kobj[i].cpu; tids[n] = kobj[i].tid; ++n; }
+        if (kobj[i].type == K_THREAD && kobj[i].running && kobj[i].cpu) {
+            ths[n] = kobj[i].th; snapshots[n]=*kobj[i].cpu; cpus[n]=&snapshots[n]; tids[n] = kobj[i].tid; ++n;
+        }
+    pthread_mutex_unlock(&cpu_snapshot_mu);
     return n;
 }
 
@@ -677,3 +732,60 @@ int threads_close(uint32_t h) {
     if (o->type != K_THREAD || o->signaled) o->type = K_FREE;
     return 1;
 }
+
+// StopServer can use deferred TerminateThread; do not remove module data until
+                                                                                
+int threads_module_self(uint32_t lo, uint32_t hi) {
+    return self && self->start >= lo && self->start < hi;
+}
+                                                                                                                   
+int threads_module_running(uint32_t lo, uint32_t hi, uint32_t *start) {
+    int n = 0;
+    for (unsigned i = 0; i < MAX_KOBJ; ++i) {
+        KObj *t = &kobj[i];
+        if (t->type == K_THREAD && t->running && !t->signaled && t->start >= lo && t->start < hi) { if (!n++ || t->start < *start) *start = t->start; }
+    }
+    return n;
+}
+int threads_drain_module(uint32_t lo, uint32_t hi) {
+    for (unsigned i = 0; i < MAX_KOBJ; ++i) {
+        KObj *t = &kobj[i];
+        if (t->type == K_THREAD && !t->signaled && t->start >= lo && t->start < hi && t == self) return 0;
+    }
+    for (unsigned i = 0; i < MAX_KOBJ; ++i) {
+        KObj *t = &kobj[i];
+        if (t->type != K_THREAD || t->start < lo || t->start >= hi) continue;
+        if (!t->signaled) {
+            t->terminate = 1;
+            changed();
+            while (!t->signaled) wait_change(0);
+        }
+        // StopServer discards its handle without CloseHandle. On unload every
+                                                                              
+        t->type = K_FREE; // module unload releases the abandoned thread handle
+    }
+    return 1;
+}
+
+// ---------------- WSA events (ws2_32.c) ----------------
+// Winsock events are plain manual-reset kernel events: DirtySock's service thread waits on a CreateEventA event and
+// WSACreateEvent events in one WSAWaitForMultipleEvents call.
+uint64_t threads_event_generation(uint32_t h) { // with the GIL held, at request submission
+    KObj *o = kget(h);
+    return o && o->type == K_EVENT ? o->generation : 0;
+}
+uint32_t threads_event_new(int manual, int initial) {
+    KObj *o;
+    uint32_t h = knew(K_EVENT, &o);
+    o->manual = manual;
+    o->signaled = initial;
+    return h;
+}
+int threads_event_set(uint32_t h, int on) {   // with the GIL held
+    KObj *o = kget(h);
+    if (!o || o->type != K_EVENT) return 0;
+    o->signaled = on;
+    if (on) changed();
+    return 1;
+}
+uint32_t threads_wait(Cpu *c, uint32_t n, const uint32_t *h, int all, uint32_t ms) { return wait_handles(c, n, h, all, ms); }

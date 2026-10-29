@@ -9,11 +9,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <math.h>
 
 #include "x360_internal.h"
 #include "settings.h"
+// The renderer supplies strong definitions; isolated CPU post fixtures retain
+// these no-op definitions (weak imports alone do not link their C snapshots).
+__attribute__((weak,noinline)) void render_float_scene_final(int preserve) { (void)preserve; }
+__attribute__((weak,noinline)) void render_float_scene_begin(void) {}
+__attribute__((weak,noinline)) void render_float_scene_post_target(uint32_t surface) { (void)surface; }
 #include "gen/x360_shader_lits.inc"   // X360_SHADER_LITS: 0 without the X360 shaders' constants (render_post.m fs_vt): PC chain
 #include "gen/x360_engine.inc"       // X360E_*: the X360 engine's post constants from the player's default.xex (0: PC chain)
 
@@ -31,8 +37,33 @@
 #define FN_VT_EPILOGUE   0x006E2F50u
 #define REAL_TIME_ELAPSED 0x009259BCu  // RealTimeElapsed: seconds of real time this main-loop pass (PrepareRealTimestep)
 static int postfx = -1;                // 1 = X360 chain
-static float adapted = X360E_ADAPT_START, measured = X360E_ADAPT_START;
-static int reset_adaptation = 1, measured_real;   // measured_real: a luminance has been read back
+typedef struct {
+    float adapted_value, measured_value;
+    int reset_value, real_value;
+    X360PostParams mirror;
+    int mirror_valid, deferred, drop_count;
+    RainDrop drop_list[64];
+    uint32_t vt, transitions[6], camera, rain, target, width, height, generation, mode_generation, last_step, pingpong;
+    uint32_t mover,depth,vt_base,player;
+    uint32_t pc_tex[3],pc_surf[3],pc_desc,pc_width,pc_height,pc_motion[3];
+    uint64_t next_diag;
+} PostState;
+static PostState post_states[3] = {
+    {.adapted_value=X360E_ADAPT_START,.measured_value=X360E_ADAPT_START,.reset_value=1},
+    {.adapted_value=X360E_ADAPT_START,.measured_value=X360E_ADAPT_START,.reset_value=1},
+    {.adapted_value=X360E_ADAPT_START,.measured_value=X360E_ADAPT_START,.reset_value=1}
+};
+static PostState *post_state=&post_states[0];
+static const X360PostView *post_view;
+#define adapted (post_state->adapted_value)
+#define measured (post_state->measured_value)
+#define reset_adaptation (post_state->reset_value)
+#define measured_real (post_state->real_value)
+#define mirror_p (post_state->mirror)
+#define mirror_have (post_state->mirror_valid)
+#define drops_deferred (post_state->deferred)
+#define ndrops (post_state->drop_count)
+#define drops (post_state->drop_list)
 
 // ---- Look settings: bloom amount and colour filter ----
 // Settings (settings.h, F10 > Graphics): graphics.bloom (0-200 %, 100 = the subtle realistic default, see BLOOM_GAIN) and
@@ -90,6 +121,14 @@ static int look_ab(void) {
 }
 // this pass's settings: the held variant's when one is drawn, else the controls'
 static int look_var_is(const char *v) { return look_state == 2 && !strcmp(look_vars[look_var], v); }
+int x360_post_ssao_enabled(void) {
+    if (look_var_is("ssaooff")) return 0;
+    if (look_var_is("ssaon")) return 1;
+                                                                          
+    // former choice's case-insensitive off/on switch for diagnostic A/Bs.
+    const char *e = getenv("NFS_SSAO");
+    return !e || strcasecmp(e, "off");
+}
 int postfx_look_variant(const char *v) { return look_var_is(v); }   // lighting.c: `wlorig` / `wlneutral`
 static const char *var_num(const char *v, char key) {   // the digits after `key` in a variant ("b50c0"), or NULL
     for (; *v; ++v) if (*v == key && v[1] >= '0' && v[1] <= '9') return v + 1;
@@ -342,7 +381,7 @@ int postfx_ab_hold(void) {
     return 0;
 }
 static uint32_t dev_call(Cpu *c, int slot, int n, const uint32_t *args) {
-    uint32_t d = M32(D3D_DEVICE), a[8] = {d};
+    uint32_t d = M32(D3D_DEVICE), a[10] = {d};
     for (int i = 0; i < n; ++i) a[i + 1] = args[i];
     uint32_t esp = c->esp, r = call_guest(c, M32(M32(d) + 4 * (uint32_t)slot), n + 1, a);
     c->esp = esp;
@@ -384,8 +423,7 @@ static void x360_log(const X360PostParams *pp, float bbi, float cbi, float pulse
 // main view: it is equivalent to x1.0, which already multiplies this frame's adapted exposure, not a fixed exposure.
 #define MIRROR_TEXTURE   0x00982A7Cu
 #define MIRROR_ON        0x00919738u   // eViews[3] enabled (RenderingViewMode 2: the mirror view is drawn)
-static X360PostParams mirror_p;
-static int mirror_have;
+
 static float mirror_scale = -1;                           // 0 = Follow main view, >0 = multiplier of main exposure
 void x360_post_set_mirror_exposure(float x) {             // the F10 menu: 0 = `main`
     mirror_scale = x >= 0 ? x : 1.0f;
@@ -393,6 +431,8 @@ void x360_post_set_mirror_exposure(float x) {             // the F10 menu: 0 = `
 }
 void f_006E6E40_orig(Cpu *c);
 void f_006E6E40(Cpu *c) {                                  // FE / HUD pass (cdecl, int hud_pass: 0 = the HUD)
+    int hud=M32(c->esp+4)==0;
+    if(hud)render_float_scene_final(1);
     uint64_t diag_current_frame(void);
     if (M32(c->esp + 4) == 0 && mirror_have && postfx_x360() && M8(MIRROR_ON) && M32(MIRROR_TEXTURE)) {
         if (mirror_scale < 0) {
@@ -411,6 +451,9 @@ void f_006E6E40(Cpu *c) {                                  // FE / HUD pass (cde
     }
     mirror_have = 0;
     f_006E6E40_orig(c);
+    // 006E755x: FE(1), __eDisplayFrame/world/post, then HUD(0). Keep
+    // loading/FE in BGRA8; the initial frame clear precedes the FE call.
+    if(!hud)render_float_scene_begin();
 }
 
 // ---- Lens raindrops (NFS_RAINDROPS; X360 chain only) ----
@@ -436,10 +479,8 @@ void f_006E6E40(Cpu *c) {                                  // FE / HUD pass (cde
 #define FN_GET_TEXTURE   0x00503400u   // GetTextureInfo(hash, 1, 0)
 static int drops_mode = -1;            // 0 pc_before, 1 pc, 2 x360
 void x360_post_set_raindrops(int mode) { drops_mode = mode; if (diag_on) diag_event("x360: raindrops mode now %d", mode); }   // the F10 menu (portmenu.m): from the next frame
-static int drops_deferred, drops_replaying, drops_have_tex = -1;
+static int drops_replaying, drops_have_tex = -1;
 static uint32_t drops_tex[2];          // D3D textures: ONSCREENRAINDROP, ONSCREENRAINDROPALPHA
-static RainDrop drops[64];
-static int ndrops;
 static int raindrops_mode(void) {
     if (drops_mode < 0) {
         const char *e = getenv("NFS_RAINDROPS");
@@ -479,13 +520,16 @@ static void rain_on_lens(Cpu *c, uint32_t to_bb) {   // the game's own drop pass
     drops_replaying = 0;
 }
 void f_006D4620_orig(Cpu *c);
-void f_006D4620(Cpu *c) {                                  // rain on the lens (cdecl, char to_backbuffer)
+static void test_rain_override(void) {
     static float test_rain = -2;
     if (test_rain < -1) { const char *e = getenv("NFS_TEST_RAIN"); test_rain = e ? (float)atof(e) : -1; }
-    if (test_rain >= 0 && !drops_replaying) put_float(RAIN_OVERRIDE, test_rain);
+    if (test_rain >= 0) put_float(RAIN_OVERRIDE, test_rain);
+}
+void f_006D4620(Cpu *c) {                                  // rain on the lens (cdecl, char to_backbuffer)
+    if (!drops_replaying) test_rain_override();
     if (drops_deferred && diag_on) { static int n; if (n++ < 3) diag_event("raindrops: last frame's deferred drops were not drawn (no X360 composite)"); }
     drops_deferred = 0;
-    uint32_t rain = M32(RAIN_PTR), vtw = M32(VT_TECHNIQUE), count = rain ? M32(rain) : 0;
+    uint32_t rain = M32(post_view ? post_view->source_view+0x68 : RAIN_PTR), vtw = M32(VT_TECHNIQUE), count = rain ? M32(rain) : 0;
     if (diag_on && !drops_replaying) {
         static uint32_t last = ~0u;
         if (count != last) { last = count; diag_event("raindrops: %u drops (intensity %.3f, override %.3f, to_bb %u)", count, rain ? F32(rain + 0x28C) : 0.0f, F32(RAIN_OVERRIDE), M8(c->esp + 4)); }
@@ -504,6 +548,7 @@ void f_006D4620(Cpu *c) {                                  // rain on the lens (
     c->esp += 4;
 }
 // f_006D53D0: the deferred drops, after the X360 composite (1) or, if the PC treatment runs instead, before it (0)
+static int split_pc_scope(Cpu *c,const X360PostView *view,int treatment);
 static void raindrops_after(Cpu *c, int composited) {
     if (!drops_deferred) return;
     drops_deferred = 0;
@@ -511,13 +556,14 @@ static void raindrops_after(Cpu *c, int composited) {
     int sig = (probe_sig & PROBE_RAINDROPS) != 0;
     static int logged;
     if (raindrops_mode() == 2 && drops_have_tex == 1) {
-        int n = render_x360_raindrops(M32(BACKBUFFER_SURF), drops, ndrops, drops_tex[0], drops_tex[1], sig);
+        int n = render_x360_raindrops_view(post_view ? post_view->source_surface : M32(BACKBUFFER_SURF), drops, ndrops, drops_tex[0], drops_tex[1], sig, post_view);
         if (n > 0) {
             probe_applied(PROBE_RAINDROPS, n);
             if (diag_on && !logged++) diag_event("raindrops: x360 pass, %d drops, first x %.3f y %.3f life %.3f size %.3f variant %u", n, drops[0].x, drops[0].y, drops[0].life, drops[0].size, drops[0].variant);
             return;
         }
     }
+    if (post_view) { split_pc_scope(c,post_view,0);return; }
     // the game's pass after the composite: it copies its source screen copy into the back buffer, then draws the drops
     // refracting that copy, so the copy gets the composite first (StretchRect, which also resolves AA)
     int32_t cur = (int32_t)M32(VT_PINGPONG);
@@ -534,6 +580,9 @@ void f_006D53D0_orig(Cpu *c);
 // its parameters and SPLINE LUT come from (FUN_006d4ef0, called at 006D54E8, rebuilds the LUT from the curves through
 // FUN_006c3b20) are filtered for the call and put back after it, since the game's look blending owns them.
 static void pc_treatment(Cpu *c) {
+    // PC's final treatment may target the next screen copy before overbright
+    // presents it. That destination has left the scene phase as well.
+    if(!M8(c->esp+4))render_float_scene_post_target(M32(SCREEN_SURFACES+4*((M32(VT_PINGPONG)+1)&1u)));
     uint32_t vt = M32(VT_PLAT);
     float f = colour_amount();
     if (!vt || f >= 1.0f) { f_006D53D0_orig(c); return; }
@@ -544,10 +593,14 @@ static void pc_treatment(Cpu *c) {
     f_006D53D0_orig(c);
     for (int i = 0; i < 14; ++i) put_float(vt + LOOK_OFFS[i], saved[i]);
 }
-void f_006D53D0(Cpu *c) {                                  // visual treatment (stdcall, char to_backbuffer)
+void f_006DC040_orig(Cpu *c);
+void f_006DBB20_orig(Cpu *c);
+static void pc_overbright(Cpu *c);
+static int split_pc_post(Cpu *c,const X360PostView *view);
+static void post_apply(Cpu *c, const X360PostView *view) {    // parameter builder and caller, full or local source
     uint32_t vtw = M32(VT_TECHNIQUE), vt = M32(VT_PLAT);
     int shadow = !postfx_x360() && postfx_ab();              // A/B: the X360 chain into a scratch target, then PC's
-    if ((!postfx_x360() && !shadow) || !vtw || !vt || M32(vtw + 40) == 1) { raindrops_after(c, 0); pc_treatment(c); return; }
+    if (!view && ((!postfx_x360() && !shadow) || !vtw || !vt || M32(vtw + 40) == 1)) { raindrops_after(c, 0); pc_treatment(c); return; }
     // the ping-pong index as PC's code uses it (signed): the screen filter FUN_006d3850 leaves it at -1, and then
     // the source is the entry before the arrays (0093DEF4) and the next index is 0
     int32_t cur = (int32_t)M32(VT_PINGPONG);
@@ -558,7 +611,7 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
     // next screen copy when PC's overbright is on (to_bb 0, every race with g_OverBrightEnable) and the overbright
     // pass (FUN_006dc040) then draws that copy into the back buffer; that pass is skipped here, so writing the
     // screen copy left the X360 result unseen and the raw scene on screen.
-    uint32_t src = M32(SCREEN_TEXTURES + 4 * cur), dst = shadow ? 0 : M32(BACKBUFFER_SURF);
+    uint32_t src = view ? 0 : M32(SCREEN_TEXTURES + 4 * cur), dst = view ? view->source_surface : shadow ? 0 : M32(BACKBUFFER_SURF);
     // vignette texture: **(VT+0x1F0)+0x18 (UVESVIGNETTE)
     uint32_t vig = 0, p1 = M32(vt + 0x1F0);
     if (p1 && M32(p1)) vig = M32(M32(p1) + 0x18);
@@ -580,10 +633,12 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
     float d = measured - adapted;
     int no_scene = !measured_real || (measured < 0.002f && !adapt_black);
     { static int was = -1; if (diag_on && no_scene != was) { was = no_scene; diag_event("x360 post: %s (measured %.4f, adapted %.4f)", no_scene ? "no scene: adaptation held" : "scene: adaptation runs", measured, adapted); } }
-    if (no_scene) ;
+    if (view && post_state->last_step == M32(0x009885B8u)) ;
+    else if (no_scene) ;
     else if (reset_adaptation) { adapted = measured; reset_adaptation = 0; }
     else if (adapted < X360E_ADAPT_FLOOR) adapted = X360E_ADAPT_FLOOR;
     else adapted += (d > 0 ? X360E_ADAPT_UP : X360E_ADAPT_DOWN) * d * dt30;
+    if (view) post_state->last_step = M32(0x009885B8u);
     // the look: tint, colour/black bloom intensity, desaturation, BlackBloomCurve and ColourBloomCurve rows' .y (the
     // X360's own values with NFS_VISUALLOOK=x360), then the colour filter (View > Colour)
     float look[14];
@@ -618,10 +673,11 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
       } }
     if (ab == 3 && ab_state == 4 && ab_var >= 2) p.debug = ab_var - 1;   // 1 input, 2 t, 3 magenta, 4 bloom mask
     if (look_var_is("raw")) p.debug = 1;                  // BOOT_DIAG_LOOK_AB `raw`: the chain's input, untreated
+    if (look_var_is("ssaodepth")) p.debug = 5; // held float depth sidecar for ssao_test.py --compare
     if ((probe_sig & PROBE_POSTFX) && !shadow) p.debug = 3;  // BOOT_DIAG_PROBE: the composite outputs magenta
     p.vignette = F32(vt + 0x17C);
     // camera: projection range, DOF, radial blur (82223D40)
-    uint32_t cam = M32(CAMERA_PTR);
+    uint32_t cam = M32(view ? view->source_view+0x40 : CAMERA_PTR);
     p.znear = cam ? F32(cam + 0xBC) : 0.5f;
     if (!(p.znear > 0.01f && p.znear < 10.0f)) p.znear = 0.5f;
     p.zfar = cam ? F32(cam + 0xC0) : 10000.0f;                     // Camera far (10000 in races)
@@ -630,7 +686,8 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
     p.dof = fabsf(focal) > 1e-4f || fabsf(dof) > 1e-4f;
     p.dof_params[0] = focal * X360E_DOF_FOCAL; p.dof_params[1] = dof * X360E_DOF_RANGE; p.dof_params[2] = dof != 0 ? 1.0f / (dof * X360E_DOF_RANGE) : 0;
     float vel[3] = {cam ? F32(cam + 0x200) : 0, cam ? F32(cam + 0x204) : 0, cam ? F32(cam + 0x208) : 0}, t[3], n[3] = {1, 0, 0};
-    for (int j = 0; j < 3; ++j) t[j] = vel[0] * F32(PLAYER_VIEW + 4 * j) + vel[1] * F32(PLAYER_VIEW + 16 + 4 * j) + vel[2] * F32(PLAYER_VIEW + 32 + 4 * j);
+    uint32_t platform = view ? M32(view->source_view) : PLAYER_VIEW;
+    for (int j = 0; j < 3; ++j) t[j] = vel[0] * F32(platform + 4 * j) + vel[1] * F32(platform + 16 + 4 * j) + vel[2] * F32(platform + 32 + 4 * j);
     float speed = sqrtf(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]), tl = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
     if (tl != 0) for (int j = 0; j < 3; ++j) n[j] = t[j] / tl;
     int racing = M32(GAMEFLOW_STATE) == 6, allowed = M32(MOTION_BLUR_ON) != 0 && racing;
@@ -674,13 +731,28 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
                    G[0x008F9B5Du], F32(0x008FAE64u));
     { static uint32_t last; uint32_t key = to_bb << 31 | (dst & 0x7FFFFFF) | (uint32_t)(cur & 3) << 28;
       if (diag_on && key != last && !shadow) { last = key; diag_event("x360 post: to_bb %u pingpong %d src %08X dst %08X (BACKBUFFER_SURF %08X) state %u", to_bb, cur, src, dst, M32(BACKBUFFER_SURF), M32(GAMEFLOW_STATE)); } }
-    float m = render_x360_post(src, dst, vig, &p);
+    float m = view ? render_x360_post_view(src, dst, vig, &p, view) : render_x360_post(src, dst, vig, &p);
     if (m > -2 && raindrops_mode() == 2 && drops_have_tex == 1) render_x360_raindrops_warm(M32(BACKBUFFER_SURF), drops_tex[0], drops_tex[1]);
+    if (view && m <= -2) { split_pc_post(c,view);return; }
     if (m <= -2) { raindrops_after(c, 0); pc_treatment(c); return; }   // couldn't run (no source/target): the PC path
     if (m >= 0) { measured = m; measured_real = 1; }
-    if (!shadow) scene_shot_track(m);
+    if (!view && !shadow) scene_shot_track(m);
     if (!shadow) { probe_applied(PROBE_POSTFX, 1); mirror_p = p; mirror_have = 1; }
     if (shadow) { x360_log(&p, bbi, cbi, pulse, speedfx, speed, step, focal, dof, cam, dt30); raindrops_after(c, 0); pc_treatment(c); return; }
+    if (view) {
+        post_state->pingpong ^= 1;
+        raindrops_after(c,1);
+        if (diag_on) {
+            uint64_t now=host_ticks();
+            if (now>=post_state->next_diag) {
+                post_state->next_diag=now+1000000000ull;
+                diag_event("splitpost: view %u generation %u source %08X depth %08X rect %u,%u %ux%u measured %.4f adapted %.4f exposure %.3f speed %.2f dof %d drops %d",
+                    M32(view->source_view+4),view->generation,view->source_surface,view->depth_surface,
+                    view->destination[0],view->destination[1],view->destination[2],view->destination[3],measured,adapted,p.exposure,speed,p.dof,ndrops);
+            }
+        }
+        return;
+    }
     // PC's bookkeeping: advance the screen-copy ping-pong, then the epilogue (FUN_006e2f50, restore the RT entry)
     M32(VT_PINGPONG) = next;
     uint32_t esp = c->esp;
@@ -690,6 +762,184 @@ void f_006D53D0(Cpu *c) {                                  // visual treatment (
     raindrops_after(c, 1);                                  // lens raindrops: after the composite, as on X360
     x360_log(&p, bbi, cbi, pulse, speedfx, speed, step, focal, dof, cam, dt30);
     c->esp += 8;                                            // ret 4
+}
+void f_006D53D0(Cpu *c) {
+    render_float_scene_final(0);
+    post_apply(c,NULL);
+}
+
+static int split_post_active;
+static uint32_t split_post_generation=1;
+void split_post_restart(void) {
+    ++split_post_generation;
+    render_x360_post_reset(); // discard pre-restart luminance results, retaining pending buffers safely
+    for (int i=1;i<3;++i) { post_states[i].mode_generation=0;post_states[i].deferred=0; }
+}
+void split_post_mode(int active) {
+    // Split owns its drop snapshot and bypasses 006D4620. Apply the shared test
+    // weather once, before either source's native Rain update, on every frame.
+    if (active) test_rain_override();
+    if (active==split_post_active) return;
+    split_post_active=active; ++split_post_generation;
+    render_x360_post_reset();
+    post_states[0].adapted_value=post_states[0].measured_value=X360E_ADAPT_START;
+    post_states[0].reset_value=1;post_states[0].real_value=0;post_states[0].mirror_valid=post_states[0].deferred=0;
+    // Keep guest allocations for reuse; invalidate all mutable history on mode transitions.
+    for (int i=1;i<3;++i) { post_states[i].mode_generation=0;post_states[i].deferred=0; }
+}
+
+// The retail PC chain runs on local targets. Shared blur/LUT scratch is recomputed for this
+// source; the screen copies/accumulation inputs and ping-pong remain owned by its PostState.
+// Nothing filters an atlas, including the resource-failure path from the X360 renderer.
+static int split_pc_post(Cpu *c,const X360PostView *view) { return split_pc_scope(c,view,1); }
+static int split_pc_scope(Cpu *c,const X360PostView *view,int treatment) {
+    PostState *s=post_state;
+    uint32_t tmp=(c->esp-128)&~15u,sp=c->esp;
+    c->esp=tmp-16;
+    if (!s->pc_desc) s->pc_desc=galloc(0x1C);
+    if (!s->pc_desc) { c->esp=sp;return 0; }
+    if (s->pc_width!=view->source[2] || s->pc_height!=view->source[3] || !s->pc_tex[2] || !s->pc_surf[2] || !s->pc_surf[0] || !s->pc_surf[1]) {
+        for (int i=0;i<3;++i) {
+            uint32_t objects[2]={s->pc_surf[i],s->pc_tex[i]};
+            for (int j=0;j<2;++j) if (objects[j]) call_guest(c,M32(M32(objects[j])+8),1,&objects[j]);
+            s->pc_tex[i]=s->pc_surf[i]=0;
+        }
+        s->pc_width=view->source[2];s->pc_height=view->source[3];
+        for (int i=0;i<3;++i) {
+            uint32_t a[8]={s->pc_width,s->pc_height,1,1,21,0,tmp,0}; // A8R8G8B8 local colour
+            M32(tmp)=0;
+            if (dev_call(c,23,8,a) || !(s->pc_tex[i]=M32(tmp))) { c->esp=sp;return 0; }
+            uint32_t b[3]={s->pc_tex[i],0,tmp};M32(tmp)=0;
+            if (call_guest(c,M32(M32(b[0])+0x48),3,b) || !(s->pc_surf[i]=M32(tmp))) { c->esp=sp;return 0; }
+        }
+    }
+    uint32_t saved_rt[4],saved_depth=dev.ds,saved_vp[6],saved_sc[4],saved_on=dev.rs[174];
+    memcpy(saved_rt,dev.rt,16);memcpy(saved_vp,dev.viewport,24);memcpy(saved_sc,dev.scissor,16);
+    uint32_t addresses[]={BACKBUFFER_SURF,VT_PINGPONG,SCREEN_TEXTURES,SCREEN_TEXTURES+4,SCREEN_SURFACES,SCREEN_SURFACES+4,
+        RT_ENTRY_CUR,0x00982C80u,0x00982BE4u,0x00982BE8u,RAIN_PTR,0x009196B4u,CAMERA_PTR,0x00982C6Cu,0x00982C70u,0x00982C74u};
+    uint32_t globals[sizeof addresses/sizeof *addresses];
+    for (unsigned i=0;i<sizeof addresses/sizeof *addresses;++i) globals[i]=M32(addresses[i]);
+    // Crop raw colour from exactly this player's source rectangle, with a local destination.
+    uint32_t r[4]={view->source[0],view->source[1],view->source[0]+view->source[2],view->source[1]+view->source[3]};
+    memcpy(G+tmp+16,r,16);
+    uint32_t copy[5]={view->source_surface,tmp+16,s->pc_surf[2],0,0};
+    if (dev_call(c,34,5,copy)) { c->esp=sp;return 0; }
+    M32(BACKBUFFER_SURF)=s->pc_surf[2];M32(VT_PINGPONG)=s->pingpong;
+    for (int i=0;i<2;++i) { M32(SCREEN_TEXTURES+4*i)=s->pc_tex[i];M32(SCREEN_SURFACES+4*i)=s->pc_surf[i]; }
+    M32(0x00982BE4u)=s->pc_width;M32(0x00982BE8u)=s->pc_height;M32(RAIN_PTR)=s->rain;M32(0x009196B4u)=M32(view->source_view+0x64);
+    memcpy(G+s->pc_desc,G+M32(view->source_view+0x60),0x1C);
+    M32(s->pc_desc+8)=s->pc_surf[2];M32(s->pc_desc+12)=0;
+    M32(s->pc_desc+0x14)=s->pc_width;M32(s->pc_desc+0x18)=s->pc_height;M32(RT_ENTRY_CUR)=s->pc_desc;
+    uint32_t off[2]={174,0};dev_call(c,57,2,off);
+    if (treatment) {
+        // Native PC motion reads a fixed camera operand and three mutable inputs.
+        // Scope those reads to this source, retaining the two local screen textures as its history.
+        M32(CAMERA_PTR)=s->camera;
+        for (int i=0;i<3;++i) M32(0x00982C6Cu+4*i)=s->pc_motion[i];
+        M32(0x00982C74u)=M32(s->vt+0x178);
+        if (M32(MOTION_BLUR_ON) && M32(0x008F9218u) && !(post_skip()&SKIP_MOTIONBLUR)) {
+            uint32_t esp=c->esp;c->esp-=4;M32(c->esp)=0;f_006DBB20_orig(c);c->esp=esp;
+        }
+        for (int i=0;i<3;++i) s->pc_motion[i]=M32(0x00982C6Cu+4*i);
+        call_guest(c,0x006DBEC0u,0,NULL); // raw screen copy and per-source bloom input
+        call_guest(c,0x006DBFE0u,0,NULL); // retail PC downsample/blur
+        if (s->drop_count && raindrops_mode()==0) rain_on_lens(c,0);
+        uint32_t esp=c->esp;c->esp-=8;M32(c->esp)=0;M32(c->esp+4)=M32(0x009017FCu) ? 0:1;
+        pc_treatment(c);c->esp=esp;
+        if (M32(0x009017FCu)) { c->esp-=4;M32(c->esp)=0;pc_overbright(c);c->esp=esp; }
+    }
+    if (s->drop_count && (!treatment || raindrops_mode()!=0)) {
+        if (raindrops_mode()==2 && drops_have_tex==1) {
+            X360PostView local=*view;
+            uint32_t r[4]={0,0,s->pc_width,s->pc_height};memcpy(local.destination,r,16);
+            int drawn=render_x360_raindrops_view(s->pc_surf[2],s->drop_list,s->drop_count,drops_tex[0],drops_tex[1],
+                (probe_sig&PROBE_RAINDROPS)!=0,&local);
+            if (drawn>0) probe_applied(PROBE_RAINDROPS,drawn);
+        } else {
+            // PC replay samples only a local composited screen copy, with local window aspect.
+            uint32_t a[5]={s->pc_surf[2],0,s->pc_surf[M32(VT_PINGPONG)&1],0,2};dev_call(c,34,5,a);
+            rain_on_lens(c,1);
+        }
+    }
+    call_guest(c,FN_VT_EPILOGUE,0,NULL);
+    s->pingpong=M32(VT_PINGPONG)&1;s->deferred=0;
+    // Only this destination rectangle is replaced; the opposite view retains its pixels.
+    for (int j=0;j<2;++j) { r[j]=view->destination[j];r[j+2]=view->destination[j]+view->destination[j+2]; }
+    memcpy(G+tmp+16,r,16);
+    copy[0]=s->pc_surf[2];copy[1]=0;copy[2]=view->source_surface;copy[3]=tmp+16;copy[4]=2;
+    dev_call(c,34,5,copy);
+    for (unsigned i=0;i<sizeof addresses/sizeof *addresses;++i) M32(addresses[i])=globals[i];
+    for (int i=0;i<4;++i) { uint32_t a[2]={(uint32_t)i,saved_rt[i]};dev_call(c,37,2,a); }
+    dev_call(c,39,1,&saved_depth);
+    memcpy(G+tmp+32,saved_vp,24);uint32_t ptr=tmp+32;dev_call(c,47,1,&ptr);
+    memcpy(G+tmp+56,saved_sc,16);ptr=tmp+56;dev_call(c,75,1,&ptr);
+    off[1]=saved_on;dev_call(c,57,2,off);
+    if (diag_on) {
+        uint64_t now=host_ticks();
+        if (now>=s->next_diag) {
+            s->next_diag=now+1000000000ull;
+            diag_event("splitpost: view %u generation %u PC %s rect %u,%u %ux%u screen %08X/%08X drops %d",
+                M32(view->source_view+4),s->generation,treatment ? "chain":"lens replay",view->destination[0],view->destination[1],
+                view->destination[2],view->destination[3],s->pc_tex[0],s->pc_tex[1],s->drop_count);
+        }
+    }
+    c->esp=sp;return 1;
+}
+
+// Clone the treatment and its six mutable VisualLookEffect records; attribute assets remain shared.
+// IVisualTreatment::Update (0074C000) resolves heat/NOS using the actual view id, not collection order.
+void split_post_view(Cpu *c, uint32_t source, const uint32_t rect[4]) {
+    uint32_t base=M32(VT_PLAT),desc=M32(source+0x60);
+    if (!base || !desc) return;
+    Cpu saved=*c;
+    PostState *state=&post_states[source==0x009196C0u ? 2:1];
+    uint32_t camera=M32(source+0x40),rain=M32(source+0x68),target=M32(desc+8),player=split_capture_player(0);
+    int reset=state->mode_generation!=split_post_generation || state->camera!=camera || state->rain!=rain ||
+        state->target!=target || state->width!=rect[2] || state->height!=rect[3] ||
+        state->mover!=M32(source+0x44) || state->depth!=M32(desc+12) || state->vt_base!=base || state->player!=player;
+    if (!state->vt) state->vt=galloc(0x200);
+    if (!state->vt) return;
+    if (reset) {
+        memcpy(G+state->vt,G+base,0x200);
+        for (int i=0;i<6;++i) {
+            uint32_t original=M32(base+0x1C0+4*i);
+            if (!state->transitions[i]) state->transitions[i]=galloc(0x10);
+            if (!state->transitions[i]) { *c=saved;return; }
+            if (original) memcpy(G+state->transitions[i],G+original,0x10);
+            else memset(G+state->transitions[i],0,0x10);
+            M32(state->vt+0x1C0+4*i)=state->transitions[i];
+        }
+        state->player=player;state->mover=M32(source+0x44);state->depth=M32(desc+12);state->vt_base=base;
+        state->camera=camera;state->rain=rain;state->target=target;state->width=rect[2];state->height=rect[3];
+        state->mode_generation=split_post_generation; ++state->generation;state->last_step=~0u;state->pingpong=0;
+        state->adapted_value=state->measured_value=X360E_ADAPT_START;state->reset_value=1;state->real_value=0;
+        state->deferred=state->drop_count=0;state->mirror_valid=0;memset(state->pc_motion,0,sizeof state->pc_motion);
+    }
+    X360PostView view={.source_view=source,.source_surface=target,.depth_surface=M32(desc+12),.generation=state->generation};
+    memcpy(view.source,rect,16);memcpy(view.destination,rect,16);memcpy(view.depth,rect,16);memcpy(view.lamp,rect,16);
+    post_state=state;post_view=&view;M32(VT_PLAT)=state->vt;
+    c->ecx=state->vt;call_guest(c,0x0074C000u,1,&source);
+    // Snapshot only this Rain object's deferred list; simulation remains the world-effects owner's work.
+    state->drop_count=0;
+    uint32_t count=rain ? M32(rain):0;
+    for (uint32_t i=0;i<count && state->drop_count<64;++i) {
+        uint32_t r=rain+i*0x1C;float total=F32(r+0x10);
+        RainDrop *d=&state->drop_list[state->drop_count++];
+        *d=(RainDrop){F32(r+4),F32(r+8),total ? F32(r+0xC)/total:0,F32(r+0x14),M32(r+0x1C)};
+    }
+    if (diag_on) {
+        static int fixture=-1;
+        if (fixture<0) fixture=getenv("BOOT_DIAG_SPLITPOST_DROPS")!=NULL;
+        if (fixture) {
+            state->drop_count=source==0x009196C0u ? 3:2;
+            for (int i=0;i<state->drop_count;++i)
+                state->drop_list[i]=(RainDrop){.x=source==0x009196C0u ? .65f+.15f*i:.25f+.2f*i,.y=source==0x009196C0u ? .03f:.99f,.life=.5f,.size=1.5f,.variant=(uint32_t)i};
+        }
+    }
+    state->deferred=state->drop_count>0;
+    if (postfx_x360()) post_apply(c,&view);
+    else split_pc_post(c,&view);
+    M32(VT_PLAT)=base;post_view=NULL;post_state=&post_states[0];*c=saved;
 }
 void f_006DBB20_orig(Cpu *c);
 void f_006DBB20(Cpu *c) {                                  // PC motion blur: off with the X360 radial blur
@@ -701,12 +951,16 @@ void f_006DC040_orig(Cpu *c);
 // with (255 x [008F9B30], [008F9B2C] without the treatment, or [[009196B4] + 0x140] x blend x const while that
 // object's +0x30 is set: 006DC0B4-006DC110), by scaling those three for the call (not skipped at 0: with the
 // treatment writing a screen copy, this pass is what draws it into the back buffer).
-void f_006DC040(Cpu *c) {
-    if (postfx_x360()) { c->esp += 4; return; }
+static void pc_overbright(Cpu *c) {
     float s = bloom_amount();
     uint32_t obj = M32(0x009196B4u), a[3] = {0x008F9B2Cu, 0x008F9B30u, obj ? obj + 0x140 : 0};
     float sv[3];
     if (s < 1.0f) for (int i = 0; i < 3; ++i) if (a[i]) { sv[i] = F32(a[i]); put_float(a[i], sv[i] * s); }
     f_006DC040_orig(c);
     if (s < 1.0f) for (int i = 0; i < 3; ++i) if (a[i]) put_float(a[i], sv[i]);
+}
+
+void f_006DC040(Cpu *c) {
+    if (postfx_x360()) { c->esp += 4; return; }
+    pc_overbright(c);
 }

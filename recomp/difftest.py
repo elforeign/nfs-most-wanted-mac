@@ -187,6 +187,15 @@ def synth_cases():
         ("pinsrw", f"{mm_in}\npinsrw mm0, eax, 1\npinsrw mm1, word ptr [esi+24], 3\n{mm_out}", 0),
         ("pmovmskb", f"{mm_in}\npmovmskb eax, mm0\npmovmskb ecx, mm1\n{mm_out}", 0),
     ]
+    # int3 continues like under a debugger (recomp.py int3; the reference hooks it the same way): the bFree 00465760
+    # continuation (pops, ADD ESP,20h), __break's int3; ret, a prefixed two-byte int3 and an int3 that is a jump target
+    cases += [
+        ("int3 continuation", "sub esp, 0x20\npush ebx\npush esi\npush edi\nmov ebx, 1\nmov esi, 2\nmov edi, 3\n"
+                              "int3\npop edi\npop esi\npop ebx\nadd esp, 0x20\nadd eax, ecx", ARITH),
+        ("int3; ret", "add eax, ecx\nint3\nret", 0),
+        ("int3 prefixed", ".byte 0xf3, 0xcc\nadd eax, ecx", ARITH),
+        ("int3 interior", "test ecx, 1\njz 1f\nadd eax, edx\n1: int3\nadd eax, ecx", ARITH),
+    ]
     cases.extend((name, body, mask) for name, body, mask, _ in audit_cases())
     return cases
 
@@ -250,6 +259,7 @@ def build(rc, funcs, workdir, header_dir=HERE):
                '  longjmp(escape, 2); }\n'
                'uint32_t audit_de_count, audit_de_at;\n'
                'void guest_divide_error(Cpu *c, uint32_t at) { (void)c; audit_de_count++; audit_de_at = at; }\n'
+               'void guest_breakpoint(Cpu *c, uint32_t at) { (void)c; (void)at; }\n'
                'void untranslated(Cpu *c, uint32_t at) { (void)c; (void)at; longjmp(escape, 7); }\n'
                'void bad_jump(Cpu *c, uint32_t at) { (void)c; (void)at; longjmp(escape, 3); }\n'
                'void host_import(Cpu *c, uint32_t slot) { (void)c; (void)slot; longjmp(escape, 4); }\n'
@@ -583,7 +593,7 @@ def main():
         return 3
     from unicorn import UcError
     from unicorn.x86_const import UC_X86_REG_EIP, UC_X86_REG_FP0, UC_X86_REG_FPCW, UC_X86_REG_FPSW, UC_X86_REG_FPTAG
-    from unicorn import UC_ERR_EXCEPTION
+    from unicorn import UC_ERR_EXCEPTION, UC_HOOK_INTR
     pe = rc.pe
     data_sec = [(pe.base + va, max(vs, rs)) for nm, vs, va, rs, raw in pe.sections if nm.startswith(b".data")][0]
     image = [(pe.base + va, pe.data[raw:raw + rs]) for nm, vs, va, rs, raw in pe.sections]
@@ -598,8 +608,19 @@ def main():
     for va, b in image:          # once: forked children inherit it copy-on-write
         guest_write(va, b)
 
-    def make_emu():
+    other_intr = []
+
+    def int3_continue(uc, intno, _):
+        # int3 behaves like a debugger's "continue" (the port's model, recomp.py int3): EIP is already past it.
+        # Any other interrupt stops the run, which then counts as skipped like an unhandled exception.
+        if intno != 3:
+            other_intr.append(intno)
+            uc.emu_stop()
+
+    def make_emu(int3_hook=True):
         e = speed_emu.SpeedEmu(heap_size=0x1000)
+        if int3_hook:
+            e.uc.hook_add(UC_HOOK_INTR, int3_continue)
         e.uc.mem_map(SCRATCH, SCRATCH_SIZE)
         if synth_code:
             e.uc.mem_map(SYNTH_BASE, (len(synth_code) + 0xFFFF) & ~0xFFFF)
@@ -630,7 +651,8 @@ def main():
             stack_img = struct.pack("<I", speed_emu.RETURN_TRAP) + struct.pack("<8I", *args_)
             # --- original under Unicorn ---
             expect_fault = name.startswith("audit3 #DE")
-            emu = make_emu() if expect_fault else shared_emu
+            emu = make_emu(int3_hook=False) if expect_fault else shared_emu
+            other_intr.clear()
             emu.uc.mem_write(*data_init)
             emu.uc.mem_write(SCRATCH, scratch)
             emu.uc.mem_write(esp - 0x400, stack)
@@ -651,6 +673,9 @@ def main():
                 else:
                     skipped += 1
                     continue
+            if other_intr:
+                skipped += 1
+                continue
             if expect_fault and not ref_fault:
                 verdicts.append("reference did not raise expected #DE")
                 continue

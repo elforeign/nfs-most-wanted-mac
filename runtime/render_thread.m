@@ -15,7 +15,7 @@ int rt_on = -1;
 
 enum { OP_RENC = 1, OP_BENC, OP_BENCD, OP_END, OP_LABEL, OP_PSO, OP_DSS, OP_FTEX, OP_VTEX, OP_FSAMP, OP_VSAMP, OP_VBUF, OP_FBUF,
        OP_VBOFF, OP_FBOFF, OP_VBYTES, OP_FBYTES, OP_VIEWPORT, OP_SCISSOR, OP_CULL, OP_WINDING, OP_BIAS, OP_STENCIL, OP_BLENDC,
-       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB };
+       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB, OP_RLIST };
 
 @interface RTCmd : NSObject {
 @public
@@ -72,6 +72,12 @@ static inline uint64_t obj_w(RTCmd *c, id o) {
 #define O(x) ((__bridge id)(void *)(uintptr_t)(x))
 
 @implementation RTCmd
+- (void)dealloc {
+    // Standalone render lists are retained by their parent frame until replay.
+    // Normal command buffers have already released these in replay().
+    if (set) for (size_t j=0;j<capset;++j) if(set[j]) CFRelease((CFTypeRef)set[j]);
+    free(set);free(w);
+}
 - (id<MTLDevice>)device { return mtl; }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
     MTLRenderPassDescriptor *k = [d copy];
@@ -128,6 +134,7 @@ static inline uint64_t obj_w(RTCmd *c, id o) {
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { REC(OP_FBUF, 3); a[0] = obj_w(c, b); a[1] = o; a[2] = i; }
 - (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { REC(OP_VBOFF, 2); a[0] = o; a[1] = i; }
 - (void)setFragmentBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { REC(OP_FBOFF, 2); a[0] = o; a[1] = i; }
+// Rectangle clears use these inline copies plus OP_SCISSOR: replay never reads guest rects or stack clear values.
 - (void)setVertexBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {
     REC(OP_VBYTES, 2 + (n + 7) / 8); a[0] = n; a[1] = i; memcpy(a + 2, p, n);
 }
@@ -185,23 +192,18 @@ destinationBytesPerImage:(NSUInteger)bpi {
 - (void)doesNotRecognizeSelector:(SEL)s { fprintf(stderr, "boot: render thread: blit encoder recorder lacks %s\n", sel_getName(s)); abort(); }
 @end
 
-static void replay(RTCmd *c) {
-    uint64_t t0 = host_ticks();
-    id<MTLCommandBuffer> real = [queue commandBuffer];
-    id<MTLRenderCommandEncoder> r = nil;
-    id<MTLBlitCommandEncoder> b = nil;
-    for (size_t i = 0; i < c->n;) {
-        const uint64_t *w = c->w + i;
-        unsigned k = (unsigned)(w[0] & 255);
-        i += w[0] >> 8;
-        const uint64_t *a = w + 1;
-        float f[4];
-        switch (k) {
-        case OP_RENC: r = [real renderCommandEncoderWithDescriptor:O(a[0])]; break;
-        case OP_BENC: b = [real blitCommandEncoder]; break;
-        case OP_BENCD: b = [real blitCommandEncoderWithDescriptor:O(a[0])]; break;
-        case OP_END: if (r) [r endEncoding]; if (b) [b endEncoding]; r = nil; b = nil; break;
-        case OP_LABEL: if (r) r.label = O(a[0]); else if (b) b.label = O(a[0]); break;
+// The same typed op stream serves ordinary frames and deferred coverage lists.
+// Lists capture bytes inline and retain resources once; they never redo D3D translation.
+static int replay_render_op(unsigned k,const uint64_t *a,id<MTLRenderCommandEncoder> r);
+static void replay_render_list(RTCmd *c,id<MTLRenderCommandEncoder> r) {
+    for(size_t i=0;i<c->n;){const uint64_t *w=c->w+i;i+=w[0]>>8;
+        if(!replay_render_op(w[0]&255,w+1,r)){fprintf(stderr,"boot: bad render list op %u\n",(unsigned)(w[0]&255));abort();}}
+}
+static int replay_render_op(unsigned k,const uint64_t *a,id<MTLRenderCommandEncoder> r) {
+    float f[4];
+    switch(k){
+        case OP_LABEL:r.label=O(a[0]);break;
+        case OP_RLIST:replay_render_list((RTCmd *)O(a[0]),r);break;
         case OP_PSO: [r setRenderPipelineState:O(a[0])]; break;
         case OP_DSS: [r setDepthStencilState:O(a[0])]; break;
         case OP_FTEX: [r setFragmentTexture:O(a[0]) atIndex:a[1]]; break;
@@ -229,6 +231,43 @@ static void replay(RTCmd *c) {
             [r drawIndexedPrimitives:(MTLPrimitiveType)a[0] indexCount:a[1] indexType:(MTLIndexType)a[2] indexBuffer:O(a[3]) indexBufferOffset:a[4]
                        instanceCount:a[5] baseVertex:(NSInteger)a[6] baseInstance:a[7]];
             break;
+        default:return 0;
+    }
+    return 1;
+}
+static RTCmd *render_list_cmd(void){RTCmd *c=[RTCmd new];c->owned=[NSMutableArray new];return c;}
+id rt_render_list_new(void){RTRender *r=[RTRender new];r->c=render_list_cmd();return r;}
+unsigned rt_render_list_ops(id list){return list?(unsigned)((RTRender *)list)->c->n:0;}
+void rt_render_list_replay(id list,id<MTLRenderCommandEncoder> encoder){
+    if(!list)return;
+    RTRender *r=list;RTCmd *recording=r->c;
+    if(encoder){
+        if([(id)encoder isKindOfClass:[RTRender class]]){
+            RTCmd *target=((RTRender *)encoder)->c;
+            op(target,OP_RLIST,1)[0]=obj_w(target,recording);
+        }else replay_render_list(recording,encoder);
+    }
+    // Detach the immutable snapshot: later draws and discard cannot mutate an
+    // already queued frame. The render thread releases its resource ownership.
+    r->c=render_list_cmd();
+}
+
+static void replay(RTCmd *c) {
+    uint64_t t0 = host_ticks();
+    id<MTLCommandBuffer> real = [queue commandBuffer];
+    id<MTLRenderCommandEncoder> r = nil;
+    id<MTLBlitCommandEncoder> b = nil;
+    for (size_t i = 0; i < c->n;) {
+        const uint64_t *w = c->w + i;
+        unsigned k = (unsigned)(w[0] & 255);
+        i += w[0] >> 8;
+        const uint64_t *a = w + 1;
+        switch (k) {
+        case OP_RENC: r = [real renderCommandEncoderWithDescriptor:O(a[0])]; break;
+        case OP_BENC: b = [real blitCommandEncoder]; break;
+        case OP_BENCD: b = [real blitCommandEncoderWithDescriptor:O(a[0])]; break;
+        case OP_END: if (r) [r endEncoding]; if (b) [b endEncoding]; r = nil; b = nil; break;
+        case OP_LABEL: if (r) r.label = O(a[0]); else if (b) b.label = O(a[0]); break;
         case OP_COPY_TT: [b copyFromTexture:O(a[0]) toTexture:O(a[1])]; break;
         case OP_COPY_TTR: {
             MTLOrigin so, dorg; MTLSize sz; memcpy(&so, a + 3, 24); memcpy(&sz, a + 6, 24); memcpy(&dorg, a + 12, 24);
@@ -242,7 +281,7 @@ static void replay(RTCmd *c) {
              destinationOffset:a[10] destinationBytesPerRow:a[11] destinationBytesPerImage:a[12] options:(MTLBlitOption)a[13]];
             break;
         }
-        default: fprintf(stderr, "boot: render thread: bad op %u\n", k); abort();
+        default: if(!replay_render_op(k,a,r)){fprintf(stderr, "boot: render thread: bad op %u\n", k); abort();}
         }
     }
     for (MTLCommandBufferHandler h in c->handlers) [real addCompletedHandler:h];

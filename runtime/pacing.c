@@ -243,7 +243,7 @@ void f_0065C6D0(Cpu *c) {
     void portmenu_pass(Cpu *c);
     int portmenu_hold(void);
     portmenu_pass(c);                      // the game's sound paused / resumed with the menu
-    if (diag_on) { void diag_warp_pass(Cpu *c); diag_warp_pass(c); }
+    if (diag_on) { void diag_warp_pass(Cpu *c); diag_warp_pass(c); void lanserver_selftest_pass(Cpu *c); lanserver_selftest_pass(c); }
     if (!pace_on()) { if (portmenu_hold()) hold_real_time(c); f_0065C6D0_orig(c); return; }
     int postfx_ab_hold(void);              // x360_post.m, BOOT_DIAG_POSTFX_AB: drop this pass's time (the next draws the same scene)
     int carpaint_ab_hold(void);            // materials.m, BOOT_DIAG_CARPAINT_AB: same-frame X360 / PC car paint

@@ -83,7 +83,7 @@ def check(refdir, newdir, diffdir):
     for name in NAMES:
         rp, np_ = find(refdir, name), find(newdir, name)
         if not rp:
-            bad.append("%s: no reference (runtime/refs.sh accept)" % name)
+            bad.append("%s: no reference (supply reference frames)" % name)
             continue
         if not np_:
             bad.append("%s: not captured" % name)

@@ -21,17 +21,18 @@ int main(void) {
     G = calloc(1, 4096); Cpu c = {.esp = 128};
     M32(c.esp + 4) = 1024; M32(c.esp + 8) = 2048;
     unsigned checked = 0, selected = 0;
-    for (unsigned view = 0; view <= 3; ++view)
+    for (unsigned view = 0; view <= 23; ++view)
         for (unsigned type = 0; type <= 16; ++type)
             for (unsigned reflection = 0; reflection <= 1; ++reflection) {
                 M32(1028) = view; M8(2048 + 0x2c) = type; M32(c.esp + 20) = reflection;
                 lampglow_begin(&c);
-                int want = view == 1 && !reflection && (type == 5 || type == 6) ? type : 0;
+                int want = (view == 1 || view == 2) && !reflection && (type == 5 || type == 6) ? type : 0;
                 assert(lampglow_type() == want);
+                assert(lampglow_owner() == (want ? view : 0));
                 selected += want != 0; ++checked;
-                lampglow_end(); assert(lampglow_type() == 0);
+                lampglow_end(); assert(lampglow_type() == 0 && lampglow_owner() == 0);
             }
-    assert(selected == 2);
+    assert(selected == 4);
     M32(c.esp + 4) = M32(c.esp + 8) = 0; lampglow_begin(&c); assert(!lampglow_type()); lampglow_end();
     free(G);
     printf("PASS emitter context: %u combinations, %u selected (main red/blue only); default Off and held overrides\n", checked, selected);

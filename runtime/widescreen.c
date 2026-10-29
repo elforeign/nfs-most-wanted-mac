@@ -142,6 +142,65 @@ void f_0051B7A0(Cpu *c) {                // Draw__18VOScreenResolution (fastcall
 }
 
 // ---- Hor+ ----
+// Split contract only: drawing/viewport submission is a separate step. PC target
+// descriptors are seven words, with no origin. Never resize the shared FE entry.
+#define SPLIT_P1 0x00919650u
+#define SPLIT_P2 0x009196C0u
+#define SPLIT_OUTPUT 0x0093DAB8u
+static uint32_t split_desc;
+static int split_active;
+static uint32_t split_saved[2][2], split_rects[2][4];
+
+void split_views_restore(void) {
+    if (!split_active) return;
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t v = SPLIT_P1 + i * 0x70;
+        M32(v + 0x60) = split_saved[i][0];
+        M32(v + 8) = split_saved[i][1];
+    }
+    split_active = 0;
+}
+
+void split_views_reset(void) {
+    split_views_restore();
+    // Retain the tiny allocation, but no surface references across a reset.
+    if (split_desc) memset(G + split_desc, 0, 56);
+    memset(split_rects, 0, sizeof split_rects);
+}
+
+void split_views_update(void) {
+    split_views_restore();
+    if (pad_count() != 2 || M32(GAMEFLOW_STATE) != 6) return;
+    uint32_t db = M32(FE_DATABASE);
+    // FEDatabase::IsSplitScreen (00469120): mode byte 2 and flag 4.
+    if (!db || M8(db) != 2 || !(M8(db + 0x12C) & 4)) return;
+    uint32_t w = M32(SPLIT_OUTPUT + 20), h = M32(SPLIT_OUTPUT + 24);
+    if (!w || h < 2 || !M32(SPLIT_OUTPUT + 8) || !M32(SPLIT_OUTPUT + 12)) return;
+    if (!split_desc) split_desc = gmalloc_try(56);
+    if (!split_desc) return; // atomic failure: original pointers/flags survive
+    for (unsigned i = 0; i < 2; ++i) {
+        uint32_t v = SPLIT_P1 + i * 0x70, d = split_desc + i * 28;
+        uint32_t y = i ? h / 2 : 0, height = i ? h - h / 2 : h / 2;
+        uint32_t words[7] = {0, i + 1, M32(SPLIT_OUTPUT + 8), M32(SPLIT_OUTPUT + 12), 1, w, height};
+        memcpy(G + d, words, sizeof words);
+        split_rects[i][0] = 0; split_rects[i][1] = y;
+        split_rects[i][2] = w; split_rects[i][3] = height;
+        split_saved[i][0] = M32(v + 0x60); split_saved[i][1] = M32(v + 8);
+        M32(v + 0x60) = d; M32(v + 8) = 1;
+    }
+    split_active = 1;
+}
+
+// Query by eView identity AND its installed descriptor, for projection now and
+// viewport/scissor consumers in Step 2. No rectangle is exposed while inactive.
+int split_view_rect(uint32_t view, uint32_t rect[4]) {
+    if (!split_active || (view != SPLIT_P1 && view != SPLIT_P2)) return 0;
+    unsigned i = view == SPLIT_P2;
+    if (M32(view + 0x60) != split_desc + i * 28) return 0;
+    if (rect) memcpy(rect, split_rects[i], sizeof split_rects[i]);
+    return 1;
+}
+
 static uint32_t cur_view;               // the view FUN_006CF400 is setting up
 void f_006CF400_orig(Cpu *c);
 void f_006CF400(Cpu *c) {                // (thiscall) builds a view's matrices and frustum; arg 0 is the view
@@ -156,6 +215,18 @@ void f_006CF400(Cpu *c) {                // (thiscall) builds a view's matrices 
 void widescreen_projection(Cpu *c, uint32_t proj) {   // from d3dx.c's D3DXMatrixMultiply
     if (M32(c->esp) != RA_PROJ_MULTIPLY || !cur_view) return;
     mirror_projection(cur_view, proj);   // mirror.c: a resized mirror target keeps the square frustum
+    uint32_t source = split_capture_source();
+    if (cur_view == VIEW_REFLECTION && source) {
+        // Use the source projection verbatim (including FOV, Hor+ and its exact
+        // odd-height aspect). Integer half-size target rounding must not change it.
+        uint32_t plat = M32(source), r[4];
+        if (plat && split_view_rect(source, r)) {
+            memcpy(G + proj, G + plat + 0x40, 64);
+            uint32_t desc = M32(cur_view + 0x60);
+            MF32(cur_view + 0xC) = MF32(source + 0xC) * (float)M32(desc + 0x14) / (float)r[2];
+        }
+        return;
+    }
     if (!wide) return;
     uint32_t type = M32(cur_view + 4), vp = M32(cur_view + 0x60);
     if (!vp) return;
@@ -163,7 +234,7 @@ void widescreen_projection(Cpu *c, uint32_t proj) {   // from d3dx.c's D3DXMatri
     int full = w == M32(WINDOW_WIDTH) && h == M32(WINDOW_HEIGHT), refl = cur_view == VIEW_REFLECTION;
     if (refl) { w = M32(WINDOW_WIDTH); h = M32(WINDOW_HEIGHT); }   // its texture is stretched over the screen
     float aspect = h ? (float)w / (float)h : 0;
-    int fix = (full || refl) && aspect > 4.0f / 3.0f + 1e-3f;
+    int fix = (full || refl || split_view_rect(cur_view, NULL)) && aspect > 4.0f / 3.0f + 1e-3f;
     if (diag_on) {                       // each kind of view once
         static uint32_t seen[64][3];
         static int nseen;
@@ -205,6 +276,84 @@ static void fe_transform(float *kx, float *ky) {
 }
 float widescreen_fe_scale(void) { float kx, ky; fe_transform(&kx, &ky); return kx / ky; }   // < 1: wider than 4:3
 
+// Split HUD ownership is scoped by the existing RenderObject wrapper. The FE
+// viewport stays full-output: package offsets already put P1/P2 in their halves.
+static int hud_owner;                  // 0 full-output, 1 top, 2 bottom
+static struct { uint32_t object, hash; } hud_map[512];
+static unsigned hud_map_count;
+
+static void split_hud_map_object(uint32_t o) {
+    if (!o || hud_map_count == 512) return;
+    for (unsigned i = 0; i < hud_map_count; ++i) if (hud_map[i].object == o) return;
+    hud_map[hud_map_count].object = o;
+    hud_map[hud_map_count++].hash = M32(o + 0x10);
+    if (M32(o + 0x18) == 5)
+        for (uint32_t k = M32(o + 0x64); k; k = M32(k + 4)) split_hud_map_object(k);
+}
+// SetWideScreenMode runs on each HUD update (0058CA30). Copy identities, never
+// retain a Minimap pointer across races. HudElement's list is sentinel +8,
+// nodes {next,prev,FEObject*}; group descendants include masks and marker art.
+static void split_hud_map_refresh(uint32_t hud) {
+    uint32_t type = M32(hud + 0x20);
+    if (type == 4 || type == 6) return;
+    hud_map_count = 0;
+    if (pad_count() != 2 || type != 3) return;
+    uint32_t map = M32(hud + 0x320);
+    if (!map) return;
+    uint32_t end = map + 8;
+    for (uint32_t n = M32(end); n && n != end; n = M32(n)) split_hud_map_object(M32(n + 8));
+}
+int split_hud_begin(uint32_t object) {
+    int saved = hud_owner;
+    hud_owner = 0;
+    uint32_t pkg = M32(0x0091CFACu);
+    if (!pkg || !split_view_rect(SPLIT_P1, NULL) || !split_view_rect(SPLIT_P2, NULL)) return saved;
+    switch (M32(pkg + 0x10)) {
+    case 0xE4A4F786u: case 0x6C130623u: hud_owner = 1; break; // HUD_[Drag_]Player1.fng
+    case 0xE4B71007u: case 0x6C251EA4u: hud_owner = 2; break;
+    default: return saved;
+    }
+                                                                               
+    // including both players' markers. It keeps the original FE scale/scissor.
+    if (hud_owner == 1)
+        for (unsigned i = 0; i < hud_map_count; ++i)
+            if (hud_map[i].object == object && hud_map[i].hash == M32(object + 0x10)) { hud_owner = 0; break; }
+    return saved;
+}
+void split_hud_end(int saved) { hud_owner = saved; }
+
+// Guest D3D calls must not change the draw's CPU or argument slots. The scratch
+// allocation contains only temporary RECT/state query data, no surface refs.
+static void split_hud_device(Cpu *c, uint32_t off, unsigned n, uint32_t *args) {
+    Cpu saved = *c;
+    call_guest(c, M32(M32(args[0]) + off), n, args);
+    *c = saved;
+}
+static void split_hud_scissor(Cpu *c, const uint32_t rect[4], uint32_t saved[5], int restore) {
+    static uint32_t scratch;
+    if (!scratch) scratch = galloc(20);
+    uint32_t dev = M32(0x00982BDCu), a[3] = {dev, scratch, 0};
+    if (!restore) {
+        split_hud_device(c, 0x130, 2, a); // GetScissorRect
+        a[1] = 174; a[2] = scratch + 16;
+        split_hud_device(c, 0xE8, 3, a);  // GetRenderState
+        memcpy(saved, G + scratch, 20);
+        uint32_t sc[4] = {rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]};
+        // Respect any pre-existing enabled clip (full-output FE normally has none).
+        if (saved[4]) {
+            sc[0] = sc[0] > saved[0] ? sc[0] : saved[0]; sc[1] = sc[1] > saved[1] ? sc[1] : saved[1];
+            sc[2] = sc[2] < saved[2] ? sc[2] : saved[2]; sc[3] = sc[3] < saved[3] ? sc[3] : saved[3];
+            if (sc[2] < sc[0]) sc[2] = sc[0];
+            if (sc[3] < sc[1]) sc[3] = sc[1];
+        }
+        memcpy(G + scratch, sc, 16);
+    } else memcpy(G + scratch, saved, 16);
+    a[1] = scratch;
+    split_hud_device(c, 0x12C, 2, a);     // SetScissorRect
+    a[1] = 174; a[2] = restore ? saved[4] : 1;
+    split_hud_device(c, 0xE4, 3, a);      // SetRenderState
+}
+
 static uint32_t matrix_ra;              // diagnostics: who set the WorldViewProj the next FE quads draw under
 void f_006C8000_orig(Cpu *c);
 void f_006C8000(Cpu *c) {                // (bMatrix4 *world, int view): sets the current effect's WorldViewProj
@@ -232,7 +381,9 @@ void f_005696C0_orig(Cpu *c);
 void f_005696C0(Cpu *c) {                // FEngHud::SetWideScreenMode: the X360 HUD layout when the screen is wide
     uint32_t db = M32(FE_DATABASE), opts = db ? M32(db + 0x10) : 0;
     if (opts && wide && screen_aspect() > 4.0f / 3.0f + 1e-3f) M8(opts + 0x34) = (uint8_t)wide_hud();
+    uint32_t self = c->ecx;
     f_005696C0_orig(c);
+    split_hud_map_refresh(self);
 }
 // Chyron::Start (0058D670) picks WIDESCREEN_MODE or NORMAL_MODE (the song-title banner's layout) from options +0x34,
 // the wide-HUD flag. The X360 sets it to eIsWidescreen() at defaults and when a profile loads (8223E200, 82297320,
@@ -453,7 +604,22 @@ void f_006D1260(Cpu *c) {                // eViewPlatInterface::Render (cdecl eP
             diag_event("widescreen: movie quad x %.1f..%.1f y %.1f..%.1f, movie aspect %.3f%s", x0, x1, y0, y1, a, widen ? ", fitted" : "");
         }
     }
-    if (widen) {
+    uint32_t hud_rect[4], hud_scissor[5];
+    int split = hud_owner && split_view_rect(hud_owner == 2 ? SPLIT_P2 : SPLIT_P1, hud_rect);
+    if (split) {
+        float w = M32(WINDOW_WIDTH), h = M32(WINDOW_HEIGHT);
+        float scale = fminf(w / (wide_hud() ? 640.0f * 4.0f / 3.0f : 640.0f), hud_rect[3] / 240.0f);
+        float centre = hud_owner == 2 ? 360.0f : 120.0f;
+        for (int v = 0; v < 4; ++v) {
+            saved[2 * v] = MF32(poly + 16 * v); saved[2 * v + 1] = MF32(poly + 16 * v + 4);
+            // Invert full-output FE -> pixel mapping; 006D1260 still uses the
+            // original FE matrix, for both FEShader and FEMaskShader.
+            MF32(poly + 16 * v) = 320.0f + scale * (saved[2 * v] - 320.0f) * 640.0f / (w * kx);
+            float py = hud_rect[1] + hud_rect[3] * 0.5f + scale * (saved[2 * v + 1] - centre);
+            MF32(poly + 16 * v + 4) = 240.0f + (py - h * 0.5f) * 480.0f / (h * ky);
+        }
+        split_hud_scissor(c, hud_rect, hud_scissor, 0);
+    } else if (widen) {
         float w = 640.0f / kx, h = 480.0f / ky;
         if (a < w / h) w = h * a; else h = w / a;
         for (int v = 0; v < 4; ++v) {
@@ -463,5 +629,6 @@ void f_006D1260(Cpu *c) {                // eViewPlatInterface::Render (cdecl eP
         }
     }
     f_006D1260_orig(c);
-    if (widen) for (int v = 0; v < 4; ++v) { MF32(poly + 16 * v) = saved[2 * v]; MF32(poly + 16 * v + 4) = saved[2 * v + 1]; }
+    if (split) split_hud_scissor(c, hud_rect, hud_scissor, 1);
+    if (split || widen) for (int v = 0; v < 4; ++v) { MF32(poly + 16 * v) = saved[2 * v]; MF32(poly + 16 * v + 4) = saved[2 * v + 1]; }
 }

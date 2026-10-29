@@ -42,6 +42,7 @@
 
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "gpuclients.h"
 
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
 
@@ -288,7 +289,8 @@ static void session_open(void) {
                         "present_8_3\tpresent_16_7\tpresent_25\tpresent_other\tpresent_dropped\tvrr_requested\tadaptive_scheduling\t"
                         "rms_fl\trms_fr\trms_c\trms_lfe\trms_sl\trms_sr\tpeak_fl\tpeak_fr\tpeak_c\tpeak_lfe\tpeak_sl\tpeak_sr\tclip\tlimit_samples\t"
                         "dip_fl\tdip_fr\tdip_c\tdip_lfe\tdip_sl\tdip_sr\t"
-                        "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\n");
+                        "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\t"
+                        "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\n");
     if (sess_f) {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
@@ -505,8 +507,12 @@ void report_frame(uint64_t frame, uint32_t flow) {
             } else fputs("\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t", perf_f);
             // what separates "the GPU got slower" causes: macOS thermal state (0 nominal .. 3 critical, -1 unknown), low power mode,
             // app frontmost, window hidden, native full screen, and the command buffers' queue-to-end ms (render_gpu_wall_ms)
-            fprintf(perf_f, "\t%d\t%d\t%d\t%d\t%d\t%.2f\n", sys_thermal_n, sys_lowpower, (int)NSApp.isActive, user32_window_occluded(),
+            fprintf(perf_f, "\t%d\t%d\t%d\t%d\t%d\t%.2f", sys_thermal_n, sys_lowpower, (int)NSApp.isActive, user32_window_occluded(),
                     ps.native_fullscreen, render_gpu_wall_ms());
+            GPUClientsSample clients;
+            gpuclients_cached(&clients);
+            gpuclients_print(perf_f, &clients);
+            fputc('\n', perf_f);
             fflush(perf_f);
         }
         // GPU times of the frames since last second into this state's histogram
@@ -763,6 +769,7 @@ void report_init(void) {
         fprintf(stderr, "boot: full diagnostic logging (Diagnostics menu): %s\n", dir);
     }
     session_open();
+    gpuclients_start();
     atexit(session_exit);
     report_note("start: build %s", port_build_id());
     if (!getenv("BOOT_DIAG")) {

@@ -1642,3 +1642,109 @@ void f_00686410(Cpu *c) {
     if (diag_on) { diag_event("racestart: PVehicle::SetAnimating %08X %u from %08X", c->ecx, arg(c, 0) & 255, M32(c->esp)); diag_timeline("racestart: SetAnimating %08X %u", c->ecx, arg(c, 0) & 255); }
     f_00686410_orig(c);
 }
+
+// BOOT_DIAG carpack: the car texture loads (split-screen two-car race load, 2026-10-27). LoadAllTexturesFromPack
+// 0075B7A0 (CarLoader this, pack name, flag) logs the loader's queued-layer count +AC and state +8; InternalLoadStreamingEntry
+// 00500D80 (loader this; load table, pack, entry) logs each entry the pack's hash table hands out (hash, file offset, size,
+// flags) with the pack's table +24/+28, and dumps the pack and the entry's neighbours when the size is implausible.
+// BOOT_DIAG carpool: the car memory pool in a (split-screen) race. CarLoader+0x64 is the pool size (carved from track pool 7
+// by SetMemoryPoolSize), 0x904A00 the pool number; free/largest from bCountFreeMemory 00464050 / bLargestMalloc 00464080.
+// Peak use = size - lowest free seen at the logged points; __break 0045CD20 called from RemoveSomethingFromCarMemoryPool
+// 00759F00 (nothing left to evict) is the eviction assert.
+static uint32_t carpool_stat(Cpu *c, uint32_t fn, uint32_t pool) {
+    uint32_t a[1] = {pool};
+    uint32_t eax = c->eax, ecx = c->ecx, edx = c->edx;
+    uint32_t r = call_guest(c, fn, 1, a);
+    c->eax = eax; c->ecx = ecx; c->edx = edx;
+    return r;
+}
+static void carpool_log(Cpu *c, const char *what) {
+    static uint32_t min_free = 0xFFFFFFFFu, min_largest = 0xFFFFFFFFu;
+    uint32_t cl = 0x009B2C00u;                                               // TheCarLoader (CarLoader+0x58 = 0x9B2C58)
+    uint32_t pool = M32(0x00904A00), size = M32(cl + 0x64);
+    uint32_t fr = carpool_stat(c, 0x00464050, pool), lg = carpool_stat(c, 0x00464080, pool);
+    if (fr < min_free) min_free = fr;
+    if (lg < min_largest) min_largest = lg;
+    diag_event("carpool: %s pool %u size %u KiB (CarLoader+0x64 = %u), free %u KiB, largest free %u KiB, peak use %u KiB, "
+               "track pool 7 free %u KiB largest %u KiB", what, pool, size >> 10, size, fr >> 10, lg >> 10,
+               (size - min_free) >> 10, carpool_stat(c, 0x00464050, 7) >> 10, carpool_stat(c, 0x00464080, 7) >> 10);
+}
+void f_00759F00_orig(Cpu *c);
+void f_00759F00(Cpu *c) {
+    if (diag_on) carpool_log(c, M32(c->esp + 4) & 255 ? "RemoveSomething(true)" : "RemoveSomething(false)");
+    f_00759F00_orig(c);
+}
+void f_0045CD20_orig(Cpu *c);
+void f_0045CD20(Cpu *c) {
+    uint32_t ra = M32(c->esp);
+    if (diag_on && ra >= 0x00759F00u && ra < 0x00759FE0u) diag_event("carpool: EVICTION ASSERT (__break from RemoveSomethingFromCarMemoryPool, ret %08X)", ra);
+    f_0045CD20_orig(c);
+}
+void f_0075B7A0_orig(Cpu *c);
+void f_0075B7A0(Cpu *c) {
+    if (!diag_on) { f_0075B7A0_orig(c); return; }
+    uint32_t self = c->ecx, name = arg(c, 0), flag = arg(c, 1), ac = M32(self + 0xAC);
+    diag_event("carpack: LoadAllTexturesFromPack enter loader %08X pack %s flag %u state %u layers %u",
+               self, name ? gptr(name) : "(null)", flag, M32(self + 8), ac);
+    carpool_log(c, "texload enter");
+    f_0075B7A0_orig(c);
+    carpool_log(c, "texload exit");
+    diag_event("carpack: LoadAllTexturesFromPack loader %08X pack %s flag %u state %u layers %u -> %u ret %u",
+               self, name ? gptr(name) : "(null)", flag, M32(self + 8), ac, M32(self + 0xAC), c->eax);
+}
+void f_00500D80_orig(Cpu *c);
+void f_00500D80(Cpu *c) {
+    if (diag_on) {
+        static unsigned n;
+        uint32_t ld = c->ecx, tbl = arg(c, 0), pk = arg(c, 1), e = arg(c, 2);
+        if (pk && e) {
+            uint32_t nm = M32(pk + 8), t = M32(pk + 0x24), cnt = M32(pk + 0x28), sz = M32(e + 8);
+            int big = sz > 0x1000000u, inside = t && e >= t && e < t + cnt * 0x18u;
+            if (n++ < 2000 || big)
+                diag_event("carpack: entry %08X pack %08X %s table %08X count %u idx %d hash %08X off %u size %u flags %02X refs %u "
+                           "loader %08X align %u loadtable %08X pool %d", e, pk, nm ? gptr(nm) : "(null)", t, cnt,
+                           inside ? (int)((e - t) / 0x18u) : -1, M32(e), M32(e + 4), sz, M8(e + 0x11), M16(e + 0x12),
+                           ld, M32(ld), tbl, tbl ? (int)(int8_t)M8(tbl) : -99);
+            if (big) {
+                char hex[16 * 3 * 4 + 1]; size_t k = 0;
+                for (uint32_t i = 0; i < 0x48 && pk; i += 4) k += (size_t)snprintf(hex + k, sizeof hex - k, "%08X ", M32(pk + i));
+                diag_event("carpack: BAD pack %08X words %s", pk, hex);
+                for (int d = -2; d <= 2; ++d) {
+                    uint32_t x = e + (uint32_t)(d * 0x18);
+                    diag_event("carpack: BAD neighbour %+d at %08X: %08X %08X %08X %08X %08X %08X", d, x, M32(x), M32(x + 4),
+                               M32(x + 8), M32(x + 12), M32(x + 16), M32(x + 20));
+                }
+            }
+        }
+    }
+    f_00500D80_orig(c);
+}
+// carpack, second stage: the entry count LoadStreamingEntry 00508560 is asked for (loader; hashes, count, cb, cbarg,
+// pool), and the per-skin texture-hash counts that feed LoadAllTexturesFromPack: LoadedSkin::GetTextureHashes 007528D0
+// (skin; out, max, flag: RideInfo at skin+8) and CarLoader::AllocateSkinLayers 00753060 (hashes, count, out, room, pack).
+void f_00508560_orig(Cpu *c);
+void f_00508560(Cpu *c) {
+    if (diag_on) {
+        uint32_t h = arg(c, 0), n = arg(c, 1);
+        diag_event("carpack: LoadStreamingEntry loader %08X count %d pool %d hashes %08X %08X %08X%s", c->ecx, (int)n,
+                   (int)arg(c, 4), h ? M32(h) : 0, h && (int)n > 1 ? M32(h + 4) : 0, h && (int)n > 2 ? M32(h + 8) : 0,
+                   n > 4096u ? " BAD count" : "");
+    }
+    f_00508560_orig(c);
+}
+void f_007528D0_orig(Cpu *c);
+void f_007528D0(Cpu *c) {
+    if (!diag_on) { f_007528D0_orig(c); return; }
+    uint32_t skin = c->ecx, max = arg(c, 1), flag = arg(c, 2), ri = M32(skin + 8);
+    f_007528D0_orig(c);
+    diag_event("carpack: GetTextureHashes skin %08X rideinfo %08X cartype %d skin14 %d max %d flag %u -> %d", skin, ri,
+               ri ? (int)M32(ri) : -1, (int)M32(skin + 0x14), (int)max, flag, (int)c->eax);
+}
+void f_00753060_orig(Cpu *c);
+void f_00753060(Cpu *c) {
+    if (!diag_on) { f_00753060_orig(c); return; }
+    uint32_t n = arg(c, 1), room = arg(c, 3), nm = arg(c, 4);
+    f_00753060_orig(c);
+    diag_event("carpack: AllocateSkinLayers count %d room %d pack %s -> %d", (int)n, (int)room, nm ? gptr(nm) : "(null)",
+               (int)c->eax);
+}

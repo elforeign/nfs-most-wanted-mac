@@ -153,6 +153,7 @@ class Recompiler:
         self.calls = False                    # True: translate calls/tail jumps (needs the callees' C too)
         self.seen = {}
         self.ft_exits = {}
+        self.int3_stops = set()               # int3s with nothing after them (padding): translated as a return
         self.tables = {}
         self.callees = set()
 
@@ -320,9 +321,13 @@ class Recompiler:
                     else:
                         self.tables[i.address] = tab
                         work.extend(t for t in set(tab.values()) if t == addr or t not in self.functions)
-                if m in ("ret", "jmp", "int3", "hlt", "ud2") or m.startswith("ret"):
+                if m in ("ret", "jmp", "hlt", "ud2") or m.startswith("ret"):
                     break
                 nxt = pc + i.size
+                if m == "int3" and (self.pe.read(nxt, 1) == b"\xCC" or (nxt >= limit if not self.calls else
+                                                                       nxt != addr and nxt in self.functions)):
+                    self.int3_stops.add(pc)          # padding (after a noreturn call): nothing follows to continue to
+                    break
                 if self.calls and nxt != addr and nxt in self.functions:
                     self.ft_exits[pc] = nxt          # falls through into the next function
                     break
@@ -379,6 +384,7 @@ class Recompiler:
         self.callees = set()
         self.tables = {}
         self.ft_exits = {}
+        self.int3_stops = set()
         try:
             insns = self.discover(addr, limit)
         except Unsupported as e:
@@ -447,6 +453,56 @@ class Recompiler:
     def insn(self, i, fstart, fend):
         m = i.mnemonic
         ops = i.operands
+        # Asset-only name operands. Identity scans and ecar registration keep
+        # CAR85; textures/vinyl masks/damage part names use the MW donor prefix.
+        car85_names = {
+            0x0075187D: ("0d36d59ea0d9dc43", "lea"),  # GetUsedCarTextureInfo: SKIN1, etc.
+            0x00739DE8: ("5c62e091b8c0565f", "push"), # stock _CV texture
+            0x00747FDE: ("5c62e091b8c0565f", "push"), # ride _CV texture
+            0x007493F3: ("de5a6f78116eca62", "push"), # vinyl layer
+            0x007494C8: ("de5a6f78116eca62", "push"), # vinyl mask
+            0x00756F72: ("5c62e091b8c0565f", "push"), # damage KIT prefix
+            0x007570E4: ("5c62e091b8c0565f", "push"), # rear KIT prefix
+        }
+        if self.calls and i.address in car85_names:
+            fingerprint, mnemonic = car85_names[i.address]
+            assert insn_fingerprint(i.bytes) == fingerprint and m == mnemonic, "car85 asset operand changed"
+            if m == "lea":
+                return [self.wr(i, ops[0], "car85_asset_name(" + self.ea(i, ops[1]) + ")")]
+            return ["{ uint32_t v = car85_asset_name(" + self.rd(i, ops[0], 4) + "); c->esp -= 4; M32(c->esp) = v; }"]
+        # Private add-one-car proof: exact PC v1.3 sites only. Two scans count
+        # bytes; the remaining bounds, quantizer and invalid sentinel count types.
+        car85_sites = {
+            0x006690BB: ("be6aa05735bf582b", "cmp", "0x54u"),
+            0x00734EE1: ("66b8476f465ef743", "push", "0x54u"),
+            0x007398A6: ("ebef6f58a58540e9", "cmp", "0x54u"),
+            0x007398FE: ("0a5583737be13bea", "cmp", "0x4440u"),
+            0x00739908: ("1547aaa7f9e8b98e", "mov", "0x54u"),
+            0x0073995B: ("be6aa05735bf582b", "cmp", "0x54u"),
+            0x007515FB: ("be6aa05735bf582b", "cmp", "0x54u"),
+            0x00759913: ("ebef6f58a58540e9", "cmp", "0x54u"),
+            0x0075E6F4: ("fa1ca4c2ee59ade2", "cmp", "0x54u"),
+            0x0075E7B4: ("fa1ca4c2ee59ade2", "cmp", "0x54u"),
+            0x007B3877: ("110d70ee83ab00d8", "cmp", "0x4440u"),
+        }
+        if self.calls and i.address in car85_sites:
+            fingerprint, mnemonic, literal = car85_sites[i.address]
+            assert insn_fingerprint(i.bytes) == fingerprint and m == mnemonic, "car85 bound instruction changed"
+            if m == "cmp":
+                code = self.arith(i, m)
+                if i.address in (0x006690BB, 0x007398A6, 0x0075E6F4, 0x0075E7B4):
+                    # These consumers use signed JGE or exact-sentinel JE.
+                    # Clamp only the comparison operand: every unsigned invalid
+                    # type takes the invalid branch, with no guest register edit.
+                    operand = self.rd(i, ops[0], ops[0].size)
+                    code = [line.replace("a = " + operand + ",", "a = (" + operand + " >= car85_count() ? car85_count() : " + operand + "),") for line in code]
+            elif m == "mov":
+                code = [self.wr(i, ops[0], self.rd(i, ops[1], ops[0].size))]
+            else:
+                code = ["{ uint32_t v = 0x54u; c->esp -= 4; M32(c->esp) = v; }"]
+            value = "(car85_count() * 208u)" if literal == "0x4440u" else "car85_count()"
+            assert any(literal in line for line in code)
+            return [line.replace(literal, value) for line in code]
         # Like the address-specific positional-audio read/store overrides, alter
         # only this guest instruction in the runtime build. Raw X360 flare alpha
         # must bypass PC's extra x2; no data-side half-alpha compensation.
@@ -471,8 +527,16 @@ class Recompiler:
             return self.insn_repe(i, stop_if="zf")
         if m.startswith("repe "):
             return self.insn_repe(i, stop_if="!zf")
-        if m in ("nop", "int3", "fnop", "wait", "fwait") or m.startswith("nop"):
-            return [] if m != "int3" else ["/* int3 */ return;"]
+        if m == "int3":
+            # A breakpoint (__break 0045CD20 and the inline asserts; SpeedScript errors reach it in single player).
+            # Retail without a debugger would stop; the port acts like a debugger's "continue": log the site under
+            # diag and run on to the next instruction (bFree 00465760 continues with three pops, ADD ESP,20h, RET).
+            # A bare return here left the caller's esp 4+ bytes low (split-screen: a return address passed as an
+            # entry count, 154 MB bMalloc). Only padding int3s, with nothing after them to continue to, return.
+            log = f"guest_breakpoint(c, 0x{i.address:08X}u);"
+            return [f"{log} return; /* padding int3 */" if i.address in self.int3_stops else log]
+        if m in ("nop", "fnop", "wait", "fwait") or m.startswith("nop"):
+            return []
         if m == "mov":
             return [self.wr(i, ops[0], self.rd(i, ops[1], ops[0].size))]
         if m in ("movzx", "movsx"):

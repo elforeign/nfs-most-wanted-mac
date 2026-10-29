@@ -552,7 +552,9 @@ static void layer_update(void) {
         olayer = [CAMetalLayer layer];
         olayer.device = mtl;
         olayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        CGColorSpaceRef srgb_colorspace(void);              // d3d9.m: the game layer's tag, so the panel matches it
+        // Independent SDR tag: the parent may be extended-linear sRGB in the
+        // hidden EDR presenter experiment. Overlay values remain sRGB/paper white.
+        CGColorSpaceRef srgb_colorspace(void);
         olayer.colorspace = srgb_colorspace();
         olayer.opaque = NO;
         olayer.framebufferOnly = YES;

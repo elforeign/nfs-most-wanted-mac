@@ -121,7 +121,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='nfsmw-hd-read-') as directory:
         run(source, directory, 128 << 10, [directory])
         files = sorted((ROOT.parent / 'x360/hd_textures_mips_alpha').glob('*.dds'))[:64]
-        assert files, 'real DDS fixtures unavailable'
+        # Absent-DDS proof: old assertion exits 1; synthetic checks + SKIP exit 3.
+        if not files:
+            print('SKIP: real DDS performance fixtures are absent (synthetic checks passed)')
+            sys.exit(3)
         run(source, directory, 64 << 20, ['perf', *files])
         if len(sys.argv) == 3 and sys.argv[1] == '--baseline':
             run(Path(sys.argv[2]).read_text(), directory, 64 << 20, ['perf', *files], expected=1)

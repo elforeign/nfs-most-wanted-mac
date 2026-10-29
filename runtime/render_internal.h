@@ -32,7 +32,13 @@ static int is_depth_pf(MTLPixelFormat f) { return f == MTLPixelFormatDepth32Floa
 // ---------------- shared state (defined in render.m unless noted) ----------------
 extern id<MTLTexture> backbuffer_tex, present_tex, autodepth_tex;
 extern RenderTex bb_rt, ad_rt;               // the back buffer and auto depth buffer as render targets (.ms with AA on)
+float render_hdr_headroom(void);            // sampled once before the world's phase; Off returns 1
+float render_hdr_composition_headroom(void); // >1 only while composing a float world/HUD frame
+void render_hdr_world_copy(id<MTLTexture> src, id<MTLTexture> dst);
+void render_float_scene_present_end(void);
+void render_hdr_scene_treated(void);        // host post already applied the complete world shoulder
 id<MTLTexture> render_lamp_source(void);      // current frame only; resolves selective flare replay
+id<MTLTexture> render_lamp_source_view(uint32_t view); // independently valid IDs 1/2; full atlas, post crops locally
 extern id<MTLCommandBuffer> cmd;
 // render_thread.m: NFS_RENDER_THREAD=1 records command buffers and replays them on a render thread
 id<MTLCommandBuffer> rt_command_buffer(void);
@@ -83,6 +89,10 @@ extern int resolve_magenta;
 void msaa_forget(RenderTex *r);
 void msaa_resolve(RenderTex *r);
 void ms_attach(MTLRenderPassAttachmentDescriptor *a, RenderTex *r, int slot);
+int render_soft_depth_store(void); // 0 original; 1 nearest resolve on store; 2 sampled resolved depth (no resolve attachment)
+id<MTLTexture> render_soft_smoke_layer(void);
+void render_soft_smoke_layer_applied(void);
+void render_soft_smoke_late_finish(id<MTLTexture> scene);
 id<MTLTexture> pass_depth(id<MTLTexture> rt0, id<MTLTexture> ds);
 // render_query.m
 extern uint32_t enc_samples;                 // the open encoder's sample count (occlusion counts are in samples)

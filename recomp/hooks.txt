@@ -3,6 +3,12 @@
 # runtime then takes every call (direct, tail and dispatch()) and can still call f_XXXXXXXX_orig.
 #
 # address   owner: function
+004713C0    chasecam.c: CameraAnchor::GetPov (optional player chase targets)
+0046F2B0    chasecam.c: camera parameter table evaluation (scoped direction duration)
+0047CE80    chasecam.c: replace MW chase distance boost while speed-reactive camera is On
+0047D3C0    chasecam.c: CubicCameraMover::Update (local-player close/far scope)
+0042F140    chasecam.c: AIVehicleHuman::Update (diag-only real-speed cruise proof fixture)
+00431C80    chasecam.c: AIVehicle::SetDriveSpeed (diag-only real-speed cruise proof fixture)
 00825957    audio_limiter.c: linked game peak limiter before Snd's float-to-int16 saturation
 00542A40    movies.c: MoviePlayer::Play (X360 WMV instead of VP6 when the file exists)
 00525F70    movies.c: MoviePlayer::UpdateFunction (per-frame decode and texture upload)
@@ -88,7 +94,10 @@
 006E6E40    x360.m: FE / HUD pass (the rear-view mirror gets the X360 tone treatment before it is composited)
 006BCDC0    x360.m: road reflection target, depth and blur creation (X360 half back buffer instead of 320x240)
 006BD0D0    x360.m: render-target table (the road reflection entry follows the target's size)
+006BD620    splitcapture.c: release per-player capture banks before retail device reset/destruction
+006308E0    x360.m: ERestartRace finalizer; invalidate split capture/post histories after retail singleton reset
 006CFAD0    x360.m: MaybeChangeViewMode (sets the road reflection entry to 320x240 again)
+006DE300    splitworld.c: ___eDisplayFrame (split races only: frame preparation once, raw world for P1 and P2)
 006BCFA0    mirror.c: mirror texture and depth creation (NFS_MIRROR_SIZE: sized to the on-screen quad)
 004FAE40    mirror.c: scenery cull info flags (NFS_MIRROR_DETAIL=full: the mirror culls like the main view)
 00723FA0    mirror.c: GrandSceneryCullInfo::StuffScenery (NFS_MIRROR_DETAIL=full: no env-map render flag for the mirror)
@@ -183,8 +192,72 @@
 004AF3E0    x360audio.c: EAXAemsManager::ResolveCurrentDataMemory (diag: load buffer released)
 004D0A60    x360audio.c: EAXAemsManager::UnloadSndData(int) (diag: every bank unload)
 004CEA30    x360audio.c: EAXAemsManager::RegisterSlots (1 MB bank slots with the X360 mix: PC slots overflow)
+00634B50    controltype.c: per-instance GameDevice buffers/capture fields with NFS_PADS=2
 006349B0    controltype.c: every GameAction's value each frame (X360 Control Type presets on the controller slots)
 004E5A80    posaudio.c: SFXCTL_3DRearPos::UpdateParams, Engine sound Realistic (player engine position, no output change)
 0069E820    steerresp.c: DoHumanSteering (F10 Steering response rewrites the SteerInputRemapTables table 0 points before it runs)
 004B6030    posaudio.c: SFXCTL_3DObjPos::Generate3DParams (BOOT_DIAG: where each 3D controller class places its source and who hears it)
 007F4F11    boot.c: career save task (a failed write/sync/close/rename of the staged file reports the game's own save error instead of success)
+
+00628D30    padguest.c: insert logical pad 1 before mouse/keyboard at Initialize call boundary
+0063F850    padguest.c: initialize port-1 scalar identities without shared backend side effects
+
+00516D70    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+005B7420    padguest.c: allocate both menu-engine FEJoyPads at cFEng construction (NFS_PADS=2 only)
+00514960    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+005149E0    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514A10    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514A60    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514A70    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514AE0    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514B20    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00514B50    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00626DD0    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00644060    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00642D70    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+0054EBC0    padguest.c: two-port FE storage/lifecycle (NFS_PADS=2 only)
+00559280    padguest.c: bounded two-port required/unplug checks
+00559400    padguest.c: consume port-1 FE events into its own map column
+00524770    padguest.c: destroy both FE queues (NFS_PADS=2 only)
+005247A0    padguest.c: flush both FE queues/map columns (NFS_PADS=2 only)
+00525790    padguest.c: resume clears both FE input columns (NFS_PADS=2 only)
+0056DBA0    padguest.c: PC player ownership / required-byte cleanup (NFS_PADS=2 only)
+007A3F20    padguest.c: join guard before original screen transitions (NFS_PADS=2 only)
+00571E80    qrsplit.c: append Split Screen before Quick Race Setup finalizes its scroller (NFS_PADS=2 only)
+007AA710    qrsplit.c: split option Accept sets QRMode=2; ordinary Custom Race unchanged
+0075B7A0    diag.c: CarLoader::LoadAllTexturesFromPack (BOOT_DIAG carpack: car texture loads, split-screen)
+00500D80    diag.c: eStreamPackLoader::InternalLoadStreamingEntry (BOOT_DIAG carpack: entry header, bad sizes)
+00508560    diag.c: eStreamPackLoader::LoadStreamingEntry (BOOT_DIAG carpack: entry count asked for)
+007528D0    diag.c: LoadedSkin::GetTextureHashes (BOOT_DIAG carpack: per-skin texture count)
+00753060    diag.c: CarLoader::AllocateSkinLayers (BOOT_DIAG carpack: layers added)
+00759F00    diag.c: CarLoader::RemoveSomethingFromCarMemoryPool (BOOT_DIAG carpool: pool numbers per eviction attempt)
+0045CD20    diag.c: __break (BOOT_DIAG carpool: counts the eviction assert)
+005FE3E0    ws2_32.c: GRaceStatus::SetRoaming (BOOT_ONLINE only: online races have no AICopManager; a stand-in ICopMgr for its one call)
+007A0060    ws2_32.c: Server::SetState (BOOT_ONLINE: logs the server state machine)
+00792230    ws2_32.c: client SetState (BOOT_ONLINE: logs the client state machine)
+00797450    ws2_32.c: client R_BI_DRIVERFINISH handler (BOOT_ONLINE: logs it)
+0079FF50    ws2_32.c: Server::SendMessageToAllClients (BOOT_ONLINE: logs R_BI_DRIVERFINISH sent by the host)
+00761140    ws2_32.c: OnlineManager::Disconnect (BOOT_ONLINE: logs who disconnects)
+006F2850    ws2_32.c: OnlineGame::CreatePlayersAndCars (BOOT_ONLINE: logs it)
+007356A0    ws2_32.c: OnlineManager::UpdateOutgoing (BOOT_ONLINE: logs the first call)
+007617D0    ws2_32.c: OnlineManager::StartOnlineRace (BOOT_ONLINE: logs it)
+006F9BB0    ws2_32.c: OnlineGame::OnlineGame (BOOT_ONLINE: logs it)
+0083CCC0    ws2_32.c: DirtySock NetConnStartup (BOOT_ONLINE: then NetConnConnect 0083CD10, as the LAN screen 00560470 does)
+005A3590    ws2_32.c: RaceStarter::SetupOnlineRace (BOOT_ONLINE: the BOOT_RACE event when no lobby chose one)
+005FACD0    ws2_32.c: GRaceParameters::GetNumOpponents (BOOT_ONLINE: from Game_InitRacers, at least racers - 1, so the AI-racer count cannot wrap)
+00755140    ws2_32.c: OnlineManager::FinishDriver (BOOT_ONLINE: logs the driver, context and result)
+00760B20    ws2_32.c: OnlineRacer constructor (BOOT_ONLINE: SkipFE route names every racer "SkipFE"; adds the slot index)
+00756A90    car85.c: LoaderCarInfo (append donor clone after chunk 34600)
+00590D40    car85.c: FEPlayerCarDB::Default (record-count diagnostic)
+007399F0    car85.c: GetTypesFromSlot (CAR85 reuses donor parts)
+00739870    car85.c: MapCarTypeNameHashToIndex (CAR85 reuses donor part namespace)
+00681340    car85.c: CollisionGeometry::Collections::Find (CAR85 reuses donor collision bounds)
+0045C380    car85.c: Vault destructor (retire source generation before dependency release)
+0045C090    car85.c: Vault deinitialize (retire source generation before .bin release)
+0056F090    car85.c: FEPlayerCarDB::LoadFromBuffer (hide unavailable CAR85 rows OFF)
+005816B0    car85.c: FECarRecord::GetType (reject unavailable/out-of-range type)
+00581790    car85.c: FECarRecord::GetManufacturerName (private manifest brands; retail pass-through)
+00739920    car85.c: car type info (unsigned bounds before table pointer calculation)
+0057F1D0    onscreen_keyboard.c: text capture generation and physical pad ownership
+00586580    onscreen_keyboard.c: retire text target before destruction
+00516520    onscreen_keyboard.c: initiating FE joy mask for text ownership

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 
 #include "d3d9_internal.h"
+#include "envcube.m"
 
 void *user32_metal_layer(uint32_t hwnd);
 void user32_client_size(uint32_t hwnd, int *cw, int *ch);
@@ -59,6 +60,7 @@ Obj *obj(uint32_t g) {
 // so a late use of a just-released resource still finds an (empty) object. Before, objects were never destroyed:
 // the game creates ~130 vertex/index buffers a second in races, ~1 KB of host memory and 32 bytes of guest each.
 static void obj_destroy(Obj *o) {
+    envcube_forget(o);
     for (int k = 0; k < 16 * 6; ++k) { Obj *s = obj(o->surfaces[k]); if (s && s->parent == o->guest) obj_destroy(s); }
     render_release(o);
     for (int k = 0; k < 16 * 6; ++k) gfree(o->mem[k]);
@@ -161,6 +163,7 @@ static uint32_t obj_release(Obj *o) {
         if (o->guest != dev.backbuffer && o->guest != dev.autodepth) {
             if (diag_on) diag_event("d3d free %08X kind %d fmt %X %ux%u", o->guest, o->kind, o->fmt, o->w, o->h);
             for (int i = 0; i < 16 * 6; ++i) { gfree(o->mem[i]); o->mem[i] = 0; }
+            envcube_forget(o);
             render_release(o);
             obj_retire(o);
         }
@@ -577,6 +580,7 @@ void f_006C1990(Cpu *c) {                      // the video settings' hardware d
 }
 
 static int d_CreateDevice(Cpu *c) {            // (this, adapter, type, hFocusWindow, behavior, pp*, ppDevice)
+    envcube_configure();
     uint32_t pp = arg(c, 5);
     memcpy(dev.pp, G + pp, sizeof dev.pp);
     dev.hwnd = dev.pp[7] ? dev.pp[7] : arg(c, 3);
@@ -637,6 +641,7 @@ uint32_t view_hash(void) {                     // diag: FNV of the current D3DTS
     return h;
 }
 static void present(void) {
+    envcube_frame();
     ++dev.frames;
     uint64_t now = host_ticks();
     if (dev.frames <= 3 || dev.frames % 300 == 0)
@@ -648,6 +653,16 @@ static void present(void) {
     render_present();
     user32_script(dev.frames, fd);
 }
+static void autodrive_players(Cpu *c, int mode) {
+    if (!mode || M32(0x009885C8u)) return; // never change suspension while a NIS owns the car
+    unsigned count = mode == 2 && split_view_rect(0x009196C0u, NULL) ? 2 : 1;
+    uint32_t esp = c->esp;
+    for (unsigned i = 0; i < count; ++i) {
+        uint32_t a[1] = {i}; // retail ForceAIControl selects first/last local player (006123B0)
+        call_guest(c, 0x006123B0, 1, a);
+        c->esp = esp;
+    }
+}
 static int v_Present(Cpu *c) {
     present();
     void x360_frame(void);
@@ -657,7 +672,10 @@ static int v_Present(Cpu *c) {
     // BOOT_AUTODRIVE=1: the game's own AI drives the player's car (Game_ForceAIControl(0), 006123B0), so a
     // scripted run covers the whole course. It returns early when no player exists (front end).
     static int autodrive = -1;
-    if (autodrive < 0) autodrive = getenv("BOOT_AUTODRIVE") != NULL;
+    if (autodrive < 0) {
+        const char *e = getenv("BOOT_AUTODRIVE");
+        autodrive = e ? (!strcmp(e, "2") ? 2 : 1) : 0; // =2 is a diagnostic two-finisher run
+    }
     // Test only, NFS_TEST_BUST=1: the AI doesn't drive (the popup handling below still runs), so with BOOT_PURSUIT=2 the
     // car sits still until the cops bust it, and the game's own busted flow runs (no single entry point to force it: the
     // busted timer lives in AIPursuit::OnTask's state, 00443BA0, which the game rewrites each tick).
@@ -675,9 +693,7 @@ static int v_Present(Cpu *c) {
     // created during loading (PVehicle at SetStartupRace, ~frame 100), BeginGameplay comes after loading, so the AI's
     // reload now always precedes the NIS (the order of every good run the refs were taken from); a car that only appears
     // with a NIS already loaded waits for the NIS to end.
-    if (autodrive && !hold_still && !M32(0x009885C8)) {
-        uint32_t esp = c->esp, a[1] = {0}; call_guest(c, 0x006123B0, 1, a); c->esp = esp;
-    }
+    if (!hold_still) autodrive_players(c, autodrive);
     // Result popups under BOOT_AUTODRIVE (README, "Into free roam"): the AI doesn't press Continue. When the FEng package
     // that has control (the one cFEng::FindPackageWithControl, 00516A90, returns) is a PostRace_* screen (Pursuit,
     // Results, MilestoneRewards), one RETURN goes 1.5 s after it took control (input focus), once per appearance. Not
@@ -802,7 +818,9 @@ static int v_CreateVolumeTexture(Cpu *c) {     // (this, w, h, d, levels, usage,
     RET(D3D_OK, 10);
 }
 static int v_CreateCubeTexture(Cpu *c) {       // (this, edge, levels, usage, fmt, pool, pp, shared)
-    Obj *t = make_texture(K_CUBE, vt_cube, arg(c, 1), arg(c, 1), 1, arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5));
+    uint32_t levels = envcube_creation_levels(arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
+    Obj *t = make_texture(K_CUBE, vt_cube, arg(c, 1), arg(c, 1), 1, levels, arg(c, 3), arg(c, 4), arg(c, 5));
+    envcube_created(t, M32(c->esp), arg(c, 6));
     M32(arg(c, 6)) = t->guest;
     RET(D3D_OK, 8);
 }
@@ -864,6 +882,7 @@ static int v_CreateOffscreenPlainSurface(Cpu *c) {   // (this, w, h, fmt, pool, 
 static int v_SetRenderTarget(Cpu *c) {
     uint32_t i = arg(c, 1);
     if (i > 3 || (i == 0 && !arg(c, 2))) RET(D3DERR_INVALIDCALL, 3);
+    if (i == 0) envcube_target_change(dev.rt[0], arg(c, 2));
     dev_bind(&dev.rt[i], arg(c, 2));
     render_targets_changed();
     Obj *s = obj(arg(c, 2));
@@ -894,11 +913,12 @@ static int v_Clear(Cpu *c) {                   // (this, count, rects, flags, co
         dev.clear_rgba[2] = (col & 255) / 255.0f;
         dev.clear_rgba[3] = (col >> 24) / 255.0f;
     }
-    // The host clears whole targets. D3D9 clears only the viewport (and the rects): record any clear where that differs.
+                                                                                  
     Obj *rt = obj(dev.rt[0]);
-    if (diag_on && (arg(c, 1) || (rt && (dev.viewport[0] || dev.viewport[1] || dev.viewport[2] < rt->w || dev.viewport[3] < rt->h))))
-        diag_event("partial Clear not honoured: %u rects, viewport %u,%u %ux%u, target %ux%u, flags %X @%08X", arg(c, 1),
-                   dev.viewport[0], dev.viewport[1], dev.viewport[2], dev.viewport[3], rt ? rt->w : 0, rt ? rt->h : 0, arg(c, 3), M32(c->esp));
+    if (diag_on && (arg(c, 1) || (dev.rs[174] && rt && (dev.scissor[0] || dev.scissor[1] || dev.scissor[2] < rt->w || dev.scissor[3] < rt->h)) || (rt && (dev.viewport[0] || dev.viewport[1] || dev.viewport[2] < rt->w || dev.viewport[3] < rt->h))))
+        diag_event("partial Clear: %u rects, viewport %u,%u %ux%u, target %ux%u, flags %X scissor %u [%d,%d,%d,%d] @%08X", arg(c, 1),
+                   dev.viewport[0], dev.viewport[1], dev.viewport[2], dev.viewport[3], rt ? rt->w : 0, rt ? rt->h : 0, arg(c, 3), dev.rs[174],
+                   (int32_t)dev.scissor[0], (int32_t)dev.scissor[1], (int32_t)dev.scissor[2], (int32_t)dev.scissor[3], M32(c->esp));
     render_clear(arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), argf(c, 5), arg(c, 6));
     RET(D3D_OK, 7);
 }
@@ -958,9 +978,10 @@ static int v_GetScissorRect(Cpu *c) { memcpy(G + arg(c, 1), dev.scissor, 16); RE
 static int v_SetSoftwareVertexProcessing(Cpu *c) { RET(D3D_OK, 2); }
 static int v_GetSoftwareVertexProcessing(Cpu *c) { RET(0, 1); }
 static int v_SetNPatchMode(Cpu *c) { RET(D3D_OK, 2); }
-static void draw(void) { ++dev.draws; ++dev.frame_draws; }
+static void draw(void) { ++dev.draws; ++dev.frame_draws; envcube_draw(); }
+uint64_t d3d9_draw_count(void) { return dev.draws; }   // splitworld.c diag: draws per split view
 // (this, type, start, primCount)
-static int v_DrawPrimitive(Cpu *c) { draw(); render_draw(arg(c, 1), arg(c, 3), 0, 0, 0, 0, arg(c, 2), 0, 0, 0, 0); RET(D3D_OK, 4); }
+static int v_DrawPrimitive(Cpu *c) { draw(); render_draw(arg(c, 1), arg(c, 3), 0, 0, 0, 0, arg(c, 2), 0, 0, 0, 0); envcube_draw_end(); RET(D3D_OK, 4); }
 // (this, type, baseVertex, minIndex, numVertices, startIndex, primCount)
 extern uint32_t x360_arrest_draws;              // x360_textures.m: draws with an X360 arrest-scene texture (diag)
 static void count_arrest_draw(void) {
@@ -968,11 +989,11 @@ static void count_arrest_draw(void) {
     if (t && t->hd_swap == 2 && (++x360_arrest_draws == 1 || x360_arrest_draws % 1000 == 0) && diag_on)
         diag_event("x360: arrest character draw %u (texture %ux%u)", x360_arrest_draws, t->w, t->h);
 }
-static int v_DrawIndexedPrimitive(Cpu *c) { draw(); count_arrest_draw(); render_draw(arg(c, 1), arg(c, 6), 1, (int32_t)arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), 0, 0, 0, 0); RET(D3D_OK, 7); }
+static int v_DrawIndexedPrimitive(Cpu *c) { draw(); count_arrest_draw(); render_draw(arg(c, 1), arg(c, 6), 1, (int32_t)arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), 0, 0, 0, 0); envcube_draw_end(); RET(D3D_OK, 7); }
 // (this, type, primCount, data, stride)
-static int v_DrawPrimitiveUP(Cpu *c) { widescreen_drop_quad(c, arg(c, 3), arg(c, 4)); draw(); render_draw(arg(c, 1), arg(c, 2), 0, 0, 0, 0, 0, arg(c, 3), arg(c, 4), 0, 0); dev_bind(&dev.stream[0], 0); RET(D3D_OK, 5); }
+static int v_DrawPrimitiveUP(Cpu *c) { widescreen_drop_quad(c, arg(c, 3), arg(c, 4)); draw(); render_draw(arg(c, 1), arg(c, 2), 0, 0, 0, 0, 0, arg(c, 3), arg(c, 4), 0, 0); dev_bind(&dev.stream[0], 0); envcube_draw_end(); RET(D3D_OK, 5); }
 // (this, type, minIndex, numVertices, primCount, indexData, indexFmt, vertexData, stride)
-static int v_DrawIndexedPrimitiveUP(Cpu *c) { draw(); render_draw(arg(c, 1), arg(c, 4), 1, 0, arg(c, 2), arg(c, 3), 0, arg(c, 7), arg(c, 8), arg(c, 5), arg(c, 6)); dev_bind(&dev.stream[0], 0); dev_bind(&dev.indices, 0); RET(D3D_OK, 9); }
+static int v_DrawIndexedPrimitiveUP(Cpu *c) { draw(); render_draw(arg(c, 1), arg(c, 4), 1, 0, arg(c, 2), arg(c, 3), 0, arg(c, 7), arg(c, 8), arg(c, 5), arg(c, 6)); dev_bind(&dev.stream[0], 0); dev_bind(&dev.indices, 0); envcube_draw_end(); RET(D3D_OK, 9); }
 static int v_CreateVertexDeclaration(Cpu *c) { // (this, elements*, pp): elements end with {0xFF, 0, D3DDECLTYPE_UNUSED=17}
     uint32_t e = arg(c, 1), n = 0;
     while (M16(e + 8 * n) != 0xFF && n < 64) ++n;

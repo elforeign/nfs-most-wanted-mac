@@ -5,10 +5,12 @@ world/local and intensity/lane contracts, and compiles production MSL with Metal
 using actual PC shader reflection. --mutate lane must fail the scalar check.
 Verified scalar max error: 1.11e-16 PASS; --mutate lane error .119508264 FAIL.
 --cpu-only exits0 here; full proof exits2 BLOCKED without a Metal device/toolchain.
+Split P2 descriptor acceptance: 2 checks pass; ID1-only mutant exits1 at the P2 check.
 """
 import argparse
 import ast
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -65,6 +67,8 @@ static unsigned char *G=storage;
 #define CUR_VIEW 0x00982A20u
 typedef struct { uint32_t eax,ecx,edi,esp; } Cpu;
 static int diag_on;
+static int split_fixture;
+static int split_view_rect(uint32_t v,uint32_t *r) { (void)r; return split_fixture && v==0x9196C0; }
 static unsigned long long host_ticks(void) { return 1; }
 static void diag_event(const char *s,...) { (void)s; }
 HOOKS
@@ -135,6 +139,9 @@ int main(void) {
     materials_aux_record(0x0093E878+0x44); assert(mat_aux_draw.valid);
     materials_aux_record(0x0093E878+2*0x44); assert(!mat_aux_draw.valid);
     materials_aux_record(0x0093E878); assert(mat_aux_draw.valid);
+    M32(0x6004)=2;M32(0x919720)=0x6000;split_fixture=1;
+    materials_aux_record(0x0093E878);if(!mat_aux_draw.valid)return 1;
+    split_fixture=0;materials_aux_record(0x0093E878);if(mat_aux_draw.valid)return 1;M32(0x6004)=1;
     M32(0x6004)=3;materials_aux_record(0x0093E878);assert(!mat_aux_draw.valid);M32(0x6004)=1;
     M32(0x8004)=0;materials_aux_record(0x0093E878);assert(!mat_aux_draw.valid);M32(0x8004)=3;
     unsigned generation=aux_queue[0].generation;
@@ -160,6 +167,13 @@ int main(void) {
     source.write_text(harness)
     run(['clang', '-O0', '-I', str(ROOT/'runtime'), str(source), '-o', str(tmp/'host')])
     print(run([str(tmp/'host')]), end='')
+    old = '!(M32(view+4) == 2 && split_view_rect('
+    assert harness.count(old) == 1
+    source.write_text(harness.replace(old, '!(M32(view+4) == 99 && split_view_rect('))
+    run(['clang', '-O0', '-I', str(ROOT/'runtime'), str(source), '-o', str(tmp/'host-broken')])
+    broken = subprocess.run([str(tmp/'host-broken')], capture_output=True, text=True)
+    assert broken.returncode == 1, broken.stdout + broken.stderr
+    print('host P2 descriptor PASS: 2 checks / 0 failures; ID1-only mutant rejected (exit 1)')
 
 
 def check_metal(tmp):
@@ -232,8 +246,12 @@ int main(int argc,char **argv) { @autoreleasepool {
     for source in sources:
         path=tmp/source
         unique.setdefault(path.read_text(),path)
+    cache = os.environ.get('NFS_METAL_CACHE') or subprocess.check_output(
+        ['sh', '-c', 'NFS_ENV_ROOT=$1; . "$1/runtime/env.sh" || exit; printf "%s" "${NFS_METAL_CACHE:-}"',
+         'metal-cache', str(ROOT)], text=True)
+    cache_args = [f'-fmodules-cache-path={cache}'] if cache else []
     for path in unique.values():
-        result=subprocess.run(['xcrun','-sdk','macosx','metal','-std=metal3.1','-c',str(path),'-o',str(path.with_suffix('.air'))],capture_output=True,text=True)
+        result=subprocess.run([*(os.environ.get('NFS_METAL') and [os.environ['NFS_METAL']] or ['xcrun','-sdk','macosx','metal']),*cache_args,'-std=metal3.1','-c',str(path),'-o',str(path.with_suffix('.air'))],capture_output=True,text=True)
         if result.returncode and 'missing Metal Toolchain' in result.stderr:
             print('\n'.join(line for line in output.splitlines() if not line.startswith('SOURCE ')))
             raise Blocked('shader compile proof: no Metal device; Xcode reports missing Metal Toolchain. Production source generation/PC reflection/constants passed; GPU compile and PSO link pending.')

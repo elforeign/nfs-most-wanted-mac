@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import math
+import os
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,7 +88,12 @@ with tempfile.TemporaryDirectory(prefix='lampglow-') as tmp:
         'texture2d<float> bself [[texture(6)]]', 'texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]').replace(
         '    if (patch) bl = 0;', '    bl += lamp.sample(lin, uv).rgb;\n    if (patch) bl = 0;') + extra
     (tmp / 'lamp.metal').write_text(specialized)
-    metal = subprocess.run(['xcrun', 'metal', '-c', str(tmp / 'lamp.metal'), '-o', str(tmp / 'lamp.air')], capture_output=True, text=True)
+    # Source the shared defaults even when invoked directly rather than by offline_tests.sh.
+    cache = os.environ.get('NFS_METAL_CACHE') or subprocess.check_output(
+        ['sh', '-c', 'NFS_ENV_ROOT=$1; . "$1/runtime/env.sh" || exit; printf "%s" "${NFS_METAL_CACHE:-}"',
+         'metal-cache', str(ROOT)], text=True)
+    cache_args = [f'-fmodules-cache-path={cache}'] if cache else []
+    metal = subprocess.run([*(os.environ.get('NFS_METAL') and [os.environ['NFS_METAL']] or ['xcrun', 'metal']), *cache_args, '-c', str(tmp / 'lamp.metal'), '-o', str(tmp / 'lamp.air')], capture_output=True, text=True)
     if metal.returncode and 'missing Metal Toolchain' in metal.stderr:
         print('UNVERIFIED offline MSL compilation: Metal Toolchain not installed', flush=True)
     elif metal.returncode:

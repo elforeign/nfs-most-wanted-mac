@@ -28,10 +28,30 @@ char *mat_aux_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t
 enum { MAT_PS_BUF = 4 };
 typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all 12; the others declare 4 and ignore the rest
 
+#ifndef NFS_PUBLIC
+#include "carbon_lamp_private.h"
+#else
+// The public build has no converted cars; this pass-through keeps the call sites compiling and is never selected.
+#define CARBON_LAMP_MSL \
+"static float4 carbon_lamp(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) {\n" \
+"    return float4(light.rgb * shade * tex.rgb + specular + reflection, tex.a * light.a);\n" \
+"}\n"
+#endif
+
 // Called by render.m's compile_entry (any thread) after sm_translate succeeded: the replacement MSL (malloc'd) when
 // the shader's bytecode is in the table and its switch is on, else NULL. *id = table index + 1 (0 = none).
 // The replacement keeps the translation's binding contract, so `refl` stays valid for binding.
 char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
+// Lamp-only cache variant: native/Off retains mat_replace's original source.
+enum { MAT_VARIANT_CARBON_LAMP = 0x107 };
+int mat_carbon_lamp_draw(void);
+char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
+enum { MAT_VARIANT_SOFT_SMOKE = 0x104, MAT_VARIANT_SOFT_SMOKE_RESOLVED = 0x105, MAT_VARIANT_SOFT_SMOKE_LATE = 0x106 };
+int mat_is_particle(int id);
+int mat_soft_particle_view(void);
+char *mat_soft_smoke_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
+char *mat_soft_smoke_resolved_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
+char *mat_soft_smoke_late_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 // Per draw (game thread): fills a replacement's extra constants. vsc = the device's vertex shader float constants.
 void mat_constants(int id, const float (*vsc)[4], MatConsts *out);
 // An extra texture the replacement samples (MAT_TEX_*, 0 = none): render.m binds it at fragment texture(MAT_TEX_SLOT).

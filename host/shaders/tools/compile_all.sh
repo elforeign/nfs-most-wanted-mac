@@ -1,12 +1,15 @@
 #!/bin/sh
 # compile_all.sh [msl_dir] - compiles every generated .metal with the Metal compiler
 # (xcrun -sdk macosx metal -c), in parallel. Prints failures; exit 1 if any failed.
+NFS_ENV_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+. "$NFS_ENV_ROOT/runtime/env.sh" || exit
 DIR=${1:-build/msl}
 LOG=$DIR/compile.log
 if [ "$2" = "--one" ]; then
   f=$3
-                                                                                                                         
-  if xcrun -sdk macosx metal -fmodules-cache-path="$DIR/.modcache" -c "$f" -o "$f.air" 2> "$f.err"; then
+  # Preserve the per-output cache for sandboxed builds unless the caller overrides it.
+  # NFS_METAL: the compiler's own path when the sandbox refuses xcrun's toolchain check.
+  if ${NFS_METAL:-xcrun -sdk macosx metal} -fmodules-cache-path="${NFS_METAL_CACHE:-$DIR/.modcache}" -c "$f" -o "$f.air" 2> "$f.err"; then
     if [ -s "$f.err" ]; then echo "WARN $f"; else echo "OK $f"; fi
   else echo "FAIL $f"; fi
   exit 0

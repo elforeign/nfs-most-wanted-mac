@@ -50,6 +50,7 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
   are absent.
 - **Discord status** (off by default) and **Check for updates** (only when you press it), both in the F10 menu under
   Display & performance > Online.
+- The public build includes the original MW car catalog. Other-game car preparation is private and excluded from Setup.
 
 ## How it works
 

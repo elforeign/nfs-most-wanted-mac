@@ -51,6 +51,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp boot "$APP/Contents/MacOS/$EXEC_NAME"
 
+# Private owner-approved art only. Public packaging never copies later-game payloads.
+if [ "${NFS_PUBLIC:-0}" != 1 ] && [ -d ../recomp/out/later_textures ]; then
+    cp -R ../recomp/out/later_textures "$APP/Contents/Resources/later_textures"
+fi
+
 # Icon: drawn by app_icon.m (a generic speedometer), every iconset size from the 1024 px master.
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

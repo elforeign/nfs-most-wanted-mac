@@ -23,6 +23,9 @@ typedef struct Cpu {
 } Cpu;
 
 extern uint8_t *G;    // guest memory base
+uint32_t car85_count(void);                       // private NFS_TEST_CAR85 proof; 84 when off
+uint32_t car85_asset_name(uint32_t address);        // exact asset operands only; identity stays CAR85
+int car85_path(const char *guest, char *host, size_t n);
 uint32_t extratrax_licensed_song_count(void);     // explicit-event lookup only; g_MaxSongs remains 26
 uint32_t posaudio_mode_read(uint32_t address);     // runtime/posaudio.c: read override, no profile writes
 uint32_t posaudio_default_angle(uint32_t angle);   // fixed music/source defaults for the selected geometry
@@ -173,6 +176,7 @@ static inline void x87_store80(uint8_t *p, double v) {
 void host_lua_protected(Cpu *c, void (*body)(Cpu *), void (*resume)(Cpu *));
 void host_lua_resume(Cpu *c, uint32_t target);
 void guest_divide_error(Cpu *c, uint32_t at);   // #DE: logged once per site; the caller continues (see recomp.py div)
+void guest_breakpoint(Cpu *c, uint32_t at);     // int3: logged once per site under diag; execution continues
 void dispatch(Cpu *c, uint32_t target);           // indirect call/jump to a guest address
 void bad_jump(Cpu *c, uint32_t at);               // jump-table index out of range
 void host_import(Cpu *c, uint32_t iat_slot);      // call through the import table (Win32/D3D/... thunk)

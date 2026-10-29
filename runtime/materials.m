@@ -43,6 +43,20 @@
 // reads +0xA0 MetallicScale and +0xA4 SpecularHotSpot (x TimeOfDay+0x60), and gives the PS the raw SpecularPower +0x58.
 MatCarPaint mat_car;
 
+// Only the converter's explicit identities select this profile. Native MW
+// BRAKELIGHTGLASS/HEADLIGHTGLASS never match, regardless of the switch.
+                                                                             
+static int carbon_lampglass_on(void) {
+#ifdef NFS_PUBLIC
+    return 0;   // public build: no converted cars
+#endif
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NFS_CARBON_LAMPGLASS"); on = !(e && !strcmp(e, "off")); }
+    return on;
+}
+static int carbon_lamp;
+static int carbon_lamp_hash(uint32_t h) { return h == 0xDAEE90A1u || h == 0x3CF307CEu; }
+
 // ---- car glass (NFS_CAR_GLASS=pc|x360, default pc; live) ----
 // Both car VSs give alpha = DiffuseMin.w + N.V x DiffuseRange.w (N.V >= 0.01) and both PSs output tex.a x that alpha and multiply
 // the specular and the environment by it again; the environment Fresnel is EnvmapMin.x + pow(N.V, EnvmapPower) x
@@ -180,8 +194,9 @@ void f_006C76E0_orig(Cpu *c);
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), called just before each draw that uses it
     uint32_t m = arg(c, 0), fx = M32(CUR_EFFECT), tod = M32(TIME_OF_DAY_PTR);
+    carbon_lamp = m && fx && M32(fx + 4) == 4 && carbon_lampglass_on() && carbon_lamp_hash(M32(m + 0xC));
     if (diag_on && m && fx && M32(fx + 4) == 4) { cd_flags = arg(c, 1); cd_mat = m; }
-    const GlassX360 *gx = m && fx && M32(fx + 4) == 4 && car_glass_on() && glass_ab_held() != 1 ? glass_find(M32(m + 0xC)) : NULL;
+    const GlassX360 *gx = !carbon_lamp && m && fx && M32(fx + 4) == 4 && car_glass_on() && glass_ab_held() != 1 ? glass_find(M32(m + 0xC)) : NULL;
     float keep[4] = {0};
     if (gx) {
         keep[0] = MF32(m + 0x50); keep[1] = MF32(m + 0x54); keep[2] = MF32(m + 0x80); keep[3] = MF32(m + 0x90);
@@ -198,7 +213,8 @@ void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), cal
     mat_car.metallic = F32(m + 0xA0);
     mat_car.hotspot = F32(m + 0xA4) * g;
     glass_boost = gx && glass_boost_on() && !glass_ab_held();
-    carnm_find(c);
+    if (carbon_lamp) carnm_tex = 0;
+    else carnm_find(c);
     if (diag_on) {                       // each material once: what the PC data carries
         static uint32_t seen[512];
         static int nseen;
@@ -213,6 +229,11 @@ void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), cal
                        F32(m + 0x7C), F32(m + 0xA0), F32(m + 0xA4), g, F32(0x009018E0u), F32(0x009018DCu));
             diag_event("materials: car material '%s' alpha min/max %g %g env min/max scale %g %g%s", name,
                        F32(m + 0x50), F32(m + 0x54), F32(m + 0x80), F32(m + 0x90), gx ? " (X360 glass row applied)" : "");
+            if (carbon_lamp) {
+                uint32_t dt = M32(0x00982CB4u);
+                diag_event("carbonlamp: '%s' profile active; diffuse %08X '%.31s' hash %08X; texture-alpha RGB mix; spec/reflection masks 0/0; MW boost/normal map bypassed", name,
+                           dt, dt ? (const char *)G + dt + 0x0C : "", dt ? M32(dt + 0x24) : 0);
+            }
         }
     }
 }
@@ -278,9 +299,22 @@ void mat_cardraw_note(const uint32_t *rs) {
 // c[0].x InvShadowStrength, c[1].x ShadowMapScale (t2, t3). m.k[0] = (SpecularPower, SpecularHotSpot x tod gain,
 // MetallicScale, mode: 0 X360, 1 probe signature (magenta), 2 the PC specular for BOOT_DIAG_CARPAINT_AB),
 // m.k[1].rgb = sun colour.
+// Xenos 09bb919c uses LOG_CLAMP -> MUL -> EXP: log2(0) becomes
+// -FLT_MAX, so SpecularPower=0 (PLAINNOTHING) yields exp2(-0)=1.
+// Metal powr(0,0) is NaN. Guard only that undefined pair: specialising
+// all zero exponents also lets relaxed math reassociate finite expressions.
+#define CAR_PAINT_POW_MSL \
+"static float car_spec_pow(float x, float e) {\n" \
+"#if !MAT_PAINT_POW_MUTANT\n" \
+"    if (x == 0.0f && e == 0.0f) return 1.0f;\n" \
+"#endif\n" \
+"    return powr(x, e);\n" \
+"}\n"
+
 static const char car_paint_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
+CAR_PAINT_POW_MSL
 "#pragma clang diagnostic ignored \"-Wunused-function\"\n"
 "struct SmPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; };\n"
 "struct MatConsts { float4 k[12]; };\n"
@@ -364,7 +398,7 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "    float3 nn = normalize(normalize(pi.texcoord4.xyz) + fv * flake), l = normalize(pi.texcoord3.xyz), v = pi.texcoord5.xyz;\n"
 "    float rv = saturate(dot(2.0f * dot(nn, v) * nn - v, l));\n"
 "    float sp = m.k[0].x;\n"
-"    float spec = powr(rv, sp) + " X360S_CAR_HOT_SCALE "f * m.k[0].y * lit * powr(rv, " X360S_CAR_HOT_POWER "f * sp);\n"
+"    float spec = car_spec_pow(rv, sp) + " X360S_CAR_HOT_SCALE "f * m.k[0].y * lit * car_spec_pow(rv, " X360S_CAR_HOT_POWER "f * sp);\n"
 "    float3 s = spec * m.k[1].rgb * v0.w * v1.rgb * lit;\n"
 "    if (m.k[0].w == 2.0f) {                      // BOOT_DIAG_CARPAINT_AB: the PC PS's own 2 pow(R.V, 16) (unnormalised)\n"
 "        float3 t3 = pi.texcoord3.xyz, t4 = pi.texcoord4.xyz;\n"
@@ -373,6 +407,16 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "    }\n"
 "    Out o;\n"
 "    o.c0 = float4((v0.rgb * tex.rgb + s) * shade + env.rgb * v1.w * v0.w * 0.5f * (1.0f + 2.0f * m.k[2].x * v0.w), tex.a * v0.w);\n"
+"#if MAT_PAINT_FINITE_AB\n"
+"    float cp_raw_spec = powr(rv, sp) + " X360S_CAR_HOT_SCALE "f * m.k[0].y * lit * powr(rv, " X360S_CAR_HOT_POWER "f * sp);\n"
+"    float3 cp_raw_s = m.k[0].w == 2.0f ? s : cp_raw_spec * m.k[1].rgb * v0.w * v1.rgb * lit;\n"
+"    float4 cp_old = float4((v0.rgb * tex.rgb + cp_raw_s) * shade + env.rgb * v1.w * v0.w * 0.5f * (1.0f + 2.0f * m.k[2].x * v0.w), tex.a * v0.w);\n"
+"    bool cp_zero_domain = rv == 0.0f && sp == 0.0f;\n"
+"    bool cp_power_changed = any(as_type<uint2>(float2(powr(rv,sp),powr(rv," X360S_CAR_HOT_POWER "f*sp))) != as_type<uint2>(float2(car_spec_pow(rv,sp),car_spec_pow(rv," X360S_CAR_HOT_POWER "f*sp))));\n"
+"#endif\n"
+"#if MAT_PAINT_NAN_TINT == 2\n"
+"    bool cp_tint_zero_domain = rv == 0.0f && sp == 0.0f;\n"
+"#endif\n"
 "    if (m.k[3].w > 0.5f) {                       // R26: X360 PS 09bc003c (car_normalmap) on this draw's tangent-space normal map\n"
 "        float2 uv = pi.texcoord1.xy;\n"
 "        float3 P = pi.texcoord6.xyz, N = normalize(pi.texcoord4.xyz), V = normalize(pi.texcoord5.xyz), L0 = pi.texcoord3.xyz, L1 = m.k[2].yzw;\n"
@@ -392,14 +436,25 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "        float w0 = saturate(dot(n, L0) + " X360S_CARNM_WRAP "f), w1 = saturate(dot(n, L1) + " X360S_CARNM_WRAP "f);   // two wrap lights, wrap " X360S_CARNM_WRAP_T "\n"
 "        float3 dif = m.k[1].rgb * w0 + m.k[3].rgb * w1;                       // LocalColourMatrix[c].x w0 + [c].y w1\n"
 "        float rv = saturate(dot(2.0f * dot(n, L0) * n - L0, V));\n"
+"#if MAT_PAINT_NAN_TINT == 2\n"
+"        cp_tint_zero_domain = rv == 0.0f && sp == 0.0f;\n"
+"#endif\n"
 "        float aoq = pi.texcoord6.w / max(saturate(2.0f * pi.texcoord6.w), 1e-3f);   // X360 AO is the raw vertex colour x; PC colour1 has saturate(2x) in it\n"
-"        float spec = " X360S_CARNM_SPEC "f * powr(rv, sp) + m.k[0].y * lit * powr(rv, " X360S_CARNM_SPEC_POWER "f * sp);\n"
+"        float spec = " X360S_CARNM_SPEC "f * car_spec_pow(rv, sp) + m.k[0].y * lit * car_spec_pow(rv, " X360S_CARNM_SPEC_POWER "f * sp);\n"
 "        float3 s2 = spec * m.k[1].rgb * v0.w * v1.rgb * aoq * lit;\n"
 "        float3 Vt = float3(dot(T, V), dot(Bn, V), dot(N, V));                  // the X360 samples the cube with the tangent-space reflection\n"
 "        float3 Rt = 2.0f * max(dot(nt, Vt), " X360S_CARNM_NV_MIN "f) * nt - Vt;\n"
 "        float3 fres = exp2(m.k[10].x * log2(nv)) * m.k[9].xyz + m.k[8].xyz;      // X360: pow(N.V, EnvmapPower) EnvmapRange + EnvmapMin (per channel)\n"
 "        float3 e2 = 2.0f * tex1.sample(smp1, Rt).rgb * fres * v0.w * pi.texcoord6.w;   // 2 env x fresnel x alpha x raw vertex AO\n"
 "        o.c0 = float4((D * dif * tex.rgb + s2) * shade + e2, tex.a * v0.w);\n"
+"#if MAT_PAINT_FINITE_AB\n"
+"        cp_raw_spec = " X360S_CARNM_SPEC "f * powr(rv, sp) + m.k[0].y * lit * powr(rv, " X360S_CARNM_SPEC_POWER "f * sp);\n"
+"        cp_raw_s = cp_raw_spec * m.k[1].rgb * v0.w * v1.rgb * aoq * lit;\n"
+"        cp_old = float4((D * dif * tex.rgb + cp_raw_s) * shade + e2, tex.a * v0.w);\n"
+"        cp_zero_domain = rv == 0.0f && sp == 0.0f;\n"
+"        cp_power_changed = any(as_type<uint2>(float2(powr(rv,sp),powr(rv," X360S_CARNM_SPEC_POWER "f*sp))) != as_type<uint2>(float2(car_spec_pow(rv,sp),car_spec_pow(rv," X360S_CARNM_SPEC_POWER "f*sp))));\n"
+"        if (m.k[7].x > 0.5f) cp_old = float4(1,0,1,1);\n"
+"#endif\n"
 "        if (m.k[7].x > 0.5f) o.c0 = float4(1.0f, 0.0f, 1.0f, 1.0f);           // NFS_TEST_CARNM_TINT\n"
 "    }\n"
 "    if (m.k[1].w > 0.5f) {                       // NFS_HIGHLIGHTS=rolloff: a shoulder on the HDR result before the 8-bit clip\n"
@@ -412,6 +467,33 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "    if (m.k[11].y > 0.5f && flake > 0.0f) o.c0 = float4(1.0f, 0.0f, 1.0f, 1.0f);   // NFS_TEST_FLAKE_TINT: where the flake term is non-zero\n"
 "    if (m.k[0].w == 1.0f) o.c0 = float4(1.0f, 0.0f, 1.0f, 1.0f);   // probe signature\n"
 "    if (aux.alpha_func != 0u && !alpha_test(aux.alpha_func, o.c0.w, aux.alpha_ref)) discard_fragment();\n"
+"#if MAT_PAINT_FINITE_AB\n"
+"    if (m.k[1].w > 0.5f) {\n"
+"        float mx = max(cp_old.r, max(cp_old.g, cp_old.b));\n"
+"        if (mx > 0.8f) {\n"
+"            float y = 0.8f + 0.2f * (1.0f - exp(-(mx - 0.8f) / 0.2f));\n"
+"            cp_old.rgb = mix(cp_old.rgb * (y / mx), float3(y), 0.5f * saturate((mx - 1.0f) * 0.5f));\n"
+"        }\n"
+"    }\n"
+"    if ((m.k[11].y > 0.5f && flake > 0.0f) || m.k[0].w == 1.0f) cp_old = float4(1,0,1,1);\n"
+"    if (hc_stage == 0u) {\n"
+"        bool raw_bad = any((as_type<uint4>(cp_old) & 0x7f800000u) == 0x7f800000u);\n"
+"        bool new_bad = any((as_type<uint4>(o.c0) & 0x7f800000u) == 0x7f800000u);\n"
+"        bool zero_domain = cp_zero_domain;\n"
+"        // Diagnostic only: unused world_export/stored row is an eight-word A/B ledger.\n"
+"        uint cp_n[8] = {1u,uint(raw_bad),uint(new_bad),uint(!raw_bad),uint(!raw_bad && any(as_type<uint4>(cp_old) != as_type<uint4>(o.c0))),uint(raw_bad && zero_domain),uint(!raw_bad && any(rint(saturate(cp_old)*255.0f) != rint(saturate(o.c0)*255.0f))),uint(!raw_bad && cp_power_changed)};\n"
+"        for (uint k=0;k<8;k++) if (cp_n[k]) atomic_fetch_add_explicit(hc_buf+8+k,cp_n[k],memory_order_relaxed);\n"
+"    }\n"
+"#endif\n"
+"#if MAT_PAINT_NAN_TINT\n"
+"    // Test only: bit classification remains valid with relaxed shader math.\n"
+"    if (MAT_PAINT_NAN_TINT == 3 || any((as_type<uint4>(o.c0) & 0x7f800000u) == 0x7f800000u)) {\n"
+"        o.c0 = float4(1,0,1,1);\n"
+"#if MAT_PAINT_NAN_TINT == 2\n"
+"        if (!cp_tint_zero_domain) o.c0 = float4(0,1,1,1);\n"
+"#endif\n"
+"    }\n"
+"#endif\n"
 "    return o;\n"
 "}\n";
 
@@ -440,7 +522,18 @@ int carpaint_ab_hold(void) {                        // pacing.c, end of each mai
 }
 
 static int car_paint = -1, car_paint_live = 1;
+#define CARPAINT_TEST_IN_RUNTIME
+#include "carpaint_nan_test.m"
+#undef CARPAINT_TEST_IN_RUNTIME
 static int car_paint_on(void) {
+    if (diag_on && getenv("BOOT_DIAG_CARPAINT_NAN_TEST")) {
+        static int tested;
+        if (!tested) {
+            tested = 1;
+            int good = carpaint_nan_test(car_paint_msl, 0), bad = carpaint_nan_test(car_paint_msl, 1), finite = carpaint_nan_test(car_paint_msl, 2);
+            diag_event("carpaint_nan_test: normal=%d broken=%d finite-mutant=%d expected=0/1/1 %s", good, bad, finite, good == 0 && bad == 1 && finite == 1 ? "PASS" : "FAIL");
+        }
+    }
     if (car_paint < 0) { const char *e = getenv("NFS_CAR_PAINT"); car_paint = !(e && !strcmp(e, "pc")) && X360_SHADER_LITS; }
     return car_paint;
 }
@@ -469,6 +562,7 @@ void materials_flake_test(int tint, int force) { materials_flake_tint = tint; ma
 void materials_set_car_flake(int x360) { flake = x360 != 0; if (diag_on) diag_event("materials: car flake live now %s", flake ? "x360" : "pc"); }
 int mat_flake_volume_ok(void) { uint32_t w, h, b; return mat_grass_noise(&w, &h) && mat_grass_volume(&b); }   // render.m binds the same volume as R27's
 static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
+    o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
     o->k[0][0] = mat_car.spec_power; o->k[0][1] = mat_car.hotspot; o->k[0][2] = mat_car.metallic;
     o->k[0][3] = (probe_sig & PROBE_CARPAINT) ? 1.0f : (ab_state == 2 && !glass_ab_held() && !aux_ab_on()) || !car_paint_live ? 2.0f : 0.0f;
     o->k[2][0] = glass_boost ? 1.0f : 0.0f;
@@ -756,6 +850,7 @@ static char *car_vs_nm_patch(const char *msl) {
 static int car_vs_nm_on(void) { return 1; }
 // t0 PS (ps_1_1): v0.rgb unclamped, and the shoulder on the result (as the car paint PS: knee 0.8, hue kept).
 static char *car_t0_ps_patch(const char *msl) {
+    if (!car_light_hdr()) return strdup(msl);
     const char *r = strstr(msl, "float4 v0 = saturate(si.col[0]);");
     const char *o = strstr(msl, "    so.oc[0] = r0;\n");
     if (!r || !o || o < r) return NULL;
@@ -769,6 +864,73 @@ static char *car_t0_ps_patch(const char *msl) {
         "        so.oc[0].xyz = mix(r0.xyz * (y / mx), float3(y), 0.5f * saturate((mx - 1.0f) * 0.5f)); } }\n");
     free(a);
     return b;
+}
+
+static const char carbon_lamp_math[] = CARBON_LAMP_MSL;
+static int car_t0_on(void) { return car_light_hdr(); }
+static void carbon_lamp_constants(const float (*vsc)[4], MatConsts *o) {
+    (void)vsc;
+    o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
+}
+// Add the experiment only when enabled, leaving the Off shader bytes exact.
+// Apply after all MW shading (normal map, boost, shoulder and flake), before
+// alpha testing. t0 swaps sampler order: cube s0, diffuse s1.
+static char *carbon_lamp_patch(char *src, int no_shadow) {
+    char *s = src;
+    int ok = edit(&s, NULL, "struct SmPSAux", carbon_lamp_math, 1);
+    if (no_shadow) {
+        ok = ok && edit(&s, NULL, "static void sm_body(", "struct MatConsts { float4 k[12]; };\n", 1);
+        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
+        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_func != 0u",
+            "    if (mk.k[6].w > 0.5f) {\n"
+            "        float4 d = float4(max(pi.color0.rgb, 0.0f), saturate(pi.color0.a)), q = saturate(pi.color1);\n"
+            "        float p = saturate(dot(saturate(pi.texcoord2.xyz), saturate(pi.texcoord3.xyz))); p *= p; p *= p; p *= p;\n"
+            "        float3 specular = 2.0f * p * d.a * q.rgb;\n"
+            "        float3 reflection = tex0.sample(smp0, pi.texcoord0.xyz, bias(aux.lodbias[0])).rgb * q.a * d.a;\n"
+            "        so.oc[0] = carbon_lamp(tex1.sample(smp1, pi.texcoord1.xy, bias(aux.lodbias[1])), d, 1.0f, specular, reflection, float2(0.0f));\n"
+            "    }\n", 1);
+    } else {
+        ok = ok && edit(&s, NULL, "    if (aux.alpha_func != 0u",
+            "    if (m.k[6].w > 0.5f) o.c0 = carbon_lamp(tex, v0, shade, s * shade, env.rgb * v1.w * v0.w * 0.5f, float2(0.0f));\n", 1);
+    }
+    if (!ok) { free(s); return NULL; }
+    return s;
+}
+
+// NFS_CAR_PAINT=pc still keeps the translated PC body for every native draw.
+// Reuse the same shadow lookup as the paint payload only inside the explicit
+// lamp branch; changing this switch must not enable X360 paint on other cars.
+static char *carbon_lamp_pc_patch(const char *src, int variant, int hardware) {
+    char *s = strdup(src);
+    const char *helpers = strstr(car_paint_msl, "#if MAT_SHADOW_HW\n");
+    const char *fragment = helpers ? strstr(helpers, "fragment Out sm_main(") : NULL;
+    const char *lit = strstr(car_paint_msl, "    float lit;");
+    const char *sample = lit ? strstr(lit, "    float4 tex =") : NULL;
+    if (!helpers || !fragment || !lit || !sample) { free(s); return NULL; }
+    char *head = malloc((size_t)(fragment - helpers) + strlen(carbon_lamp_math) + 128);
+    sprintf(head, "struct MatConsts { float4 k[12]; };\n%s%.*s", carbon_lamp_math, (int)(fragment - helpers), helpers);
+    int ok = edit(&s, NULL, "static void sm_body(", head, 1);
+    free(head);
+    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
+    char *body = malloc((size_t)(sample - lit) + 1024);
+    sprintf(body,
+        "    if (mk.k[6].w > 0.5f) {\n"
+        "    float4 t2 = pi.texcoord2;\n"
+        "%.*s"
+        "    float4 d = float4(max(pi.color0.rgb, 0.0f), saturate(pi.color0.a)), q = saturate(pi.color1);\n"
+        "    float3 t3 = pi.texcoord3.xyz, t4 = pi.texcoord4.xyz;\n"
+        "    float p = saturate(dot(2.0f * dot(t4, t3) * t4 - t3, pi.texcoord5.xyz)); p *= p; p *= p; p *= p; p *= p;\n"
+        "    float3 specular = 2.0f * p * d.a * q.rgb * shade * shade;\n"
+        "    float3 reflection = tex1.sample(smp1, pi.texcoord0.xyz, bias(aux.lodbias[1])).rgb * q.a * d.a * 0.5f;\n"
+        "    so.oc[0] = carbon_lamp(tex0.sample(smp0, pi.texcoord1.xy, bias(aux.lodbias[0])), d, shade, specular, reflection, float2(0.0f));\n"
+        "    }\n", (int)(sample - lit), lit);
+    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_func != 0u", body, 1);
+    free(body);
+    if (!ok) { free(s); return NULL; }
+    char *out = malloc(strlen(s) + 128);
+    sprintf(out, "#define MAT_VARIANT %d\n#define MAT_SHADOW_HW %d\n%s", variant, hardware, s);
+    free(s);
+    return out;
 }
 
 // ---- payload 4 (R21): particle shading and size clamp (NFS_PARTICLES=pc|x360, default pc; live) ----
@@ -950,7 +1112,7 @@ static const MatShader table[] = {
     // car lighting above 1 (hashes of host/shaders/testdata/car)
     {"car t0 vs_1_1 (no shadows) oD0 unclamped", 0x1BEA38904139377AULL, SM_VERTEX, 0, {0, 0, 0, 0}, 0, NULL, car_vs_patch, car_light_hdr, NULL, 0},
     {"car t1 vs_1_1 (shadow levels 1-5) oD0 unclamped + R26 texcoord6", 0xB1CE127C28045F2CULL, SM_VERTEX, 0, {0, 0, 0, 0}, 0, NULL, car_vs_nm_patch, car_vs_nm_on, NULL, 0},
-    {"car t0 ps_1_1 (no shadows) light unclamped + shoulder", 0x89E9A52CCEE09BCFULL, SM_PIXEL, 0, {0, 0, 0, 0}, 0, NULL, car_t0_ps_patch, car_light_hdr, NULL, 0},
+    {"car t0 ps_1_1 (no shadows) light unclamped + shoulder", 0x89E9A52CCEE09BCFULL, SM_PIXEL, 0, {0, 0, 0, 0}, 0, NULL, car_t0_ps_patch, car_t0_on, carbon_lamp_constants, 0},
     // worldreflect (hashes of host/shaders/testdata/worldreflect, the same bytecode as speed.exe's effect)
     RIPPLE_VS("worldreflect t0 vs_1_1 (no shadows)", 0xBB253668A28870F5ULL),
     RIPPLE_VS("worldreflect t1 vs_1_1 (shadow levels 1-5)", 0x8BBB8DFEF2EDAE21ULL),
@@ -962,14 +1124,15 @@ static const MatShader table[] = {
     RIPPLE_PS("worldreflect t5 ps_2_x (shadow level 5)", 0x242B92C6A96DE029ULL),
 };
 
-char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id, int lamp) {
     *id = 0;
     uint64_t h = 1469598103934665603ull;
     const uint8_t *b = (const uint8_t *)tokens;
     for (size_t i = 0; i < 4 * (size_t)n; ++i) h = (h ^ b[i]) * 1099511628211ull;
     for (int k = 0; k < (int)(sizeof table / sizeof *table); ++k) {
         const MatShader *e = &table[k];
-        if (e->hash != h || e->stage != refl->shader_type || !e->enabled()) continue;
+        int car = e->msl == car_paint_msl || e->patch == car_t0_ps_patch;
+        if (e->hash != h || e->stage != refl->shader_type || (!e->enabled() && !(lamp && car))) continue;
         int shadow_hw = 0, ok = 1;
         for (int s = 0; s < refl->n_samplers; ++s) {
             const SmSampler *sm = &refl->samplers[s];
@@ -978,12 +1141,19 @@ char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int 
             if (sm->shadow) shadow_hw = 1;
         }
         char *src = NULL;
-        if (ok && e->patch) src = e->patch(refl->msl);
+        int pc_lamp = e->msl == car_paint_msl && lamp && !car_paint_on();
+        if (ok && pc_lamp) src = carbon_lamp_pc_patch(refl->msl, e->variant, shadow_hw);
+        else if (ok && e->patch) src = e->patch(refl->msl);
         else if (ok) {
-            size_t len = strlen(e->msl) + 128;
+            size_t len = strlen(e->msl) + 384;
             src = malloc(len);
-            snprintf(src, len, "#define MAT_VARIANT %d\n#define MAT_SHADOW_HW %d\n#define MAT_CAR_HDR %d\n%s", e->variant, shadow_hw, car_light_hdr(), e->msl);
+            snprintf(src, len, "#define MAT_VARIANT %d\n#define MAT_SHADOW_HW %d\n#define MAT_CAR_HDR %d\n#define MAT_PAINT_POW_MUTANT %d\n#define MAT_PAINT_NAN_TINT %d\n#define MAT_PAINT_FINITE_AB %d\n%s", e->variant, shadow_hw, car_light_hdr(),
+                     diag_on && getenv("BOOT_DIAG_CARPAINT_POW_MUTANT") != NULL,
+                     diag_on && getenv("NFS_TEST_CARPAINT_NAN_TINT") ? atoi(getenv("NFS_TEST_CARPAINT_NAN_TINT")) : 0,
+                     diag_on && getenv("BOOT_DIAG_HDR_CLIP") && !strcmp(getenv("BOOT_DIAG_HDR_CLIP"), "1") && getenv("BOOT_DIAG_CARPAINT_FINITE_AB") != NULL, e->msl);
         }
+        if (src && !pc_lamp && lamp && car)
+            src = carbon_lamp_patch(src, e->patch == car_t0_ps_patch);
         if (!src) {
             if (diag_on) diag_event("materials: %s: %s, translated PC shader kept", e->name, ok ? "translation not as expected" : "unexpected samplers");
             return NULL;
@@ -995,11 +1165,68 @@ char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int 
     return NULL;
 }
 
+char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    // Even an inactive branch can change Metal's optimized native arithmetic.
+    // Keep its source exact; the renderer selects the lamp variant per draw.
+    return mat_replace_profile(tokens, n, refl, id, 0);
+}
+int mat_carbon_lamp_draw(void) {
+    uint32_t fx = M32(CUR_EFFECT);
+    return carbon_lamp && fx && M32(fx + 4) == 4;
+}
+char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *s = mat_replace_profile(tokens, n, refl, id, 1);
+    return s ? s : strdup(refl->msl);
+}
+
 void mat_constants(int id, const float (*vsc)[4], MatConsts *out) {
     memset(out, 0, sizeof *out);
     if (id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].constants) table[id - 1].constants(vsc, out);
 }
 int mat_extra_texture(int id) { return id > 0 && id <= (int)(sizeof table / sizeof *table) ? table[id - 1].extra_tex : 0; }
+
+// Port extra: the original particles_msl above is also the exact Off source.
+// A distinct variant adds one explicitly bound snapshot; rain never selects it.
+int mat_is_particle(int id) {
+    return id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].msl == particles_msl;
+}
+int mat_soft_particle_view(void) { return !particles_rain && particle_vid == 1; }
+static const char soft_smoke_math[] =
+"inline float smoke_view_z(float d, float zn, float zf) { return zn*zf/(zf-d*(zf-zn)); }\n"
+"inline float smoke_fade(float scene, float particle, float zn, float zf, float range) {\n"
+"    if (scene >= 0.999999f) return 1.0f;\n"
+"    float pz = smoke_view_z(particle, zn, zf);\n"
+"    float fade = saturate((smoke_view_z(scene, zn, zf) - pz) / range);\n"
+"    float camera = saturate((pz - zn - range) / range);\n"
+"    return 1.0f + camera * (fade - 1.0f);\n"
+"}\n";
+char *mat_soft_smoke_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *s = mat_replace(tokens, n, refl, id);
+    if (!s || !mat_is_particle(*id)) { free(s); *id = 0; return NULL; }
+    if (!edit(&s, NULL, "fragment Out sm_main(", soft_smoke_math, 1) ||
+        !edit(&s, NULL, "sampler smp1 [[sampler(1)]])", "sampler smp1 [[sampler(1)]], texture2d<float> smoke_depth [[texture(15)]])", 0) ||
+        !edit(&s, NULL, "    return o;\n", "    if (m.k[1].w < 0.5f) o.c0.a *= smoke_fade(smoke_depth.read(uint2(pi.pos.xy)).r, pi.pos.z, m.k[1].x, m.k[1].y, m.k[1].z);\n    return o;\n", 0)) {
+        free(s); *id = 0; return NULL;
+    }
+    return s;
+}
+char *mat_soft_smoke_resolved_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *s=mat_soft_smoke_shader(tokens,n,refl,id);
+    if(!s)return NULL;
+    if(!edit(&s,NULL,"texture2d<float> smoke_depth", "depth2d<float, access::read> smoke_depth",0) ||
+       !edit(&s,NULL,"smoke_depth.read(uint2(pi.pos.xy)).r", "smoke_depth.read(uint2(pi.pos.xy))",0)){free(s);*id=0;return NULL;}
+    return s;
+}
+char *mat_soft_smoke_late_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *s=mat_soft_smoke_resolved_shader(tokens,n,refl,id);if(!s)return NULL;
+    if(!edit(&s,NULL,"    float4 v0 = saturate(pi.color0)",
+        "    float scene_z=smoke_depth.read(uint2(pi.pos.xy));\n"
+        "    if(scene_z < pi.pos.z || (m.k[2].x < 3.0f && scene_z == pi.pos.z)) discard_fragment();\n"
+        "    float fade=1.0f; if(m.k[1].w < 0.5f && m.k[2].y > 0.5f && m.k[0].z < 0.5f) fade=smoke_fade(scene_z,pi.pos.z,m.k[1].x,m.k[1].y,m.k[1].z);\n"
+        "    if(fade<=0.0f)discard_fragment();\n",1) ||
+       !edit(&s,NULL,"    if (m.k[1].w < 0.5f) o.c0.a *= smoke_fade(smoke_depth.read(uint2(pi.pos.xy)), pi.pos.z, m.k[1].x, m.k[1].y, m.k[1].z);", "    o.c0.a *= fade;",0)){free(s);*id=0;return NULL;}
+    return s;
+}
 
 // ---------------- R20: load generations and queue-owned auxiliary contexts ----------------
 typedef struct { uint32_t header, instances, count, id, generation; } AuxSection;
@@ -1118,7 +1345,10 @@ void materials_aux_record(uint32_t q) {
     if (!loaded) { mat_aux_fallback(AUX_GENERATION); return; }
     uint32_t view = M32(CUR_VIEW), fx = M32(q+16), transform = M32(q+28), mesh = M32(q);
     // Main colour only. Mirror fog may temporarily select main effects, but retains view id3.
-    if (!view || M32(view) || M32(view+4) != 1) { mat_aux_fallback(AUX_VIEW); return; }
+    if (!view || M32(view) || (M32(view+4) != 1 &&
+        !(M32(view+4) == 2 && split_view_rect(0x009196C0u, NULL) && view == M32(0x009196C0u + 0x60)))) {
+        mat_aux_fallback(AUX_VIEW); return;
+    }
     if (M32(q+4) || !fx || (M32(fx+4) != 1 && M32(fx+4) != 3) || !mesh) { mat_aux_fallback(AUX_EFFECT); return; }
     uint32_t material_name = M32(mesh+0x60);
     if (material_name && (!memcmp(G+material_name,"grasstype",9) || !memcmp(G+material_name,"glossywindow",11))) { mat_aux_fallback(AUX_EFFECT); return; }
@@ -1251,8 +1481,9 @@ void materials_grass_record(uint32_t q) {
     // ANM_WATERA is shared by five generic-material trailer entries. Exact
     // material identity limits R18 to the six PC watersea meshes (effect world).
     if (name && !memcmp(G + name, "watersea", 9) && effect && !M32(effect + 4) &&
-        view && M32(view + 4) == 1 && !M32(view) && M32(q + 28)) {
-        mat_water_draw.mesh = mesh; mat_water_draw.view = 1;
+        view && (M32(view + 4) == 1 || (M32(view + 4) == 2 && split_view_rect(0x009196C0u, NULL) &&
+        view == M32(0x009196C0u + 0x60))) && !M32(view) && M32(q + 28)) {
+        mat_water_draw.mesh = mesh; mat_water_draw.view = M32(view + 4);
         memcpy(mat_water_draw.world, G + M32(q + 28), sizeof mat_water_draw.world);
     }
     if (name && !memcmp(G + name, "grasstype1", 11)) {
@@ -1641,7 +1872,19 @@ char *mat_grass_shader(const SmResult *pc, int stage, int shell, uint16_t input_
 // Fresnel term, pow(R.V, c254.z), diffuse x c254.y + c255.rgb and fog exactly (09bfd3e0's literals).
 MatWaterDraw mat_water_draw;
 static int water_mode = -1;
-static unsigned water_this_frame, water_previous_frame;
+static unsigned water_this_frame[3], water_previous_frame[3]; // retail, split P1, split P2
+static unsigned water_owner(void) {
+    uint32_t source = split_capture_source();
+    return source == 0x00919650u ? 1 : source == 0x009196C0u ? 2 : 0;
+}
+void mat_water_reset(void) {
+    water_this_frame[1] = water_this_frame[2] = 0;
+    water_previous_frame[1] = water_previous_frame[2] = 0;
+}
+void mat_water_reset_view(uint32_t source) {
+    unsigned owner = source == 0x009196C0u ? 2 : 1;
+    water_this_frame[owner] = water_previous_frame[owner] = 0;
+}
 static unsigned water_draws, water_variants, water_forced, water_shader_fail, water_pipeline_fail;
 int mat_water_enabled(void) {
     if (!X360_SHADER_LITS) return 0;
@@ -1657,7 +1900,7 @@ void materials_set_water(int x360) {
     if (changed && water_mode && !M32(0x009017D4u)) graphics_reset_request();
 }
 void mat_water_emit(int variant) {
-    ++water_this_frame; ++water_draws; water_variants += variant != 0;
+    ++water_this_frame[water_owner()]; ++water_draws; water_variants += variant != 0;
 }
 void mat_water_failure(int pipeline) {
     unsigned n = __atomic_add_fetch(pipeline ? &water_pipeline_fail : &water_shader_fail, 1, __ATOMIC_RELAXED);
@@ -1665,10 +1908,11 @@ void mat_water_failure(int pipeline) {
 }
 void mat_water_reflection_forced(void) { ++water_forced; }
 int mat_water_reflection_requested(void) {
-    return mat_water_enabled() && water_previous_frame && M32(GAMEFLOW_STATE) == 6;
+    return mat_water_enabled() && water_previous_frame[water_owner()] && M32(GAMEFLOW_STATE) == 6;
 }
 void mat_water_frame(void) {
-    water_previous_frame = water_this_frame; water_this_frame = 0;
+    memcpy(water_previous_frame, water_this_frame, sizeof water_this_frame);
+    memset(water_this_frame, 0, sizeof water_this_frame);
     if (!diag_on) return;
     static uint64_t last;
     uint64_t now = host_ticks();

@@ -58,12 +58,15 @@ __attribute__((constructor)) static void brightness_register(void) {
     settings_add(&s_brightness);
 }
 
-// Main menu: no LAN Play (MainLAN, name hash D6DB74DE; it crashes the port on the unimplemented WSAStartup, the X360
-// has no such item: F10) and no Online (MainOnline, 74FB90A8: EA's login service is gone, the X360 shows Xbox Live
-                                                                                                                       
-// thiscall, one stack argument); an item that is never added never shows, and the others close up. The Online slot is
-// for the online free-roam work later: NFS_FE_ONLINE_ITEMS=1 puts both back (one switch, this table).
-static const uint32_t k_hidden_items[] = {0xD6DB74DEu /* MainLAN */, 0x74FB90A8u /* MainOnline */};
+// MainLAN follows the original menu/login state machine. F10's saved choice
+// takes effect at restart; an explicit NFS_LAN keeps its original exact-1 override.
+// Dead MainOnline stays hidden in LAN mode; the legacy online switch is unchanged.
+static int lan_items(void) {
+    const char *e = getenv("NFS_LAN");
+    if (e) return !strcmp(e, "1");
+    const Setting *s = settings_find("gameplay.lan");
+    return s && s->boot_value == 1;
+}
 static int online_items(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("NFS_FE_ONLINE_ITEMS"); v = e && *e == '1'; }
@@ -72,14 +75,16 @@ static int online_items(void) {
 void f_00573960_orig(Cpu *c);
 void f_00573960(Cpu *c) {                                  // IconScrollerMenu::AddOption(this = ecx, IconOption *)
     uint32_t opt = M32(c->esp + 4);
-    if (opt && !online_items()) {
+    if (opt) {
         uint32_t name = M32(opt + 0x2C);
-        for (size_t i = 0; i < sizeof k_hidden_items / sizeof *k_hidden_items; ++i)
-            if (name == k_hidden_items[i]) {
-                if (diag_on) diag_event("fe_console: main menu item %08X not added", name);
-                c->esp += 8;                               // ret 4
-                return;
-            }
+        int hidden = name == 0xD6DB74DEu ? !lan_items() && !online_items() :
+                     name == 0x74FB90A8u ? lan_items() || !online_items() : 0;
+        if (hidden) {
+            if (diag_on) diag_event("fe_console: main menu item %08X not added", name);
+            c->esp += 8;                                   // ret 4
+            return;
+        }
+        if (name == 0xD6DB74DEu && diag_on) diag_event("lan-menu: MainLAN added");
     }
     f_00573960_orig(c);
 }
@@ -352,8 +357,10 @@ void f_00529280(Cpu *c) {                                   // UIOptionsScreen d
 // player's input queue is on that device: keyboard-only play never sees it, and a key or mouse move hands the screen
 // back (the game's check then finds the pad "present" and clears the error). Plugging it in again clears it too.
 int prompts_pad_lost(void);
+int padguest_connection(Cpu *c);
 void f_006287D0_orig(Cpu *c);
 void f_006287D0(Cpu *c) {                                  // InputDevice::IsConnected (thiscall)
+    if (padguest_connection(c)) return;                   // NFS_PADS=2: independently connected port 1
     f_006287D0_orig(c);
     if (c->ecx > 0x10000 && M32(c->ecx) == 0x008A7B9Cu && prompts_pad_lost()) {
         static int logged;

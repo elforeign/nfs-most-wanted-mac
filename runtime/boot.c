@@ -17,12 +17,17 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <mach/mach_time.h>
 #include <sys/time.h>
 
 #include "funcs.h"
 #include "host.h"
+#include "private_cars.h"
+#include "server_loader.h"
 #include "x360audio.h"
 #include "x360copspeech.h"
 
@@ -96,23 +101,33 @@ void untranslated(Cpu *c, uint32_t addr) {
 // x86 raises #DE here; the port keeps running with the quotient/remainder an ARM divide gives (q 0, r n
                                                                                                            
 // than fidelity in a case retail play shouldn't reach; the log line says if it ever does.
-void guest_divide_error(Cpu *c, uint32_t at) {
-    static uint32_t seen[256];
+// True the first time a site is seen (at most 256 sites are remembered; later ones are never reported).
+static int first_at_site(uint32_t *seen, uint32_t at) {
     for (unsigned k = 0; k < 256; k++) {
         uint32_t v = __atomic_load_n(&seen[k], __ATOMIC_RELAXED);
-        if (v == at) return;
+        if (v == at) return 0;
         if (v == 0) {
             uint32_t z = 0;
             if (!__atomic_compare_exchange_n(&seen[k], &z, at, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-                if (z == at) return;
+                if (z == at) return 0;
                 continue;
             }
-            fprintf(stderr, "boot: guest divide error (#DE) at %08X (eax %08X, edx %08X): continuing with the ARM result\n",
-                    at, c->eax, c->edx);
-            diag_event("divide_error at=%08X eax=%08X edx=%08X", at, c->eax, c->edx);
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+void guest_divide_error(Cpu *c, uint32_t at) {
+    static uint32_t seen[256];
+    if (!first_at_site(seen, at)) return;
+    fprintf(stderr, "boot: guest divide error (#DE) at %08X (eax %08X, edx %08X): continuing with the ARM result\n",
+            at, c->eax, c->edx);
+    diag_event("divide_error at=%08X eax=%08X edx=%08X", at, c->eax, c->edx);
+}
+// int3 (a failed assert, __break 0045CD20, SpeedScript errors): continued like under a debugger (see recomp.py int3).
+void guest_breakpoint(Cpu *c, uint32_t at) {
+    static uint32_t seen[256];
+    if (diag_on && first_at_site(seen, at)) diag_event("int3 at=%08X esp0=%08X", at, M32(c->esp));   // nothing when diag is off
 }
 // BEGIN audit3 Lua unwind helpers (compiled verbatim by difftest --audit-native).
 // The guest _setjmp still writes its original buffer. Only Lua's known protected
@@ -197,6 +212,9 @@ uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {
 }
 // Calls per import and per host (COM) function, for <diag>/calls.txt: which stubs the game really uses.
 static uint64_t import_calls_n[2048], host_fn_calls_n[4096];
+// Calls per server.dll import (its IAT is outside speed's thunk table), for BOOT_DIAG_LANSERVER's summary.
+const char *server_import_names[256];
+uint32_t server_import_calls[256];
 void boot_write_call_counts(FILE *f) {
     for (unsigned i = 0; i < speed_import_count && i < 2048; ++i)
         if (import_calls_n[i]) fprintf(f, "%12llu  %s\n", (unsigned long long)import_calls_n[i], speed_imports[i].name);
@@ -205,6 +223,10 @@ void boot_write_call_counts(FILE *f) {
 }
 void dispatch(Cpu *c, uint32_t t) {
     if (t == 0x006069E8u) host_lua_resume(c, t);   // Lua protected-error resume (audit 3 #2); dispatch is hot, so test inline
+    if ((t >= SERVER_BASE && t < SERVER_RESERVED_END) || (t >= SERVER_THUNK_BASE && t < SERVER_THUNK_BASE + 4096)) {
+        if (server_dispatch(c, t)) return;
+        die("call to unavailable server target %08X", t);
+    }
     if (t >= THUNK_BASE && t < THUNK_BASE + 4 * speed_import_count) {
         if ((t - THUNK_BASE) / 4 < 2048) __atomic_fetch_add(&import_calls_n[(t - THUNK_BASE) / 4], 1, __ATOMIC_RELAXED);
         host_import(c, speed_imports[(t - THUNK_BASE) / 4].slot);
@@ -354,6 +376,51 @@ static int resolve(const char *win, char *out, size_t n) {
     }
     return 0;
 }
+// Private converter probe: only existing car geometry/texture files, never saves or write opens.
+static int test_car_path(const char *guest, char *host, size_t n) {
+    const char *root = getenv("NFS_TEST_CAR_DIR");
+    if (!root || !*root || !guest) return 0;
+    char rel[1024], candidate[4096];
+    if (snprintf(rel, sizeof rel, "%s", guest) >= (int)sizeof rel) return 0;
+    for (char *p = rel; *p; ++p) if (*p == '\\') *p = '/';
+    char *r = rel;
+    if (strlen(r) > 2 && r[1] == ':') r += 2;
+    while (*r == '/') ++r;
+    if (!strncasecmp(r, "NFSMW/", 6)) r += 6;
+    if (strncasecmp(r, "CARS/", 5)) return 0;
+    char *car = r + 5, *file = strchr(car, '/');
+    if (!file || file == car) return 0;
+    *file++ = 0;
+    for (const char *p = car; *p; ++p)
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) return 0;
+    if (strcasecmp(file, "GEOMETRY.BIN") && strcasecmp(file, "TEXTURES.BIN")) return 0;
+    if (snprintf(candidate, sizeof candidate, "%s", root) >= (int)sizeof candidate) return 0;
+    // Match Windows component case on case-sensitive scratch volumes too.
+    const char *parts[] = {car, file};
+    for (int k = 0; k < 2; ++k) {
+        DIR *dir = opendir(candidate);
+        if (!dir) return 0;
+        struct dirent *e;
+        int found = 0;
+        while ((e = readdir(dir))) if (!strcasecmp(e->d_name, parts[k])) {
+            size_t len = strlen(candidate);
+            if (snprintf(candidate + len, sizeof candidate - len, "/%s", e->d_name) <
+                (int)(sizeof candidate - len)) found = 1;
+            break;
+        }
+        closedir(dir);
+        if (!found) return 0;
+    }
+    struct stat st;
+    if (stat(candidate, &st) || !S_ISREG(st.st_mode) || strlen(candidate) >= n) return 0;
+    snprintf(host, n, "%s", candidate);
+    if (diag_on) {
+        diag_event("test car redirect: %s -> %s", guest, host);
+        fprintf(stderr, "boot: test car redirect: %s -> %s\n", guest, host);
+    }
+    return 1;
+}
 // FindFirstFileA / FindNextFileA: a directory listing with Windows wildcards (case-insensitive; "*.*" is everything),
 // e.g. the save folder's aliases at start-up.
 // Handle ranges (each import routes by range, so they must not overlap): file handles HANDLE_BASE 0x1000 + 4*256
@@ -480,8 +547,18 @@ bad:;
     free(s); errno = err;
     return NULL;
 }
+// Private extratrax supplies the strong admission latch; public defaults to allow.
+__attribute__((weak)) int private_cars_save_allowed(void) { return 1; }
+__attribute__((weak)) int private_cars_save_prepare(const char *path) { (void)path; return 1; }
+__attribute__((weak)) void private_cars_save_complete(int committed) { (void)committed; }
+static int profile_write_denied(const char *path) {
+    return !private_cars_save_allowed() && (file_is_save(path) || !strcmp(path, userdata_dir()));
+}
 static uint32_t file_open(const char *win, const char *host, uint32_t access, uint32_t share, uint32_t disp, uint32_t flags) {
     int k = 1, fd = -1, fresh = 0, fl = file_flags(access, disp);
+    if ((fl != O_RDONLY) && profile_write_denied(host)) {
+        errno = EACCES; file_error(); return 0xFFFFFFFFu;
+    }
     for (; k < 256 && fds[k]; ++k) {}
     if (k == 256) { errno = EMFILE; goto bad; }
     SaveFile *s = NULL;
@@ -552,6 +629,10 @@ static void file_failed(uint32_t h) {
 }
 static ssize_t file_write(uint32_t h, const void *buf, size_t n) {
     int fd = h >= 0x100 && h < 0x110 ? 2 : handle_fd(h);
+    if (h >= HANDLE_BASE && (h - HANDLE_BASE) / 4 < 256 &&
+        file_info[(h - HANDLE_BASE) / 4].path && profile_write_denied(file_info[(h - HANDLE_BASE) / 4].path)) {
+        errno = EACCES; file_failed(h); return -1;
+    }
     ssize_t r = write(fd, buf, n);
     if (r < 0 || (size_t)r != n) { if (r >= 0) errno = EIO; file_failed(h); }
     return r;
@@ -562,6 +643,10 @@ static int file_flush(uint32_t h) {
     return r == 0;
 }
 static int file_end(uint32_t h) {
+    if (h >= HANDLE_BASE && (h - HANDLE_BASE) / 4 < 256 &&
+        file_info[(h - HANDLE_BASE) / 4].path && profile_write_denied(file_info[(h - HANDLE_BASE) / 4].path)) {
+        errno = EACCES; file_failed(h); return 0;
+    }
     int fd = handle_fd(h);
     off_t pos = lseek(fd, 0, SEEK_CUR);
     int r = pos < 0 ? -1 : ftruncate(fd, pos);
@@ -578,7 +663,9 @@ static int file_close(uint32_t h) {
     }
     SaveFile *s = file_info[k].save;
     int commit = s && (file_info[k].access & 0x40000000) && !--s->writers;
+    if (s && profile_write_denied(file_info[k].path)) s->failed = 1;
     int ok = 1;
+    if (commit && !s->failed && !private_cars_save_prepare(s->temp)) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
     if (commit && !s->failed && durable_sync(fd)) { s->failed = 1; ok = 0; file_error(); }
     if (close(fd)) { if (s) s->failed = 1; ok = 0; file_error(); }
     if (commit) {
@@ -603,6 +690,7 @@ static void save_sidecars_complete(uint32_t self, uint32_t state_before, unsigne
     int ok = save_fail_seq == seq_before && save_commit_seq != commits_before && !M32(self + 0x2f4);
     extratrax_save_complete(ok);
     padbind_save_complete(ok);
+    private_cars_save_complete(ok);
 }
 static void save_task_fixup(uint32_t self, uint32_t state_before, unsigned seq_before) {
     if (state_before != 0xb || !M32(self + 0x300) || save_fail_seq == seq_before) return;
@@ -811,15 +899,27 @@ static int win32(Cpu *c, const char *fn) {
         // the exe itself, or a system DLL (always loaded on Windows; the CRT relies on it)
         if (arg(c, 0) == 0) RET(0x400000, 1);
         const char *n = (const char *)G + arg(c, 0);
+        if (server_library_name(n)) RET(server_handle(), 1);
         RET(strcasestr(n, "kernel32") || strcasestr(n, "user32") || strcasestr(n, "ntdll") ? 0x7C800000 : 0, 1);
     }
     if (!strcmp(fn, "GetProcAddress")) {
-        if (boot_trace) fprintf(stderr, "      GetProcAddress(%s) -> not provided\n", (const char *)G + arg(c, 1));
+        if (arg(c, 0) == SERVER_BASE) RET(server_proc(arg(c, 0), arg(c, 1)), 2);
+        if (boot_trace) fprintf(stderr, "      GetProcAddress(%08X) -> not provided\n", arg(c, 1));
         RET(0, 2);
     }
-    if (!strcmp(fn, "LoadLibraryA")) RET(0, 1);
+    if (!strcmp(fn, "LoadLibraryA")) {
+        if (server_library_name(gptr(arg(c, 0)))) {
+            char path[4096];
+            resolve("server.dll", path, sizeof path);
+            RET(server_load(c, path), 1);
+        }
+        RET(0, 1);
+    }
     if (!strcmp(fn, "VirtualAlloc")) {
-        uint32_t n = arg(c, 1);
+        uint32_t n = arg(c, 1), requested = arg(c, 0);
+        if (requested && requested < SERVER_RESERVED_END && (uint64_t)requested + n > SERVER_BASE) {
+            last_error = 487; RET(0, 4);
+        }
         if (!arg(c, 0)) heap_note(3, (void *)(uintptr_t)M32(c->esp), n);
         heap_next = (heap_next + 0xFFFF) & ~0xFFFFu;
         uint32_t a = heap_next;
@@ -852,7 +952,7 @@ static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "GetEnvironmentStringsW") || !strcmp(fn, "GetEnvironmentStrings")) RET(galloc(8), 0);
     if (!strcmp(fn, "FreeEnvironmentStringsA") || !strcmp(fn, "FreeEnvironmentStringsW")) RET(1, 1);
     if (!strcmp(fn, "GetModuleFileNameA")) {
-        const char *s = "C:\\NFSMW\\speed.exe";
+        const char *s = arg(c, 0) && arg(c, 0) == server_handle() ? "C:\\NFSMW\\server.dll" : "C:\\NFSMW\\speed.exe";
         uint32_t n = arg(c, 2);
         strncpy((char *)G + arg(c, 1), s, n);
         RET(strlen(s), 3);
@@ -1032,7 +1132,11 @@ static int win32(Cpu *c, const char *fn) {
             RET(new_music_handle(&music), 7);
         }
         int x360_arrest_path(const char *guest, char *host, size_t n);   // x360_textures.m: NFS_X360_ARREST=x360
-        if (file_flags(acc, disp) == O_RDONLY) x360_arrest_path((char *)G + arg(c, 0), host, sizeof host);
+        if (file_flags(acc, disp) == O_RDONLY) {
+            x360_arrest_path((char *)G + arg(c, 0), host, sizeof host);
+            car85_path((char *)G + arg(c, 0), host, sizeof host);       // NFS_TEST_CAR85: CARS/CAR85 -> donor
+            test_car_path((char *)G + arg(c, 0), host, sizeof host);    // NFS_TEST_CAR_DIR: converted car files win
+        }
         uint32_t h = file_open((char *)G + arg(c, 0), host, acc, arg(c, 2), disp, arg(c, 5));
         if (boot_trace) fprintf(stderr, "      CreateFileA(%s) -> %s\n", (char *)G + arg(c, 0), h != 0xFFFFFFFF ? host : "not found");
         if (diag_on) diag_event("CreateFileA(%s, %X, disp %u) -> %s", (char *)G + arg(c, 0), acc, disp, h != 0xFFFFFFFF ? "ok" : strerror(errno));
@@ -1066,6 +1170,18 @@ static int win32(Cpu *c, const char *fn) {
         int fd = handle_fd(arg(c, 0));
         off_t o = lseek(fd, (int32_t)arg(c, 1), (int)arg(c, 3));
         RET(o < 0 ? 0xFFFFFFFF : (uint32_t)o, 4);
+    }
+    if (!strcmp(fn, "GetFileTime")) {
+        struct stat st;
+        int fd = handle_fd(arg(c, 0));
+        if (fd < 0 || fstat(fd, &st)) { last_error = 6; RET(0, 4); }
+        struct timespec times[] = {st.st_birthtimespec, st.st_atimespec, st.st_mtimespec};
+        for (int i = 0; i < 3; ++i) if (arg(c, i + 1)) {
+            uint64_t ft = ((uint64_t)times[i].tv_sec + 11644473600ull) * 10000000ull + (uint64_t)times[i].tv_nsec / 100;
+            M32(arg(c, i + 1)) = (uint32_t)ft;
+            M32(arg(c, i + 1) + 4) = (uint32_t)(ft >> 32);
+        }
+        RET(1, 4);
     }
     if (!strcmp(fn, "GetFileSize")) {
         X360MusicHandle *music = handle_music(arg(c, 0));
@@ -1188,7 +1304,10 @@ static int win32(Cpu *c, const char *fn) {
         RET(strlen(v) + 1, 4);
     }
     if (!strcmp(fn, "EnumSystemLocalesA")) RET(1, 2);
-    if (!strcmp(fn, "FreeLibrary")) RET(1, 1);
+    if (!strcmp(fn, "FreeLibrary")) {
+        if (arg(c, 0) == SERVER_BASE) RET(server_free(c, arg(c, 0)), 1);
+        RET(1, 1);
+    }
     if (!strcmp(fn, "SetConsoleCtrlHandler")) RET(1, 2);
     if (!strcmp(fn, "SetEnvironmentVariableA")) RET(1, 2);
     if (!strcmp(fn, "SetStdHandle")) RET(1, 2);
@@ -1201,6 +1320,7 @@ static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "DeleteFileA") || !strcmp(fn, "RemoveDirectoryA")) {
         char host[4096];
         resolve((char *)G + arg(c, 0), host, sizeof host);
+        if (profile_write_denied(host)) { last_error = 5; RET(0, 1); }
         int r = fn[0] == 'D' ? unlink(host) : rmdir(host);
         if (r) last_error = 2;
         RET(r == 0, 1);
@@ -1209,6 +1329,7 @@ static int win32(Cpu *c, const char *fn) {
         char a[4096], b[4096];
         resolve((char *)G + arg(c, 0), a, sizeof a);
         resolve((char *)G + arg(c, 1), b, sizeof b);
+        if (profile_write_denied(a) || profile_write_denied(b)) { last_error = 5; RET(0, 2); }
         int r = rename(a, b);
         if (r) last_error = 2;
         RET(r == 0, 2);
@@ -1249,8 +1370,14 @@ void host_import(Cpu *c, uint32_t slot) {
         if (speed_imports[m].slot == slot) { name = speed_imports[m].name; break; }
         if (speed_imports[m].slot < slot) lo = m + 1; else hi = m - 1;
     }
-    if (!name) die("call through unknown IAT slot %08X", slot);
     int import_index = (lo + hi) / 2;
+    if (!name) {
+        unsigned module_index = 0;
+        name = server_import(slot, &module_index);
+        import_index = name ? (int)(speed_import_count + module_index) : -1;
+        if (name && module_index < 256) { server_import_names[module_index] = name; ++server_import_calls[module_index]; }
+    }
+    if (!name) die("call through unknown IAT slot %08X", slot);
     ++import_calls;
     const char *fn = strchr(name, '!') + 1;
     if (boot_trace) fprintf(stderr, "  [%u] %s  esp %08X\n", import_calls, name, c->esp);
@@ -1284,6 +1411,7 @@ void host_import(Cpu *c, uint32_t slot) {
            : !strncmp(name, "d3d9", 4) ? win32_d3d9(c, fn)
            : !strncmp(name, "DSOUND", 6) ? win32_dsound(c, fn)
            : !strncmp(name, "DINPUT8", 7) ? win32_dinput(c, fn)
+           : !strncmp(name, "WS2_32", 6) || !strncmp(name, "NETAPI32", 8) ? win32_ws2(c, fn)
            : !strncmp(name, "USER32", 6) || !strncmp(name, "GDI32", 5) ? win32_user32(c, fn)
            : win32_threads(c, fn) || win32_heap(c, fn) || win32(c, fn);
     if (!ok)
@@ -1312,6 +1440,16 @@ void host_import(Cpu *c, uint32_t slot) {
 
 // ---------------- deterministic race start ----------------
 // BOOT_RACE=1 (or a race ID such as 15.1.1, from GLOBAL/gameplay.bin) skips the front end with the game's own
+// Split-screen car memory pool (NFS_PADS=2). PC's CarLoaderPoolSizes (008F7EF0) holds 50,000 KiB for one player and
+// 1 KiB for split (word 008F7EF4: PC never ran two player cars in one pool); the X360 uses 55,000 KiB for either
+// player count (828FD46C/70). RaceStarter picks 008F7EF4 only for the split race, so the one-player size is untouched.
+static void split_car_pool(void) {
+    if (pad_count() != 2) return;
+    const char *t = getenv("NFS_TEST_SPLITPOOL");                                // test only: =pc keeps PC's 1 KiB (before/after proof)
+    if ((t && !strcmp(t, "pc")) || M32(0x008F7EF4) != 1) return;               // not the PC table: leave it
+    M32(0x008F7EF4) = 55000;
+}
+
 // developer switches: main() calls RaceStarter::StartSkipFERace instead of LoadFrontend when SkipFE is set, and
 // QuickGame::HandleSkipFEOptions builds the startup race from SkipFERaceID. Retail never reads online.cfg
 // (OnlineCfg::ReadConfigFile has no caller), so the globals are written here, before the entry point runs.
@@ -1341,6 +1479,62 @@ static void race_setup(void) {
     if (getenv("BOOT_RACE_COPS")) M32(0x008F86C0) = 0;                         // SkipFEDisableCops (test: cops spawn in the race, for BOOT_PURSUIT)
     M32(0x00926080) = getenv("BOOT_RACE_AI") ? (uint32_t)atoi(getenv("BOOT_RACE_AI")) : 3;        // SkipFENumAICars
     printf("boot: SkipFE race %s, car %s, %u laps, %u opponents\n", race, car, M32(0x008F86BC), M32(0x00926080));
+}
+
+// BOOT_ONLINE=host|client: a 2-player race through the game's own client/server code (stage A1), entered by the
+// developer SkipFE-online route: StartSkipFERace calls RaceStarter::InitSkipFEOnline (0056C3E0) when OnlineEnabled is
+// set, which starts DirtySock, hosts or connects, and waits for NUMCLIENTCARS remote players. The OnlineCfg globals
+// (OnlineCfg::ProcessSetting 0078A900 stores; retail never reads online.cfg) are written here like the SkipFE ones.
+// BOOT_ONLINE_PEER=ip[:port]: the client's host (default 127.0.0.1:3658). The race is the BOOT_RACE one (default
+// 15.1.1, 1 lap, no AI). Two copies on one Mac: the client's binds move one port up (ws2_port_shift) when the peer is
+// a loopback address. Off by default: nothing here runs without BOOT_ONLINE.
+extern uint32_t ws2_local_ip;
+extern int ws2_port_shift;
+extern uint8_t ws2_mac_last;
+extern int ws2_online;
+static void online_setup(void) {
+    const char *role = getenv("BOOT_ONLINE");
+    if (!role || !*role || !strcmp(role, "0")) return;
+    int host = !strcmp(role, "host");
+    if (!host && strcmp(role, "client")) { fprintf(stderr, "boot: BOOT_ONLINE must be host or client, not \"%s\"\n", role); exit(2); }
+    const char *peer = getenv("BOOT_ONLINE_PEER") ? getenv("BOOT_ONLINE_PEER") : "127.0.0.1";
+    unsigned a = 127, b = 0, cc = 0, d = 1, port = 3658;
+    if (sscanf(peer, "%u.%u.%u.%u:%u", &a, &b, &cc, &d, &port) < 4 || a > 255 || b > 255 || cc > 255 || d > 255 || !port || port > 65535) {
+        fprintf(stderr, "boot: BOOT_ONLINE_PEER \"%s\" is not ip[:port]\n", peer);
+        exit(2);
+    }
+    uint32_t peer_ip = a << 24 | b << 16 | cc << 8 | d;   // host order, as SocketInTextGetAddr returns it
+    // This copy's address: the one that routes to the peer (loopback peer -> 127.0.0.1).
+    uint32_t local = 0x7F000001;
+    if (a != 127) {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in to = {sizeof to, AF_INET, htons(9), {htonl(peer_ip)}}, me;
+        socklen_t ml = sizeof me;
+        if (fd >= 0 && !connect(fd, (struct sockaddr *)&to, sizeof to) && !getsockname(fd, (struct sockaddr *)&me, &ml)) local = ntohl(me.sin_addr.s_addr);
+        if (fd >= 0) close(fd);
+    }
+    ws2_local_ip = local;
+    ws2_online = 1;
+    ws2_mac_last = host ? 1 : 2;
+    if (!host && a == 127) ws2_port_shift = getenv("BOOT_ONLINE_PORTSHIFT") ? atoi(getenv("BOOT_ONLINE_PORTSHIFT")) : 1;
+    setenv("BOOT_RACE", "15.1.1", 0);
+    setenv("BOOT_RACE_LAPS", "1", 0);
+    setenv("BOOT_RACE_AI", "0", 0);
+    M32(0x00926110) = 1;                                       // OnlineEnabled
+    M32(0x009B416C) = host;                                    // OnlineIsServer
+    M32(0x00905D98) = 1;                                       // SkipFEOnlineNumExpectedRemotePlayers (NUMCLIENTCARS)
+    M32(0x009B3E98) = host ? local : peer_ip;                  // SkipFEOnlineHostAddr (SERVERIP)
+    *(uint16_t *)(G + 0x00905DF8) = (uint16_t)port;            // NetworkHostPort (SERVERPORT)
+    M32(0x009B417C) = local;                                   // local address: read at 9 places, written by nothing in
+                                                               // the exe; InitSkipFEOnline spins until it is nonzero
+    M32(0x009B4174) = 0;                                       // NetworkUseLobbies: no EA lobby
+    M32(0x00926094) = 1;                                       // SkipFEDisableTraffic: the online race manager
+                                                               // (FUN_00761B30 state 5) ends the race at the first
+                                                               // vehicle without an IOnlinePlayer
+    if (host) M32(0x009B40F8) = peer_ip;                      // SkipFEOnlineClientAddr[0] (CLIENTIP0): the host
+                                                               // links to each listed client (InitSkipFEOnline 0056C493)
+    printf("boot: online %s, peer %u.%u.%u.%u:%u, local %u.%u.%u.%u, port shift %d\n", role, a, b, cc, d, port,
+           local >> 24, local >> 16 & 255, local >> 8 & 255, local & 255, ws2_port_shift);
 }
 
 // BOOT_SKIPINTRO=1: a new career skips the prologue (the D-Day races) and starts in the safehouse with the career
@@ -1382,6 +1576,18 @@ int main(int argc, char **argv) {
     game_dir = app_start(argc, argv);
     void settings_init(void), settings_dump(const char *), report_init(void);
     settings_init();                       // settings.c: the F10 menu's saved values, before anything reads its switch
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    // Inventory only; routing/registration and settings remain WO3/4. TEST roots
+    // are explicit and all fixtures set BOOT_USERDATA before this startup seam.
+    {
+        char root[4096];
+        private_cars_metadata_userdata(userdata_dir());
+        const char *override = getenv("NFS_TEST_PRIVATE_CARS_ROOT");
+        if (override && *override) snprintf(root, sizeof root, "%s", override);
+        else snprintf(root, sizeof root, "%s/private-cars", userdata_dir());
+        private_cars_init(root, 1, NULL, 0);
+    }
+#endif
     void settings_language_setup(const char *);
     settings_language_setup(game_dir);     // settings_port.c: the language packs present; the Language row when > 1
     if (getenv("BOOT_DIAG")) { char p[1100]; snprintf(p, sizeof p, "%s/settings_rows.txt", getenv("BOOT_DIAG")); settings_dump(p); }
@@ -1411,7 +1617,9 @@ int main(int argc, char **argv) {
         memcpy(G + 0x400000 + va, pe + raw, rs);
     }
     for (unsigned i = 0; i < speed_import_count; ++i) M32(speed_imports[i].slot) = THUNK_BASE + 4 * i;
+    online_setup();
     race_setup();
+    split_car_pool();
     dev_switches();
     reg_load();
     widescreen_setup();

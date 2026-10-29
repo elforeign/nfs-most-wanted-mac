@@ -8,6 +8,7 @@
 // Defaults: the rows carry the shipped defaults; with water left at its old default 0: FAIL, 1 failure (line 96); runtime/defaults_check.py
 // reads the real Setting rows (broken water row: FAIL 1 wrong).
 // graphics.trees row (R28): PASS; settings.c without its kLook entry: FAIL, 1 failure (line 111, Xbox 360 leaves it PC).
+// Built-in contact shadows no longer registers a row; obsolete keys tested by builtin_features_test.py.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

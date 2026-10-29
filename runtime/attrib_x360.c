@@ -154,8 +154,12 @@ static void steer_deadzone_patch(uint32_t ld) {
 }
 
 void f_00457F90_orig(Cpu *c);
+void car85_collection_seen(uint32_t ld, uint32_t vault);
+void car85_vault_loaded(Cpu *c, uint32_t vault);
+void car85_vault_begin(uint32_t vault);
 void x360audio_attrib_patch(uint32_t key, uint32_t cls, uint32_t lay, uint32_t ld);
 void f_00457F90(Cpu *c) {
+    car85_collection_seen(M32(c->esp + 4), M32(c->esp + 8));
     steer_deadzone_patch(M32(c->esp + 4));
     x360audio_attrib_patch(M32(M32(c->esp + 4)), M32(M32(c->esp + 4) + 4), M32(M32(c->esp + 4) + 0x1C), M32(c->esp + 4));   // sound attributes (x360audio.c)
     uint32_t ld_light = M32(c->esp + 4);
@@ -204,7 +208,9 @@ void f_00457670(Cpu *c) {
     uint32_t vault = c->ecx;
     unsigned seen_before = light_seen, records_before[2] = {light_records[0], light_records[1]},
              fields_before[2] = {light_fields[0], light_fields[1]};
+    car85_vault_begin(vault);
     f_00457670_orig(c);
+    car85_vault_loaded(c, vault);
     if (diag_on && light_seen != seen_before) {
         uint32_t vt = M32(0x00901828u);  // g_VisualTreatment, queried by 006C0A20
         diag_event("lighting_data: option=%s vault=%08X records 399ED882=%u C7C5806D=%u fields=%u/%u g_VisualTreatment=%u active_quartet=%s",

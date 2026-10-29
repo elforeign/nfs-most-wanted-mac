@@ -249,6 +249,7 @@ int user32_di_pending(void) { return (int)(di_head - di_tail); }
 void user32_pump(void);
 
 void prompts_input(int pad);              // padprompts.c: which input was used last (button prompts)
+#include "onscreen_keyboard.h"
 void prompts_mouse_moved(float points);
 void prompts_pad_seen(int connected);
 // portmenu.m: the F10 settings menu takes F10 always, and every key, character, mouse event and pad read while open.
@@ -261,8 +262,8 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
 int settings_get(const char *id);
 static void key_event(uint32_t hwnd, uint8_t vk, uint8_t scan, int down, int repeat) {
     if (!vk) return;
-    if (portmenu_key(vk, down, repeat)) return;
     if (down && !key_down[vk]) prompts_input(0);
+    if (portmenu_key(vk, down, repeat)) return;
     key_scan[vk] = scan;
     if (!(down && key_down[vk])) di_event((uint8_t)(scan | (vk_extended(vk) ? 0x80 : 0)), down);
     uint32_t lp = 1 | (uint32_t)scan << 16 | (uint32_t)vk_extended(vk) << 24;
@@ -306,6 +307,7 @@ static void pump(int wait) {
             switch (e.type) {
             case NSEventTypeKeyDown:
             case NSEventTypeKeyUp: {
+                if (e.type == NSEventTypeKeyDown) prompts_input(0);
                 if ((e.modifierFlags & NSEventModifierFlagCommand) && e.type == NSEventTypeKeyDown) break;  // Cmd-Q etc.
                 KeyMap k = e.keyCode < 128 ? mac_keys[e.keyCode] : (KeyMap){0, 0};
                 key_event(hwnd, k.vk, k.scan, e.type == NSEventTypeKeyDown, e.isARepeat);
@@ -536,6 +538,8 @@ static int kind_of_word(const char *w) {
            !strcasecmp(w, "ds4") || !strcasecmp(w, "dualshock4") ? PAD_KIND_DUALSHOCK4 :
            !strcasecmp(w, "edge") ? PAD_KIND_EDGE : !strcasecmp(w, "xbox") ? PAD_KIND_OTHER : -1;
 }
+static uint32_t script_pad2, script_raw2;   // slot 1 only, enabled by NFS_PADS=2
+static char script_axis2[32];
 static uint32_t script_pad, script_raw;   // BOOT_KEYS pad:MASK / padraw:MASK, held (with BOOT_PAD=sim)
 static int script_trigger_pair;
 static float script_lt, script_rt;
@@ -548,7 +552,8 @@ static int script_layout = -1;             // padlayout: changes this run only, 
 static char script_axis[32];               // BOOT_KEYS padaxis:NAME=V (lx ly rx ry lt rt), held
 // BOOT_KEYS=seq:step,step,...  steps run in order: KEY (press, release 4 ticks later), pad:MASK (BOOT_PAD=sim only: the
 // physical buttons in MASK, as BOOT_PAD's buttons= (bit 12 PS/Guide, 13 touchpad click), held 6 ticks; padraw:MASK the game's DirectInput buttons, after the
-// layout; padaxis:NAME=V one axis, after the layout (a stick also before it, as a real stick); each takes :N to be held
+// layout; pad2:MASK, pad2raw:MASK and pad2axis:NAME=V target slot 1 (NFS_PADS=2, BOOT_PAD2=sim);
+// padaxis:NAME=V one axis, after the layout (a stick also before it, as a real stick); each takes :N to be held
 // N ticks), padtriggers:LT/RT:N (both physical pressures BEFORE layout, cleared on release),
 // padlayout:xbox|playstation (run-only layout), padtype:WORD (BOOT_PAD=sim's identity from then on), pkg:NAME
 // (until the FE package in control starts with NAME, e.g. pkg:MainMenu.fng; at most 30 s; pkg:NAME:KEY presses KEY every
@@ -559,8 +564,14 @@ static char script_axis[32];               // BOOT_KEYS padaxis:NAME=V (lx ly rx
 // (focus loss for N seconds, below), race:N (N ticks after the race state, game-flow 6, began), cmdopt:K (Cmd-Option-K through the menu bar, e.g. cmdopt:p cycles the performance
 // overlay). A tick is 1/60 s of real time, so scripts behave the same at any frame rate
 // (they were written in frames at 60 fps).
+// Strict scripted menu runs must stop input at a package timeout.
+static int script_pkg_result(const char *ctl,const char *want,uint64_t elapsed,int strict) {
+    if(ctl && !strncasecmp(ctl,want,strlen(want)))return 1;
+    return elapsed>=1800 ? (strict ? -1 : 1) : 0;
+}
 static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
-    static int step = 0;
+    static int step = 0, sequence_failed;
+    if(sequence_failed)return;
     static uint64_t step_start = 0, last_draws = ~0ull, same_since = 0, release_at = 0;
     static char held[16];
     // script clock: 1/60 s ticks of wall time; in a race with NFS_LOCKSTEP one tick of the sim rate per frame, so a slow
@@ -576,6 +587,7 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     if (release_at && frame >= release_at) {
         float diag_car_speed(void);
         if (!strcmp(held, "pad")) { script_pad = script_raw = 0; script_axis[0] = 0; if (diag_on) diag_event("scripted pad up (car %.1f m/s)", diag_car_speed()); }
+        else if (!strcmp(held, "pad2")) { script_pad2 = script_raw2 = 0; script_axis2[0] = 0; }
         else if (!strcmp(held, "triggers")) {
             script_trigger_pair = 0; script_lt = script_rt = 0; ++script_trigger_step;
             if (diag_on) diag_event("scripted padtriggers up (car %.1f m/s)", diag_car_speed());
@@ -681,11 +693,16 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         float diag_car_speed(void);
         if (diag_on) diag_event("scripted %s down (car %.1f m/s)", tok, diag_car_speed());
         ++step; step_start = 0;
-    } else if (!strncmp(tok, "pad:", 4) || !strncmp(tok, "padraw:", 7) || !strncmp(tok, "padaxis:", 8)) {
-        if (tok[3] == ':') script_pad = (uint32_t)strtoul(tok + 4, NULL, 0);
-        else if (tok[3] == 'r') script_raw = (uint32_t)strtoul(tok + 7, NULL, 0);
-        else snprintf(script_axis, sizeof script_axis, "%s", tok + 8);
-        snprintf(held, sizeof held, "pad");
+    } else if (!strncmp(tok, "pad:", 4) || !strncmp(tok, "padraw:", 7) || !strncmp(tok, "padaxis:", 8) ||
+               !strncmp(tok, "pad2:", 5) || !strncmp(tok, "pad2raw:", 8) || !strncmp(tok, "pad2axis:", 9)) {
+        int second = tok[3] == '2';
+        const char *op = tok + 3 + second;
+        if (!second || pad_count() == 2) {
+            if (op[0] == ':') *(second ? &script_pad2 : &script_pad) = (uint32_t)strtoul(op + 1, NULL, 0);
+            else if (op[0] == 'r') *(second ? &script_raw2 : &script_raw) = (uint32_t)strtoul(op + 4, NULL, 0);
+            else snprintf(second ? script_axis2 : script_axis, sizeof script_axis, "%s", op + 5);
+        }
+        snprintf(held, sizeof held, "%s", second ? "pad2" : "pad");
         const char *hold = strchr(strchr(tok, ':') + 1, ':');   // pad:MASK:N etc.: held N ticks
         release_at = frame + (hold && atoi(hold + 1) > 0 ? (uint64_t)atoi(hold + 1) : 6);
         fprintf(stderr, "boot: scripted %s at frame %llu\n", tok, (unsigned long long)real_frame);
@@ -712,7 +729,16 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         snprintf(want, sizeof want, "%s", tok + 4);
         if ((key = strchr(want, ':'))) *key++ = 0;      // pkg:NAME:KEY presses KEY every 150 ticks meanwhile
         const char *ctl = fe_package_in_control();
-        if ((ctl && !strncasecmp(ctl, want, strlen(want))) || frame - step_start >= 1800) {
+        static int strict=-1;
+        if(strict<0){const char *v=getenv("BOOT_KEYS_STRICT");strict=v && !strcmp(v,"1");}
+        int result=script_pkg_result(ctl,want,frame-step_start,strict);
+        if(result<0){
+            sequence_failed=1;
+            fprintf(stderr,"script: package timeout want=%s actual=%s; input stopped\n",want,ctl?ctl:"none");
+            if(diag_on)diag_event("script: package timeout want=%s actual=%s; input stopped",want,ctl?ctl:"none");
+            return;
+        }
+        if (result>0) {
             if (diag_on) diag_event("script step %d %s done after %llu frames (%s)", step, tok, (unsigned long long)(frame - step_start), ctl ? ctl : "none");
             ++step; step_start = 0;
         } else if (key && frame - step_start >= 150 && frame - last_pkg_key >= 150) {
@@ -1066,6 +1092,14 @@ int win32_user32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "PeekMessageA") || !strcmp(fn, "GetMessageA")) {   // (msg, hwnd, min, max[, remove])
         int get = fn[0] == 'G';
         uint32_t out = arg(c, 0), min = arg(c, 2), max = arg(c, 3), rm = get ? 1 : arg(c, 4);
+        // Another thread's queue is empty (messages go to the window's thread): NetworkCore::Flush (0078B190) pumps from
+        // the online network thread at the race start, and AppKit throws when events are pumped off the main thread.
+        if (!pthread_main_np()) {
+            if (!get) RET(0, 5);
+            memset(G + out, 0, 28);                               // GetMessage: a WM_NULL after a short wait
+            gil_release(); usleep(10000); gil_acquire();
+            RET(1, 4);
+        }
         for (;;) {
             if (get && qlen == 0) wait_messages();
             pump(0);
@@ -1225,7 +1259,7 @@ static void pad_diag_bindings(void) {
 }
 static const char *pad_mode = "menus", *pad_ctl;   // the last mapping decision, for the diag pad: lines
 int controltype_passthrough(void);
-static void pad_apply_layout(PadState *st, uint32_t phys) {
+static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
     uint32_t sim = M32(SIM_INSTANCE);
     // Driving: racing (game-flow 6), the sim not paused, and no menu package in control (the race results come up
     // while the sim still runs; the HUD packages are HUD_*).
@@ -1235,11 +1269,13 @@ static void pad_apply_layout(PadState *st, uint32_t phys) {
     int remap = pad_remap_listening();
     // A button held while re-mapping starts (the Cross that picked the field: Accept in menus) or ends (the button
     // just bound) is left out until released, so it is neither bound nor taken as a new menu press.
-    static int last_remap;
-    static uint32_t remap_held;
-    if (remap != last_remap) { last_remap = remap; remap_held = phys; }
-    remap_held &= phys;
-    phys &= ~remap_held;
+    static int last_remaps[2];
+    static uint32_t remap_helds[2];
+    int *last_remap = &last_remaps[idx];
+    uint32_t *remap_held = &remap_helds[idx];
+    if (remap != *last_remap) { *last_remap = remap; *remap_held = phys; }
+    *remap_held &= phys;
+    phys &= ~*remap_held;
     pad_mode = remap ? "remap" : driving ? "driving" : "menus"; pad_ctl = ctl;
     static const char *last_mode;
     if (diag_on && pad_mode != last_mode) {
@@ -1265,10 +1301,12 @@ static void pad_apply_layout(PadState *st, uint32_t phys) {
     int xb = pad_layout_xbox();
     uint32_t back = bit(phys, xb ? P_CIRCLE : P_TRIANGLE), fourth = bit(phys, xb ? P_TRIANGLE : P_CIRCLE);
     uint32_t v = fourth << 0 | bit(phys, P_CROSS) << 1 | back << 2 | (phys & 0x30) | bit(phys, P_OPTIONS) << 7;   // menus
-    static uint32_t held_driving;           // a button held from driving into a menu (Options pausing) is no key there
+    // A button held from driving into a menu (Options pausing) is no key there.
+    static uint32_t held_drivings[2];
+    uint32_t *held_driving = &held_drivings[idx];
     uint32_t keys = bit(phys, P_SQUARE) | bit(phys, P_CREATE) << 1 | bit(phys, P_OPTIONS) << 2;
-    held_driving = driving ? keys : held_driving & keys;
-    pad_menu_keys(keys & ~held_driving);
+    *held_driving = driving ? keys : *held_driving & keys;
+    if (idx == 0) pad_menu_keys(keys & ~*held_driving);
     if (driving)
         v = gas << 0 | ebrake << 1 | brake << 2 | speedbreaker << 3 | lookback << 4 | bit(phys, P_CREATE) << 5 | nitrous << 6 |
             bit(phys, P_OPTIONS) << 7;
@@ -1280,9 +1318,9 @@ static void pad_apply_layout(PadState *st, uint32_t phys) {
 
 // The pad's identity: its kind and the name the game sees (DIDEVICEINSTANCE, the Controls screen's page title, and the
 // profile's binding set: padbind.c). Set by pad_read; a disconnected pad keeps the last one.
-static int pad_kind = PAD_KIND_NONE;
-static char pad_name[64];
-static void set_identity(int kind, const char *vendor) {
+static int pad_kinds[2];
+static char pad_names[2][64];
+static void set_identity(int idx, int kind, const char *vendor) {
     char name[64];
     if (kind == PAD_KIND_DUALSENSE) snprintf(name, sizeof name, "Controller (DualSense)");
     else if (kind == PAD_KIND_DUALSHOCK4) snprintf(name, sizeof name, "Controller (DualShock 4)");
@@ -1290,18 +1328,19 @@ static void set_identity(int kind, const char *vendor) {
     else if (!vendor || !*vendor) snprintf(name, sizeof name, "Controller (XBOX 360 For Windows)");
     else if (!strncasecmp(vendor, "Controller", 10)) snprintf(name, sizeof name, "%s", vendor);
     else snprintf(name, sizeof name, "Controller (%s)", vendor);
-    if (kind == pad_kind && !strcmp(name, pad_name)) return;
-    pad_kind = kind;
-    snprintf(pad_name, sizeof pad_name, "%s", name);
-    fprintf(stderr, "boot: controller %s\n", pad_name);
-    if (diag_on) diag_event("pad: identity %s (kind %d)", pad_name, kind);
+    if (kind == pad_kinds[idx] && !strcmp(name, pad_names[idx])) return;
+    pad_kinds[idx] = kind;
+    snprintf(pad_names[idx], sizeof pad_names[idx], "%s", name);
+    fprintf(stderr, "boot: controller %s\n", pad_names[idx]);
+    if (diag_on) diag_event("pad: identity %s (kind %d)", pad_names[idx], kind);
 }
-int pad_identity(char *name, size_t n) {
-    if (name && n) snprintf(name, n, "%s", pad_name);
-    return pad_kind;
+int pad_identity_n(int idx, char *name, size_t n) {
+    if (name && n) snprintf(name, n, "%s", idx >= 0 && idx < 2 ? pad_names[idx] : "");
+    return idx >= 0 && idx < 2 ? pad_kinds[idx] : PAD_KIND_NONE;
 }
+int pad_identity(char *name, size_t n) { return pad_identity_n(0, name, n); }
 static int kind_native(int kind) { return kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_DUALSHOCK4 || kind == PAD_KIND_EDGE; }
-int user32_pad_native(void) { return kind_native(pad_kind); }   // padprompts.c: PlayStation glyphs whatever the layout
+int user32_pad_native(void) { return kind_native(pad_kinds[0]); }   // padprompts.c: PlayStation glyphs whatever the layout
 // A PlayStation pad as itself: the physical buttons (L2/R2 only as their analog axes), nothing remapped.
 static void pad_native(PadState *st, uint32_t phys) {
     if (phys & 1u << P_L2) st->lt = 1;      // BOOT_PAD buttons= / pad: steps with the L2 / R2 bits: a full press
@@ -1312,14 +1351,14 @@ static void pad_native(PadState *st, uint32_t phys) {
     if (diag_on && st->buttons != last) { last = st->buttons; diag_event("pad: native buttons %04X", st->buttons); }
 }
 // The F10 menu is open: the game reads a connected pad at rest (the layout's held menu keys are released too).
-static void pad_neutral(PadState *st) {
+static void pad_neutral(int idx, PadState *st) {
     memset(st, 0, sizeof *st);
     st->connected = 1;
     st->pov = -1;
-    pad_apply_layout(st, 0);
+    pad_apply_layout(idx, st, 0);
     st->buttons = 0;
     st->lt = st->rt = 0;
-    st->native = kind_native(pad_kind);
+    st->native = kind_native(pad_kinds[idx]);
 }
 // A PlayStation pad's PS button and touchpad click reach the game (bindable in Options > Controls) unless one is the
 // F10 menu's shortcut (settings controls.menu_button: 0 automatic = the touchpad click on a pad with one, else the PS
@@ -1340,33 +1379,94 @@ static void pov_dirs(int pov, int *u, int *d, int *l, int *r) {   // hundredths 
 
 // A controller connecting or going away, at any time (GameController.framework adds a pad when it connects, wakes or is
 // plugged in; dinput.c's gamepad exists from start-up and reads centred while there is none). Logged to the app log.
-static int pad_present = -1;              // -1 before the first read
-static void pad_presence(int present, const char *what) {
-    if (present == pad_present) return;
-    int first = pad_present < 0;
-    pad_present = present;
+static int pad_presents[2] = {-1, -1};              // -1 before the first read
+static void pad_presence(int idx, int present, const char *what) {
+    if (present == pad_presents[idx]) return;
+    int first = pad_presents[idx] < 0;
+    pad_presents[idx] = present;
     if (present) {
         fprintf(stderr, "boot: controller connected: %s\n", what);
-        if (!first) prompts_input(1);     // connected while playing: its glyphs (a key press brings the keycaps back)
+        if (idx == 0 && !first) prompts_pad_seen(1);
     } else {
         fprintf(stderr, first ? "boot: no controller connected yet (one connecting later is picked up)\n"
                               : "boot: controller disconnected: the game reads it centred until one connects\n");
-        pad_menu_keys(0);                 // the menu keys it held are released
+        if (idx == 0) pad_menu_keys(0);                 // the menu keys it held are released
     }
     if (diag_on) diag_event("pad: %s%s (app active %d)", present ? "connected: " : first ? "none at start-up" : "disconnected",
                             present ? what : "", headless ? 0 : (int)NSApp.isActive);
 }
+// Cache the restart-only opt-in once: default reads retain the original single-controller scan,
+// without observers, locks, allocation or a second GCController.controllers fetch.
+int pad_count(void) {
+    static int count;
+    if (!count) { const char *e = getenv("NFS_PADS"); count = e && !strcmp(e, "2") ? 2 : 1; }
+    return count;
+}
+// Two-pad mode: notifications preserve connection order, and holes are reused without compacting
+// the surviving slot. Controllers already connected at initialization use the framework's order.
+// All access is serialized with notification delivery, which may arrive off the polling thread.
+static GCController *pad_slots[2];
+static void pad_slot_connect(GCController *ctl) {
+    if (!ctl.extendedGamepad) return;
+    @synchronized (GCController.class) {
+        for (int i = 0; i < 2; ++i) if (pad_slots[i] == ctl) return;
+        for (int i = 0; i < 2; ++i) if (!pad_slots[i]) { pad_slots[i] = ctl; return; }
+    }
+}
+static void pad_slot_disconnect(GCController *ctl) {
+    @synchronized (GCController.class) {
+        for (int i = 0; i < 2; ++i) if (pad_slots[i] == ctl) pad_slots[i] = nil;
+    }
+}
+static void pad_slots_init(void) {
+    if (pad_count() != 2) return;
+    const char *sim = getenv("BOOT_PAD");
+    if (sim && (!strcmp(sim, "sim") || !strncmp(sim, "sim:", 4))) return;
+    @autoreleasepool {
+        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            pad_slot_connect(n.object);
+        }];
+        [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            pad_slot_disconnect(n.object);
+        }];
+        @synchronized (GCController.class) {
+            for (GCController *ctl in GCController.controllers) pad_slot_connect(ctl);
+        }
+    }
+}
+static GCController *pad_controller_n(int idx) {
+    if (pad_count() == 1) {
+        if (idx) return nil;
+        for (GCController *ctl in GCController.controllers) if (ctl.extendedGamepad) return ctl;
+        return nil;
+    }
+    @synchronized (GCController.class) { return pad_slots[idx]; }
+}
 static uint64_t start_ns;                 // BOOT_PAD=sim:...@T: seconds since start-up
-__attribute__((constructor)) static void pad_clock(void) { start_ns = host_ticks(); }
+static uint32_t pad_activity(uint32_t buttons, const PadState *st, int has_touchpad) {
+    int choice = settings_get("controls.menu_button");
+    int shortcut = choice == 0 ? ((buttons & 8192u) || (!has_touchpad && (buttons & (4096u | 64u)))) :
+                   choice == 1 ? (buttons & 4096u) : choice == 2 ? ((buttons & 768u) == 768u) : (buttons & 64u);
+    if (shortcut) buttons |= OSK_MENU_SHORTCUT;
+    return buttons | (st->rx > .5f ? 1u << 16 : st->rx < -.5f ? 1u << 17 : 0) |
+           (st->ry > .5f ? 1u << 18 : st->ry < -.5f ? 1u << 19 : 0) |
+           (st->lt > .5f ? 1u << 20 : 0) | (st->rt > .5f ? 1u << 21 : 0);
+}
+__attribute__((constructor)) static void pad_clock(void) { start_ns = host_ticks(); pad_slots_init(); }
 
-// The first GameController.framework extended gamepad, or BOOT_PAD=sim:name=value,... (constant values for tests:
+// The indexed GameController.framework extended gamepad, or BOOT_PAD=sim:name=value,...
+// (BOOT_PAD2 for slot 1 with NFS_PADS=2; same parser and independent script state) (constant values for tests:
 // lx ly rx ry in -1..1 with y up positive, lt rt 0..1, buttons=<physical P_* mask>, dpad=<hundredths of a degree>; a
 // bare word is the pad's identity: dualsense, ds4, edge, or xbox, the default; a last @T1-T2-T3... connects it T1
 // seconds after start-up, disconnects it at T2, connects it again at T3, ...). 0: no controller (st centred).
-int pad_read(PadState *st) {
+int pad_read_n(int idx, PadState *st) {
     memset(st, 0, sizeof *st);
     st->pov = -1;
-    const char *sim = getenv("BOOT_PAD");
+    if (idx < 0 || idx >= pad_count()) return 0;
+    const char *sim = getenv(idx ? "BOOT_PAD2" : "BOOT_PAD");
+    const char *first_sim = idx && !sim ? getenv("BOOT_PAD") : NULL;
+    if (first_sim && (!strcmp(first_sim, "sim") || !strncmp(first_sim, "sim:", 4))) return 0;
     if (sim && !strcmp(sim, "sim")) sim = "sim:xbox";   // a bare sim is a simulated pad too, never the real controller
     if (sim && !strncmp(sim, "sim:", 4)) {
         const char *at = strchr(sim, '@'), *end = at ? at : sim + strlen(sim);
@@ -1382,7 +1482,7 @@ int pad_read(PadState *st) {
                 q = *e == '-' ? e + 1 : e + strlen(e);
             }
         }
-        if (!on) { pad_presence(0, NULL); prompts_pad_seen(0); return 0; }
+        if (!on) { pad_presence(idx, 0, NULL); if (!idx) prompts_pad_seen(0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
         st->connected = 1;
         int word_kind = -1;
         for (const char *p = sim + 4; p < end;) {
@@ -1400,63 +1500,66 @@ int pad_read(PadState *st) {
             while (p < end && *p != ',') ++p;
             if (p < end) ++p;
         }
-        if (script_trigger_pair) { st->lt = script_lt; st->rt = script_rt; }   // physical pair, before F10/layout
-        st->buttons |= script_pad;          // BOOT_KEYS pad: steps
-        int kind = sim_kind >= 0 ? sim_kind : word_kind >= 0 ? word_kind : PAD_KIND_OTHER;
-        pad_presence(1, kind == PAD_KIND_DUALSENSE ? "simulated DualSense" : kind == PAD_KIND_DUALSHOCK4 ? "simulated DualShock 4" :
+        const char *axis = idx ? script_axis2 : script_axis;
+        if (!idx && script_trigger_pair) { st->lt = script_lt; st->rt = script_rt; }   // physical pair, before F10/layout
+        st->buttons |= idx ? script_pad2 : script_pad;          // BOOT_KEYS pad: steps
+        int kind = !idx && sim_kind >= 0 ? sim_kind : word_kind >= 0 ? word_kind : PAD_KIND_OTHER;
+        pad_presence(idx, 1, kind == PAD_KIND_DUALSENSE ? "simulated DualSense" : kind == PAD_KIND_DUALSHOCK4 ? "simulated DualShock 4" :
                         kind == PAD_KIND_EDGE ? "simulated DualSense Edge" : "simulated pad");
-        set_identity(kind, NULL);
-        prompts_pad_seen(1);
+        set_identity(idx, kind, NULL);
+        if (!idx) prompts_pad_seen(1);
         // the F10 menu: bit 12 is the PS/Guide button, bit 13 the touchpad click (a simulated DualSense)
         int u, d, l, r;
-        if (script_axis[0] && (!strncmp(script_axis, "lx", 2) || !strncmp(script_axis, "ly", 2)) && strchr(script_axis, '='))   // BOOT_KEYS padaxis: the menu sees a scripted left stick
-            (script_axis[1] == 'x' ? &st->lx : &st->ly)[0] = (float)atof(strchr(script_axis, '=') + 1);
+        if (axis[0] && (!strncmp(axis, "lx", 2) || !strncmp(axis, "ly", 2)) && strchr(axis, '='))   // BOOT_KEYS padaxis: the menu sees a scripted left stick
+            (axis[1] == 'x' ? &st->lx : &st->ly)[0] = (float)atof(strchr(axis, '=') + 1);
         pov_dirs(st->pov, &u, &d, &l, &r);
-        uint32_t inject, hide = portmenu_pad(st->buttons & 0xFFF, u, d, l, r, st->lx, st->ly, (st->buttons >> 12) & 1, (st->buttons >> 13) & 1, 1, &inject);
-        uint32_t extras = kind_native(pad_kind) ? st->buttons & pad_game_extras(1) & 0xF000 : 0;
+        if (osk_pad(idx, pad_activity(st->buttons, st, 1), u, d, l, r, st->lx, st->ly, 1,
+                    pad_layout_xbox() && !kind_native(kind))) { pad_neutral(idx, st); return 1; }
+        uint32_t inject = 0, hide = idx ? (portmenu_is_open() ? ~0u : 0) : portmenu_pad(st->buttons & 0xFFF, u, d, l, r, st->lx, st->ly, (st->buttons >> 12) & 1, (st->buttons >> 13) & 1, 1, &inject);
+        uint32_t extras = kind_native(pad_kinds[idx]) ? st->buttons & (idx ? 0xF000u : pad_game_extras(1)) & 0xF000 : 0;
         st->buttons &= 0xFFF;
-        if (hide == ~0u) { pad_neutral(st); return 1; }
+        if (hide == ~0u || osk_visible()) { pad_neutral(idx, st); return 1; }
         st->buttons = (st->buttons & ~hide) | inject | extras;
-        if (st->buttons || fabsf(st->lx) > 0.5f || fabsf(st->ly) > 0.5f || fabsf(st->rx) > 0.5f || fabsf(st->ry) > 0.5f ||
-            st->lt > 0.5f || st->rt > 0.5f || st->pov >= 0)
-            prompts_input(1);
         float *ax[6] = {&st->lx, &st->ly, &st->rx, &st->ry, &st->lt, &st->rt};
         static const char *an[6] = {"lx", "ly", "rx", "ry", "lt", "rt"};
-        float axv = script_axis[0] ? (float)atof(strchr(script_axis, '=') ? strchr(script_axis, '=') + 1 : "0") : 0;
-        for (int k = 0; k < 4; ++k) if (script_axis[0] && !strncmp(script_axis, an[k], 2)) *ax[k] = axv;   // sticks: seen by the layout
-        if (kind_native(pad_kind)) pad_native(st, st->buttons);
-        else pad_apply_layout(st, st->buttons);   // buttons= is the physical P_* mask, mapped like a real pad
-        st->buttons |= script_raw;
-        for (int k = 0; k < 6; ++k) if (script_axis[0] && !strncmp(script_axis, an[k], 2)) *ax[k] = axv;
-        static uint32_t last_sim = ~0u;
-        if (diag_on && st->buttons != last_sim) {
-            last_sim = st->buttons;
-            diag_event("pad: sim buttons %03X ry %.2f, %s (package in control %s)", st->buttons, st->ry, pad_mode, pad_ctl ? pad_ctl : "none");
+        float axv = axis[0] ? (float)atof(strchr(axis, '=') ? strchr(axis, '=') + 1 : "0") : 0;
+        for (int k = 0; k < 4; ++k) if (axis[0] && !strncmp(axis, an[k], 2)) *ax[k] = axv;   // sticks: seen by the layout
+        if (kind_native(pad_kinds[idx])) pad_native(st, st->buttons);
+        else pad_apply_layout(idx, st, st->buttons);   // buttons= is the physical P_* mask, mapped like a real pad
+        st->buttons |= idx ? script_raw2 : script_raw;
+        for (int k = 0; k < 6; ++k) if (axis[0] && !strncmp(axis, an[k], 2)) *ax[k] = axv;
+        static uint32_t last_sims[2] = {~0u, ~0u};
+        uint32_t *last_sim = &last_sims[idx];
+        if (diag_on && st->buttons != *last_sim) {
+            *last_sim = st->buttons;
+            diag_event(idx ? "pad2: sim buttons %03X ry %.2f, %s (package in control %s)" :
+                             "pad: sim buttons %03X ry %.2f, %s (package in control %s)",
+                       st->buttons, st->ry, pad_mode, pad_ctl ? pad_ctl : "none");
         }
-        rumble_update();                    // a connected DualSense still plays the rumble
+        if (!idx) rumble_update();                    // a connected DualSense still plays the rumble
         // the adaptive triggers and lightbar decide as for a real pad and only log it (padfx.m never touches a pad here)
-        padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
+        if (!idx) padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
         return 1;
     }
-    if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kind); return 1; }   // another app has focus: centred, nothing pressed
+    if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }   // another app has focus: centred, nothing pressed
     @autoreleasepool {
-        GCExtendedGamepad *g = nil;
-        GCController *ctl = nil;
-        for (GCController *k in GCController.controllers) if ((g = k.extendedGamepad)) { ctl = k; break; }
-        if ((g != nil) != pad_present)
-            pad_presence(g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
+        GCController *ctl = pad_controller_n(idx);
+        GCExtendedGamepad *g = ctl.extendedGamepad;
+        if ((g != nil) != pad_presents[idx])
+            pad_presence(idx, g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
                                         ctl.productCategory ?: @"?", (unsigned long)GCController.controllers.count].UTF8String : NULL);
-        prompts_pad_seen(g != nil);
-        if (!g) return 0;
-        rumble_update();
+        if (idx == 0) prompts_pad_seen(g != nil);
+        if (!g) { osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+        // Pad 1 feedback would hook here once the model and legacy single-output HID transport have player routing.
+        if (idx == 0) rumble_update();
         st->connected = 1;
         int kind = PAD_KIND_OTHER;
         NSString *cat = ctl.productCategory ?: @"";
         if ([g isKindOfClass:GCDualSenseGamepad.class] || [cat hasPrefix:@"DualSense"])
             kind = [cat rangeOfString:@"Edge" options:NSCaseInsensitiveSearch].location != NSNotFound ? PAD_KIND_EDGE : PAD_KIND_DUALSENSE;
         else if ([g isKindOfClass:GCDualShockGamepad.class] || [cat hasPrefix:@"DualShock"]) kind = PAD_KIND_DUALSHOCK4;
-        set_identity(kind, ctl.vendorName.UTF8String);
-        padfx_update((__bridge void *)ctl, [g isKindOfClass:GCDualSenseGamepad.class], g.leftTrigger.value, g.rightTrigger.value);
+        set_identity(idx, kind, ctl.vendorName.UTF8String);
+        if (idx == 0) padfx_update((__bridge void *)ctl, [g isKindOfClass:GCDualSenseGamepad.class], g.leftTrigger.value, g.rightTrigger.value);
         st->lx = g.leftThumbstick.xAxis.value; st->ly = g.leftThumbstick.yAxis.value;
         st->rx = g.rightThumbstick.xAxis.value; st->ry = g.rightThumbstick.yAxis.value;
         st->lt = g.leftTrigger.value; st->rt = g.rightTrigger.value;
@@ -1474,15 +1577,17 @@ int pad_read(PadState *st) {
         GCControllerButtonInput *home = g.buttonHome;
         int choice = settings_get("controls.menu_button");
         static __weak GCControllerButtonInput *home_claimed;
-        if (home && home != home_claimed && (choice == 1 || (choice == 0 && !touch) || kind_native(kind))) {
+        if (idx == 0 && home && home != home_claimed && (choice == 1 || (choice == 0 && !touch) || kind_native(kind))) {
             // the system's Home-button gesture (Launchpad / game overlay) off while we're frontmost, so the press is ours
             home.preferredSystemGestureState = GCSystemGestureStateDisabled;
             home_claimed = home;
             if (diag_on) diag_event("pad: claimed the Home button from the system (%s)", ctl.vendorName.UTF8String ?: "?");
         }
         if (diag_on && home.pressed) { static int logged; if (!logged++) diag_event("pad: Home button delivered to the app"); }
-        uint32_t inject, hide = portmenu_pad(phys, up, down, left, right, st->lx, st->ly, home.pressed, touch.pressed, touch != nil, &inject);
-        if (hide == ~0u) { pad_neutral(st); return 1; }
+        if (osk_pad(idx, pad_activity(phys | (home.pressed ? 4096u : 0) | (touch.pressed ? 8192u : 0), st, touch != nil), up, down, left, right,
+                    st->lx, st->ly, 1, pad_layout_xbox() && !kind_native(kind))) { pad_neutral(idx, st); return 1; }
+        uint32_t inject = 0, hide = idx == 0 ? portmenu_pad(phys, up, down, left, right, st->lx, st->ly, home.pressed, touch.pressed, touch != nil, &inject) : (portmenu_is_open() ? ~0u : 0);
+        if (hide == ~0u || osk_visible()) { pad_neutral(idx, st); return 1; }
         phys = (phys & ~hide) | inject;
         if (kind_native(kind)) {           // PS, the touchpad click, the Edge's back paddles, when not the menu's shortcut
             GCControllerButtonInput *lp = nil, *rp = nil;
@@ -1491,28 +1596,28 @@ int pad_read(PadState *st) {
             }
             uint32_t extras = (home.pressed ? 1u << P_PS : 0) | (touch.pressed ? 1u << P_TOUCHPAD : 0) |
                               (lp.pressed ? 1u << P_LPADDLE : 0) | (rp.pressed ? 1u << P_RPADDLE : 0);
-            pad_native(st, phys | (extras & pad_game_extras(touch != nil)));
+            pad_native(st, phys | (extras & (idx == 0 ? pad_game_extras(touch != nil) : 0xF000u)));
         } else
-            pad_apply_layout(st, phys);
-        if (phys || up || down || left || right || fabsf(st->lx) > 0.5f || fabsf(st->ly) > 0.5f || fabsf(st->rx) > 0.5f ||
-            fabsf(st->ry) > 0.5f || g.leftTrigger.value > 0.5f || g.rightTrigger.value > 0.5f)
-            prompts_input(1);
+            pad_apply_layout(idx, st, phys);
         if (up || down || left || right) {
             int x = right - left, y = up - down;
             static const int pov[3][3] = {{22500, 27000, 31500}, {18000, -1, 0}, {13500, 9000, 4500}};   // [x+1][y+1]
             st->pov = pov[x + 1][y + 1];
         }
         if (diag_on) {                   // each change of buttons/D-pad, or of a stick/trigger by 0.25
-            static PadState last;
+            static PadState lasts[2];
+            PadState last = lasts[idx];
             float d = fabsf(st->lx - last.lx) + fabsf(st->ly - last.ly) + fabsf(st->rx - last.rx) + fabsf(st->ry - last.ry) +
                       fabsf(st->lt - last.lt) + fabsf(st->rt - last.rt);
             if (st->buttons != last.buttons || st->pov != last.pov || d > 0.25f) {
                 diag_event("pad: buttons %03X pov %d lx %.2f ly %.2f rx %.2f ry %.2f lt %.2f rt %.2f, %s (package in control %s, app active %d)",
                            st->buttons, st->pov, st->lx, st->ly, st->rx, st->ry, st->lt, st->rt, pad_mode, pad_ctl ? pad_ctl : "none",
                            (int)NSApp.isActive);
-                last = *st;
+                lasts[idx] = *st;
             }
         }
     }
     return 1;
 }
+
+int pad_read(PadState *st) { return pad_read_n(0, st); }

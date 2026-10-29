@@ -19,12 +19,16 @@ static char udir[64];
 const char *userdata_dir(void) { return udir; }
 int user32_pad_layout_xbox(void) { return 0; }
 int pad_identity(char *name, size_t n) { snprintf(name, n, "Controller (DualSense)"); return PAD_KIND_DUALSENSE; }
+int pad_identity_n(int idx, char *name, size_t n) { (void)idx; return pad_identity(name,n); }
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {   // 0063CD80: the new pad's default bindings
     (void)c; (void)n; (void)args;
     if (fn == 0x0063CD80u) set_rec(rec(CT_GAS, 2), T_BUTTON, 0, 77);
     return 0;
 }
 void f_006349B0_orig(Cpu *c) { padbind_sync(c); }   // the device poll inside the GameAction update
+int pad_count(void) { return 1; }                   // one host pad: the split-screen paths stay off
+void f_00628940(Cpu *c) { (void)c; }
+void f_00634B50_orig(Cpu *c) { (void)c; }
 void f_004F6EA0_orig(Cpu *c) { (void)c; }
 uint32_t f_0056E180_orig(Cpu *c) { (void)c; return 0; }
 void f_0056E200_orig(Cpu *c) { (void)c; }

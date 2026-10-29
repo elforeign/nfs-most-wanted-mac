@@ -197,6 +197,39 @@ static void nonps_defaults(int xbox) {
     }
     add(A_NEXTSONG, T_BUTTON, XBOX_L3);
 }
+// P2 uses its own layout defaults when P1's shared table describes another layout.
+// Cache from the retail Xbox base, before profile/custom bindings are applied.
+static uint32_t port_defaults[3][GA_N][6], port_saved[GA_N][6];
+static int port_defaults_valid;
+static void port_page(uint32_t page[GA_N][6], int install) {
+    for (int a = 0; a < GA_N; ++a)
+        if (install) memcpy(G + rec(a, 2), page[a], 24);
+        else memcpy(page[a], G + rec(a, 2), 24);
+}
+static void port_cache_defaults(void) {
+    if (pad_count() != 2) return;
+    port_page(port_saved, 0);                // unmodified retail Xbox defaults
+    for (int layout = L_NATIVE_PS; layout <= L_NONPS_XBOX; ++layout) {
+        port_page(port_saved, 1);
+        if (layout == L_NATIVE_PS) ps_defaults();
+        else nonps_defaults(layout == L_NONPS_XBOX);
+        port_page(port_defaults[layout - L_NATIVE_PS], 0);
+    }
+    port_page(port_saved, 1);
+    port_defaults_valid = 1;
+}
+int padbind_port_begin(int idx) {
+    if (idx != 1 || pad_count() != 2 || !port_defaults_valid) return 0;
+    char name[64];
+    pad_identity_n(idx, name, sizeof name);
+    int layout = layout_for(name);
+    if (layout == active_layout) return 0;   // same layout retains the shared custom bindings
+    port_page(port_saved, 0);
+    port_page(port_defaults[layout - L_NATIVE_PS], 1);
+    return 1;
+}
+void padbind_port_end(int swapped) { if (swapped) port_page(port_saved, 1); }
+
 void f_0063CD80_orig(Cpu *c);
 void f_0063CD80(Cpu *c) {                      // cdecl (void): the joystick's defaults, by its name
     uint32_t dev = joy();
@@ -214,6 +247,7 @@ void f_0063CD80(Cpu *c) {                      // cdecl (void): the joystick's d
         for (int k = 0; k < 2; ++k) for (int i = 0; i < 3; ++i)
             legacy_defaults[a][k][i] = M32(rec(a, k + 2) + 4u * (uint32_t)i);
     legacy_defaults_valid = 1;
+    port_cache_defaults();
     if (ps) ps_defaults();
     else {
         nonps_defaults(user32_pad_layout_xbox());

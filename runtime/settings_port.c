@@ -329,6 +329,10 @@ static const char *const kPrompts[] = {"Automatic", "Console glyphs", "PC keycap
 static Setting s_prompts = {.id = "controls.prompts", .category = SET_CONTROLS, .order = 30, .label = "Button prompts",
     .help = "Automatic shows console glyphs while a controller is in use and keycaps after a key press or the mouse.",
     .type = SET_CHOICE, .choices = kPrompts, .values = kPromptsV, .nchoices = 3, .env = "NFS_BUTTON_PROMPTS", .restart = 1};
+static const char *const kPads[] = {"1 (single player)", "2 (split-screen)"}, *const kPadsV[] = {"1", "2"};
+static Setting s_pads = {.id = "controls.pads", .category = SET_CONTROLS, .order = 35, .label = "Controllers",
+    .help = "2 lets a second controller join: Quick Race then offers Split Screen, each player with their own half.",
+    .type = SET_CHOICE, .choices = kPads, .values = kPadsV, .nchoices = 2, .env = "NFS_PADS", .restart = 1};
 static const char *const kOffOnL[] = {"Off", "On"}, *const kOffOnV[] = {"off", "on"};
 static void rumble_apply(int v) { rumble_set_enabled(v); }
 static Setting s_rumble = {.id = "controls.rumble", .category = SET_CONTROLS, .order = 70, .label = "Rumble",
@@ -372,8 +376,8 @@ static const char *const kCatV[] = {"Audio", "Graphics", "Controls", "Gameplay",
 static Setting s_cat = {.id = "diag.report_category", .category = SET_DIAGNOSTICS, .order = 40, .label = "What's wrong",
     .help = "Pick the kind of problem; it goes on the report's first lines.", .type = SET_CHOICE, .choices = kCat, .values = kCatV,
     .nchoices = N(kCat), .def = 5, .pref = ""};
-static Setting s_note = {.id = "diag.report_note", .category = SET_DIAGNOSTICS, .order = 50, .label = "Note (keyboard)", .type = SET_TEXT,
-    .help = "Press Enter, type a short optional description, then press Enter again."};
+static Setting s_note = {.id = "diag.report_note", .category = SET_DIAGNOSTICS, .order = 50, .label = "Note", .type = SET_TEXT,
+    .help = "Select to enter a short optional description with your keyboard or controller."};
 static void report_save(int v) {
     (void)v;
     Setting *c = settings_find("diag.report_category");
@@ -409,6 +413,11 @@ static Setting s_quit = {.id = "diag.quit_game", .category = SET_DISPLAY, .order
     .help = "Saves settings and closes the game after a second press within 4 seconds, losing race progress since the last save.", .apply = app_quit_game};
 static Setting s_logs = {.id = "diag.logs_open", .category = SET_DIAGNOSTICS, .order = 100, .label = "Show logs in Finder", .type = SET_ACTION,
     .help = "Opens this run's log folder (the diagnostic folder with full logging).", .apply = open_logs};
+
+// Keep the LAN row outside the language-only extraction used by gamelang_test.py.
+static Setting s_lan = {.id = "gameplay.lan", .category = SET_GAMEPLAY, .order = 80, .label = "LAN play (beta)",
+    .help = "In development; both Macs must be on the same network. Takes effect after a restart.",
+    .type = SET_TOGGLE, .def = 0, .env = "NFS_LAN", .own_pref = 1, .restart = 1};
 
 // ---------------- Gameplay: the game's text language (old public issues #7, #12) ----------------
 // speed.exe reads one registry value, Language, and looks it up in its LanguageConversionTable (0x8fb578, FUN_006c5350
@@ -515,12 +524,12 @@ __attribute__((constructor)) static void settings_port_register(void) {
         }
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
-    REG(s_window); REG(s_overlay);
+    REG(s_window); REG(s_overlay); REG(s_lan);
     REG(s_framelimit);
     REG(s_vrr);
     REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
     REG(s_audio); REG(s_limiter); REG(s_speaker_layout); REG(s_engine_sound); REG(s_audio_now);
-    REG(s_menubtn); REG(s_layout); REG(s_prompts); REG(s_rumble); REG(s_rumble_surfaces); REG(s_rumble_props); REG(s_triggers); REG(s_light);
+    REG(s_menubtn); REG(s_layout); REG(s_prompts); REG(s_pads); REG(s_rumble); REG(s_rumble_surfaces); REG(s_rumble_props); REG(s_triggers); REG(s_light);
     REG(h_perf); REG(s_perf); REG(s_audio_now2);
     REG(h_report); REG(s_cat); REG(s_note); REG(s_save); REG(s_open);
     REG(h_log); REG(s_full); REG(s_logs); REG(s_quit); REG(s_restart);

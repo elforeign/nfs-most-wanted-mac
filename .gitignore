@@ -6,6 +6,7 @@ media/mediatest
 *.o
 *.a
 __pycache__/
+.metal-cache/
 .DS_Store
 *.dSYM/
 host/audio/build/

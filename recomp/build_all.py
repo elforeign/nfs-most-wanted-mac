@@ -9,6 +9,10 @@ instead (same output; kept one release for A/B).
 Output in port/recomp/out/: speed_NN.c (chunks), funcs.h (prototypes), table.c (guest address -> function, for
 dispatch, and the code fingerprint of speed.exe), speed.a, and report.txt. Functions the translator can't handle yet become stubs that call
 untranslated(c, address), so the library links completely.
+
+If present, the separately fingerprinted server.dll beside speed.exe (override:
+--server-dll / $NFS_SERVER_DLL) builds to out/server/server.a with private tables.
+Absent DLLs skip cleanly; --skip-server disables this optional build entirely.
 """
 import argparse
 import re
@@ -159,10 +163,129 @@ def water_reflection_gates(addr, code):
     return code
 
 
+def split_shadow_operands(addr, code):
+    """Split-only operand aliases, preserving IDs and the retail branches/state.
+
+    Assert instruction text as well as operand: a changed decoder must fail closed.
+    """
+    sites = {
+        0x006C5B80: ((0x006C5BD5, 'cmp dword ptr [edx + 4], 1',
+                     'M32((uint32_t)(c->edx + 0x4u))', 'split_shadow_id(c->edx)'),),
+        0x006C7030: ((0x006C715F, 'cmp dword ptr [edx + 4], 1',
+                     'M32((uint32_t)(c->edx + 0x4u))', 'split_shadow_id(c->edx)'),
+                    (0x006C71D7, 'mov eax, dword ptr [0x919650]',
+                     'M32((uint32_t)(0x919650u))', 'split_shadow_player_plat()')),
+        0x006D6AA0: ((0x006D6B68, 'cmp dword ptr [ecx + 4], 1',
+                     'M32((uint32_t)(c->ecx + 0x4u))', 'split_shadow_id(c->ecx)'),),
+        0x0074E160: ((0x0074E812, 'cmp dword ptr [edi + 4], 1',
+                     'M32((uint32_t)(c->edi + 0x4u))', 'split_shadow_id(c->edi)'),),
+        0x006C83D0: ((0x006C83DE, 'mov ecx, dword ptr [0x9196b8]',
+                     'M32((uint32_t)(0x9196B8u))', 'split_shadow_rain()'),),
+        0x00731870: ((0x007318AA, 'mov eax, dword ptr [eax + 0x919620]',
+                     'M32((uint32_t)(c->eax + 0x919620u))',
+                     'split_shadow_section_camera(M32((uint32_t)(c->eax + 0x919620u)))'),),
+        0x006E44C0: ((0x006E50C8, 'mov eax, dword ptr [0x982c08]',
+                     '    c->eax =', '    split_shadow_casters(c);\n    c->eax ='),),
+    }
+    for site, instruction, old, new in sites.get(addr, ()):
+        marker = f'    /* {site:08X}: {instruction} */'
+        assert code.count(marker) == 1, f'split shadow instruction changed: {site:08X}'
+        start = code.index(marker)
+        end = code.find('    /* ', start + len(marker))
+        assert end >= 0
+        block = code[start:end]
+        assert block.count(old) == 1, f'split shadow operand changed: {site:08X}'
+        code = code[:start] + block.replace(old, new, 1) + code[end:]
+    return code
+
+
+def split_fx_operands(addr, code):
+    """Only effects' source operands; real eView IDs and global view mode stay intact."""
+    sites = {
+        0x00505380: ((0x005056BB, 'call 0x410d40',
+                     'f_00410D40(c);', 'f_00410D40(c); c->eax = split_fx_player(c->eax);'),),
+        0x00744E20: ((0x00744EFF, 'mov eax, dword ptr [eax + 4]',
+                     'M32((uint32_t)(c->eax + 0x4u))', 'split_fx_flare_step(c->eax, c->edi)'),),
+        0x00758100: (
+            (0x00758203, 'fmul dword ptr [esp + 0xc]',
+             'MF32((uint32_t)(c->esp + 0xCu))', 'split_fx_rain_dt(MF32((uint32_t)(c->esp + 0xCu)))'),
+            (0x0075838E, 'fmul dword ptr [0x890f14]',
+             'MF32((uint32_t)(0x890F14u))', 'split_fx_rain_scale(MF32((uint32_t)(0x890F14u)))'),
+            # Paused rain compensates for the old /8. Full-quality split must not multiply it by 8.
+            (0x007581B4, 'fmul dword ptr [0x8b2f28]',
+             'MF32((uint32_t)(0x8B2F28u))', 'split_fx_rain_scale(MF32((uint32_t)(0x8B2F28u)))'),
+        ),
+        0x0073CDB0: ((0x0073CE3B, 'mov eax, 0xa',
+                      '(uint32_t)0xAu', 'split_fx_drop_count(10)'),),
+        0x00507770: (
+            (0x005077FD, 'mov eax, dword ptr [0x9196b8]',
+             'M32((uint32_t)(0x9196B8u))', 'M32(split_fx_view(0x00919650u) + 0x68)'),
+            (0x00507820, 'push 0x919650', '0x919650u', 'split_fx_view(0x00919650u)'),
+        ),
+        0x006BE940: (
+            (0x006BE9AC, 'fimul dword ptr [0x982be4]',
+             'M32((uint32_t)(0x982BE4u))', 'split_fx_dimension(M32((uint32_t)(0x982BE4u)), 0)'),
+            (0x006BE9C4, 'fimul dword ptr [0x982be8]',
+             'M32((uint32_t)(0x982BE8u))', 'split_fx_dimension(M32((uint32_t)(0x982BE8u)), 1)'),
+        ),
+        0x006D04E0: (
+            (0x006D0577, 'fild dword ptr [0x982be4]',
+             'M32((uint32_t)(0x982BE4u))', 'split_fx_dimension(M32((uint32_t)(0x982BE4u)), 0)'),
+            (0x006D058B, 'fild dword ptr [0x982be8]',
+             'M32((uint32_t)(0x982BE8u))', 'split_fx_dimension(M32((uint32_t)(0x982BE8u)), 1)'),
+        ),
+    }
+    for site, instruction, old, new in sites.get(addr, ()):
+        marker = f'    /* {site:08X}: {instruction} */'
+        assert code.count(marker) == 1, f'split effects instruction changed: {site:08X}'
+        start = code.index(marker)
+        end = code.find('    /* ', start + len(marker))
+        assert end >= 0
+        block = code[start:end]
+        assert block.count(old) == 1, f'split effects operand changed: {site:08X}'
+        code = code[:start] + block.replace(old, new, 1) + code[end:]
+    return code
+
+
+def split_capture_operands(addr, code):
+    """Only the capture source operands change; unscoped addresses remain byte-identical.
+
+    UpdateEnvironmentMapCameras selects a mover and an eye; UpdateCameras
+    separately copies the basis, and DoCulling separately tests road wetness.
+    Keep all four sources tied to the same scope without falsifying any view ID.
+    """
+    sites = {
+        0x00756060: ((0x00756069, 'mov eax, dword ptr [0x919694]',
+                      'M32((uint32_t)(0x919694u))', 'M32(split_capture_address(0x00919694u))'),
+                     (0x0075606E, 'cmp eax, 0x919694', '(uint32_t)0x919694u', 'split_capture_address(0x00919694u)'),
+                     (0x00756080, 'cmp eax, 0x919694', '(uint32_t)0x919694u', 'split_capture_address(0x00919694u)'),
+                     (0x007560B9, 'mov ecx, dword ptr [0x919690]',
+                      'M32((uint32_t)(0x919690u))', 'M32(split_capture_address(0x00919690u))'),
+                     (0x00756159, 'call 0x425200', 'f_00425200(c);',
+                      'f_00425200(c); c->eax = split_capture_player(c->eax);')),
+        0x006DA350: ((0x006DA590, 'mov esi, dword ptr [0x919690]',
+                      'M32((uint32_t)(0x919690u))', 'M32(split_capture_address(0x00919690u))'),),
+        0x006BFDD0: ((0x006BFEE1, 'mov eax, dword ptr [0x9196b8]',
+                      'M32((uint32_t)(0x9196B8u))', 'M32(split_capture_address(0x009196B8u))'),),
+    }
+    for site, instruction, old, new in sites.get(addr, ()):
+        marker = f'    /* {site:08X}: {instruction} */'
+        assert code.count(marker) == 1, f'split capture instruction changed: {site:08X}'
+        start = code.index(marker)
+        end = code.find('    /* ', start + len(marker))
+        assert end >= 0
+        block = code[start:end]
+        assert block.count(old) == 1, f'split capture operand changed: {site:08X}'
+        code = code[:start] + block.replace(old, new, 1) + code[end:]
+    return code
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--exe", help="the player's speed.exe (default: $NFS_SPEED_EXE, else the owner's game folder)")
+    ap.add_argument("--server-dll", help="optional server.dll (default: $NFS_SERVER_DLL, else beside speed.exe)")
+    ap.add_argument("--skip-server", action="store_true", help="build speed.exe only")
     args = ap.parse_args()
     if args.exe:
         recomp.EXE = args.exe
@@ -188,6 +311,9 @@ def main():
     hooks = load_hooks()
     for k, (a, name, code) in enumerate(bodies):
         code = water_reflection_gates(a, code)
+        code = split_shadow_operands(a, code)
+        code = split_capture_operands(a, code)
+        code = split_fx_operands(a, code)
         bodies[k] = (a, name, code)
         if a in hooks:
             # The runtime replaces this function: the translated body becomes f_X_orig, and f_X a weak wrapper that a
@@ -198,6 +324,15 @@ def main():
     with open(os.path.join(OUT, "funcs.h"), "w") as h:
         h.write('#pragma once\n#include "runtime.h"\nvoid untranslated(Cpu *c, uint32_t addr);\n')
         h.write('uint32_t x360_water_reflection_level(void);\nfloat x360_water_reflection_wetness(uint32_t site, float wetness);\n')
+        h.write('uint32_t split_capture_address(uint32_t original);\nuint32_t split_capture_player(uint32_t original);\n')
+        h.write('uint32_t split_fx_view(uint32_t original);\nuint32_t split_fx_player(uint32_t original);\n'
+                'uint32_t split_fx_flare_step(uint32_t view, uint32_t car);\n'
+                'uint32_t split_fx_dimension(uint32_t original, unsigned axis);\n'
+                'double split_fx_rain_dt(double dt);\nfloat split_fx_rain_scale(float original);\n'
+                'uint32_t split_fx_drop_count(uint32_t original);\n')
+        h.write('uint32_t split_shadow_id(uint32_t object);\nuint32_t split_shadow_player_plat(void);\n'
+                'uint32_t split_shadow_rain(void);\nuint32_t split_shadow_section_camera(uint32_t original);\n'
+                'void split_shadow_casters(Cpu *c);\n')
         h.writelines(f"void f_{a:08X}(Cpu *c);\n" for a, _, _ in bodies)
         h.writelines(f"void f_{a:08X}_orig(Cpu *c);   /* hooked: {hooks[a]} */\n" for a, _, _ in bodies if a in hooks)
     with open(os.path.join(OUT, "table.c"), "w") as t:
@@ -254,6 +389,11 @@ def main():
     print("\n".join(rep[:6]))
     if errors:
         raise SystemExit(1)
+    if not args.skip_server:
+        import server_module
+        server_path = (args.server_dll or os.environ.get("NFS_SERVER_DLL") or
+                       os.path.join(os.path.dirname(recomp.EXE), "server.dll"))
+        server_module.build(server_path, args.jobs, speed_pe=rc.pe)
 
 
 if __name__ == "__main__":

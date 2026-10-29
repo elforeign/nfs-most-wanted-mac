@@ -105,6 +105,8 @@ void x360_shadow_texture_size(uint32_t *w, uint32_t *h) {   // from d3d9.m's Cre
 #define CUR_EFFECT  0x00982C80u          // current effect wrapper: +0x44 handles (+0x1DC cull mode), +0x48 ID3DXEffect
 static uint32_t culled[64][2];           // (effect, cull handle) pairs given a front-face cull in this shadow pass
 static int nculled;
+static uint32_t shadow_source_view;
+static int x360_vp_set;
 void f_006C68B0_orig(Cpu *c);
 void f_006C68B0(Cpu *c) {                // per-material effect states, including the cull mode
     if (!shadow_cull_front || M32(SHADOW_PASS) != 1 || M32(PASS_MODE) != 1) { f_006C68B0_orig(c); return; }
@@ -122,6 +124,8 @@ void f_006C68B0(Cpu *c) {                // per-material effect states, includin
 // above goes back to D3DCULL_NONE, the value the PC shadow pass leaves (else main-pass car parts lose front faces).
 void f_006E44C0_orig(Cpu *c);
 void f_006E44C0(Cpu *c) {                // shadow light camera + caster pass
+    shadow_source_view = M32(c->esp + 4);
+    x360_vp_set = 0;
     f_006E44C0_orig(c);
     for (int i = 0; i < nculled; ++i) {
         uint32_t a[3] = {culled[i][0], culled[i][1], 1}, esp = c->esp;
@@ -213,14 +217,12 @@ void x360_frame(void) {
 void x360_shadow_fit(const float player_view[16], float focus_x, float focus_y, const float light_dir[3],
                      float focus_near, float focus_far, float proj_out[16]);
 int render_dump_active(void);
-#define PLAYER_VIEW_PLAT 0x009842D0u     // player eViewPlatInfo: +0x00 view, +0x40 projection (row vectors)
 // The receivers' matrix is not view 15's projection: FUN_006e44c0 keeps its fit M1 (playerView x LiSPSM) in a stack
 // local, copies it into view 15's projection for the casters (006E4FEF), and after the casters multiplies that same
 // stack M1 by the bias (006E5428) into view 15's projection, which every receiver's ShadowTransform reads (World x
 // 00985990+0x40: FUN_006c8000, and FUN_006d6aa0 for the car shadow effect). So the X360 projection written at
 // 006E50C3 must replace M1 at 006E5428 too, else receivers look the casters' X360 map up through the PC fit.
 static float x360_vp[16];
-static int x360_vp_set;
 void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c's D3DXMatrixMultiply
     if (M32(c->esp) == 0x006E542Du) {                              // shadow view-projection x texel-centre bias
         float centre = 0.5f + 0.5f / (float)shadow_size;
@@ -233,7 +235,7 @@ void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c
                 const float *m = (const float *)(G + ms[k]);
                 for (int r = 0; r < 4; ++r) diag_event("x360: shadow matrix %s row %d: %.9g %.9g %.9g %.9g", nm[k], r, m[4 * r], m[4 * r + 1], m[4 * r + 2], m[4 * r + 3]);
             }
-            const float *pv = (const float *)(G + PLAYER_VIEW_PLAT + 0x80);
+            const float *pv = (const float *)(G + M32(shadow_source_view) + 0x80);
             for (int r = 0; r < 4; ++r) diag_event("x360: shadow matrix player viewproj row %d: %.9g %.9g %.9g %.9g", r, pv[4 * r], pv[4 * r + 1], pv[4 * r + 2], pv[4 * r + 3]);
         }
         return;
@@ -253,7 +255,8 @@ void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c
         memcpy(logged_light, light, 12);
     }
     if (fit != 2) return;
-    memcpy(pv, G + PLAYER_VIEW_PLAT, 64); memcpy(pp, G + PLAYER_VIEW_PLAT + 0x40, 64);
+    uint32_t source_plat = M32(shadow_source_view);
+    memcpy(pv, G + source_plat, 64); memcpy(pp, G + source_plat + 0x40, 64);
     memcpy(&far, G + SHADOW_FOCUS_FAR, 4);
     x360_shadow_fit(pv, pp[0], -pp[5], light, X360E_SHADOW_NEAR, far, out);
     static const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
@@ -313,6 +316,11 @@ static void refl_options(void) {
     const char *e = getenv("NFS_ROAD_REFLECTION");
     refl_x360 = !(e && !strcmp(e, "pc"));
 }
+void x360_reflection_dimensions(uint32_t view_w, uint32_t view_h, uint32_t *w, uint32_t *h) {
+    refl_options();
+    *w = refl_x360 ? (view_w > 1 ? view_w / 2 : 1) : 320;
+    *h = refl_x360 ? (view_h > 1 ? view_h / 2 : 1) : 240;
+}
 void f_006BCDC0_orig(Cpu *c);
 void f_006BCDC0(Cpu *c) {                // creates the road reflection target, depth surface and blur texture (320x240)
     if (pending_refl >= 0) { refl_x360 = pending_refl; pending_refl = -1; }
@@ -331,7 +339,7 @@ void f_006BCDC0(Cpu *c) {                // creates the road reflection target, 
 }
 
 static int water_reflection_active(void) {
-    if (!mat_water_reflection_requested()) return 0;
+    if (!mat_water_reflection_requested() && !split_capture_reflection_pending()) return 0;
     Obj *t = obj(M32(0x00982A6Cu));
     return t && t->w > 1 && t->h > 1 && M32(0x00982A78u);
 }
@@ -362,18 +370,37 @@ static void refl_entry(void) {
 }
 void f_006BD0D0_orig(Cpu *c);
 void f_006BD0D0(Cpu *c) {                // fills the render-target table (after the targets are created)
+    split_views_reset();
     f_006BD0D0_orig(c);
     refl_entry();
     if (diag_on) diag_event("x360: road reflection %s: target %ux%u (g_RoadReflectionEnable %u, max %u)", refl_x360 ? "x360" : "pc",
                             M32(RT_REFLECTION + 0x14), M32(RT_REFLECTION + 0x18), M32(0x009017D4u), M32(0x0090185Cu));
 }
 void f_006CFAD0_orig(Cpu *c);
+void f_006308E0_orig(Cpu *c);
+void f_006308E0(Cpu *c) {                // ERestartRace finalizer: retail resets its singleton treatment here
+    f_006308E0_orig(c);
+    if (!split_view_rect(0x00919650u, NULL) || !split_view_rect(0x009196C0u, NULL)) return;
+    // Restart reuses the players, cameras and targets, so identity-based invalidation cannot see it.
+    // Run after the retail reset so the next per-player treatment clones the reset singleton.
+    Cpu saved = *c;
+    split_capture_reset(c);
+    split_post_restart();
+    *c = saved;
+    if (diag_on) diag_event("split lifecycle: restart invalidated both capture and post banks (006308E0)");
+}
 void f_006CFAD0(Cpu *c) {                // MaybeChangeViewMode: sets view 4's entry to 320x240 again in view modes 1 and 2
+    split_views_restore(); // retail layout must see its original descriptors
     f_006CFAD0_orig(c);
     refl_entry();
+    split_views_update(); // dimensions installed before eDisplayFrame's matrix loop
+    split_capture_mode(c, split_view_rect(0x00919650u, NULL) && split_view_rect(0x009196C0u, NULL));
 }
 
 // The roadrefl probe (probe.m): `guest` is the road reflection target at the X360 size.
 int x360_reflection_target(uint32_t guest, uint32_t w, uint32_t h) {
+    uint32_t source = split_capture_source(), r[4];
+    if (source && split_view_rect(source, r))
+        return refl_x360 && (guest == M32(0x00982A6Cu) || guest == M32(0x00982A74u)) && w == r[2]/2 && h == r[3]/2;
     return refl_w && guest == M32(0x00982A6Cu) && w == refl_w && h == refl_h;
 }

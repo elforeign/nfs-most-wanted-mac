@@ -7,8 +7,8 @@
 //   movies       optional: the extracted X360 Movies folder
 //   caches       optional: where converted caches go (default ~/Library/Caches/NFSMW-port)
 //   tmp          optional: scratch for unlinked temp files (default $TMPDIR, else /tmp)
-// With no roots.txt ("legacy"; a development checkout) every lookup is today's: NFS_* switches, then <game>/../x360/...,
-// then ./../x360/... . With a roots.txt nothing is searched beside the game or in the cwd: a key that is absent means
+// With no roots.txt ("legacy"; a development checkout) every lookup is today's: NFS_* switches, then the owner's X360 extract,
+// then the checkout's legacy asset folders. With a roots.txt nothing is searched beside the game or in the cwd: a key that is absent means
 // that root does not exist, and the feature using it falls back to PC. NFS_* switches (development, tests) still win.
 #pragma once
 #include <stdio.h>
@@ -55,7 +55,7 @@ static inline const char *roots_file_(void) {
     return path[0] ? path : NULL;
 }
 #ifdef NFS_PUBLIC
-// The public build never looks beside the game or in the cwd (<game>/../x360, ../assets_audio: M4 F7): without a
+// The public build never looks beside the game or in the cwd (M4 F7): without a
 // roots.txt there is no X360 or assets root unless NFS_X360_FILES names one explicitly.
 static inline int roots_active(void) { return 1; }
 #else
@@ -93,7 +93,7 @@ static inline const char *roots_get(const char *key) {
 }
 
 // The X360 extract's "files" folder: NFS_X360_FILES, else the manifest's x360_root (ROOTS_NONE when the manifest has
-// none), else legacy <game>/../x360/files if it exists, else ../x360/files.
+// none), else the legacy sibling asset folder if it exists.
 static inline const char *roots_x360_files(void) {
     static char dir[2048];
     if (dir[0]) return dir;
@@ -106,7 +106,7 @@ static inline const char *roots_x360_files(void) {
     return dir;
 }
 // A Setup-converted asset folder ("hd_textures_ui", "nis_arrest"): <assets_root>/<sub>, ROOTS_NONE when the manifest has
-// no assets_root, legacy <game>/../x360/<sub>.
+// no assets_root, the legacy sibling asset folder.
 static inline const char *roots_asset_dir(const char *sub, char *out, size_t n) {
     if (roots_active()) {
         const char *a = roots_get("assets_root");
@@ -114,7 +114,7 @@ static inline const char *roots_asset_dir(const char *sub, char *out, size_t n) 
     } else snprintf(out, n, "%s/../x360/%s", game_dir ? game_dir : ".", sub);
     return out;
 }
-// The X360 Movies folder: NFS_X360_MOVIES is the caller's; manifest "movies"; legacy <game>/../x360/Movies, ../x360/Movies.
+// The X360 Movies folder: NFS_X360_MOVIES is the caller's; manifest "movies"; legacy sibling Movies folder.
 // NULL when none.
 static inline const char *roots_movies_dir(char *out, size_t n) {
     struct stat st;

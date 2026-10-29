@@ -1,7 +1,8 @@
 """Offline test for audit2 #10: threads.c kept only 64 pending host->guest event signals and silently dropped the rest.
-Compiles production threads.c with async_events_test.c: 200 distinct events signaled from the host side before the guest
-applies them. New code: signaled=200 of 200 -> PASS. Old code (threads.c from main before this fix; pass its path as argv[1],
-e.g. `git show main:runtime/threads.c > /tmp/old_threads.c`): signaled=64 of 200 -> FAIL.
+Also covers challenger item 5: a queued socket completion must not signal a closed/reused event handle.
+Production: 200/200 signals and 6 generation checks, 0 failures (exit 0). Broken source controls:
+disable pending-capacity growth -> 64/200 signals, 1 failure (exit 1); replace the generation equality
+with 1 -> 200/200 signals and 6 generation checks, 2 failures (exit 1). Mutation details in the C header.
 Run: $TOOLS_PY -I runtime/async_events_test.py [threads.c path]
 """
 import os, subprocess, sys, tempfile

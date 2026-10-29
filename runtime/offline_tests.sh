@@ -9,7 +9,7 @@
 #   runtime/*_test.py  recomp/*_test.py  tools_snapshot/test_*.py  tools/publish/test_*.py      the Python-driven tests (each compiles its C/ObjC harness)
 #   the standalone C/ObjC/shell tests listed in run_one below (aa_setting_test.c, feedback_test.c, framecap_test.c incl. its
 #   --broken run, heap_test.c, settings_look_test.c, rumble_test.m, jdlz_test.c, x360abk_test.c g3, lampbatch_test.m,
-#   msaa_resolve_test.m, dsound_dup_test.sh, wfx_cb_test.sh, defaults_check.py)
+#   msaa_resolve_test.m, rectangle_clear_test.m (via rectangle_clear_test.py), dsound_dup_test.sh, wfx_cb_test.sh, defaults_check.py)
 #   host/audio/build.sh (builds + runs leveltest, limitertest, limiter_guest_test with their broken controls), dstest (headless)
 #   and ctest; host/shaders/build.sh (translator vs reference, Metal compile, GPU vs CPU) last, alone (heavy).
 # Run through host_audio: dsound_dup_test.c (via dsound_dup_test.sh), ctest.c, dstest.cpp, leveltest.cpp, limitertest.cpp,
@@ -17,6 +17,8 @@
 # input is missing, and the summary lists them; a development checkout with the inputs has all of them.
 # A test whose source file is not mentioned in this script (or paired with a .py driver) fails the run as "unregistered", so a
 # new standalone test cannot be forgotten.
+# Security-fixture sandbox guard: harmless fixture skips (exit 3, 0 executions); broken pattern runs it (exit 0,
+# 1 execution). Publication fixture check, 2026-10-28; no game process involved.
 # Offline-tested by itself: break any test (e.g. flip an assertion in runtime/framecap_test.c) -> OFFLINE FAIL: framecap.
 . "$(dirname "$0")/env.sh"; nfs_need_py
 cd "$(dirname "$0")/.." || exit 2
@@ -32,8 +34,22 @@ FF=$here/third_party/ffmpeg
 run_one() {
     n=$1; d=$2; mkdir -p "$d"
     case $n in
+    ws2_policy|ws2_policy_test) clang -O1 -Iruntime -Irecomp -Irecomp/out runtime/ws2_policy_test.c -o "$d/t" && exec "$d/t" ;;
+    settings_look|settings_look_test) clang $CF -I recomp runtime/settings_look_test.c runtime/settings.c -o "$d/t" && exec "$d/t" ;;
     *_test|test_*|defaults_check)       # Python-driven (runtime/ recomp/ tools_snapshot/)
         for f in runtime/$n.py recomp/$n.py tools_snapshot/$n.py tools/publish/$n.py; do [ -f "$f" ] && break; done
+        # Unicorn can crash at initialization in restricted sandboxes. Without an explicitly
+        # supplied compatible library, leave these tests for an unrestricted host run.
+        if [ -n "${CODEX_SANDBOX:-}" ] && [ -z "${LIBUNICORN_PATH:-}" ] && grep -q difftest "$f"; then
+            echo "SKIP: PENDING host run (Unicorn crashes in this sandbox): runtime/offline_tests.sh $n"; return 3
+        fi
+        # Private security fixtures are omitted from publication and need an unrestricted host.
+        # Match the fixture class so the public script does not name an absent tool.
+        case $n in *_game_mcp_test)
+            if [ -n "${CODEX_SANDBOX:-}${NFS_GPU_SANDBOX:-}" ]; then
+                echo "SKIP: PENDING host run (host-only security test): runtime/offline_tests.sh $n"; return 3
+            fi ;;
+        esac
         case $n in
         test_x360_fe_textures)          # needs the X360 ISO, the game folder and the generated HD set
             iso="$NFS_PARENT/Need for Speed - Most Wanted x360 (USA).iso"
@@ -43,7 +59,6 @@ run_one() {
         exec "$py" -I "$f" ;;
     aa_setting)  clang $CF -I recomp runtime/aa_setting_test.c runtime/aa_setting.c runtime/settings.c runtime/offline_stubs.c -o "$d/t" && exec "$d/t" ;;
     feedback)    clang $CF -I recomp runtime/feedback_test.c -o "$d/t" && exec "$d/t" ;;
-    settings_look) clang $CF -I recomp runtime/settings_look_test.c runtime/settings.c -o "$d/t" && exec "$d/t" ;;
     heap)        clang -O2 -DHEAP_TEST -o "$d/t" runtime/heap_test.c runtime/heap.c && exec "$d/t" ;;
     rumble)      clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp runtime/rumble_test.m \
                      -framework Foundation -framework IOKit -lz -o "$d/t" && exec "$d/t" ;;
@@ -87,7 +102,7 @@ fi
 
 # ---- the list
 pylist() { for f in runtime/*_test.py recomp/*_test.py tools_snapshot/test_*.py tools/publish/test_*.py runtime/defaults_check.py; do [ -f "$f" ] && basename "$f" .py; done; }
-standalone="aa_setting feedback settings_look heap rumble framecap jdlz x360abk lampbatch msaa_resolve dsound_dup wfx_cb host_audio"
+standalone="aa_setting feedback ws2_policy settings_look heap rumble framecap jdlz x360abk lampbatch msaa_resolve dsound_dup wfx_cb host_audio"
 if [ $# -gt 0 ]; then names="$*"; else names="$(pylist | tr '\n' ' ')$standalone"; fi
 
 # unregistered test sources: anything *_test.* / test_*.py in the test directories that this script neither runs nor
@@ -105,6 +120,7 @@ fi
 
 OT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/offline.XXXXXX"); export OT_DIR
 mkdir -p "$OT_DIR/work"
+OT_TOOL_TMPDIR=${TMPDIR:-/tmp/}; export OT_TOOL_TMPDIR   # xcrun resolves downloaded toolchains via its original temp cache
 export TMPDIR=$OT_DIR/work              # tests' mkdtemp scratch lands here and goes with it (reverb keeps 10 s WAVs)
 t0=$(date +%s)
 heavy=

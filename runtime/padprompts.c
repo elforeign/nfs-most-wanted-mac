@@ -59,6 +59,8 @@ static int env_mode = -1;                  // 0 pc, 1 console, 2 auto
 void user32_hide_pointer(void);
 static int pad_lost;                       // the controller that was the active input has gone (fe_console.c: the game's unplugged check)
 static int pad_active = -1;                // auto: the last input came from a controller (1) or keyboard/mouse (0)
+static int physical_input;                // connection/prompt overrides never count as physical input
+int prompts_last_input(void) { return physical_input; }
 static int mode(void) {
     if (env_mode < 0) {
         const char *e = getenv("NFS_BUTTON_PROMPTS");
@@ -75,6 +77,7 @@ void prompts_input(int pad) {              // user32.m: a key or mouse button (0
     static float moved;
     if (pad < 0) { moved += 1; if (moved < 16) return; pad = 0; }   // mouse movement: about 16 points of it
     moved = 0;
+    physical_input = pad;
     if (pad == 1) user32_hide_pointer();   // F21: hidden until the mouse moves (a key press or click also hands the prompts back)
     if (!pad) pad_lost = 0;                // keys or the mouse: the player has moved on from the lost controller
     if (pad_active == pad) return;
@@ -86,9 +89,11 @@ void prompts_mouse_moved(float points) {   // user32.m: mouse movement over the 
     for (float d = points; d >= 1; d -= 1) prompts_input(-1);
 }
 void prompts_pad_seen(int connected) {     // user32.m pad_read: a controller is there (at start-up: console prompts)
+    int physical = physical_input;
     if (connected) pad_lost = 0;
     if (connected && pad_active < 0) prompts_input(1);
     else if (!connected && pad_active == 1) { prompts_input(0); pad_lost = 1; }
+    physical_input = physical;
 }
 int prompts_pad_lost(void) { return pad_lost; }
 // The game's own pointer (texture 0x6B6A294F) is drawn by FUN_0056FDB0 (cdecl, FE x, y), called from FEManager::Render
@@ -380,7 +385,7 @@ void f_00514CC0(Cpu *c) {                  // FEngSetVisible (cdecl, FEObject *)
     M32(o + 0x1C) |= 0x40u;
 }
 void f_005A45B0_orig(Cpu *c);
-void f_005A45B0(Cpu *c) {                  // cFEngRender::RenderObject (thiscall, FEObject *, FEPackageRenderInfo *)
+static void render_prompt_object(Cpu *c) {                  // cFEngRender::RenderObject (thiscall, FEObject *, FEPackageRenderInfo *)
     if (!mode()) { f_005A45B0_orig(c); return; }
     uint32_t o = arg(c, 0), f = M32(o + 0x1C);
     int con = console();
@@ -396,6 +401,14 @@ void f_005A45B0(Cpu *c) {                  // cFEngRender::RenderObject (thiscal
     f_005A45B0_orig(c);
     if (f & 0x40) M32(o + 0x1C) |= 0x40u;
     if (sub) { M32(o + 0x24) = tex; M32(o + 0x1C) |= 0x2000000u; }   // and again with the PC one when drawn next
+}
+
+// Scope even the prompts=off and hidden-object paths; no second hook for the
+// guest entry point, and nested/full-output objects restore the previous owner.
+void f_005A45B0(Cpu *c) {
+    int saved = split_hud_begin(arg(c, 0));
+    render_prompt_object(c);
+    split_hud_end(saved);
 }
 
 // ---------------- the controller-diagram loading screen ----------------
@@ -620,13 +633,14 @@ void f_00525520(Cpu *c) {                  // cFEngGameInterface::PackageWasLoad
 // 4 * index; +0x18 its scalars, 16 bytes each. FE actions 0x19..0x2C: UP DOWN LEFT RIGHT RUP RDOWN RLEFT RRIGHT
 // ACCEPT CANCEL CANCEL_ALT START BUTTON0..5 LTRIGGER RTRIGGER.
 static void dump_mapping(void) {
-    static uint32_t done[1];
+    static uint32_t done[2];
     uint32_t fe = M32(0x0091CAD0u);
     if (!fe || !inv) return;
     static const char *fe_names[] = {"UP", "DOWN", "LEFT", "RIGHT", "RUP", "RDOWN", "RLEFT", "RRIGHT", "ACCEPT", "CANCEL",
                                      "CANCEL_ALT", "START", "BUTTON0", "BUTTON1", "BUTTON2", "BUTTON3", "BUTTON4", "BUTTON5",
                                      "LTRIGGER", "RTRIGGER"};
-    for (uint32_t port = 0; port < 1; ++port) {   // HandleJoy reads port 0 only
+    const char *pads = getenv("NFS_PADS");
+    for (uint32_t port = 0; port < (pads && !strcmp(pads, "2") ? 2u : 1u); ++port) {   // HandleJoy reads port 0 only; NFS_PADS=2 also lists port 1
         uint32_t q = M32(fe + 4 * port), map = q ? M32(q + 0x270) : 0;
         if (!map || done[port] == map) continue;
         done[port] = map;
@@ -645,9 +659,24 @@ static void dump_mapping(void) {
 }
 void prompts_diag_frame(void) {            // diag.c, every frame
     dump_mapping();
-    static int32_t last[16];
+    if (getenv("NFS_PADS")) {                  // both devices' ACCEPT (32) and START (39) scalars when they change
+        static uint32_t lastsc[2][2][4];
+        for (uint32_t d = 0; d < 2; ++d) {
+            uint32_t dev = M32(0x00920DE8u + 4 * d), sc = dev ? M32(dev + 0x18) : 0;
+            for (int k = 0; k < 2 && sc; ++k) {
+                uint32_t e = sc + 16 * (k ? 39u : 32u), v[4] = {M32(e), M32(e + 4), M32(e + 8), M32(e + 12)};
+                if (memcmp(v, lastsc[d][k], sizeof v)) {
+                    memcpy(lastsc[d][k], v, sizeof v);
+                    diag_event("fescalar: dev %u %s %08X %08X %08X %08X", d, k ? "START" : "ACCEPT", v[0], v[1], v[2], v[3]);
+                }
+            }
+        }
+    }
+    static int32_t last[16], last1[16];
     for (int i = 0; i < 16; ++i) {
         uint32_t e = 0x008F3428u + 28u * (uint32_t)i;
+        int32_t v1 = (int32_t)M32(e + 0x10);
+        if (v1 != last1[i] && getenv("NFS_PADS")) { last1[i] = v1; diag_event("fepad1: %s %d (action %u)", gptr(M32(e + 8)) ? gptr(M32(e + 8)) : "?", v1, M32(e)); }
         int32_t v = (int32_t)M32(e + 0xC);
         if (v == last[i]) continue;
         last[i] = v;
