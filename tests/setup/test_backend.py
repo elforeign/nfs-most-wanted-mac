@@ -1,5 +1,11 @@
 """Public Setup offline proofs; run with the project's Python -I.
 
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.3.0;
+changing it to 4.2.0 fails 1/1 against the independent 4.3.0 expectations.
+
+Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
+broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
+
 T3 stub toolchain: good probe passes; missing/old clang, SDK and the actual
 recompiler LLVM option fail. Bypassing preflight breaks the oracle. A toolchain
 without `metal` (Command Line Tools) passes, stubbed and real (DEVELOPER_DIR=CLT):
@@ -425,8 +431,10 @@ class BuildFailureTests(Fixture):
             def translate(self, *args):
                 return ("this deliberately will not compile !!!" if broken else "void f_00000001(Cpu *c) {}"), None
         fp = types.SimpleNamespace(SUPPORTED={"fixture": "0"}, NAMES=["fixture"], WHOLE_FILE_SHA256="0")
-        ns = dict(argparse=__import__("argparse"), os=os, sys=sys, collections=collections,
+        ns = dict(argparse=__import__("argparse"), os=os, sys=sys, Path=Path, collections=collections,
                   concurrent=concurrent, subprocess=subprocess, OUT=str(out), HERE=str(out), CHUNK=800,
+                  build_inputs=types.SimpleNamespace(recomp_key=lambda **kw: 'fixture',
+                      fresh=lambda *a: False, outputs=lambda: {}, record=lambda *a: None),
                   load_functions=lambda: [(1, 2, "fixture")], add_data_referenced=lambda x: x,
                   load_hooks=lambda: {},
                   recomp=types.SimpleNamespace(Recompiler=RC, CFLAGS=["-O0"], exe_fingerprint=fp,
@@ -434,6 +442,8 @@ class BuildFailureTests(Fixture):
         # Keep translation transforms isolated as main grows; compilation and
         # archive/error handling below still run for real.
         functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+        functions.update(alias.asname or alias.name for n in tree.body if isinstance(n, ast.ImportFrom)
+                         for alias in n.names)
         referenced = {n.id for n in ast.walk(main) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         for name in (functions & referenced) - ns.keys() - {"main"}:
             ns[name] = lambda *args, **kwargs: args[-1]
@@ -1137,6 +1147,26 @@ class ProtocolTests(Fixture):
             self.assertEqual(self.main_fixture(), 0)
         self.assert_golden(self.stream.getvalue())
 
+    def test_run_log_link_never_truncates_preferences_on_failure(self):
+        self.old_install()
+        preferences = self.paths.data / "app.txt"
+        before = self.snapshot()
+        pointer = self.paths.work / "run-log.txt"
+        for link in ("symlink", "hardlink"):
+            with self.subTest(link=link):
+                pointer.unlink(missing_ok=True)
+                if link == "symlink":
+                    pointer.symlink_to(preferences)
+                else:
+                    os.link(preferences, pointer)
+                self.stream.seek(0)
+                self.stream.truncate()
+                self.assertNotEqual(self.main_fixture(fail="runtime"), 0)
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse(pointer.is_symlink())
+                self.assertNotEqual(ins.ident(pointer), ins.ident(preferences))
+                self.assertTrue(Path(pointer.read_text().strip()).is_file())
+
     def test_x360_optional_module_stub_and_failure(self):
         source = self.home / "own.iso"
         write(source, "fixture ISO")
@@ -1175,6 +1205,7 @@ class ProtocolTests(Fixture):
     def test_bundle_public_arguments_environment_and_owner_defaults(self):
         runtime = self.home / "bundle payload/runtime"
         write(runtime / "bundle.sh", (ROOT / "runtime/bundle.sh").read_bytes())
+        write(runtime / "docs/guide.md", (ROOT / "runtime/docs/guide.md").read_bytes())
         write(runtime / "boot", b"runtime fixture", True)
         tools = self.home / "bundle tools"
         # Real shell + real plist parser; stub only compiler/icon/signing tools.
@@ -1215,8 +1246,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], b.PUBLIC_VERSION)
-        self.assertEqual(public["CFBundleVersion"], b.PUBLIC_VERSION)
+        self.assertEqual(public["CFBundleShortVersionString"], "4.3.0")
+        self.assertEqual(public["CFBundleVersion"], "4.3.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -1240,9 +1271,9 @@ printf icon > "$1"
 
     def test_protocol_file_matches_golden_shapes(self):
         schema = json.loads((ROOT / "tools/setup_kit/protocol.json").read_text())
-        self.assertEqual(schema["$defs"]["stage"]["enum"], [s for s, _ in b.STAGES])
+        self.assertEqual(schema["$defs"]["stage"]["enum"], [s for s, _ in b.STAGES] + ["stage"])
         names = {shape["properties"]["ev"]["const"] for shape in schema["oneOf"]}
-        self.assertEqual(names, {"stage", "progress", "warn", "error", "features", "done"})
+        self.assertEqual(names, {"stage", "progress", "warn", "error", "features", "done", "ready"})
         self.assertTrue(all(s["additionalProperties"] is False for s in schema["oneOf"]))
 
     def test_media_pin_missing_and_wrong_even_with_extracted_tree(self):

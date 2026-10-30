@@ -70,6 +70,12 @@ static int legacy_defaults_valid;
 static int active_layout;
 static uint32_t joy(void) { uint32_t d = M32(JOY); return d && d != 0xFFFFFFFCu ? d : 0; }
 static char *joy_name(uint32_t dev) { return (char *)G + dev + 0x114; }
+int padbind_pedals(int port) {
+    if (!pedals_selected()) return 0;
+    if (port == 1) { char name[64]; pad_identity_n(1, name, sizeof name); return name_ps(name); }
+    uint32_t d = joy();
+    return d && name_ps(joy_name(d));
+}
 static const char *action_name(int a) { const char *n = gptr(M32(GA + 0x34u * (uint32_t)a)); return n ? n : "?"; }
 static const char *profile_name(void) {
     uint32_t db = M32(FEDB), up = db ? M32(db + 0x10) : 0;
@@ -525,6 +531,7 @@ void padbind_trigger_sample(unsigned step, float lt, float rt, uint32_t z, uint3
     trigger_sample.z = z; trigger_sample.rz = rz; trigger_sample.native = native;
     trigger_sample.base_z = M32(BASELINE + 0x208); trigger_sample.base_rz = M32(BASELINE + 0x214);
     trigger_sample.layout = active_layout; trigger_sample.pending = 1;
+    pedals_trace_sample(step, lt, rt);
 }
 static void trigger_sample_log(void) {
     if (!trigger_sample.pending) return;
@@ -677,9 +684,13 @@ uint32_t padbind_ps_label(int slot, uint32_t fallback) {
         0x56AFE190u, 0xDC1CD97Du, 0x1CEDC132u, 0, 0, 0, 0, 0, 0xD38DF194u, 0x13121940u, 0, 0x6369F4B8u};
     uint32_t dev = joy();
     if (slot < 1 || slot > 17 || !ctl[slot].t || !dev || !name_ps(joy_name(dev))) return fallback;
-    for (int a = 0; a < GA_PAGE; ++a)
+    for (int a = 0; a < GA_PAGE; ++a) {
+        uint32_t effective[6];
+        int preset = pedals_binding(a, effective);
         for (int s = 2; s < 4; ++s)
-            if (M32(rec(a, s)) == ctl[slot].t && M32(rec(a, s) + 8) == ctl[slot].o) return label[a];
+            if ((preset ? effective[3*(s-2)] : M32(rec(a, s))) == ctl[slot].t &&
+                (preset ? effective[3*(s-2)+2] : M32(rec(a, s) + 8)) == ctl[slot].o) return label[a];
+    }
     return 0;
 }
 
@@ -692,13 +703,17 @@ int padbind_trigger_role(int right) {
     if (!dev || !name_ps(joy_name(dev))) return PADBIND_ROLE_NONE;
     uint32_t axis = right ? T_ROT_HI : T_AXIS_HI, button = right ? P_R2 : P_L2;
     int best = PADBIND_ROLE_NONE;
-    for (int a = 0; a < GA_PAGE; ++a)
+    for (int a = 0; a < GA_PAGE; ++a) {
+        uint32_t effective[6];
+        int preset = pedals_binding(a, effective);
         for (int s = 2; s < 4; ++s) {
-            uint32_t t = M32(rec(a, s)), o = M32(rec(a, s) + 8);
+            uint32_t t = preset ? effective[3*(s-2)] : M32(rec(a, s));
+            uint32_t o = preset ? effective[3*(s-2)+2] : M32(rec(a, s) + 8);
             if (!((t == axis && o == 2) || (t == T_BUTTON && o == button))) continue;
             int role = a == A_GAS ? PADBIND_ROLE_GAS : a == A_BRAKE ? PADBIND_ROLE_BRAKE :
                        a == A_SHIFTUP || a == A_SHIFTDOWN ? PADBIND_ROLE_SHIFT : PADBIND_ROLE_OTHER;
             if (best == PADBIND_ROLE_NONE || role < best) best = role;
         }
+    }
     return best;
 }

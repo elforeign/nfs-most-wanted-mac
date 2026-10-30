@@ -1,6 +1,7 @@
 """Public build: the "Check for updates" logic (pub_update_core.h, ported from nfs-most-wanted-mac's update_check.cpp)
-against a local JSON fixture (runtime/pub_update_fixture.json); no network, no OS. Each check has a broken control: the
-driver is built against a copy of the header with one line broken and the check must fail (test_controls_fail).
+against a local JSON fixture (runtime/pub_update_fixture.json); no network, no OS. Each check has a broken control.
+Proof: 5 good checks pass / 5 broken controls fail.
+The driver is built against a copy of the header with one line broken and the check must fail (test_controls_fail).
 Run: python3 runtime/pub_update_test.py"""
 import subprocess, tempfile
 from pathlib import Path
@@ -8,10 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DRIVER = r'''
 #include "pub_update_core.h"
-static const char *app_ver; static int opened, fetches; static char opened_url[512];
+static const char *app_ver; static int jobs, fetches; static char target_version[512];
 static int ver(char *o, size_t c) { snprintf(o, c, "%s", app_ver); return app_ver[0] != 0; }
 static int fetch(void) { ++fetches; return 1; }          /* the answer arrives later via pu_done */
-static int opn(const char *u) { ++opened; snprintf(opened_url, sizeof opened_url, "%s", u); return 1; }
+static int start(const char *u) { ++jobs; snprintf(target_version, sizeof target_version, "%s", u); return 1; }
 int main(int argc, char **argv) {
     const char *cmd = argv[1];
     if (!strcmp(cmd, "cmp")) { printf("%d\n", pu_compare_versions(argv[2], argv[3])); return 0; }
@@ -19,14 +20,14 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[3], "rb"); static char buf[8192]; size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0; buf[n] = 0;
     char t[128];
     pu_status(t, sizeof t); printf("0:%s\n", t);
-    pu_press(ver, fetch, opn);
+    pu_press(ver, fetch, start);
     pu_status(t, sizeof t); printf("1:%s|fetches=%d\n", t, fetches);   /* checking */
-    pu_press(ver, fetch, opn);                                          /* a press while checking does nothing */
+    pu_press(ver, fetch, start);                                          /* a press while checking does nothing */
     printf("fetches_after_second=%d\n", fetches);
     pu_done(!strcmp(cmd, "ok"), buf);                                   /* "fail": a network failure */
     pu_status(t, sizeof t); printf("2:%s\n", t);
-    pu_press(ver, fetch, opn);                                          /* newer: opens; else checks again */
-    printf("opened=%d url=%s fetches=%d\n", opened, opened_url, fetches);
+    pu_press(ver, fetch, start);                                          /* newer: starts preparation; else checks again */
+    printf("jobs=%d version=%s fetches=%d\n", jobs, target_version, fetches);
     return 0;
 }
 '''
@@ -62,19 +63,19 @@ def ok_versions(exe):
             and cmp_(exe, '3.9', '3.10') < 0 and cmp_(exe, '4.0', '4.0.0') == 0 and cmp_(exe, 'v4.0.0', '4.0.0') == 0)
 
 
-def ok_newer_opens_release_page(exe):   # fixture has a nested author html_url and a decoy asset: the release's own is used
+def ok_newer_starts_update(exe):   # fixture has nested decoy tags: the release's own tag is used
     r = flow(exe, 'ok', '3.0.4')
-    return r['2'] == '4.0.0 is out: press to open' and r['opened'].startswith('1 url=https://github.com/example/nfs/releases/tag/v4.0.0 fetches=1')
+    return r['2'] == '4.0.0 is out: Update now' and r['jobs'].startswith('1 version=4.0.0 fetches=1')
 
 
-def ok_up_to_date_no_open(exe):
+def ok_up_to_date_no_job(exe):
     r = flow(exe, 'ok', '4.0.0')
-    return r['2'] == 'Up to date (4.0.0)' and r['opened'].startswith('0 ') and r['opened'].endswith('fetches=2')
+    return r['2'] == 'Up to date (4.0.0)' and r['jobs'].startswith('0 ') and r['jobs'].endswith('fetches=2')
 
 
 def ok_failure_message(exe):
     r = flow(exe, 'fail', '3.0.4')
-    return r['2'] == 'No answer: press to retry' and r['opened'].startswith('0 ') and r['opened'].endswith('fetches=2')
+    return r['2'] == 'No answer: press to retry' and r['jobs'].startswith('0 ') and r['jobs'].endswith('fetches=2')
 
 
 def ok_press_while_checking_ignored(exe):
@@ -85,10 +86,10 @@ def ok_press_while_checking_ignored(exe):
 CHECKS = {
     'numeric_compare': (ok_versions, ('const long x = strtol(a, &ea, 10), y = strtol(b, &eb, 10);\n        if (x != y) return x < y ? -1 : 1;',
                                       'const long x = strtol(a, &ea, 10), y = strtol(b, &eb, 10);\n        if (x != y) return strcmp(a, b);')),
-    'newer_opens_release_page': (ok_newer_opens_release_page, ('if (depth != 1 ||', 'if (depth > 99 ||')),
-    'up_to_date_no_open': (ok_up_to_date_no_open, ('> 0 ? PU_NEWER', '>= 0 ? PU_NEWER')),
+    'newer_starts_update': (ok_newer_starts_update, ('pu_state = pu_compare_versions(pu_latest, pu_current) > 0 ? PU_NEWER : PU_UP_TO_DATE;', 'pu_state = PU_UP_TO_DATE;')),
+    'up_to_date_no_job': (ok_up_to_date_no_job, ('> 0 ? PU_NEWER', '>= 0 ? PU_NEWER')),
     'network_failure_message': (ok_failure_message, ('if (!ok || !body ||', 'if (!body ||')),
-    'press_while_checking_ignored': (ok_press_while_checking_ignored, ('if (pu_state == PU_CHECKING) return;', '')),
+    'press_while_checking_ignored': (ok_press_while_checking_ignored, ('if (pu_state == PU_CHECKING || pu_busy() || pu_state == PU_READY) return;', 'if (pu_busy() || pu_state == PU_READY) return;')),
 }
 
 

@@ -50,6 +50,7 @@ void diag_event(const char *fmt, ...) { (void)fmt; }
 int padbind_port_begin(int idx) { (void)idx; return 0; }
 void padbind_port_end(int swapped) { (void)swapped; }
 void padbind_follow(Cpu *c) { (void)c; ++follows; }
+int padbind_pedals(int port) { (void)port; return 0; }
 void padbind_swap(int on) { swaps += on ? 1 : -1; CHECK(swaps >= 0 && swaps <= 1); }
 void bad_jump(Cpu *c,uint32_t t) { (void)c; fprintf(stderr,"bad jump %x\n",t); exit(2); }
 void abi_violation(Cpu *c,uint32_t fn,uint32_t b,uint32_t s,uint32_t i,uint32_t p,uint32_t sp) {
@@ -263,7 +264,7 @@ def main():
         def compile_one(name, source):
             c = tmp/(name+'.c'); exe = tmp/name
             # include paths resolve both generated tables and real runtime headers.
-            c.write_text(PRE + pad + bodies + source + MAIN)
+            c.write_text(PRE + '\n#define PEDALS_NO_TRACE 1\n#include "pedals.c"\n' + pad + bodies + source + MAIN)
             run(['clang', '-std=c11', '-g', '-w', '-DRECOMP_ABICHECK', '-fsanitize=address,undefined',
                  '-fno-sanitize-recover=all', '-I', str(ROOT/'recomp'), '-I', str(ROOT/'recomp/out'),
                  '-I', str(ROOT/'runtime'), str(c), '-o', str(exe)])

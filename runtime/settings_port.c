@@ -10,6 +10,7 @@
 
 #include "host.h"
 #include "settings.h"
+#include "roadfilm.h"
 #include "roots.h"            // X360_ENGINE_CONSTS / X360E_MIRROR_WORLD (gen/x360_engine.inc)
 #include "posaudio.h"
 #include "../host/audio/dsound_host.h"
@@ -26,6 +27,7 @@ void materials_set_car_paint(int x360);      // materials.m
 void materials_set_rain_ripples(int x360);
 void materials_set_parallax(int x360);
 void materials_set_car_glass(int x360);
+void materials_set_headlamp_glass(int clear);
 void materials_set_car_normals(int x360);
 void materials_set_car_flake(int x360);
 void materials_set_grass(int x360);
@@ -58,18 +60,42 @@ void portmenu_status(const char *fmt, ...);
 #define REG(s) settings_add(&(s))
 
 // ---------------- Picture: the look preset ----------------
-// Original PC / Xbox 360 set every PC-vs-X360 choice (the table is in settings.c); My picks restores the user's own values; any
-// edit of a picture row shows Custom. Its state is derived from the rows, so it is never saved itself.
-static const char *const kLook[] = {"Original PC", "Xbox 360", "My picks", "Custom"};
+// The table in settings.c owns the complete set of affected picture values.
+static const char *const kLook[] = {"Port (recommended)", "Xbox 360 retail", "PC retail", "My picks"};
 static void look_apply(int v) {
     int r = settings_look_apply(v);
     if (r < 0) portmenu_status("No saved picks yet: change a picture row first.");
-    else if (r > 0) portmenu_status("%d changed row%s take%s effect after Restart game \u27F3 (Display & performance).", r, r == 1 ? "" : "s", r == 1 ? "s" : "");
+    else portmenu_status("%s%s%d row%s awaiting Restart game (Display & performance).",
+        v == PRESET_X360 && settings_look_partial() ? "partial: your Xbox 360 files are not installed. " : "",
+        settings_look_state() == PRESET_MINE && v != PRESET_MINE ? "My picks: environment overrides differ. " : "", r, r == 1 ? "" : "s");
 }
 static Setting s_look = {.id = "graphics.look_preset", .category = SET_PICTURE, .order = 10, .label = "Look preset",
-    .help = "Sets every PC-versus-Xbox 360 picture choice at once, leaving port extras such as Natural bloom as you set them; changing any row shows Custom.",
-    .type = SET_CHOICE, .choices = kLook, .nchoices = 4, .def = PRESET_CUSTOM, .pref = "", .own_pref = 1,
+    .help = "Port restores recommended picture defaults; retail choices include the original colour filter, closest to retail. Xbox 360 files are needed for the full look. Changes may need Restart game.",
+    .type = SET_CHOICE, .choices = kLook, .nchoices = 4, .def = PRESET_PORT, .pref = "", .own_pref = 1,
     .apply = look_apply, .get = settings_look_state};
+
+// Preset-owned, persisted startup overrides, deliberately absent from F10.
+// Existing switches carry these to the renderer just like visible restart rows.
+static Setting s_look_data = {.id = "graphics.look_data", .type = SET_CHOICE, .hidden = 1,
+    .choices = (const char *const[]){"PC", "X360"}, .values = (const char *const[]){"pc", "x360"},
+    .nchoices = 2, .env = "NFS_VISUALLOOK", .restart = 1};
+static Setting s_look_contact = {.id = "graphics.look_contact_shadows", .type = SET_TOGGLE, .hidden = 1,
+    .def = 1, .env = "NFS_SSAO", .restart = 1};
+static Setting s_look_smoke = {.id = "graphics.look_soft_smoke", .type = SET_TOGGLE, .hidden = 1,
+    .def = 1, .env = "NFS_SOFT_SMOKE", .restart = 1};
+static Setting s_look_fog = {.id = "graphics.look_fog", .type = SET_CHOICE, .hidden = 1,
+    .choices = (const char *const[]){"PC", "X360"}, .values = (const char *const[]){"pc", "x360"},
+    .nchoices = 2, .def = 1, .env = "NFS_FOG", .restart = 1};
+static Setting s_look_mirror_art = {.id = "graphics.look_mirror_art", .type = SET_CHOICE, .hidden = 1,
+    .choices = (const char *const[]){"PC", "Smooth"}, .values = (const char *const[]){"pc", "smooth"},
+    .nchoices = 2, .def = 1, .env = "NFS_MIRROR_ART", .restart = 1};
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+static Setting s_look_reflections = {.id = "graphics.look_reflections", .type = SET_CHOICE, .hidden = 1,
+    .choices = (const char *const[]){"Standard", "Sharp"}, .values = (const char *const[]){"pc", "sharp"},
+    .nchoices = 2, .def = 1, .env = "NFS_CAR_REFLECTION", .restart = 1};
+static Setting s_look_later_textures = {.id = "graphics.look_later_textures", .type = SET_TOGGLE, .hidden = 1,
+    .def = 1, .env = "NFS_LATER_TEXTURES", .restart = 1};
+#endif
 
 // ---------------- Section headings (not selectable) ----------------
                                                                                                                      
@@ -95,9 +121,15 @@ static const char *const kWindow[] = {"Full screen", "Window"}, *const kWindowV[
 static int window_get(void) { return !user32_fullscreen(); }
 static void window_apply(int v) { if (window_get() != v) user32_toggle_fullscreen(); }
 static Setting s_window = {.id = "display.window", .category = SET_DISPLAY, .order = 10, .label = "Window mode",
-    .help = "Full screen covers the whole screen and keeps Cmd-Tab instant, while Window is a resizable window, the same as the green button.",
+    .help = "Full screen uses the Full screen choice below; Window is resizable, the same as the green button.",
     .type = SET_CHOICE, .choices = kWindow, .values = kWindowV, .nchoices = 2, .env = "NFS_FULLSCREEN", .pref = "",
     .own_pref = 1, .apply = window_apply, .get = window_get};
+
+static const char *const kFullScreen[] = {"Borderless", "Native"}, *const kFullScreenV[] = {"borderless", "native"};
+static Setting s_fullscreen = {.id = "display.fullscreen", .category = SET_DISPLAY, .order = 11, .label = "Full screen",
+    .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Restart game to apply.",
+    .type = SET_CHOICE, .choices = kFullScreen, .values = kFullScreenV, .nchoices = 2, .def = 0,
+    .env = "NFS_FULLSCREEN_MODE", .restart = 1};
 
 static const char *const kOverlay[] = {"Off", "Compact", "Full"};
 static void overlay_apply(int v) { overlay_set_level(v); }
@@ -109,10 +141,10 @@ static Setting s_overlay = {.id = "display.overlay", .category = SET_DISPLAY, .o
 // ---------------- Graphics ----------------
 // Restart: hc_transform specializes world shaders for float_scene_on, while
 // get_shader_variant caches by bytecode/options/material, not that mode.
-static const char *const kHdr[] = {"Off", "On"}, *const kHdrV[] = {"off", "edr"};
+static const char *const kHdr[] = {"Auto", "Off", "On"}, *const kHdrV[] = {"auto", "off", "edr"};
 static Setting s_hdr = {.id = "graphics.hdr_output", .category = SET_PICTURE, .order = 20, .label = "HDR output",
-    .help = "Uses HDR highlights when the screen supports them, with SDR fallback otherwise. Restart game to apply.",
-    .type = SET_CHOICE, .choices = kHdr, .values = kHdrV, .nchoices = 2, .def = 0, .env = "NFS_HDR_OUTPUT", .restart = 1};
+    .help = "Auto uses HDR when the display reports HDR support; Off uses SDR; On requests HDR with SDR fallback. Restart game to apply.",
+    .type = SET_CHOICE, .choices = kHdr, .values = kHdrV, .nchoices = 3, .def = 0, .env = "NFS_HDR_OUTPUT", .restart = 1};
 static void hdr_status(char *buf, int n) { snprintf(buf, (size_t)n, "%s", render_hdr_output_status()); }
 static Setting s_hdr_status = {.id = "graphics.hdr_status", .category = SET_PICTURE, .order = 21, .label = "HDR status",
     .help = "The current output. SDR fallback keeps your HDR preference for when the screen has HDR headroom; split screen uses SDR.",
@@ -167,6 +199,11 @@ static void glass_apply(int v) { materials_set_car_glass(v == 1); }
 static Setting s_glass = {.id = "graphics.car_glass", .category = SET_CARS, .order = 20, .label = "Car glass",
     .help = "PC keeps the retuned car windows, while X360 uses the console's window opacity and stronger reflections.",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_CAR_GLASS", .apply = glass_apply};
+static const char *const kHeadlamp[] = {"Retail", "Clear"}, *const kHeadlampV[] = {"retail", "clear"};
+static void headlamp_apply(int v) { materials_set_headlamp_glass(v == 1); }
+static Setting s_headlamp = {.id = "graphics.headlamp_glass", .category = SET_PICTURE, .order = 65, .label = "Headlamp glass",
+    .help = "Retail keeps the original lamp shading. Clear makes headlamp covers transparent over their reflectors; native PC glass stays unchanged.",
+    .type = SET_CHOICE, .choices = kHeadlamp, .values = kHeadlampV, .nchoices = 2, .def = 0, .env = "NFS_HEADLAMP_GLASS", .apply = headlamp_apply};
 static void carnm_apply(int v) { materials_set_car_normals(v == 1); }
 static Setting s_carnm = {.id = "graphics.car_normals", .category = SET_CARS, .order = 30, .label = "Tyre and badge detail",
     .help = "X360 adds the console's bump detail to tyre sidewalls, tread and badges (needs the X360 car paint on); PC keeps them flat.",
@@ -215,6 +252,12 @@ static Setting s_ripples = {.id = "graphics.rain_ripples", .category = SET_WORLD
     .help = "X360 ripples wet roads with raindrop rings, while PC leaves a still reflection.",
     .type = SET_CHOICE, .choices = kX360Pc, .values = kX360PcV, .nchoices = 2, .env = "NFS_RAIN_RIPPLES", .live_from_default = 1,
     .apply = ripples_apply};
+static const char *const kRoadFilm[] = {"Retail", "Water film"};
+static const char *const kRoadFilmV[] = {"0", "1"};
+static Setting s_roadfilm = {.id = "graphics.road_film", .category = SET_PICTURE, .order = 85, .label = "Wet road reflection",
+    .help = "Retail keeps the original reflection. Water film reduces it by the viewing angle of an air/water surface. Rain ripples are independent.",
+    .type = SET_CHOICE, .choices = kRoadFilm, .values = kRoadFilmV, .nchoices = 2, .def = 0,
+    .env = "NFS_ROAD_FILM", .apply = roadfilm_set};
 static void parallax_apply(int v) { materials_set_parallax(v == 0); }
 static Setting s_parallax = {.id = "graphics.parallax", .category = SET_WORLD, .order = 85, .label = "Wall and kerb depth",
     .help = "X360 shifts normal-mapped walls, kerbs and cliffs with the viewing angle and darkens them faster away from the sun, while PC leaves them flat.",
@@ -385,14 +428,8 @@ static void props_apply(int v) { feedback_set_props(v); }
 static Setting s_rumble_props = {.id = "controls.rumble_props", .category = SET_CONTROLS, .order = 90, .label = "Prop hits rumble by impact",
     .help = "Boxes, cones and other props rumble by how hard they were hit, while X360 rumbled by your speed so a box at 50 m/s felt like a wall.",
     .type = SET_TOGGLE, .choices = kX360OnL, .values = kX360OnV, .nchoices = 2, .def = 1, .env = "NFS_RUMBLE_PROPS", .apply = props_apply};
-static void triggers_apply(int v) { padfx_set_triggers(v); }
-static Setting s_triggers = {.id = "controls.pad_triggers", .category = SET_CONTROLS, .order = 40, .label = "DualSense adaptive triggers",
-    .help = "Gives the gas and brake triggers resistance and vibration at wheelspin or lock-up, and a shift trigger a click.",
-    .type = SET_TOGGLE, .choices = kOffOnL, .values = kOffOnV, .nchoices = 2, .def = 0, .env = "NFS_PAD_TRIGGERS", .apply = triggers_apply};
-static void light_apply(int v) { padfx_set_light(v); }
-static Setting s_light = {.id = "controls.pad_light", .category = SET_CONTROLS, .order = 50, .label = "Controller lightbar",
-    .help = "Colours the lightbar with the heat level in a race, police lights in a pursuit, and tints for speedbreaker and nitrous.",
-    .type = SET_TOGGLE, .choices = kOffOnL, .values = kOffOnV, .nchoices = 2, .def = 0, .env = "NFS_PAD_LIGHT", .apply = light_apply};
+// DualSense effects are built in. Removed effect preferences are never loaded:
+// settings_init visits registered rows only, so stale saved keys are ignored silently.
 
 // ---------------- Diagnostics ----------------
 static Setting h_perf = {.id = "diag.h_perf", .category = SET_DIAGNOSTICS, .order = 5, .label = "Performance", .type = SET_HEADING,
@@ -565,12 +602,16 @@ __attribute__((constructor)) static void settings_port_register(void) {
         }
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
-    REG(s_window); REG(s_overlay); REG(s_lan);
+    REG(s_window); REG(s_fullscreen); REG(s_overlay); REG(s_lan);
     REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);
     REG(s_vrr);
-    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
+    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_headlamp); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
+    REG(s_look_data); REG(s_look_contact); REG(s_look_smoke); REG(s_look_fog); REG(s_look_mirror_art);
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    REG(s_look_reflections); REG(s_look_later_textures);
+#endif
     REG(s_audio); REG(s_limiter); REG(s_speaker_layout); REG(s_engine_sound); REG(s_audio_now);
-    REG(s_menubtn); REG(s_layout); REG(s_prompts); REG(s_pads); REG(s_rumble); REG(s_rumble_surfaces); REG(s_rumble_props); REG(s_triggers); REG(s_light);
+    REG(s_menubtn); REG(s_layout); REG(s_prompts); REG(s_pads); REG(s_rumble); REG(s_rumble_surfaces); REG(s_rumble_props);
     REG(h_perf); REG(s_perf); REG(s_audio_now2);
     REG(h_report); REG(s_cat); REG(s_note); REG(s_save); REG(s_open);
     REG(h_log); REG(s_full); REG(s_logs); REG(s_quit); REG(s_restart);

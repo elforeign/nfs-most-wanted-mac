@@ -370,8 +370,13 @@ static int tpk_find(FILE *f, long pos, long end, uint32_t hash, uint8_t ti[124],
 // Adds a texture to the extra-texture list: builds its TextureInfo from rec (124 bytes, the TPK record layout) and the
 // platform record from pl (32 bytes), with D3D format fmt, top level only, pixels at guest address data (size bytes,
 // kept), creates the D3D texture with TextureInfoPlatInterface::Init and registers it under the hash at rec + 0x24
-// (0: failed). The list holds 36 names (009159A0..00915A30, FUN_004FAF10 doesn't check): keep the users few.
+// (0: failed). Both arrays hold 30 entries: hashes 009159A0..00915A18, pointers 00915A30..00915AA8.
+// The adjacent globals are sun/flare state, not spare capacity; FUN_004FAF10 doesn't check the limit.
 uint32_t extra_texture_add(Cpu *c, const uint8_t rec[124], const uint8_t pl[32], uint32_t fmt, uint32_t data, uint32_t size, int add) {
+    if (add && M32(0x00915FA8u) >= 30) {
+        fprintf(stderr, "boot: extra texture list full (30 entries)\n");
+        return 0;
+    }
     uint32_t hash;
     memcpy(&hash, rec + 0x24, 4);
     uint32_t ti = gmalloc(0x80 + 0x20), pi = ti + 0x80;

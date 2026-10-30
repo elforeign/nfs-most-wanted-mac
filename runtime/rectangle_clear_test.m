@@ -12,6 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "d3d9_internal.h"
+static id<MTLRenderPipelineState> pipeline_build_device(id<MTLDevice> device, MTLRenderPipelineDescriptor *d, const char *pass, NSError **error) {
+    (void)pass; return [device newRenderPipelineStateWithDescriptor:d error:error];
+}
 #include "rectangle_helpers.inc"
 
 Device dev;

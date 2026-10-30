@@ -11,6 +11,7 @@
 #include "../host/shaders/sm_translate.h"
 #include "materials.h"
 #include "d3d9_internal.h"
+#include "pipeline_cache.h"
 
 // ---------------- GPU-side objects ----------------
 typedef struct {
@@ -100,3 +101,5 @@ extern uint32_t q_active;                    // the occlusion query between Issu
 void query_segment(void);
 void query_stats_log(void);
 extern float q_bb[4];                        // diag: the last counted fan's x/y range (render.m writes it)
+
+void render_post_prewarm(void);

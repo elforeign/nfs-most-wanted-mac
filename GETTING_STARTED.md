@@ -41,24 +41,30 @@ these features are simply absent. Setup only reads your copy; it never provides 
 - **F10** (Fn+F10 on a Mac keyboard) opens the settings menu; so does the touchpad click on a DualSense or DualShock 4.
   The same key closes it. Up/Down and Left/Right change things; Esc closes it.
 - Rows marked with a restart symbol take effect after **Restart game** (Display & performance).
-- **Display & performance > Online:** *Check for updates* asks GitHub once, only when you press it, and opens the
-  release page if a newer version exists. *Discord status* is off by default.
+- **Help > Guide** explains the settings, look presets and controls.
+- **Controls > Triggers:** the new PlayStation selector offers Shift (default) or Pedals for R2 gas and L2 brake/reverse.
+- **Online (beta):** free roam is Off until you Host or Join. Hosting needs incoming UDP and may need router setup; some networks cannot host. Read the [Guide](runtime/docs/guide.md#online-beta) before trying it.
+- **Display & performance > Online:** *Check for updates* asks GitHub when you press it. *Update now* prepares an available update for the next launch. *Discord status* is off by default.
 
 ## Where things are
 
 - Your saves and settings: `~/Library/Application Support/NFSMW-port/`
 - The game's logs: `~/Library/Logs/NFSMW-port/`
-- Setup's own files (safe to delete after building): `~/Library/Application Support/NFSMW-Setup/` and
-  `~/Library/Caches/NFSMW-Setup/`
+- Setup’s saved choices: `~/Library/Application Support/NFSMW-Setup/source-choices.json`. Keep this file for Update now, along with the original PC and any selected Xbox 360 sources.
+- Setup’s cache: `~/Library/Caches/NFSMW-Setup/` (can be deleted after building; later builds may need to download or prepare files again).
 - Setup's logs: `~/Library/Logs/NFSMW-Setup/`
 
 ## Updating
 
-Download the newer Setup from the releases page and build again. Your game folder is only read, never changed.
+In 4.3, use **F10 > Display & performance > Online > Check for updates**, then **Update now** when offered. Follow the status, quit and reopen when ready. Cancel update stops it before the next launch; Retry update starts again after a failure or cancellation.
+
+Keep Setup’s saved source choices and the sources they point to. If they moved or were deleted, run the latest Setup and select them again. Careers and settings are kept.
+
+**From 4.2.0 or earlier:** download the newer Setup from the releases page, quit the game and build again manually. The 4.2.0 update check opens a browser; it cannot prepare updates. Your game folder is only read, never changed.
 
 ## Coming from 3.x
 
-4.0.0 is a new native recompilation and runtime, not an update of 3.x. Download the 4.0.0 Setup and build again.
+4.0.0 is a new native recompilation and runtime, not an update of 3.x. Download the latest Setup and build again.
 
 **4.0.0 replaces the 3.x app and keeps it.** Setup installs **NFS Most Wanted Native.app** where the 3.x app was, so
 the Dock icon carries over. The 3.x app is not deleted: it is renamed "NFS Most Wanted Native 3.x.app" (or "... 3.x (2).app"

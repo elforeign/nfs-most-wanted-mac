@@ -1,4 +1,7 @@
 """Ordered manifest proof. Good 0/1/2: 200/260/316 checks, 0 failures.
+Mapped manifest: 326/326; omitted solid loader: 320/326, 6 failures.
+Distinct paint keys: 326/326; old constant-purple write: 324/326, 2 failures.
+Omitted paint loader: 322/326, 4 failures (metadata and cloned stock key).
 Missing strings: 8/316; borrowed NameId: 2/316; missing logos: 6/298;
 lot owned-row guard removed: 2/316 failures (transition plus early cash change).
 Missed bound/duplicate ID: exit 2. CoreText raster runs offline; upload is stubbed.
@@ -8,6 +11,7 @@ Guest construction/FE enumeration is a contract fixture, not native proof.
 from pathlib import Path
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -73,6 +77,15 @@ int main(int argc, char **argv) {
     uint8_t original[84*208]; memcpy(original,G+chunk+16,sizeof original);
     M32(c.esp+4)=chunk; f_00756A90(&c);
     CHECK(car85_count()==84+expected); CHECK(nadditions==expected);
+    for(unsigned j=0;j<expected;++j) if(getenv("TEST_SOLID_MAP")) {
+        CHECK(additions[j].solid_count==1);
+        CHECK(additions[j].solid_map && additions[j].solid_map[0]==101);
+        CHECK(additions[j].solid_map && additions[j].solid_map[1]==1001+j);
+        // GLOSS_L1_COLOR01 / COLOR02, independently expected per fixture car.
+        static const uint32_t expected_paint[] = {0xB8BCBDE2u, 0xB8BCBDE3u};
+        CHECK(additions[j].paint_key==expected_paint[j]);
+        CHECK(M32(M32(TABLE)+(84+j)*208+0xCC)==expected_paint[j]);
+    }
     CHECK(!memcmp(original,G+M32(TABLE),sizeof original));
     for(unsigned i=0;i<84;++i) {
         uint32_t hash=M32(chunk+16+i*208+0x50), type=M32(chunk+16+i*208+0x90);
@@ -237,8 +250,15 @@ def main(extra_addresses=(), variants=None):
         env=dict(os.environ,BOOT_DIAG=str(tmp/"diag"),BOOT_USERDATA=str(tmp/"diag.user")); env.pop("NFS_TEST_CAR85",None)
         actual=(base.ROOT/"runtime/car85.c").read_text()
         results=[]
-        for variant in (variants or ("good","duplicate_id","missed_bound","missing_names","borrowed_name","missing_logos","lot_guard")):
+        for variant in (variants or ("good","missing_solid_map","missing_paint","purple_paint","duplicate_id","missed_bound","missing_names","borrowed_name","missing_logos","lot_guard")):
             changed=actual
+            if variant=="missing_solid_map":
+                changed=actual.replace('if (!stat(solid_map, &map_stat)) load_solid_map(a, solid_map);',
+                                       'if (!stat(solid_map, &map_stat)) { /* omitted map */ }')
+            if variant=="missing_paint":
+                changed=actual.replace('load_default_paint(a, paint_path);', '/* omitted paint loader */')
+            if variant=="purple_paint":
+                changed=actual.replace('M32(extra + 0xCC) = a->paint_key;', 'M32(extra + 0xCC) = 0xB8BCBE09u;')
             if variant=="duplicate_id": changed=actual.replace('M32(extra + 0x90) = addition_id(j);', 'M32(extra + 0x90) = TYPES;')
             if variant=="missing_names":
                 changed=actual.replace('M32(owned + n * 8 + 4) = a->string;', 'M32(owned + n * 8 + 4) = 0;')
@@ -297,8 +317,27 @@ def main(extra_addresses=(), variants=None):
                 manifest=tmp/"manifest.tsv"; manifest.write_text("".join(f"{name}\t{donor}\t{packs}\n" for name,donor in list(zip(("R8","CCX"),("997S","911TURBO")))[:n]))
                 result=subprocess.run([str(binary),str(n)],env=dict(env,NFS_TEST_ADDCARS=str(manifest)),text=True,capture_output=True)
                 print(variant,result.stdout.strip()); print(result.stderr[-1800:],end="")
-                assert (result.returncode==0)==(variant=="good"),(variant,n,result.returncode)
+                assert (result.returncode==0)==(variant in ("good","missing_solid_map","missing_paint","purple_paint")),(variant,n,result.returncode)
                 results.append((variant,n,result.returncode))
+            if variant in ("good", "missing_solid_map", "missing_paint", "purple_paint"):
+                rows=[]
+                for j,(name,donor) in enumerate((("R8","997S"),("CCX","911TURBO"))):
+                    folder=tmp/name; folder.mkdir(exist_ok=True)
+                    for filename in ("GEOMETRY.BIN","TEXTURES.BIN"): (folder/filename).write_bytes(b"fixture")
+                    identity=0xFFFFFFFF
+                    for ch in name.encode(): identity=(identity*33+ch)&0xFFFFFFFF
+                    (folder/"SOLIDMAP.BIN").write_bytes(struct.pack('<6I',0x31504D53,2,identity,1,101,1001+j))
+                    donor_hash=0xFFFFFFFF
+                    for ch in donor.encode(): donor_hash=(donor_hash*33+ch)&0xFFFFFFFF
+                    paint = [0x31545044,2,identity,donor_hash,0xB8BCBDE2+j,0xB8BCBDE2+j,1]
+                    checksum = 0xFFFFFFFF
+                    for word in paint: checksum = ((checksum ^ word) * 16777619) & 0xFFFFFFFF
+                    (folder/"PAINT.BIN").write_bytes(struct.pack('<8I',*paint,checksum))
+                    rows.append(f"{name}\t{donor}\t{folder}\n")
+                manifest=tmp/"mapped.tsv"; manifest.write_text(''.join(rows))
+                result=subprocess.run([str(binary),"2"],env=dict(env,NFS_TEST_ADDCARS=str(manifest),TEST_SOLID_MAP="1"),text=True,capture_output=True)
+                print(variant,"mapped",result.stdout.strip())
+                assert (result.returncode==0)==(variant=="good"),(variant,result.returncode,result.stderr[-1000:])
         malformed = {
             "duplicate_folder": f"R8\t997S\t{packs}\nr8\t911TURBO\t{packs}\n",
             "original_folder": f"997S\t997S\t{packs}\n",

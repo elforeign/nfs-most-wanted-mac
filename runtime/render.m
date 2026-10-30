@@ -12,6 +12,8 @@
 // share is declared in render_internal.h. This file keeps the draw, pipeline, sampler and texture core.
 #include "render_internal.h"
 #include "lampbatch.h"
+#include "alpha_to_coverage.h"
+#include "roadfilm.h"
 #define HDRCLIP_COPY_TEST 1
 #include "hdrclip.m" // diagnostic counter module, owned by this translation unit
 #include "gen/x360_shader_lits.inc"   // X360F_KMAXDIST_WORLD (the X360 fog distance, from the player's ZZDATA0.BIN)
@@ -274,6 +276,7 @@ id<MTLTexture> render_lamp_source(void) { return render_lamp_source_view(0); }
 
 static void shader_cache_warm(void);
 static void ff_shader_warm(void);
+static int ssao_depth_warm(void);
 static void dump_consts(FILE *df, const char *stage, const SmResult *r, float (*k)[4], int nk);
 static void depthdump(uint32_t guest, id<MTLTexture> src);
 
@@ -582,7 +585,7 @@ void render_init(void) {
     pd.vertexFunction = [lib newFunctionWithName:@"blit_vs"];
     pd.fragmentFunction = [lib newFunctionWithName:@"blit_fs"];
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    blit_pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+    blit_pso = pipeline_build(pd, __func__, &err);
     if (!blit_pso) fprintf(stderr, "boot: render: blit pipeline: %s\n", err.localizedDescription.UTF8String);
     MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
     sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
@@ -594,12 +597,22 @@ void render_init(void) {
         int good=float_scene_test(0),bad=float_scene_test(1);
         diag_event("float_scene_test: normal=%d mutant=%d expected=0/1 %s",good,bad,good==0&&bad==1?"PASS":"FAIL");
     }
+    uint64_t pipeline_load_start = diag_on ? host_ticks() : 0;
     shader_cache_warm();
     ff_shader_warm();
+    render_contact_warm();
+    dispatch_async(shader_workers[0], ^{ @autoreleasepool { render_post_prewarm(); }});
+    const char *prewarm=getenv("NFS_PSO_PREWARM");
+    if(prewarm && atoi(prewarm)) dispatch_async(shader_workers[1], ^{ @autoreleasepool { if(!ssao_depth_warm() && diag_on)diag_event("pipeline_prewarm: failed=ao_depth"); }});
     // Device construction is the load boundary, before the first scene frame.
     // Join the eager catalogue here; no draw waits for a compiler or drops known
                                                                                   
     for (int i = 0; i < 4; ++i) dispatch_sync(shader_workers[i], ^{});
+    for (int i = 0; i < nshaders; ++i) pipeline_register_shader(shaders[i]->key, shaders[i]->fn);
+    pipeline_prewarm(shader_workers, bb_rt.ms ? bb_rt.ms.sampleCount : 1);
+    for (int i = 0; i < 4; ++i) dispatch_sync(shader_workers[i], ^{});
+    if (diag_on) diag_event("pipeline_prewarm: loading_ms=%.3f", (host_ticks()-pipeline_load_start)/1e6);
+    pipeline_loading_done();
     if (diag_on) diag_event("shader_compile: load_ready=%d frame_sync=%llu", nshaders, stat_sync_shader);
 }
 
@@ -766,7 +779,7 @@ static void float_scene_ramp(void) {
         NSString *src=@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 vs(uint v [[vertex_id]]){float2 p=float2((v<<1)&2,v&2);return float4(p*2-1,0,1);}\nfragment float4 fs(float4 p [[position]]){float x=floor(p.x)/128.0f;if(p.x>1025)return as_type<float4>(uint4(0x7fc00000u,0x7f800000u,0xff800000u,0x7fc00000u));return float4(x,x,x,1);}";
         NSError *error=nil;id<MTLLibrary> lib=[mtl newLibraryWithSource:hdrclip_world_source(src,UINT64_MAX,0,0) options:nil error:&error];
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[lib newFunctionWithName:@"vs"];pd.fragmentFunction=[lib newFunctionWithName:@"fs"];pd.colorAttachments[0].pixelFormat=t.pixelFormat;pd.rasterSampleCount=t.sampleCount;
-        pso=[mtl newRenderPipelineStateWithDescriptor:pd error:&error];samples=t.sampleCount;
+        pso=pipeline_build(pd, __func__, &error);samples=t.sampleCount;
         if(!pso){diag_event("float scene ramp compile: %s",error.localizedDescription.UTF8String);return;}
     }
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=t;rp.colorAttachments[0].loadAction=MTLLoadActionLoad;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
@@ -914,23 +927,28 @@ static int ssao_prepare(id<MTLTexture> z) {
     if(ssao_proof())ssao_cpu_reference_mask.ms=ssao_mask.ms;
     return ssao_mask.tex&&ssao_mask.ms&&ssao_half_depth&&(!ssao_proof()||ssao_reference_mask.tex);
 }
-static int ssao_depth_prepare(id<MTLTexture> z) {
-    static id<MTLRenderPipelineState> pipeline;static id<MTLDepthStencilState> write_depth;
-    if (!pipeline) {
+static id<MTLRenderPipelineState> ssao_depth_pipeline;
+static id<MTLDepthStencilState> ssao_write_depth;
+static int ssao_depth_warm(void) {
+    if (!ssao_depth_pipeline) {
         NSError *error=nil;id<MTLLibrary> library=[mtl newLibraryWithSource:[NSString stringWithUTF8String:ssao_depth_src] options:nil error:&error];
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];d.vertexFunction=[library newFunctionWithName:@"coverage_vs"];d.fragmentFunction=[library newFunctionWithName:@"coverage_fs"];
         d.rasterSampleCount=4;d.depthAttachmentPixelFormat=MTLPixelFormatDepth16Unorm;
-        pipeline=[mtl newRenderPipelineStateWithDescriptor:d error:&error];
-        MTLDepthStencilDescriptor *dd=[MTLDepthStencilDescriptor new];dd.depthCompareFunction=MTLCompareFunctionAlways;dd.depthWriteEnabled=YES;write_depth=[mtl newDepthStencilStateWithDescriptor:dd];
-        if (!pipeline) {fprintf(stderr,"boot: SSAO depth downsample: %s\n",error.localizedDescription.UTF8String);return 0;}
+        ssao_depth_pipeline=pipeline_build(d, "ao_depth", &error);
+        MTLDepthStencilDescriptor *dd=[MTLDepthStencilDescriptor new];dd.depthCompareFunction=MTLCompareFunctionAlways;dd.depthWriteEnabled=YES;ssao_write_depth=[mtl newDepthStencilStateWithDescriptor:dd];
+        if (!ssao_depth_pipeline) {fprintf(stderr,"boot: SSAO depth downsample: %s\n",error.localizedDescription.UTF8String);return 0;}
     }
+    return ssao_depth_pipeline != nil;
+}
+static int ssao_depth_prepare(id<MTLTexture> z) {
+    if (!ssao_depth_warm()) return 0;
     end_pass();ensure_cmd();
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
     rp.depthAttachment.texture=ssao_half_depth;rp.depthAttachment.loadAction=MTLLoadActionDontCare;rp.depthAttachment.storeAction=MTLStoreActionStore;
     [rp setSamplePositions:ssao_samples count:4];
     if(gpt_on)gpt_render_auto(rp,"ssao half depth");
     id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
-    [e setRenderPipelineState:pipeline];[e setDepthStencilState:write_depth];[e setFragmentTexture:z atIndex:0];
+    [e setRenderPipelineState:ssao_depth_pipeline];[e setDepthStencilState:ssao_write_depth];[e setFragmentTexture:z atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];ssao_half_serial=frame_serial;return 1;
 }
 static void ssao_open(id<MTLTexture> z) {
@@ -1030,7 +1048,7 @@ static int soft_smoke_snapshot_copy(id<MTLTexture> z) {
         pd.vertexFunction = [lib newFunctionWithName:@"smoke_depth_vs"];
         pd.fragmentFunction = [lib newFunctionWithName:@"smoke_depth_fs"];
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
-        if (lib) pso[ms] = [mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+        if (lib) pso[ms] = pipeline_build(pd, __func__, &error);
         if (!pso[ms]) { if (diag_on) diag_event("soft smoke: depth pipeline failed: %s", error.localizedDescription.UTF8String); return 0; }
     }
     if (!soft_copy_depth || soft_copy_depth.width != z.width || soft_copy_depth.height != z.height) {
@@ -1154,7 +1172,7 @@ static void soft_late_composite(id<MTLTexture> scene) {
         pd.vertexFunction=[l newFunctionWithName:@"copy_vs"];pd.fragmentFunction=[l newFunctionWithName:@"copy_fs"];
         MTLRenderPipelineColorAttachmentDescriptor *a=pd.colorAttachments[0];a.pixelFormat=scene.pixelFormat;a.writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
         a.blendingEnabled=YES;a.sourceRGBBlendFactor=MTLBlendFactorOne;a.destinationRGBBlendFactor=MTLBlendFactorOneMinusSourceAlpha;
-        pso=states[slot]=[mtl newRenderPipelineStateWithDescriptor:pd error:nil];if(!pso){fprintf(stderr,"soft smoke composite pipeline failed\n");abort();}
+        pso=states[slot]=pipeline_build(pd, __func__, NULL);if(!pso){fprintf(stderr,"soft smoke composite pipeline failed\n");abort();}
     }
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=scene;
     rp.colorAttachments[0].loadAction=MTLLoadActionLoad;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
@@ -1202,7 +1220,7 @@ static int soft_proof_begin(id<MTLTexture> scene,id<MTLTexture> z) {
         NSError *error=nil;id<MTLLibrary> l=[mtl newLibraryWithSource:s options:nil error:&error];
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[l newFunctionWithName:@"copy_vs"];pd.fragmentFunction=[l newFunctionWithName:@"copy_fs"];
         pd.colorAttachments[0].pixelFormat=scene.pixelFormat;pd.rasterSampleCount=samples;
-        if(l)pso[samples]=[mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+        if(l)pso[samples]=pipeline_build(pd, __func__, &error);
         if(!pso[samples]){diag_event("soft smoke proof: copy pipeline failed %s",error.localizedDescription.UTF8String);return 0;}
     }
     soft_proof_z=z;
@@ -1320,7 +1338,7 @@ static ClearPipeline *clear_pipeline(id<MTLDevice> device, const MTLPixelFormat 
     pd.depthAttachmentPixelFormat = depth;
     int has_stencil = depth == MTLPixelFormatDepth32Float_Stencil8;
     pd.stencilAttachmentPixelFormat = has_stencil ? depth : MTLPixelFormatInvalid;
-    id<MTLRenderPipelineState> pso = libs[mask] ? [device newRenderPipelineStateWithDescriptor:pd error:&err] : nil;
+    id<MTLRenderPipelineState> pso = libs[mask] ? pipeline_build_device(device, pd, __func__, &err) : nil;
     if (!pso) { fprintf(stderr, "boot: rectangle clear pipeline: %s\n", err.localizedDescription.UTF8String); abort(); }
     MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
     dd.depthCompareFunction = MTLCompareFunctionAlways;
@@ -1622,7 +1640,9 @@ static char *shader_replacement(ShaderEntry *e) {
                    : e->variant == MAT_VARIANT_SOFT_SMOKE ? mat_soft_smoke_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : e->variant == MAT_VARIANT_SOFT_SMOKE_RESOLVED ? mat_soft_smoke_resolved_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : e->variant == MAT_VARIANT_SOFT_SMOKE_LATE ? mat_soft_smoke_late_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
+                   : e->variant == MAT_VARIANT_HEADLAMP_CLEAR ? mat_headlamp_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : e->variant == MAT_VARIANT_CARBON_LAMP ? mat_carbon_lamp_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
+                   : e->variant == MAT_VARIANT_ROAD_FILM ? mat_roadfilm_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : e->variant ? mat_grass_shader(&e->refl, e->refl.shader_type, (int)e->variant - 1, e->opt.vs_input_int, e->opt.vs_input_uint)
                                : mat_replace(e->tokens, e->ntokens, &e->refl, &e->mat);
     pthread_mutex_unlock(&shader_source_mu);
@@ -1748,7 +1768,7 @@ static void shader_cache_warm(void) {
         uint32_t variant;
         while (fread(&opt, sizeof opt, 1, f) == 1) {
             variant = 0;
-            if (hdr[1] != sizeof(SmOptions) && (fread(&variant, 4, 1, f) != 1 || (variant > 10 && variant != MAT_VARIANT_WATER && variant != MAT_VARIANT_GLASS && variant != MAT_VARIANT_TREES && variant != MAT_VARIANT_BONE && variant != MAT_VARIANT_CARBON_LAMP && variant != MAT_VARIANT_AUX && variant != MAT_VARIANT_SOFT_SMOKE && variant != MAT_VARIANT_SOFT_SMOKE_RESOLVED && variant != MAT_VARIANT_SOFT_SMOKE_LATE))) break;
+            if (hdr[1] != sizeof(SmOptions) && (fread(&variant, 4, 1, f) != 1 || (variant > 10 && variant != MAT_VARIANT_WATER && variant != MAT_VARIANT_GLASS && variant != MAT_VARIANT_TREES && variant != MAT_VARIANT_BONE && variant != MAT_VARIANT_CARBON_LAMP && variant != MAT_VARIANT_HEADLAMP_CLEAR && variant != MAT_VARIANT_AUX && variant != MAT_VARIANT_SOFT_SMOKE && variant != MAT_VARIANT_SOFT_SMOKE_RESOLVED && variant != MAT_VARIANT_SOFT_SMOKE_LATE && variant != MAT_VARIANT_ROAD_FILM))) break;
             if (fread(&n, 4, 1, f) != 1 || !n || n >= (1u << 20)) break;
             uint32_t *t = malloc(4 * (size_t)n);
             if (fread(t, 4, n, f) != n) { free(t); break; }
@@ -1861,7 +1881,9 @@ static void shader_preload_blob(const uint32_t *words, uint32_t count, const cha
                 if (world) for (uint32_t shell = 1; shell <= 10; ++shell) shader_preload_variant(&s, &opt, shell);
                 if (world) shader_preload_variant(&s, &opt, MAT_VARIANT_AUX);
                 if (world) shader_preload_variant(&s, &opt, MAT_VARIANT_WATER);
-                if (!strcmp(name, "IDI_CAR_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_CARBON_LAMP);
+                if (roadfilm_shader_hash(s.tokens_hash) && roadfilm_enabled())
+                    shader_preload_variant(&s, &opt, MAT_VARIANT_ROAD_FILM);
+                if (!strcmp(name, "IDI_CAR_FX")) { shader_preload_variant(&s, &opt, MAT_VARIANT_CARBON_LAMP); shader_preload_variant(&s, &opt, MAT_VARIANT_HEADLAMP_CLEAR); }
                 if (!strcmp(name, "IDI_GLOSSYWINDOW_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_GLASS);
                 if (!strcmp(name, "IDI_TREE_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_TREES);
                 if (!strcmp(name, "IDI_WORLDBONE_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_BONE);
@@ -2494,7 +2516,7 @@ static int grass_pso_async(uint64_t key, MTLRenderPipelineDescriptor *pd) {
     grass_pso_pend[grass_pso_npend++] = key;
     dispatch_async(shader_q, ^{ @autoreleasepool {
         NSError *err = nil;
-        id<MTLRenderPipelineState> pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+        id<MTLRenderPipelineState> pso = pipeline_build(pd, __func__, &err);
         if (!pso) fprintf(stderr, "boot: render: grass pipeline failed: %s\n", err.localizedDescription.UTF8String);
         pthread_mutex_lock(&grass_pso_mu);
         if (grass_pso_ndone < 16) grass_pso_done[grass_pso_ndone++] = (GrassPsoDone){key, (__bridge_retained void *)pso};
@@ -2596,7 +2618,7 @@ static void grass_prepare(GrassDraw *g, Obj *vs, Obj *ps, const SmOptions *vo, c
             if (grass_pso_async(key, pd)) { missing = 1; continue; }    // built off the frame; this draw stays PC until it lands
             NSError *err = nil;
             uint64_t t0 = diag_on ? host_ticks() : 0;
-            pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+            pso = pipeline_build(pd, __func__, &err);
             if (diag_on) { ++stat_sync_grass; stat_sync_grass_ns += host_ticks() - t0; }
             if (!pso) return;
             map_put(&pipelines, key, pso);
@@ -2706,7 +2728,7 @@ static AuxDraw aux_prepare(Obj *vs, Obj *ps, const SmOptions *vo, const SmOption
         pd.depthAttachmentPixelFormat = ds.pixelFormat;
         if (ds.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) pd.stencilAttachmentPixelFormat = ds.pixelFormat;
         NSError *err = nil;
-        id<MTLRenderPipelineState> pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];   // strong local: a.pso is unretained
+        id<MTLRenderPipelineState> pso = pipeline_cached(pd, v->key, p->key, "aux", &err);   // strong local: a.pso is unretained
         if (!pso) {
             if (diag_on) diag_event("auxlights: pipeline failed: %s",err.localizedDescription.UTF8String);
             map_put(&aux_pipeline_errors,key,@YES); { mat_aux_fallback(reason); return (AuxDraw){0}; }
@@ -2800,7 +2822,7 @@ static WaterDraw water_prepare(Obj *vs, Obj *ps, const SmOptions *vo, const SmOp
     NSError *err = nil;
     // A strong local: w.pso is __unsafe_unretained, so assigning the new (+1) pipeline straight to it let ARC free it
     // at once and map_put retained a dead object (crash in the first X360-water race, 2026-10-24).
-    id<MTLRenderPipelineState> pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+    id<MTLRenderPipelineState> pso = pipeline_cached(pd, v->key, p->key, "water", &err);
     if (!pso) {
         mat_water_failure(1);
         if (diag_on) diag_event("water: pipeline: %s", err.localizedDescription.UTF8String);
@@ -2866,6 +2888,7 @@ static id<MTLRenderPipelineState> host_material_pipeline(const ShaderEntry *v, c
         pd.rasterSampleCount = rt.sampleCount; pd.colorAttachments[0].pixelFormat = rt.pixelFormat;
         pd.colorAttachments[0].writeMask = ((rs[168] & 1) ? MTLColorWriteMaskRed : 0) | ((rs[168] & 2) ? MTLColorWriteMaskGreen : 0) |
             ((rs[168] & 4) ? MTLColorWriteMaskBlue : 0) | ((rs[168] & 8) ? MTLColorWriteMaskAlpha : 0);
+        pd.alphaToCoverageEnabled = !ssao_replay && alpha_to_coverage_draw(rs, (unsigned)rt.sampleCount, alpha_blend || rs[27]);
         // The material's blend (824513F0 modes on X360, BlendState on PC): never forced by the effect name.
         // alpha_blend (R28 trees' second pass): SRCALPHA/INVSRCALPHA, ADD, whatever the PC draw set.
         pd.colorAttachments[0].blendingEnabled = alpha_blend || rs[27] != 0;
@@ -2883,7 +2906,7 @@ static id<MTLRenderPipelineState> host_material_pipeline(const ShaderEntry *v, c
         }
         if (ds) { pd.depthAttachmentPixelFormat = ds.pixelFormat; pd.stencilAttachmentPixelFormat = ds.pixelFormat==MTLPixelFormatDepth32Float_Stencil8?ds.pixelFormat:MTLPixelFormatInvalid; }
         NSError *err = nil;
-        pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];   // strong local (water lesson, 2026-10-24)
+        pso = pipeline_cached(pd, v->key, p->key, ssao_replay ? "ao_material" : "material", &err);
         if (!pso) {
             failure(1);
             if (diag_on) diag_event("%s: pipeline: %s", tag, err.localizedDescription.UTF8String);
@@ -2974,6 +2997,7 @@ static int trees_emit(void (^geometry)(void)) {
         if (ssao_replay) { lr[52]=lr[59]=0;if(lr[23]==2)lr[23]=4; }
         SmPSAux pa = eb.pa;
         pa.alpha_func = ssao_replay&&!ssao_reference_record?0:2;
+        pa.alpha_to_coverage = 0; // blended fringe retains its original alpha and discard
         float k1[32][4]; memcpy(k1, trees_now.k, sizeof k1); k1[20][1] = 1;
         [enc setRenderPipelineState:trees_now.pso1];
         [enc setDepthStencilState:depth_state_for(lr)];
@@ -3111,9 +3135,19 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (ttff & 256) po.tex_projected[st] = (uint8_t)((ttff & 255) == 3 ? 3 : 4);
     }
     ShaderEntry *pse = get_shader(ps, &po);
+    if (roadfilm_draw(ps->tokens_hash, dev.psc[1][3])) {
+        ShaderEntry *film = get_shader_variant(ps, &po, MAT_VARIANT_ROAD_FILM);
+        if (!__atomic_load_n(&film->pending, __ATOMIC_ACQUIRE) && film->ok) pse = film;
+    }
     if (mat_carbon_lamp_draw()) {
-        ShaderEntry *lamp = get_shader_variant(ps, &po, MAT_VARIANT_CARBON_LAMP);
-        if (!__atomic_load_n(&lamp->pending, __ATOMIC_ACQUIRE) && lamp->ok) pse = lamp;
+        int clear = mat_headlamp_clear_draw();
+        ShaderEntry *lamp = get_shader_variant(ps, &po, clear ? MAT_VARIANT_HEADLAMP_CLEAR : MAT_VARIANT_CARBON_LAMP);
+        ShaderEntry *cover_vs = clear ? get_shader_variant(vs, &vo, MAT_VARIANT_HEADLAMP_CLEAR) : NULL;
+        if (!__atomic_load_n(&lamp->pending, __ATOMIC_ACQUIRE) && lamp->ok &&
+            (!clear || (!__atomic_load_n(&cover_vs->pending, __ATOMIC_ACQUIRE) && cover_vs->ok))) {
+            pse = lamp;
+            if (clear) vse = cover_vs;
+        }
     }
     if (shader_pending(pse)) { ++stat_deferred; return; }
     if (!pse->ok) { ++stat_fail; return; }
@@ -3204,9 +3238,10 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         }
     }
     if (diag_on) { extern void mat_cardraw_note(const uint32_t *rs); mat_cardraw_note(rs); }
+    int a2c = alpha_to_coverage_draw(rs, (unsigned)rt0.sampleCount, blend);
     struct { uint64_t ps, vs; uint32_t fmts[4], bstate[8]; } pk = {pse->key, vse->key,
         {(uint32_t)rt0.pixelFormat, dst ? (uint32_t)dst.pixelFormat : 0, rs[168] & 15, (uint32_t)rt0.sampleCount},
-        {(uint32_t)blend, rs[19], rs[20], rs[171], rs[206], rs[207], rs[208], rs[209]}};
+        {(uint32_t)(blend | (a2c << 1)), rs[19], rs[20], rs[171], rs[206], rs[207], rs[208], rs[209]}};
     _Static_assert(sizeof pk == 64, "pipeline key bytes must have no padding");
     static typeof(pk) last_pk;
     static uint64_t last_pk_vkey, last_pkey;
@@ -3232,6 +3267,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         pd.fragmentFunction = pse->fn;
         pd.vertexDescriptor = vd;
         pd.rasterSampleCount = rt0.sampleCount;
+        pd.alphaToCoverageEnabled = a2c;
         pd.colorAttachments[0].pixelFormat = rt0.pixelFormat;
         MTLColorWriteMask wm = 0;
         if (rs[168] & 1) wm |= MTLColorWriteMaskRed;
@@ -3252,15 +3288,20 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (dst) { pd.depthAttachmentPixelFormat = dst.pixelFormat; pd.stencilAttachmentPixelFormat = dst.pixelFormat==MTLPixelFormatDepth32Float_Stencil8?dst.pixelFormat:MTLPixelFormatInvalid; }
         NSError *err = nil;
         uint64_t t0 = host_ticks();
-        pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+        pso = pipeline_cached(pd, vse->key, pse->key, ssao_replay ? "ao" : "draw", &err);
         uint64_t dt = host_ticks() - t0;
-        if (diag_on) { ++stat_sync_pso; stat_sync_pso_ns += dt; }
+
         if (diag_on && dt > 20000000ull) {
             extern char diag_fx_pass[];
             diag_event("render: pipeline %016llX took %.0f ms (%s)", (unsigned long long)pkey, dt / 1e6, diag_fx_pass[0] ? diag_fx_pass : "no effect pass");
         }
         if (!pso) { fprintf(stderr, "boot: render: pipeline failed: %s\n", err.localizedDescription.UTF8String); ++stat_fail; return; }
         map_put(&pipelines, pkey, pso);
+        if (diag_on && rs[15]) {
+            extern char diag_fx_pass[];
+            diag_event("a2c: pipeline %016llX samples %u enabled %d func %u ref %u blend %d pass %s",
+                (unsigned long long)pkey, (unsigned)rt0.sampleCount, a2c, rs[25], rs[24] & 255, blend, diag_fx_pass);
+        }
     }
 
     GrassDraw grass;
@@ -3389,6 +3430,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     memset(&pa, 0, sizeof pa);
     pa.alpha_func = rs[15] ? rs[25] : 0;
     pa.alpha_ref = (rs[24] & 255) / 255.0f;
+    pa.alpha_to_coverage = a2c;
     for (int s = 0; s < 8; ++s) {
         memcpy(&pa.bumpenv[s][0], &dev.tss[s][7], 4); memcpy(&pa.bumpenv[s][1], &dev.tss[s][8], 4);
         memcpy(&pa.bumpenv[s][2], &dev.tss[s][9], 4); memcpy(&pa.bumpenv[s][3], &dev.tss[s][10], 4);
@@ -3720,7 +3762,7 @@ void quad_into(id<MTLCommandBuffer> cb, id<MTLTexture> src, MTLRegion sr, id<MTL
                 pd.colorAttachments[0].pixelFormat = dst.pixelFormat;
                 pd.rasterSampleCount = dst.sampleCount;
                 NSError *error = nil;
-                pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+                pso = pipeline_build(pd, __func__, &error);
                 if(pso)map_put(&blit_pipelines,key,pso);
                 else if(diag_on)diag_event("quad: pipeline format=%lu samples=%lu error=%s",(unsigned long)dst.pixelFormat,(unsigned long)dst.sampleCount,error.localizedDescription.UTF8String);
             }
@@ -3914,6 +3956,7 @@ static void drawshot(void) {
 }
 // stderr, every 300 frames: the draw and pipeline counts.
 void render_stats_log(void) {
+    pipeline_diag_tick();
     mat_grass_diag_frame();
     mat_aux_frame();
     mat_glass_frame();
@@ -3921,6 +3964,7 @@ void render_stats_log(void) {
     mat_bone_frame();
     if (diag_on && dev.frames % 600 == 0 && dev.frames) {
         diag_event("shader_compile: frame_sync=%llu", stat_sync_shader);
+        pipeline_frame_stats(&stat_sync_pso, &stat_sync_pso_ns);
         extern uint64_t fx_epoch_now(void);
         diag_event("audit1: frame %llu | blend-factor14/15 draws %llu, stale blend colour %llu | stencil-state calls %llu, ds-presence mismatch %llu | glass draws %llu, stale (middle edit) %llu, rebased %llu | sampler builds past 64: %llu | MRT1-3 draws %llu | fx epoch %llu | sync PSO builds %llu (%.1f ms) grass %llu (%.1f ms)",
                    (unsigned long long)dev.frames, ad1.bf_draws, ad1.bc_stale, ad1.ds_calls, ad1.ds_mismatch, ad1.glass_draws, ad1.glass_stale_mid, ad1.glass_rebased,

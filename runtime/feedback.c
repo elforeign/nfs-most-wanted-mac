@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "host.h"
 #include "gen/x360_engine.inc"   // X360E_FB_*: the console's envelope and collision numbers (the player's default.xex)
@@ -38,7 +39,19 @@ static uint64_t last_tick;
 // as its slip oscillators get it, whether or not the game's Rumble option is on), this DoFFB frame and the last one.
 static float slip_now[2], hz_now[2], slip_pub[2], hz_pub[2];   // [0] rear, [1] front
 static int nos_on;
+static float road_speed_now, road_surface_now, road_speed_pub, road_surface_pub;
 static unsigned suppressed;
+static _Atomic int effects_valid;
+static _Atomic int reset_model;
+void feedback_invalidate_effects(void) { effects_valid = 0; reset_model = 1; }
+// Disconnect can arrive on the HID queue. Reset the model only on its game thread,
+// before sampling old output or building the next frame; discard timed envelopes too.
+static void reset_invalid_model(void) {
+    if (!atomic_exchange(&reset_model, 0)) return;
+    int active = S.active;
+    memset(&S, 0, sizeof S); S.active = active;
+    last_tick = 0;
+}
 // These transitions run on the game/AppKit thread, like the IFeedback methods. The HID queue has its own atomic
 // gate (rumble.m), so a report already queued cannot restore a nonzero value after this stop.
 void feedback_suppress(unsigned reason, int on) {
@@ -49,6 +62,8 @@ void feedback_suppress(unsigned reason, int on) {
     last_tick = 0;
     memset(slip_now, 0, sizeof slip_now); memset(hz_now, 0, sizeof hz_now);
     memset(slip_pub, 0, sizeof slip_pub); memset(hz_pub, 0, sizeof hz_pub); nos_on = 0;
+    road_speed_now = road_surface_now = road_speed_pub = road_surface_pub = 0;
+    padfx_suppress(reason, on);
     rumble_suppress(suppressed != 0);
     if (diag_on) diag_event("feedback: %s %s (holds %02X), motors 0",
         on ? "suppress" : "resume", reason == FEEDBACK_MENU ? "menu" : reason == FEEDBACK_PAUSE ? "pause" :
@@ -57,9 +72,14 @@ void feedback_suppress(unsigned reason, int on) {
 void feedback_poll_pause(void) {
     uint32_t sim = G ? M32(0x009885E0u) : 0;  // Sim::_mSystem; Sim::GetState (006E8D20), 4 = paused
     feedback_suppress(FEEDBACK_PAUSE, sim && M32(sim + 0x2C) == 4);
+    padfx_poll();
 }
 void feedback_trigger_state(float slip[2], float hz[2], int *nos) {
+    if (!effects_valid) { memset(slip, 0, sizeof slip_pub); memset(hz, 0, sizeof hz_pub); *nos = 0; return; }
     memcpy(slip, slip_pub, sizeof slip_pub); memcpy(hz, hz_pub, sizeof hz_pub); *nos = nos_on;
+}
+void feedback_road_state(float *speed, float *surface) {
+    *speed = effects_valid ? road_speed_pub : 0; *surface = effects_valid ? road_surface_pub : 0;
 }
 static unsigned ncalls[16];                    // diag: calls per slot (slot / 4) since the last summary
 static float peak_l, peak_r;
@@ -112,6 +132,7 @@ void feedback_last_levels(float *heavy, float *light) {    // the overlay's rumb
 }
 void feedback_levels(float *heavy, float *light) {
     feedback_poll_pause();
+    reset_invalid_model();
     uint64_t now = host_ticks();
     float dt = last_tick ? (float)(now - last_tick) / 1e6f : 0;
     last_tick = now;
@@ -174,20 +195,24 @@ void feedback_levels(float *heavy, float *light) {
 }
 
 // ---- the IFeedback methods (thiscall; RET pops the arguments like the stubs' ret N)
-static int fb_stop(Cpu *c) { COUNT(0x04); S.active = 0; rumble_stop(); RET(0, 0); }
+static int fb_stop(Cpu *c) { COUNT(0x04); S.active = 0; padfx_stop(); rumble_stop(); RET(0, 0); }
 static int fb_resume(Cpu *c) { COUNT(0x08); feedback_poll_pause(); S.active = !suppressed; RET(0, 0); }
 static int fb_reset(Cpu *c) { COUNT(0x0C); S.active = 0; S.out_l = S.out_r = 0; memset(&S.env[0], 0, sizeof S.env[0]); RET(0, 0); }
 static void dump_surfaces(Cpu *c);
 static int fb_begin_frame(Cpu *c) {
     COUNT(0x10);
+    reset_invalid_model();
     if (diag_on) { dump_surfaces(c); trace_open(); tyre_n = 0; }
     for (int k = 0; k < 12; ++k) S.osc[k].amp = S.osc[k].freq = S.osc[k].offset = 0;   // phases kept
     memset(slip_now, 0, sizeof slip_now); memset(hz_now, 0, sizeof hz_now);
+    road_speed_now = road_surface_now = 0;
     RET(0, 0);
 }
 static int fb_end(Cpu *c) {
     COUNT(0x14);
     memcpy(slip_pub, slip_now, sizeof slip_now); memcpy(hz_pub, hz_now, sizeof hz_now);
+    road_speed_pub = suppressed ? 0 : road_speed_now; road_surface_pub = suppressed ? 0 : road_surface_now;
+    effects_valid = !suppressed;
     RET(0, 0);
 }
 
@@ -306,6 +331,11 @@ static int fb_speed(Cpu *c) {
     COUNT(0x18);
     float x; int front; uint32_t surf;
     wheel_args(c, 0, &x, &front, &surf);
+    if (!suppressed && padfx_road_wanted() && isfinite(x)) {
+        float hz;
+        road_speed_now = fmaxf(road_speed_now, fmaxf(x, 0));
+        road_surface_now = fmaxf(road_surface_now, surface_level(c, surf, 0xBA1297DAu, x, &hz));
+    }
     if (diag_on) { int i = surf_index(surf); tyre_ticks[i]++; if (tyre_n < 4) tyre_now[tyre_n++] = i; speed_now = x; }
     if (S.active) surface_curves(c, surf, 0xBA1297DAu, x, 0);
     if (S.active && rough_on() && is_rough(c, surf)) { curve_into(kRoughHeavy, x, &S.osc[1]); curve_into(kRoughLight, x, &S.osc[2]); }

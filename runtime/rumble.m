@@ -25,10 +25,29 @@ static IOHIDDeviceRef pad;                                  // hid_q (the match/
 static int bluetooth, seq;
 static uint8_t sent_heavy = 0xFF, sent_light = 0xFF;        // hid_q: what the controller plays
 static uint64_t sent_at;
-static _Atomic uint32_t want;                               // the game's latest levels: heavy | light << 8
+static _Atomic uint64_t want;                               // connection epoch << 32 | heavy | light << 8
+static _Atomic uint32_t motor_generation;
 static _Atomic int queued, closed;                          // closed: the game is quitting, the motors stay off
 static _Atomic int suppressed;                              // menu / pause / focus / app holds
 static dispatch_source_t sig_term, sig_int;                 // kept alive: a released source leaves the signal ignored
+static int neutral_pending, retry_queued;                   // hid_q: neutral must succeed before gameplay
+static uint64_t clear_until, retry_generation;
+static dispatch_semaphore_t close_done;
+static void flush(void);
+static void finish_clear(void) {
+    if (close_done) { dispatch_semaphore_signal(close_done); close_done = nil; }
+}
+static void cleared(void) {
+    neutral_pending = 0; clear_until = 0; retry_queued = 0; ++retry_generation;
+    finish_clear();
+}
+static void invalidate_motors(void) {                       // hid_q; never mutate the game-thread model here
+    feedback_invalidate_effects();
+    want = 0; ++motor_generation;                          // publish the epoch only after invalidating the model
+    ++retry_generation; retry_queued = 0; clear_until = 0;
+    neutral_pending = 1;
+    sent_heavy = sent_light = 0xFF; sent_at = 0;
+}
 
 static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
@@ -38,13 +57,16 @@ static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
         pad = dev;
         CFTypeRef t = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
         bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() && CFStringFind(t, CFSTR("Bluetooth"), 0).location != kCFNotFound;
-        sent_heavy = sent_light = 0xFF;
+        invalidate_motors();
+        flush();                                           // neutral before the next feedback publication
         if (diag_on) diag_event("rumble: DualSense over %s", bluetooth ? "Bluetooth" : "USB");
     });
 }
 static void removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
-    dispatch_async(hid_q, ^{ if (dev == pad) { CFRelease(pad); pad = NULL; } });
+    dispatch_async(hid_q, ^{
+        if (dev == pad) { invalidate_motors(); CFRelease(pad); pad = NULL; finish_clear(); }
+    });
 }
 static void rumble_open(void) {
     hid_q = dispatch_queue_create("nfsmw.rumble", DISPATCH_QUEUE_SERIAL);
@@ -58,7 +80,7 @@ static void rumble_open(void) {
     IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone);
 }
 
-static void send(uint8_t heavy, uint8_t light) {
+static int send(uint8_t heavy, uint8_t light) {
     uint8_t r[78] = {0};
     uint8_t *c;                                             // the common part: flags, motors, ...
     CFIndex n;
@@ -76,26 +98,55 @@ static void send(uint8_t heavy, uint8_t light) {
     static int logs;
     if (diag_on && (ok != kIOReturnSuccess || logs < 20) && logs++ < 40)
         diag_event("rumble: heavy %u light %u -> %s (0x%X)", heavy, light, ok == kIOReturnSuccess ? "sent" : "failed", ok);
+    return ok == kIOReturnSuccess;
+}
+
+// A stop cannot depend on another pad read. Retry only neutral, every 20 ms for at most 250 ms.
+// A new connection or a successful clear cancels delayed work from the previous attempt.
+static void retry_clear(void) {
+    uint64_t now = host_ticks();
+    if (!clear_until) clear_until = now + 250000000ull;
+    if (now >= clear_until) { finish_clear(); return; }
+    if (retry_queued) return;
+    retry_queued = 1;
+    uint64_t token = retry_generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), hid_q, ^{
+        if (token != retry_generation) return;
+        retry_queued = 0;
+        if (host_ticks() >= clear_until) { finish_clear(); return; }
+        flush();
+    });
 }
 
 // hid_q: send the latest levels when they changed (and a refresh every second, in case the controller reconnected).
 static void flush(void) {
     queued = 0;
-    if (!pad) return;
-    uint32_t w = closed || suppressed ? 0 : want;
+    if (!pad) { finish_clear(); return; }
+    uint64_t request = want;
+    uint32_t w = closed || suppressed || neutral_pending || (request >> 32) != motor_generation ? 0 : (uint32_t)request;
     uint8_t heavy = w & 0xFF, light = w >> 8 & 0xFF;
     uint64_t now = host_ticks();
-    if (heavy == sent_heavy && light == sent_light && now - sent_at < 1000000000ull) return;
-    send(heavy, light);
-    sent_heavy = heavy; sent_light = light; sent_at = now;
+    if (heavy == sent_heavy && light == sent_light && now - sent_at < 1000000000ull) { if (!w) cleared(); return; }
+    if (send(heavy, light)) {
+        sent_heavy = heavy; sent_light = light; sent_at = now;
+        if (!w) cleared();
+    } else if (!w) { neutral_pending = 1; retry_clear(); }
 }
-static void post_levels(uint8_t heavy, uint8_t light) {
-    want = heavy | (uint32_t)light << 8;
+static void post_levels_at(uint8_t heavy, uint8_t light, uint32_t token) {
+    want = (uint64_t)token << 32 | heavy | (uint32_t)light << 8;
     if (!atomic_exchange(&queued, 1)) dispatch_async(hid_q, ^{ flush(); });
 }
 
 // The game stops reading the pad while it's paused (focus lost): the motors would keep its last levels.
-void rumble_stop(void) { if (hid_q) post_levels(0, 0); }
+void rumble_stop(void) {
+    if (!hid_q) return;
+    want = (uint64_t)motor_generation << 32;
+    dispatch_async(hid_q, ^{
+        neutral_pending = 1; clear_until = 0;
+        ++retry_generation; retry_queued = 0;
+        flush();
+    });
+}
 void rumble_suppress(int on) {
     suppressed = on;
     rumble_stop();                         // clear want on BOTH edges: resume never replays a queued old level
@@ -107,9 +158,9 @@ void rumble_suppress(int on) {
 void rumble_close(void) {
     if (!hid_q || atomic_exchange(&closed, 1)) return;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    dispatch_async(hid_q, ^{ flush(); dispatch_semaphore_signal(done); });
+    dispatch_async(hid_q, ^{ close_done = done; clear_until = 0; flush(); });
     long late = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC));
-    if (diag_on) diag_event("rumble: closed, motors off%s", late ? " (controller didn't answer in 300 ms)" : "");
+    if (diag_on) diag_event("rumble: close clear wait %s", late ? "expired (300 ms)" : "finished");
 }
 static dispatch_source_t close_on_signal(int sig) {
     signal(sig, SIG_IGN);                                   // the dispatch source takes it instead
@@ -141,7 +192,8 @@ void rumble_update(void) {
         atexit(rumble_close);
         rumble_signals();
     }
+    uint32_t token = motor_generation;
     float hf, lf;
     feedback_levels(&hf, &lf);                              // the model advances with or without a DualSense
-    if (!closed) post_levels((uint8_t)lroundf(hf * 255), (uint8_t)lroundf(lf * 255));
+    if (!closed) post_levels_at((uint8_t)lroundf(hf * 255), (uint8_t)lroundf(lf * 255), token);
 }

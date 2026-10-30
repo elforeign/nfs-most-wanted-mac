@@ -16,6 +16,11 @@
 
 
 
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -197,7 +202,9 @@ def main():
         (scratch / 'frame_end.inc').write_text(frame_end)
         post_code = (section(post, 'static const char *x360_src =', '#include "lampglow_shader.h"') +
                      section(post, 'static NSString *x_edr_source(', '// END HDR output M post variant') +
-                     section(post, 'typedef struct { float off[16][4]', '// The visual treatment into a multisampled back buffer'))
+                     section(post, 'static const char *ssao_src =', 'typedef struct { float proj[4],size[4],rect[4],bounds[4],tune[4]; } AOParams;') +
+                     section(post, 'typedef struct { float off[16][4]', '// The visual treatment into a multisampled back buffer') +
+                     section(post, 'static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format) {', 'static struct { id<MTLRenderPipelineState> kernel,blur,apply'))
         (scratch / 'post.inc').write_text(post_code)
         (scratch / 'quad.inc').write_text(maps + '\nstatic Map blit_pipelines;\n' + blit + quad)
         (scratch / 'routing.inc').write_text(
@@ -264,6 +271,7 @@ def main():
                      scratch / (shader + '.metal'), '-o', scratch / (shader + '.air')],
                     env={**env, 'TMPDIR': str(scratch) + '/'})
         print('hdr_output_test: offline Metal compile: HDR/gamma/quad/post/post_edr/HUD 6/6 PASS', flush=True)
+        env['NFS_HDR_OUTPUT']='off'
         # Never treat sandbox device denial as GPU evidence.
         result = subprocess.run([str(exe), '--sdr'], capture_output=True, text=True,
                                 env={**env, 'MTL_DEBUG_LAYER': '1'})
@@ -271,6 +279,19 @@ def main():
         if result.returncode == 3:
             return 3
         assert result.returncode == 0, 'SDR baseline failed'
+        auto_env={k:v for k,v in env.items() if k!='NFS_HDR_OUTPUT'}
+        checked([exe, '--auto-hdr'], env=auto_env)
+        old_request=production.replace('hdr_output_requested = nfs_hdr_output_requested();',
+            'hdr_output_requested = nfs_hdr_output_mode()==2;')
+        assert old_request!=production
+        (scratch / 'presenter.inc').write_text(old_request)
+        checked(build)
+        old_auto=subprocess.run([str(exe), '--auto-hdr'], capture_output=True, text=True, env=auto_env)
+        assert old_auto.returncode==1 and 'FAIL: Auto potential 7 startup' in old_auto.stderr, old_auto.stdout+old_auto.stderr
+        print('hdr_output_test: old Auto startup 1 failure vs production 0 rejected PASS', flush=True)
+        (scratch / 'presenter.inc').write_text(production)
+
+        checked(build)
         edr_env = {**env, 'NFS_HDR_OUTPUT': 'edr', 'MTL_DEBUG_LAYER': '1'}
         for _ in range(8):
             for on in (True, False, True):
@@ -302,6 +323,27 @@ def main():
         broken = subprocess.run([str(exe), '--broken'], capture_output=True, text=True, env=edr_env)
         print(broken.stdout + broken.stderr, end='', flush=True)
         assert broken.returncode == 1 and 'FAIL: PATCH above_one=0 lost=2 bad_channels=6' in broken.stderr, 'BGRA8 mutant escaped or failed for another reason'
+        checked([exe, '--prewarm'], env=edr_env)
+        checked([exe, '--prewarm-msaa'], env=edr_env)
+        checked([exe, '--prewarm-lamps'], env=edr_env)
+        wrong_lamp = harness.replace('held?x_edr_pipeline(@"fs_vt",samples,lamp):direct',
+                                     'held?x_edr_pipeline(@"fs_vt",samples,0):direct')
+        assert wrong_lamp != harness
+        (scratch / 'test.m').write_text(wrong_lamp)
+        checked(build)
+        missing = subprocess.run([str(exe), '--prewarm-lamps'], capture_output=True, text=True, env=edr_env)
+        assert missing.returncode == 1 and 'held lamp pixels differ lamp=1 samples=1 differing=384/1024' in missing.stderr, missing.stdout + missing.stderr
+        print('hdr_output_test: wrong lamp variant rejected:', missing.stderr.strip(), flush=True)
+        (scratch / 'test.m').write_text(harness)
+        skipped_downscale = post_code.replace('for (NSString *fs in @[@"fs_downscale",', 'for (NSString *fs in @[')
+        assert skipped_downscale != post_code
+        (scratch / 'post.inc').write_text(skipped_downscale)
+        checked(build)
+        missing = subprocess.run([str(exe), '--prewarm'], capture_output=True, text=True, env=edr_env)
+        assert missing.returncode == 1 and 'frame_builds=2' in missing.stdout, missing.stdout + missing.stderr
+        print('hdr_output_test: EDR prewarm normal 0 vs missing-downscale 2 frame builds PASS', flush=True)
+        (scratch / 'post.inc').write_text(post_code)
+        checked(build)
         checked([exe, '--composition'], env=edr_env)
         checked([exe, '--composition-msaa'], env=edr_env)
         bad_capture = production.replace('show && present_graded ? present_tex : backbuffer_tex;',

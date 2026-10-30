@@ -80,6 +80,15 @@ def rename_new(src, dst):
         raise OSError(e, os.strerror(e), str(src), None, str(dst))
 
 
+def exchange(src, dst):
+    """Exchange two existing sibling names atomically; never fall back to copy/delete."""
+    if Path(src).parent != Path(dst).parent:
+        raise InstallError("Atomic replacement requires sibling paths.")
+    if _libc.renamex_np(os.fsencode(src), os.fsencode(dst), 0x00000002) != 0:  # RENAME_SWAP
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e), str(src), None, str(dst))
+
+
 def ident(path):
     """Filesystem identity of path itself (not a link target), or None when nothing is there."""
     try:
@@ -98,15 +107,36 @@ def write_synced(path, data, mode=0o644):
         os.chmod(path, mode)
         f.write(data)
         f.flush()
-        os.fsync(f.fileno())
+        full_sync(f.fileno())
+
+
+def full_sync(fd):
+    """Drain kernel writes AND the device's volatile write cache (macOS)."""
+    os.fsync(fd)
+    fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
 
 
 def sync_dir(path):
     fd = os.open(path, os.O_RDONLY)
     try:
-        os.fsync(fd)
+        full_sync(fd)
     finally:
         os.close(fd)
+
+
+def sync_tree(root):
+    for base, dirs, files in os.walk(root, topdown=False):
+        for name in files:
+            with open(Path(base) / name, "rb") as f:
+                full_sync(f.fileno())
+        sync_dir(base)
+
+
+def sync_volumes(profile, destination):
+    # These directories can be on different devices. Flush both before a
+    # transaction crosses its exchange or backup-deletion boundary.
+    sync_dir(profile)
+    sync_dir(destination)
 
 
 def updated_profile(original, pc_root):
@@ -303,6 +333,7 @@ def _finish(data_home, record, log=None, allow_rollback=True):
     the user the install succeeded) nothing is removed or rolled back: "unverified" is returned."""
     log = log or (lambda msg: None)
     names, generation, generation_tmp = _plan(data_home, record)
+    sync_volumes(data_home, Path(record["dest"]))
     ids = record.get("ids") or {}
     for path, new, backup in names:
         remove(new)
@@ -546,6 +577,9 @@ def _recover(data_home, held=None, log=None):
     except (OSError, ValueError, KeyError, TypeError):
         raise InstallError("The install journal is damaged.", "Remove " + str(path) + " and run Setup again.") from None
     with dest_lock(dest, held), defer_interrupts():
+        if record.get("kind") == "launch-update-v1":
+            from .apply import recover_locked
+            return recover_locked(data_home, record)
         outcome = _finish(data_home, record, log) if committed else None
         if not committed:
             _rollback(data_home, record)
@@ -554,12 +588,12 @@ def _recover(data_home, held=None, log=None):
     return outcome or ("finished" if committed else "restored")
 
 
-def recover_interrupted(data_home, log=None):
+def recover_interrupted(data_home, log=None, held=None):
     """For the next Setup run: resolve an interrupted install under the profile lock (None when there was none)."""
     if not exists(journal_path(data_home)):
         return None
     with profile_guard(Path(data_home)):
-        return _recover(Path(data_home), log=log)
+        return _recover(Path(data_home), held=held, log=log)
 
 
 def transactional_install(app, staged_data, roots, data_home, dest, verify, running=assert_not_running, on_commit=None,
@@ -600,7 +634,9 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
                 if digest_tree(staged_data) != digest_tree(generation_tmp):
                     raise InstallError("The copied game data failed verification.", "Check the source and destination disks.")
             mark_owned(generation_tmp, data_home)  # this generation is Setup's (identity survives the rename): prunable later
+            sync_tree(generation_tmp)
             rename_new(generation_tmp, generation)
+            sync_dir(generation.parent)
             relocated = {}
             for key, value in roots.items():
                 try:
@@ -614,6 +650,7 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
             if digest_tree(app) != digest_tree(candidate):
                 raise InstallError("The copied app failed verification.", "Check the destination disk.")
             verify(candidate)
+            sync_tree(candidate)
             # Prepare every replacement before moving any existing file.
             for (path, new, backup), content in zip(names[1:], (
                 "".join(f"{k}={v}\n" for k, v in sorted(relocated.items())).encode(),
@@ -641,6 +678,7 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
             running()  # The old copy may have been launched while we copied data.
             write_journal(data_home, record)
             _step("journal-replacing")
+            sync_volumes(data_home, dest)
             for path, new, backup in names:
                 old_id = record["ids"][str(path)][0]
                 if old_id is not None:

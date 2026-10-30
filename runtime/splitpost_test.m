@@ -1,5 +1,7 @@
 // Review: 1,313 recording checks / 0 failures; two PC-local lens submissions.
 // Missing-parent / missing-SP-wait controls fail 2 / 24 checks; eight SP waits, zero split waits.
+// Opt-in: 1,425 checks / 0 failures, 12 startup waits; forced wait/oldest/pending read/reuse fail 49/1/22/44.
+// Missing startup wait/black readiness/stale epoch readiness fail 32/13/8 checks.
 // Two six-frame SP snapshots match pre-split renderer (57,396 shader-consumed command/readback bytes).
 // Recording encoder companion; no GPU/device creation. Production renderer is included by the Python runner.
 #import "render_internal.h"
@@ -27,6 +29,9 @@ void diag_png(const char *path,const void *p,uint32_t w,uint32_t h,uint32_t pitc
 uint64_t frame_serial=1,done_serial;
 Device dev;
 id<MTLDevice> mtl;
+id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
+    (void)pass; return [mtl newRenderPipelineStateWithDescriptor:d error:e];
+}
 id<MTLCommandBuffer> cmd;
 id<MTLTexture> backbuffer_tex,present_tex,autodepth_tex;
 RenderTex bb_rt,ad_rt;
@@ -230,6 +235,45 @@ int main(void){@autoreleasepool{ @try {
   CHECK(render_x360_raindrops_view(8,drops,owner?2:1,6,7,0,&v)==(owner?2:1));
  }
  pc_lens_local=0;single_testing=1;owner=0;((TTexture*)(id)textures[1].tex).tag=25;
+ if(x_lum_nowait()) {
+  // Black loading readbacks must not release the startup wait. Repeat after a
+  // reset with an old-epoch scene readback still pending: it cannot arm this epoch.
+  memset(&x_resources[0],0,sizeof x_resources[0]);
+  for(unsigned epoch=0;epoch<2;++epoch){
+   if(epoch)render_x360_post_reset();
+   unsigned before=waits;
+   for(unsigned i=0;i<6;++i){
+    frame_serial=40+epoch*10+i;done_serial=frame_serial-2;
+    ((TTexture*)(id)textures[1].tex).tag=i<4?0:25;
+    float m=render_x360_post(1,2,0,&p);
+    CHECK(i==0?m==-1:fabsf(m-(i==5?25:0)*4096*9.536743e-07)<1e-5);
+    CHECK(waits==before+i+(epoch?1:0));
+   }
+  }
+  // Present guarantees frame N-2 complete, while N-1 may still be pending.
+  // Every frame must submit into free storage, consume the newest completed
+  // sample, and leave the pending previous frame untouched.
+  memset(&x_resources[0],0,sizeof x_resources[0]);
+  unsigned before=waits;
+  for(unsigned i=0;i<16;++i){
+   frame_serial=100+i;done_serial=frame_serial-2;
+   ((TTexture*)(id)textures[1].tex).tag=25+i;
+   float m=render_x360_post(1,2,0,&p);
+   CHECK(i==0||i==2?m==-1:fabsf(m-(i==1?25:25+i-2)*4096*9.536743e-07)<1e-5);
+   unsigned current=0;
+   for(unsigned j=0;j<X_LUM_SLOTS;++j)current+=x_resources[0].readback[j].pending&&x_resources[0].readback[j].serial==frame_serial;
+   CHECK(current==1);CHECK(waits==before+(i?1:0));
+  }
+  before=waits;
+  // Delayed completion beyond the Present bound: full ring must never wait,
+  // overwrite pending storage, or invent a measurement. Resume at newest.
+  frame_serial=120;done_serial=0;
+  for(unsigned i=0;i<8;++i)CHECK(render_x360_post(1,2,0,&p)==-1);
+  CHECK(waits==before);
+  done_serial=120;frame_serial=121;
+  CHECK(fabsf(render_x360_post(1,2,0,&p)-40*4096*9.536743e-07)<1e-5);
+  CHECK(waits==before);
+ } else {
  // With single-player (unset / 1), the previous frame is initially incomplete.
  // Each call must wait, consume that frame, and reuse the now-completed storage.
  for(unsigned mode=0;mode<2;++mode){
@@ -243,6 +287,7 @@ int main(void){@autoreleasepool{ @try {
    CHECK(waits==before+i+1);CHECK(done_serial==frame_serial-1);
   }
   memset(&x_resources[0],0,sizeof x_resources[0]);
+ }
  }
  printf("encoder: %u checks / %u failures; %u composites, %u lens, %u crops, %u waits\n",checks,failures,composites,lens,copies,waits);
  return failures?1:0;

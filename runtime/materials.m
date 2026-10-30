@@ -25,6 +25,7 @@
 // with the X360 `wetroad` PS 09c17c18 rain term (x360/shaders/hlsl/17_road): two scales of an animated RAINSPLASH
 // frame perturb the projective reflection lookup and add glints; see "payload 2" below. A payload either replaces
 // the shader source (msl) or edits the translation (patch), which keeps everything else the PC shader does exactly.
+#include "../host/shaders/sm_coverage.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@
 #include "x360_internal.h"
 #include "roots.h"
 #include "materials.h"
+#include "roadfilm.h"
 #include "trees.h"
 
 #define TIME_OF_DAY_PTR   0x009B392Cu    // TimeOfDayPointer: +0x60 the specular/hotspot time-of-day gain
@@ -43,8 +45,8 @@
 // reads +0xA0 MetallicScale and +0xA4 SpecularHotSpot (x TimeOfDay+0x60), and gives the PS the raw SpecularPower +0x58.
 MatCarPaint mat_car;
 
-// Only the converter's explicit identities select this profile. Native MW
-// BRAKELIGHTGLASS/HEADLIGHTGLASS never match, regardless of the switch.
+// The converter switch selects only its explicit material identities.
+// Native headlamp covers use the separate X360 glass selection below.
                                                                              
 static int carbon_lampglass_on(void) {
 #ifdef NFS_PUBLIC
@@ -54,8 +56,21 @@ static int carbon_lampglass_on(void) {
     if (on < 0) { const char *e = getenv("NFS_CARBON_LAMPGLASS"); on = !(e && !strcmp(e, "off")); }
     return on;
 }
-static int carbon_lamp;
+// Live Picture choice; Retail preserves the existing platform equations.
+static int headlamp_glass = -1;
+static int headlamp_glass_on(void) {
+    if (headlamp_glass < 0) { const char *e = getenv("NFS_HEADLAMP_GLASS"); headlamp_glass = e && !strcmp(e, "clear"); }
+    return headlamp_glass;
+}
+void materials_set_headlamp_glass(int clear) {
+    headlamp_glass = clear != 0;
+}
+static int lamp_cover; // diagnostic premultiplied cover contribution, opaque output
+static int carbon_lamp, clear_headlamp; // 1: converted source alpha; 2: native X360 cover
 static int carbon_lamp_hash(uint32_t h) { return h == 0xDAEE90A1u || h == 0x3CF307CEu; }
+static int clear_headlamp_kind(uint32_t h, int x360, int converted) {
+    return converted && h == 0x3CF307CEu ? 1 : x360 && h == 0xA6348EE3u ? 2 : 0;
+}
 
 // ---- car glass (NFS_CAR_GLASS=pc|x360, default pc; live) ----
 // Both car VSs give alpha = DiffuseMin.w + N.V x DiffuseRange.w (N.V >= 0.01) and both PSs output tex.a x that alpha and multiply
@@ -107,6 +122,16 @@ static int glass_boost;                   // set by the setter hook for this dra
 // BOOT_DIAG_GLASS_AB=1|2 (with BOOT_DIAG_SIMSHOTS, NFS_CAR_GLASS=x360): the car paint A/B's held pass (below) draws the
 // same frame with PC glass (1) or X360 glass without the env boost (2) instead of the PC specular: simshot_<t>_pcpaint.png.
 static int glass_ab = -1, ab_state;
+// BOOT_DIAG_LAMP_AB=1: each simshot/full-size frame shot gains held
+// _beforelamp (Retail), _reflector (cover hidden), _cover and _beforecover frames.
+// The last two replace the cover with its premultiplied contribution, excluding transmitted light.
+// Paint stays unchanged across the three passes.
+static int lamp_ab_on(void) {
+    static int on = -1;
+    if (on < 0) on = diag_on && getenv("BOOT_DIAG_LAMP_AB") != NULL;
+    return on;
+}
+static int lamp_ab_held(void) { return lamp_ab_on() && (ab_state == 2 || ab_state == 8); }
 // BOOT_DIAG_AUX_AB=1 (with BOOT_DIAG_SIMSHOTS, NFS_AUX_LIGHTS=x360): the same held pass draws without the R20 scenery
 // light pass (car paint unchanged): simshot_<t>_pcaux.png, a same-frame PC / X360 scenery-light pair.
 static int aux_ab = -1;
@@ -195,6 +220,13 @@ uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), called just before each draw that uses it
     uint32_t m = arg(c, 0), fx = M32(CUR_EFFECT), tod = M32(TIME_OF_DAY_PTR);
     carbon_lamp = m && fx && M32(fx + 4) == 4 && carbon_lampglass_on() && carbon_lamp_hash(M32(m + 0xC));
+    clear_headlamp = headlamp_glass_on() && m && fx && M32(fx + 4) == 4 ?
+        clear_headlamp_kind(M32(m + 0xC), M32(m + 0xC) == 0xA6348EE3u && car_glass_on() &&
+                            glass_ab_held() != 1 && glass_find(0xA6348EE3u) != NULL, carbon_lamp) : 0;
+    lamp_cover = lamp_ab_on() && (ab_state == 6 || ab_state == 8) && clear_headlamp != 0;
+    if (lamp_ab_on() && ab_state == 4 && clear_headlamp) clear_headlamp = -1;
+    if (lamp_ab_held()) clear_headlamp = 0;
+    carbon_lamp |= clear_headlamp != 0;
     if (diag_on && m && fx && M32(fx + 4) == 4) { cd_flags = arg(c, 1); cd_mat = m; }
     const GlassX360 *gx = !carbon_lamp && m && fx && M32(fx + 4) == 4 && car_glass_on() && glass_ab_held() != 1 ? glass_find(M32(m + 0xC)) : NULL;
     float keep[4] = {0};
@@ -231,7 +263,7 @@ void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), cal
                        F32(m + 0x50), F32(m + 0x54), F32(m + 0x80), F32(m + 0x90), gx ? " (X360 glass row applied)" : "");
             if (carbon_lamp) {
                 uint32_t dt = M32(0x00982CB4u);
-                diag_event("carbonlamp: '%s' profile active; diffuse %08X '%.31s' hash %08X; texture-alpha RGB mix; spec/reflection masks 0/0; MW boost/normal map bypassed", name,
+                diag_event("carbonlamp: '%s' profile active; diffuse %08X '%.31s' hash %08X; Headlamp glass selected per draw; clear Fresnel n=1.5848 F0=0.0511871; MW boost/normal map bypassed", name,
                            dt, dt ? (const char *)G + dt + 0x0C : "", dt ? M32(dt + 0x24) : 0);
             }
         }
@@ -314,9 +346,10 @@ void mat_cardraw_note(const uint32_t *rs) {
 static const char car_paint_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
+SM_ALPHA_COVERAGE_MSL
 CAR_PAINT_POW_MSL
 "#pragma clang diagnostic ignored \"-Wunused-function\"\n"
-"struct SmPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; };\n"
+"struct SmPSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; };\n"
 "struct MatConsts { float4 k[12]; };\n"
 "struct In {\n"
 "    float4 pos [[position]];\n"
@@ -466,6 +499,7 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "    }\n"
 "    if (m.k[11].y > 0.5f && flake > 0.0f) o.c0 = float4(1.0f, 0.0f, 1.0f, 1.0f);   // NFS_TEST_FLAKE_TINT: where the flake term is non-zero\n"
 "    if (m.k[0].w == 1.0f) o.c0 = float4(1.0f, 0.0f, 1.0f, 1.0f);   // probe signature\n"
+SM_ALPHA_COVERAGE_APPLY("o.c0.w")
 "    if (aux.alpha_func != 0u && !alpha_test(aux.alpha_func, o.c0.w, aux.alpha_ref)) discard_fragment();\n"
 "#if MAT_PAINT_FINITE_AB\n"
 "    if (m.k[1].w > 0.5f) {\n"
@@ -503,21 +537,33 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 static int ab = -1;                      // (ab_state above) 1 shot taken, 2 the held pass (PC specular), 3 its shot taken
 static char ab_path[512];
 static int carpaint_ab(void) {
-    if (ab < 0) ab = diag_on && (getenv("BOOT_DIAG_CARPAINT_AB") || getenv("BOOT_DIAG_GLASS_AB") || getenv("BOOT_DIAG_AUX_AB")) ? atoi(getenv("BOOT_DIAG_CARPAINT_AB") ? getenv("BOOT_DIAG_CARPAINT_AB") : "1") : 0;
+    if (ab < 0) ab = diag_on && (getenv("BOOT_DIAG_CARPAINT_AB") || getenv("BOOT_DIAG_GLASS_AB") || getenv("BOOT_DIAG_AUX_AB") || lamp_ab_on()) ? atoi(getenv("BOOT_DIAG_CARPAINT_AB") ? getenv("BOOT_DIAG_CARPAINT_AB") : "1") : 0;
     return ab > 0;
 }
 int carpaint_ab_shot(char *path, size_t n) {        // render_present.m, each Present: `path` is this frame's shot (or empty)
     if (!carpaint_ab()) return 0;
     if (ab_state == 2) { snprintf(path, n, "%s", ab_path); ab_state = 3; return 1; }
-    if (ab_state == 0 && path[0] && strstr(path, "/simshot_")) {
-        snprintf(ab_path, sizeof ab_path, "%.*s%s", (int)(strlen(path) - 4), path, aux_ab_on() ? "_pcaux.png" : "_pcpaint.png");
+    if (ab_state == 4) {
+        const char *suffix = strstr(ab_path, "_beforelamp.png");
+        snprintf(path, n, "%.*s_reflector.png", (int)(suffix - ab_path), ab_path);
+        ab_state = 5; return 1;
+    }
+    if (ab_state == 6 || ab_state == 8) {
+        const char *suffix = strstr(ab_path, "_beforelamp.png");
+        snprintf(path, n, "%.*s_%s.png", (int)(suffix - ab_path), ab_path, ab_state == 6 ? "cover" : "beforecover");
+        ++ab_state; return 1;
+    }
+    if (ab_state == 0 && path[0] && (strstr(path, "/simshot_") || (lamp_ab_on() && strstr(path, "/frame_")))) {
+        snprintf(ab_path, sizeof ab_path, "%.*s%s", (int)(strlen(path) - 4), path, lamp_ab_on() ? "_beforelamp.png" : aux_ab_on() ? "_pcaux.png" : "_pcpaint.png");
         ab_state = 1;
     }
     return 0;
 }
 int carpaint_ab_hold(void) {                        // pacing.c, end of each main-loop pass: 1 = hold the next pass
     if (ab_state == 1) { ab_state = 2; return 1; }
-    if (ab_state == 3) { ab_state = 0; return 1; }
+    if (ab_state == 3) { ab_state = lamp_ab_on() ? 4 : 0; return 1; }
+    if (ab_state == 5 || ab_state == 7) { ++ab_state; return 1; }
+    if (ab_state == 9) { ab_state = 0; return 1; }
     return 0;
 }
 
@@ -563,8 +609,11 @@ void materials_set_car_flake(int x360) { flake = x360 != 0; if (diag_on) diag_ev
 int mat_flake_volume_ok(void) { uint32_t w, h, b; return mat_grass_noise(&w, &h) && mat_grass_volume(&b); }   // render.m binds the same volume as R27's
 static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
     o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
+    o->k[6][0] = (float)clear_headlamp;
+    o->k[6][2] = lamp_cover ? 1.0f : 0.0f;
+    o->k[6][1] = (!headlamp_glass_on() || lamp_ab_held()) ? 1.0f : 0.0f;
     o->k[0][0] = mat_car.spec_power; o->k[0][1] = mat_car.hotspot; o->k[0][2] = mat_car.metallic;
-    o->k[0][3] = (probe_sig & PROBE_CARPAINT) ? 1.0f : (ab_state == 2 && !glass_ab_held() && !aux_ab_on()) || !car_paint_live ? 2.0f : 0.0f;
+    o->k[0][3] = (probe_sig & PROBE_CARPAINT) ? 1.0f : (ab_state == 2 && !glass_ab_held() && !aux_ab_on() && !lamp_ab_on()) || !car_paint_live ? 2.0f : 0.0f;
     o->k[2][0] = glass_boost ? 1.0f : 0.0f;
     {
         o->k[11][0] = flake_on() && mat_flake_volume_ok() && o->k[0][3] != 2.0f ? 1.0f : 0.0f;
@@ -848,6 +897,14 @@ static char *car_vs_nm_patch(const char *msl) {
     return s;
 }
 static int car_vs_nm_on(void) { return 1; }
+// t0 exposes N.H in xyz; carry N.V separately for the clear-cover Fresnel.
+static char *car_vs_cover_patch(const char *msl) {
+    char *s = car_light_hdr() ? car_vs_patch(msl) : strdup(msl);
+    if (!s) return NULL;
+    if (!edit(&s, NULL, "    r.texcoord2 = so.tex[2];\n",
+        "    r.texcoord2 = float4(so.tex[2].xyz, abs(dot(normalize(si.v[1].xyz), normalize(c[13].xyz - si.v[0].xyz))));\n", 0)) { free(s); return NULL; }
+    return s;
+}
 // t0 PS (ps_1_1): v0.rgb unclamped, and the shoulder on the result (as the car paint PS: knee 0.8, hue kept).
 static char *car_t0_ps_patch(const char *msl) {
     if (!car_light_hdr()) return strdup(msl);
@@ -867,10 +924,14 @@ static char *car_t0_ps_patch(const char *msl) {
 }
 
 static const char carbon_lamp_math[] = CARBON_LAMP_MSL;
+static const char carbon_lamp_retail_math[] = CARBON_LAMP_RETAIL_MSL;
 static int car_t0_on(void) { return car_light_hdr(); }
 static void carbon_lamp_constants(const float (*vsc)[4], MatConsts *o) {
     (void)vsc;
     o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
+    o->k[6][0] = (float)clear_headlamp;
+    o->k[6][2] = lamp_cover ? 1.0f : 0.0f;
+    o->k[6][1] = (!headlamp_glass_on() || lamp_ab_held()) ? 1.0f : 0.0f;
 }
 // Add the experiment only when enabled, leaving the Off shader bytes exact.
 // Apply after all MW shading (normal map, boost, shoulder and flake), before
@@ -881,17 +942,25 @@ static char *carbon_lamp_patch(char *src, int no_shadow) {
     if (no_shadow) {
         ok = ok && edit(&s, NULL, "static void sm_body(", "struct MatConsts { float4 k[12]; };\n", 1);
         ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
-        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_func != 0u",
+        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_to_coverage != 0u",
             "    if (mk.k[6].w > 0.5f) {\n"
             "        float4 d = float4(max(pi.color0.rgb, 0.0f), saturate(pi.color0.a)), q = saturate(pi.color1);\n"
             "        float p = saturate(dot(saturate(pi.texcoord2.xyz), saturate(pi.texcoord3.xyz))); p *= p; p *= p; p *= p;\n"
             "        float3 specular = 2.0f * p * d.a * q.rgb;\n"
             "        float3 reflection = tex0.sample(smp0, pi.texcoord0.xyz, bias(aux.lodbias[0])).rgb * q.a * d.a;\n"
             "        so.oc[0] = carbon_lamp(tex1.sample(smp1, pi.texcoord1.xy, bias(aux.lodbias[1])), d, 1.0f, specular, reflection, float2(0.0f));\n"
-            "    }\n", 1);
+            "        if (mk.k[6].y > 0.5f) so.oc[0] = carbon_lamp_retail(tex1.sample(smp1, pi.texcoord1.xy, bias(aux.lodbias[1])), d, 1.0f, specular, reflection, float2(0.0f));\n"
+            "        if (mk.k[6].x > 0.5f) so.oc[0] = clear_lamp(tex1.sample(smp1, pi.texcoord1.xy, bias(aux.lodbias[1])), d, specular, tex0.sample(smp0, pi.texcoord0.xyz, bias(aux.lodbias[0])).rgb, pi.texcoord2.w, mk.k[6].x - 1.0f);\n"
+            "        if (mk.k[6].x < -0.5f) so.oc[0] = float4(0.0f);\n"
+            "    }\n"
+            "    if (mk.k[6].z > 0.5f) so.oc[0] = float4(so.oc[0].rgb * so.oc[0].a, 1.0f);\n", 1);
     } else {
-        ok = ok && edit(&s, NULL, "    if (aux.alpha_func != 0u",
-            "    if (m.k[6].w > 0.5f) o.c0 = carbon_lamp(tex, v0, shade, s * shade, env.rgb * v1.w * v0.w * 0.5f, float2(0.0f));\n", 1);
+        ok = ok && edit(&s, NULL, "    if (aux.alpha_to_coverage != 0u",
+            "    if (m.k[6].w > 0.5f) o.c0 = carbon_lamp(tex, v0, shade, s * shade, env.rgb * v1.w * v0.w * 0.5f, float2(0.0f));\n"
+            "    if (m.k[6].w > 0.5f && m.k[6].y > 0.5f) o.c0 = carbon_lamp_retail(tex, v0, shade, s * shade, env.rgb * v1.w * v0.w * 0.5f, float2(0.0f));\n"
+            "    if (m.k[6].x > 0.5f) o.c0 = clear_lamp(tex, v0, s * shade, env.rgb, abs(dot(normalize(pi.texcoord4.xyz), normalize(pi.texcoord5.xyz))), m.k[6].x - 1.0f);\n"
+            "    if (m.k[6].x < -0.5f) o.c0 = float4(0.0f);\n"
+            "    if (m.k[6].z > 0.5f) o.c0 = float4(o.c0.rgb * o.c0.a, 1.0f);\n", 1);
     }
     if (!ok) { free(s); return NULL; }
     return s;
@@ -912,6 +981,67 @@ static char *carbon_lamp_pc_patch(const char *src, int variant, int hardware) {
     int ok = edit(&s, NULL, "static void sm_body(", head, 1);
     free(head);
     ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
+    char *body = malloc((size_t)(sample - lit) + 2048);
+    sprintf(body,
+        "    if (mk.k[6].w > 0.5f) {\n"
+        "    float4 t2 = pi.texcoord2;\n"
+        "%.*s"
+        "    float4 d = float4(max(pi.color0.rgb, 0.0f), saturate(pi.color0.a)), q = saturate(pi.color1);\n"
+        "    float3 t3 = pi.texcoord3.xyz, t4 = pi.texcoord4.xyz;\n"
+        "    float p = saturate(dot(2.0f * dot(t4, t3) * t4 - t3, pi.texcoord5.xyz)); p *= p; p *= p; p *= p; p *= p;\n"
+        "    float3 specular = 2.0f * p * d.a * q.rgb * shade * shade;\n"
+        "    float3 reflection = tex1.sample(smp1, pi.texcoord0.xyz, bias(aux.lodbias[1])).rgb * q.a * d.a * 0.5f;\n"
+        "    so.oc[0] = carbon_lamp(tex0.sample(smp0, pi.texcoord1.xy, bias(aux.lodbias[0])), d, shade, specular, reflection, float2(0.0f));\n"
+        "    if (mk.k[6].y > 0.5f) so.oc[0] = carbon_lamp_retail(tex0.sample(smp0, pi.texcoord1.xy, bias(aux.lodbias[0])), d, shade, specular, reflection, float2(0.0f));\n"
+        "    if (mk.k[6].x > 0.5f) so.oc[0] = clear_lamp(tex0.sample(smp0, pi.texcoord1.xy, bias(aux.lodbias[0])), d, specular, tex1.sample(smp1, pi.texcoord0.xyz, bias(aux.lodbias[1])).rgb, abs(dot(normalize(t4), normalize(pi.texcoord5.xyz))), mk.k[6].x - 1.0f);\n"
+        "    if (mk.k[6].x < -0.5f) so.oc[0] = float4(0.0f);\n"
+        "    }\n"
+        "    if (mk.k[6].z > 0.5f) so.oc[0] = float4(so.oc[0].rgb * so.oc[0].a, 1.0f);\n", (int)(sample - lit), lit);
+    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_to_coverage != 0u", body, 1);
+    free(body);
+    if (!ok) { free(s); return NULL; }
+    char *out = malloc(strlen(s) + 128);
+    sprintf(out, "#define MAT_VARIANT %d\n#define MAT_SHADOW_HW %d\n%s", variant, hardware, s);
+    free(s);
+    return out;
+}
+
+
+
+// Retail retains the complete original shader source and evaluation order.
+static char *carbon_lamp_retail_patch(char *src, int no_shadow) {
+    char *s = src;
+    int ok = edit(&s, NULL, "struct SmPSAux", carbon_lamp_retail_math, 1);
+    if (no_shadow) {
+        ok = ok && edit(&s, NULL, "static void sm_body(", "struct MatConsts { float4 k[12]; };\n", 1);
+        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
+        ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_to_coverage != 0u",
+            "    if (mk.k[6].w > 0.5f) {\n"
+            "        float4 d = float4(max(pi.color0.rgb, 0.0f), saturate(pi.color0.a)), q = saturate(pi.color1);\n"
+            "        float p = saturate(dot(saturate(pi.texcoord2.xyz), saturate(pi.texcoord3.xyz))); p *= p; p *= p; p *= p;\n"
+            "        float3 specular = 2.0f * p * d.a * q.rgb;\n"
+            "        float3 reflection = tex0.sample(smp0, pi.texcoord0.xyz, bias(aux.lodbias[0])).rgb * q.a * d.a;\n"
+            "        so.oc[0] = carbon_lamp(tex1.sample(smp1, pi.texcoord1.xy, bias(aux.lodbias[1])), d, 1.0f, specular, reflection, float2(0.0f));\n"
+            "    }\n", 1);
+    } else {
+        ok = ok && edit(&s, NULL, "    if (aux.alpha_to_coverage != 0u",
+            "    if (m.k[6].w > 0.5f) o.c0 = carbon_lamp(tex, v0, shade, s * shade, env.rgb * v1.w * v0.w * 0.5f, float2(0.0f));\n", 1);
+    }
+    if (!ok) { free(s); return NULL; }
+    return s;
+}
+static char *carbon_lamp_retail_pc_patch(const char *src, int variant, int hardware) {
+    char *s = strdup(src);
+    const char *helpers = strstr(car_paint_msl, "#if MAT_SHADOW_HW\n");
+    const char *fragment = helpers ? strstr(helpers, "fragment Out sm_main(") : NULL;
+    const char *lit = strstr(car_paint_msl, "    float lit;");
+    const char *sample = lit ? strstr(lit, "    float4 tex =") : NULL;
+    if (!helpers || !fragment || !lit || !sample) { free(s); return NULL; }
+    char *head = malloc((size_t)(fragment - helpers) + strlen(carbon_lamp_retail_math) + 128);
+    sprintf(head, "struct MatConsts { float4 k[12]; };\n%s%.*s", carbon_lamp_retail_math, (int)(fragment - helpers), helpers);
+    int ok = edit(&s, NULL, "static void sm_body(", head, 1);
+    free(head);
+    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
     char *body = malloc((size_t)(sample - lit) + 1024);
     sprintf(body,
         "    if (mk.k[6].w > 0.5f) {\n"
@@ -924,7 +1054,7 @@ static char *carbon_lamp_pc_patch(const char *src, int variant, int hardware) {
         "    float3 reflection = tex1.sample(smp1, pi.texcoord0.xyz, bias(aux.lodbias[1])).rgb * q.a * d.a * 0.5f;\n"
         "    so.oc[0] = carbon_lamp(tex0.sample(smp0, pi.texcoord1.xy, bias(aux.lodbias[0])), d, shade, specular, reflection, float2(0.0f));\n"
         "    }\n", (int)(sample - lit), lit);
-    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_func != 0u", body, 1);
+    ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    if (aux.alpha_to_coverage != 0u", body, 1);
     free(body);
     if (!ok) { free(s); return NULL; }
     char *out = malloc(strlen(s) + 128);
@@ -932,7 +1062,6 @@ static char *carbon_lamp_pc_patch(const char *src, int variant, int hardware) {
     free(s);
     return out;
 }
-
 // ---- payload 4 (R21): particle shading and size clamp (NFS_PARTICLES=pc|x360, default pc; live) ----
 // The PC particles PS t1 (hardware shadow map, 1 texldp tap, saturate(s + 0.5)) and t2 (1 compare, a floor: PCS_PARTICLE_FLOOR, from speed.exe) are always
 // replaced by one shader whose mode (m.k[0].x) picks the PC output (transcribed from the .asm) or the X360 PS 09bea960:
@@ -946,7 +1075,8 @@ static char *carbon_lamp_pc_patch(const char *src, int variant, int hardware) {
 static const char particles_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
-"struct SmPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; };\n"
+SM_ALPHA_COVERAGE_MSL
+"struct SmPSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; };\n"
 "struct MatConsts { float4 k[4]; };\n"
 "struct In { float4 pos [[position]]; float4 color0 [[user(color0)]]; float4 texcoord0 [[user(texcoord0)]]; float4 texcoord1 [[user(texcoord1)]]; };\n"
 "struct Out { float4 c0 [[color(0)]]; };\n"
@@ -993,6 +1123,7 @@ static const char particles_msl[] =
 "        float4 r = 2.0f * tex * v0; r.rgb *= l;\n"
 "        o.c0 = r;\n"
 "    }\n"
+SM_ALPHA_COVERAGE_APPLY("o.c0.w")
 "    if (aux.alpha_func != 0u && !alpha_test(aux.alpha_func, o.c0.w, aux.alpha_ref)) discard_fragment();\n"
 "    return o;\n"
 "}\n";
@@ -1110,7 +1241,7 @@ static const MatShader table[] = {
     CAR("car t4 ps_2_x (shadow level 4)", 0x6F1A7154236357C9ULL, 4),
     CAR("car t5 ps_2_x (shadow level 5)", 0xA8F9086D6BE6DB85ULL, 5),
     // car lighting above 1 (hashes of host/shaders/testdata/car)
-    {"car t0 vs_1_1 (no shadows) oD0 unclamped", 0x1BEA38904139377AULL, SM_VERTEX, 0, {0, 0, 0, 0}, 0, NULL, car_vs_patch, car_light_hdr, NULL, 0},
+    {"car t0 vs_1_1 (no shadows) oD0 unclamped", 0x1BEA38904139377AULL, SM_VERTEX, 0, {0, 0, 0, 0}, 0, NULL, car_vs_cover_patch, car_vs_nm_on, NULL, 0},
     {"car t1 vs_1_1 (shadow levels 1-5) oD0 unclamped + R26 texcoord6", 0xB1CE127C28045F2CULL, SM_VERTEX, 0, {0, 0, 0, 0}, 0, NULL, car_vs_nm_patch, car_vs_nm_on, NULL, 0},
     {"car t0 ps_1_1 (no shadows) light unclamped + shoulder", 0x89E9A52CCEE09BCFULL, SM_PIXEL, 0, {0, 0, 0, 0}, 0, NULL, car_t0_ps_patch, car_t0_on, carbon_lamp_constants, 0},
     // worldreflect (hashes of host/shaders/testdata/worldreflect, the same bytecode as speed.exe's effect)
@@ -1133,6 +1264,8 @@ static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmRes
         const MatShader *e = &table[k];
         int car = e->msl == car_paint_msl || e->patch == car_t0_ps_patch;
         if (e->hash != h || e->stage != refl->shader_type || (!e->enabled() && !(lamp && car))) continue;
+        int cover_vs = e->patch == car_vs_cover_patch;
+        if (cover_vs && lamp != 2 && !car_light_hdr()) continue;
         int shadow_hw = 0, ok = 1;
         for (int s = 0; s < refl->n_samplers; ++s) {
             const SmSampler *sm = &refl->samplers[s];
@@ -1142,8 +1275,8 @@ static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmRes
         }
         char *src = NULL;
         int pc_lamp = e->msl == car_paint_msl && lamp && !car_paint_on();
-        if (ok && pc_lamp) src = carbon_lamp_pc_patch(refl->msl, e->variant, shadow_hw);
-        else if (ok && e->patch) src = e->patch(refl->msl);
+        if (ok && pc_lamp) src = lamp == 1 ? carbon_lamp_retail_pc_patch(refl->msl, e->variant, shadow_hw) : carbon_lamp_pc_patch(refl->msl, e->variant, shadow_hw);
+        else if (ok && e->patch) src = cover_vs && lamp != 2 ? car_vs_patch(refl->msl) : e->patch(refl->msl);
         else if (ok) {
             size_t len = strlen(e->msl) + 384;
             src = malloc(len);
@@ -1153,7 +1286,7 @@ static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmRes
                      diag_on && getenv("BOOT_DIAG_HDR_CLIP") && !strcmp(getenv("BOOT_DIAG_HDR_CLIP"), "1") && getenv("BOOT_DIAG_CARPAINT_FINITE_AB") != NULL, e->msl);
         }
         if (src && !pc_lamp && lamp && car)
-            src = carbon_lamp_patch(src, e->patch == car_t0_ps_patch);
+            src = lamp == 1 ? carbon_lamp_retail_patch(src, e->patch == car_t0_ps_patch) : carbon_lamp_patch(src, e->patch == car_t0_ps_patch);
         if (!src) {
             if (diag_on) diag_event("materials: %s: %s, translated PC shader kept", e->name, ok ? "translation not as expected" : "unexpected samplers");
             return NULL;
@@ -1165,6 +1298,12 @@ static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmRes
     return NULL;
 }
 
+char *mat_roadfilm_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *base = mat_replace_profile(tokens, n, refl, id, 0);
+    char *film = roadfilm_patch(base ? base : refl->msl);
+    free(base);
+    return film;
+}
 char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
     // Even an inactive branch can change Metal's optimized native arithmetic.
     // Keep its source exact; the renderer selects the lamp variant per draw.
@@ -1172,7 +1311,12 @@ char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int 
 }
 int mat_carbon_lamp_draw(void) {
     uint32_t fx = M32(CUR_EFFECT);
-    return carbon_lamp && fx && M32(fx + 4) == 4;
+    return (carbon_lamp || lamp_cover) && fx && M32(fx + 4) == 4;
+}
+int mat_headlamp_clear_draw(void) { return lamp_cover || (headlamp_glass_on() && !lamp_ab_held()); }
+char *mat_headlamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *s = mat_replace_profile(tokens, n, refl, id, 2);
+    return s ? s : strdup(refl->msl);
 }
 char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
     char *s = mat_replace_profile(tokens, n, refl, id, 1);
@@ -2305,6 +2449,7 @@ int mat_glass_constants(const SmResult *pcvs, const SmResult *pcps, const float 
 static const char glass_common_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
+SM_ALPHA_COVERAGE_MSL
 "struct GlassConstants { float4 k[32]; };\n"
 "struct GlassOut { float4 pos [[position]];\n"
 "float4 t0 [[user(glass_t0)]]; float4 t1 [[user(glass_t1)]]; float4 t2 [[user(glass_t2)]]; float4 t3 [[user(glass_t3)]];\n"
@@ -2338,6 +2483,7 @@ static const char glass_ps_end[] =
 X360B_GLASS_PS_END_0
 "if (g.k[27].z != 0) { r0.xyz = float3(1, 0, 1); r3.x = 1; }   // NFS_TEST_GLASS_TINT: the reflection term only\n"
 X360B_GLASS_PS_END_1
+SM_ALPHA_COVERAGE_APPLY("oC0.w")
 "if (aux.alpha_func != 0u && !glass_alpha_test(aux.alpha_func, oC0.w, aux.alpha_ref)) discard_fragment();\n"
 "return oC0;\n"
 "}\n";
@@ -2389,7 +2535,7 @@ char *mat_glass_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
         for (int s = 0; s < pc->n_samplers; ++s) if (pc->samplers[s].reg == 1) hw = pc->samplers[s].shadow;
         char head[1800];
         snprintf(head, sizeof head,
-            "struct GlassPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
+            "struct GlassPSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
             "static inline bool glass_alpha_test(uint f, float a, float ref) {\n"
             "    float qa = rint(saturate(a) * 255.0f), qr = rint(saturate(ref) * 255.0f);\n"
             "    switch (f) { case 1: return false; case 2: return qa < qr; case 3: return qa == qr; case 4: return qa <= qr;\n"
@@ -2523,6 +2669,7 @@ int mat_trees_constants(const SmResult *pcvs, const float (*vsc)[4], float out[3
 static const char trees_common_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
+SM_ALPHA_COVERAGE_MSL
 "struct TreesConstants { float4 k[32]; };\n"
 "struct TreesOut { float4 pos [[position]];\n"
 "float4 t0 [[user(trees_t0)]]; float4 t1 [[user(trees_t1)]]; float4 t2 [[user(trees_t2)]]; float4 t3 [[user(trees_t3)]]; };\n"
@@ -2542,6 +2689,7 @@ static const char trees_ps_body[] =
 "float4 r0 = i.t0, r1 = i.t1, r2 = i.t2, r3 = i.t3, r4 = 0;\n"
 "float ps = 0; float4 oC0 = 0;\n"
 X360B_TREES_PS_BODY
+SM_ALPHA_COVERAGE_APPLY("oC0.w")
 "if (aux.alpha_func != 0u && !trees_alpha_test(aux.alpha_func, oC0.w, aux.alpha_ref)) discard_fragment();\n"
 "if (g.k[20].x != 0) { oC0.xyz = g.k[20].y != 0 ? float3(0, 1, 1) : float3(1, 0, 1); if (g.k[20].y != 0) oC0.w = 1; }   // NFS_TEST_TREES_TINT: pass 0 magenta, blended pass 1 cyan (opaque)\n"
 "return oC0;\n"
@@ -2572,7 +2720,7 @@ char *mat_trees_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
     } else if (stage == SM_PIXEL) {
         if (h != 0x460871E26A412F77ull) return NULL;        // tree t0 ps_1_1
         static const char head[] =
-            "struct TreesPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
+            "struct TreesPSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
             "static inline bool trees_alpha_test(uint f, float a, float ref) {\n"
             "    float qa = rint(saturate(a) * 255.0f), qr = rint(saturate(ref) * 255.0f);\n"
             "    switch (f) { case 1: return false; case 2: return qa < qr; case 3: return qa == qr; case 4: return qa <= qr;\n"
@@ -2671,6 +2819,7 @@ int mat_bone_constants(const float (*vsc)[4], float out[MAT_BONE_K][4]) {
 static const char bone_common_msl[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
+SM_ALPHA_COVERAGE_MSL
 "struct BoneConstants { float4 k[96]; };\n"
 "struct BoneOut { float4 pos [[position]];\n"
 "float4 uv [[user(bone_uv)]]; float4 p [[user(bone_p)]]; float4 n [[user(bone_n)]]; float4 env [[user(bone_env)]];\n"
@@ -2729,6 +2878,7 @@ static const char bone_ps_body[] =
 "oC0.xyz = (light * dif.xyz + i.c1.xyz * g.k[83].x * spm + i.c1.w * i.c0.w * env) * g.k[83].y;\n"
 "oC0.w = 2.0f * i.c0.w * dif.w;\n"
 "if (g.k[83].z != 0) oC0.xyz = float3(1, 0, 1);   // NFS_TEST_ARRESTNM_TINT\n"
+SM_ALPHA_COVERAGE_APPLY("oC0.w")
 "if (aux.alpha_func != 0u && !bone_alpha_test(aux.alpha_func, oC0.w, aux.alpha_ref)) discard_fragment();\n"
 "return oC0;\n"
 "}\n";
@@ -2759,7 +2909,7 @@ char *mat_bone_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, in
     } else if (stage == SM_PIXEL) {
         if (h != 0xFD2B54560A2564FFULL) return NULL;        // worldbone t0 ps_1_1
         static const char head[] =
-            "struct BonePSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
+            "struct BonePSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };\n"
             "static inline bool bone_alpha_test(uint f, float a, float ref) {\n"
             "    float qa = rint(saturate(a) * 255.0f), qr = rint(saturate(ref) * 255.0f);\n"
             "    switch (f) { case 1: return false; case 2: return qa < qr; case 3: return qa == qr; case 4: return qa <= qr;\n"

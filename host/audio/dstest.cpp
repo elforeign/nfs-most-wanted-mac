@@ -7,7 +7,44 @@
 // Standalone build: compile only this source, with MEDIA_AUDIO_CALLBACK_TEST and the usual FFmpeg/framework
 // flags. Including the implementations lets this fixture exercise the actual IOProc and parking decision with
 // synthetic buffers, without adding callback/clock mutation controls to the production API.
+#include <CoreAudio/CoreAudio.h>
+#include <vector>
+#include <algorithm>
+#include <cstring>
+// Fake HAL timing notifications exercise the real listener registration and removal paths.
+namespace fake_hal {
+UInt32 period = 4096, safety = 128;
+Float64 rate = 48000;
+struct Listener { AudioObjectID device; AudioObjectPropertyAddress address; AudioObjectPropertyListenerProc proc; void *context; };
+std::vector<Listener> listeners;
+OSStatus get(AudioObjectID device, const AudioObjectPropertyAddress *a, UInt32, const void *, UInt32 *size, void *dst) {
+    if (device != 0x7FA0 && device != 0x7FA1) return kAudioHardwareBadDeviceError;
+    if (a->mSelector == kAudioDevicePropertyBufferFrameSize) { *size = sizeof period; memcpy(dst, &period, *size); }
+    else if (a->mSelector == kAudioDevicePropertySafetyOffset) { *size = sizeof safety; memcpy(dst, &safety, *size); }
+    else if (a->mSelector == kAudioDevicePropertyNominalSampleRate) { *size = sizeof rate; memcpy(dst, &rate, *size); }
+    else return kAudioHardwareUnknownPropertyError;
+    return noErr;
+}
+OSStatus add(AudioObjectID device, const AudioObjectPropertyAddress *a, AudioObjectPropertyListenerProc proc, void *ctx) {
+    listeners.push_back({device, *a, proc, ctx}); return noErr;
+}
+OSStatus remove(AudioObjectID device, const AudioObjectPropertyAddress *a, AudioObjectPropertyListenerProc proc, void *ctx) {
+    listeners.erase(std::remove_if(listeners.begin(), listeners.end(), [&](const Listener &l) {
+        return l.device == device && l.address.mSelector == a->mSelector && l.proc == proc && l.context == ctx;
+    }), listeners.end()); return noErr;
+}
+void change(AudioObjectID device, AudioObjectPropertySelector selector) {
+    for (auto l : listeners) if (l.device == device && l.address.mSelector == selector)
+        l.proc(device, 1, &l.address, l.context);
+}
+}
+#define AudioObjectGetPropertyData fake_hal::get
+#define AudioObjectAddPropertyListener fake_hal::add
+#define AudioObjectRemovePropertyListener fake_hal::remove
 #include "../../media/media.cpp"
+#undef AudioObjectGetPropertyData
+#undef AudioObjectAddPropertyListener
+#undef AudioObjectRemovePropertyListener
 #include "dsound_host.cpp"
 
 namespace media {
@@ -55,12 +92,12 @@ int main() {
     auto stats = original->take_callback_stats();
     check(stats.zero_callbacks == 1 && (!p.diag || (stats.valid == 1 && stats.zero_bytes == 64)),
           "priming shortage accounting remains intact");
-    p.bq.assign(16, 0x42);
+    { std::vector<uint8_t> bytes(16, 0x42); p.bq.put(bytes.data(), bytes.size()); }
     age();
     io();
     check(!original->stalled(0.5) && p.bq.empty() && a[0] == 0x42 && a[15] == 0x42 && a[16] == 0 && silent(b),
           "partial consumption refreshes health and zero fills the tail and unused stream");
-    p.bq.assign(128, 0x42);
+    { std::vector<uint8_t> bytes(128, 0x42); p.bq.put(bytes.data(), bytes.size()); }
     age();
     check(original->stalled(0.5), "queued audio without consumption becomes unhealthy");
     io();
@@ -80,13 +117,13 @@ int main() {
     check(owner.out.get() == original && mode == DS_OUT_TRUEHD && rate == 48000 && from == 123 && !closed_dev,
           "take_parked reuses the same output within the 2 s window");
     if (owner.out) {
-        p.bq.assign(16, 0x42);
+        { std::vector<uint8_t> bytes(16, 0x42); p.bq.put(bytes.data(), bytes.size()); }
         p.stream_index = 2;
         age();
         io();
         check(original->stalled(0.5) && p.bq.size() == 16 && silent(a) && silent(b),
               "invalid stream with queued data stays unhealthy and silences all buffers");
-        p.bq.clear();
+        { std::vector<uint8_t> bytes(p.bq.size()); p.bq.take(bytes.data(), bytes.size()); }
         io();
         check(original->stalled(0.5), "invalid stream with empty queue also stays unhealthy");
         p.stream_index = 0;
@@ -101,7 +138,7 @@ int main() {
         io();  // healthy again before parking; then invalidate it during the parking window
         park_output(owner);
         p.stream_index = 2;
-        p.bq.assign(16, 0x42);
+        { std::vector<uint8_t> bytes(16, 0x42); p.bq.put(bytes.data(), bytes.size()); }
         age();
         io();
         owner.out = take_parked(owner.cfg, 0, &mode, &rate, &from, &closed_dev);
@@ -115,6 +152,130 @@ int main() {
     q.take_floats(samples, 8);
     check(media::now_ns() - q.last_callback.load() < 500000000 && samples[0] == 0 && samples[7] == 0,
           "valid empty PCM callback refreshes health and supplies zeros");
+    // Large-period negative control: remove the minimum_queue_frames floor from output_latency.
+    // Fixed: 141 checks, 0 failed (diag on/off); floor removed: 12 failed, 48 underruns/mode.
+    // Stereo: 0/1445376 zero/total bytes fixed; 1052160/1445376 broken (72.8%).
+    check(media::pcm_queue_frames(4096, 128, 48000, 44100) == 7644,
+          "4096-frame period and safety offset scale upward to 44100 Hz");
+    check(media::pcm_queue_frames(0, 128, 48000, 44100) == 0 &&
+          media::pcm_queue_frames(4096, 0, 0, 44100) == 0,
+          "missing hardware timing retains the existing fallback");
+    for (auto mode : {DS_OUT_STEREO, DS_OUT_PCM51}) {
+        DsConfig cfg{};
+        cfg.sink = DS_SINK_DEVICE; cfg.mode = mode; cfg.mix_rate = 44100; cfg.block_frames = 256;
+        DsDevice *device = nullptr;
+        check(ds_device_create(&cfg, &device) == DS_OK, "large-period fake PCM opens");
+        if (!device) continue;
+        stop_thread(*device);
+        device->out->stop_for_test();
+        auto &pcm_impl = media::AudioOutputTest::impl(*device->out);
+        { std::vector<float> old(pcm_impl.fq.size()); pcm_impl.fq.take(old.data(), old.size()); }
+        pcm_impl.stats = {};
+        check(device->cfg.latency_frames == 7644, "initial PCM open uses scaled hardware latency");
+        start_thread(*device);
+        std::vector<float> pull(3764 * pcm_impl.channels);
+        uint64_t zero = 0, taken = 0;
+        for (int callback = 0; callback < 48; ++callback) {
+            // Synthetic device clock: permit a full refill between 85 ms device periods, then pull one
+            // whole period. No wall-clock scheduling claim: the real mixer and real queue are exercised.
+            auto deadline = Clock::now() + std::chrono::seconds(1);
+            while (device->out->queued_frames() < (size_t)device->cfg.latency_frames && Clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            check(device->out->queued_frames() >= (size_t)device->cfg.latency_frames, "mixer refills to target");
+            pcm_impl.callback_begin();
+            pcm_impl.take_floats(pull.data(), pull.size());
+        }
+        // Stop joins the mixer's final stats read; callback byte counters are cumulative.
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        stop_thread(*device);
+        auto callback_stats = device->out->take_callback_stats();
+        zero = callback_stats.zero_bytes; taken = callback_stats.taken_bytes;
+        printf("large-period %s: 48 callbacks, target %d, taken %llu, zero %llu, underruns %llu\n",
+               mode_label(mode), device->cfg.latency_frames, (unsigned long long)taken,
+               (unsigned long long)zero, (unsigned long long)device->underruns);
+        check((!diag || (taken > 0 && zero == 0)) && callback_stats.zero_callbacks == 0 && device->underruns == 0,
+              "large-period PCM has no zero-fill or underruns after priming");
+        // Exercise the primary-format rate reopen, explicit low/high targets and asynchronous output adoption.
+        set_mix_rate(*device, 96000);
+        stop_thread(*device); device->out->stop_for_test();
+        check(device->cfg.latency_frames == 16640, "rate reopen rescales hardware latency");
+        device->fixed_latency = true; device->requested_latency = 512;
+        output_latency(*device);
+        check(device->cfg.latency_frames == 16640, "explicit short PCM latency cannot underrun hardware");
+        device->requested_latency = 32768; output_latency(*device);
+        check(device->cfg.latency_frames == 32768, "larger explicit PCM latency is preserved");
+        device->fixed_latency = false;
+        device->ready.reset(new media::AudioOutput);
+        check(device->ready->open(media::OutputMode::Stereo, 48000), "fake replacement opens");
+        device->ready->stop_for_test();
+        device->ready_mode = DS_OUT_STEREO; device->ready_rate = 48000;
+        follow_output(*device);
+        check(device->cfg.latency_frames == 8320, "output adoption recomputes period at the new rate");
+        ds_device_release(device);
+    }
+    // Same-device period growth: cached-at-open code fails (1024 target, 3072/4096 frames zero filled).
+    // The fake HAL invokes the registered production callback; the actual mixer must observe its atomic floor.
+    auto close_parked = [] {
+        std::unique_ptr<media::AudioOutput> old;
+        { auto &sh = shared(); std::lock_guard<std::mutex> g(sh.m); old = std::move(sh.parked.out); }
+        if (old) old->close();
+    };
+    close_parked();
+    fake_hal::period = 256; fake_hal::safety = 128;
+    DsConfig changing_cfg{};
+    changing_cfg.sink = DS_SINK_DEVICE; changing_cfg.mode = DS_OUT_STEREO;
+    changing_cfg.mix_rate = 48000; changing_cfg.block_frames = 256;
+    DsDevice *changing = nullptr;
+    check(ds_device_create(&changing_cfg, &changing) == DS_OK, "changing-period fake PCM opens");
+    if (changing) {
+        stop_thread(*changing); changing->out->stop_for_test();
+        auto *same_output = changing->out.get();
+        auto same_device = same_output->device();
+        check(same_output->minimum_queue_frames() == 640, "small initial period floor");
+        start_thread(*changing);
+        auto wait_queue = [&](size_t target) {
+            auto deadline = Clock::now() + std::chrono::seconds(1);
+            while (same_output->queued_frames() < target && Clock::now() < deadline) {
+                // Synthetic callbacks below own the queue; keep their paused fake clock healthy while refilling.
+                media::AudioOutputTest::impl(*same_output).last_callback.store(media::now_ns());
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        };
+        wait_queue(1024);
+        fake_hal::period = 4096;
+        fake_hal::change(same_device, kAudioDevicePropertyBufferFrameSize);
+        check(same_output->minimum_queue_frames() == 8320, "period notification recomputes floor");
+        wait_queue(8320);
+        stop_thread(*changing);
+        check(changing->cfg.latency_frames == 8320 && same_output->queued_frames() >= 8320,
+              "running mixer follows same-device period growth");
+        auto &impl = media::AudioOutputTest::impl(*same_output);
+        same_output->take_callback_stats();
+        std::vector<float> pull(4096 * 2);
+        impl.take_floats(pull.data(), pull.size());
+        auto stats = same_output->take_callback_stats();
+        printf("period-change: target %d, floor %d, shortage callbacks %llu\n",
+               changing->cfg.latency_frames, same_output->minimum_queue_frames(), (unsigned long long)stats.zero_callbacks);
+        check(stats.zero_callbacks == 0, "grown period callback has no zero fill");
+        fake_hal::safety = 512;
+        fake_hal::change(same_device, kAudioDevicePropertySafetyOffset);
+        check(same_output->minimum_queue_frames() == 8704, "safety notification recomputes floor");
+        fake_hal::rate = 96000;
+        fake_hal::change(same_device, kAudioDevicePropertyNominalSampleRate);
+        check(same_output->minimum_queue_frames() == 4352, "nominal-rate notification rescales floor");
+        check(changing->out.get() == same_output && same_output->device() == same_device,
+              "timing updates preserve output and DeviceID");
+        ds_device_release(changing);
+        close_parked();
+        check(fake_hal::listeners.empty(), "close unregisters timing listeners");
+    }
+    DsDevice encoded;
+    encoded.cfg.mode = DS_OUT_TRUEHD; output_latency(encoded);
+    check(encoded.cfg.latency_frames == 4096, "TrueHD default unchanged");
+    encoded.cfg.mode = DS_OUT_DOLBY_DIGITAL; output_latency(encoded);
+    check(encoded.cfg.latency_frames == 3072, "Dolby Digital default unchanged");
+    encoded.cfg.mode = DS_OUT_DOLBY_DIGITAL_PLUS; output_latency(encoded);
+    check(encoded.cfg.latency_frames == 3072, "Dolby Digital Plus default unchanged");
     printf("callback/parking fixture: %d checks, %d failed (BOOT_DIAG=%d)\n", checks, failed, diag);
     return failed ? 1 : 0;
 }

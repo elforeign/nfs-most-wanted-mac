@@ -5,6 +5,9 @@
 #import <Cocoa/Cocoa.h>
 #include "settings.h"
 #include "framecap.h"
+#include "roam_online.h"
+#include <errno.h>
+#include <time.h>
 
 // ---------------- present ----------------
 // The game thread has no run loop, so nothing drained its autorelease pool: every frame's render pass descriptors,
@@ -27,9 +30,11 @@ static pthread_mutex_t presentation_mu = PTHREAD_MUTEX_INITIALIZER;
 static RenderPresentation presentation;
 static double last_presented;
 static double gpu_average;              // seconds; completion-thread EMA, only used by opt-in adaptive scheduling
+static double next_display;
+void render_presentation_changed(void) { next_display = 0; }
 // Called on the game thread. This is presentation policy, never a sim clock.
 void render_presentation_stats(RenderPresentation *out) {
-    static double next_display, refresh_ms = 1000.0 / 60, min_ms, max_ms, granularity_ms;
+    static double refresh_ms = 1000.0 / 60, min_ms, max_ms, granularity_ms;
     static int vrr, native_fullscreen;
     double now = host_ticks() / 1e9;
     if (now >= next_display) {
@@ -51,6 +56,7 @@ void render_presentation_stats(RenderPresentation *out) {
     static const int limits[] = {0, 120, 60, 40};
     int choice = settings_get("graphics.frame_rate_limit");
     int limit = choice >= 0 && choice < 4 ? limits[choice] : 0;
+    limit = roam_online_limit(limit, atomic_load_explicit(&roam_online_active, memory_order_relaxed));
     pthread_mutex_lock(&presentation_mu);
     presentation.limit = limit;
     presentation.refresh_ms = refresh_ms;
@@ -179,7 +185,7 @@ static void gamma_blit(void) {
         pd.vertexFunction = [lib newFunctionWithName:@"gamma_vs"];
         pd.fragmentFunction = [lib newFunctionWithName:@"gamma_fs"];
         pd.colorAttachments[0].pixelFormat = present_tex.pixelFormat;
-        pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+        pso = pipeline_build(pd, __func__, &err);
         if (!pso) { fprintf(stderr, "boot: gamma ramp pipeline: %s\n", err.localizedDescription.UTF8String); gamma_active = 0; }
     }
     if (!pso) return;
@@ -213,11 +219,22 @@ static float hdr_brightness_exponent(unsigned channel) {
 }
 int render_hdr_output_enabled(void) { return hdr_output_on; }
 const char *render_hdr_output_status(void) {
+    if(nfs_hdr_output_mode()==0) {
+        // Auto decides at launch (the setting needs a restart); afterwards report the current screen, like On.
+        if(!hdr_output_requested)return "Auto: SDR (no HDR at launch; restart to re-check)";
+        return hdr_output_on && hdr_frame_headroom>1 ? "Auto: HDR active" : "Auto: SDR on this screen";
+    }
     return !hdr_output_requested ? "Off" : hdr_output_on && hdr_frame_headroom>1 ? "EDR active" : "SDR fallback";
 }
 static NSScreen *hdr_output_screen(void) {
     NSWindow *w = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
     return w.screen ?: NSScreen.mainScreen;
+}
+float render_hdr_display_potential(void) {
+    __block float potential=1;
+    void (^sample)(void)=^{ potential=(float)hdr_output_screen().maximumPotentialExtendedDynamicRangeColorComponentValue; };
+    if(NSThread.isMainThread)sample();else dispatch_sync(dispatch_get_main_queue(),sample);
+    return isfinite(potential) ? potential : 1;
 }
 static float hdr_output_ceiling(float h) {
     if(!isfinite(h) || h<=1)return 1;
@@ -304,7 +321,7 @@ static id<MTLRenderPipelineState> hdr_output_pipeline_samples(MTLPixelFormat for
     pd.fragmentFunction = [lib newFunctionWithName:@"hdr_fs"];
     pd.colorAttachments[0].pixelFormat = format;
     pd.rasterSampleCount = samples;
-    pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+    pso = pipeline_build(pd, __func__, &error);
     if (pso) states[key] = pso;
     else hdr_output_error("pipeline", error);
     return pso;
@@ -342,7 +359,7 @@ void render_hdr_output_init(void) {
     if (initialized) return;
     initialized = 1;
     hdr_output_requested = nfs_hdr_output_requested();
-    if (!hdr_output_requested || !layer) return;   // unset: no layer/colour/PSO changes
+    if (!hdr_output_requested || !layer) return;   // SDR: no layer/colour/PSO changes
     const char *pads=getenv("NFS_PADS");
     if(pads && !strcmp(pads,"2"))return;         // shared split atlas: retain the whole SDR frame
     void (^configure)(void) = ^{
@@ -437,6 +454,7 @@ static void present_show(void) {
     rt_after_commit(cmd, ^{                  // behind the frame's commit (render_thread.m replays it later)
         dispatch_async(q, ^{
             @autoreleasepool {
+                if(diag_on)pipeline_frame_scope(1);
                 id<CAMetalDrawable> d = [l nextDrawable];
                 if (d) {
                     if (diag_on && hdr_output_requested) {
@@ -462,6 +480,7 @@ static void present_show(void) {
                     uint64_t n = __atomic_add_fetch(&hdr_nil_drawables, 1, __ATOMIC_RELAXED);
                     if (!(n & (n - 1))) hdr_output_diag("nil-drawable", MTLPixelFormatInvalid);
                 }
+                if(diag_on)pipeline_frame_scope(0);
                 presenting = 0;
             }
         });
@@ -470,6 +489,27 @@ static void present_show(void) {
 
 void render_present(void) {
     if (!mtl) return;
+    // Also bound submitted frames when a background/occluded window has no drawable.
+    // Anchor to the actual previous frame, so a slow frame never creates a catch-up burst.
+    static uint64_t online_previous;
+    if (atomic_load_explicit(&roam_online_active, memory_order_relaxed)) {
+        RenderPresentation policy; render_presentation_stats(&policy);
+        uint64_t now = host_ticks();
+        uint64_t deadline = online_previous + 1000000000ull / (unsigned)policy.limit;
+        if (online_previous && deadline > now) {
+            uint64_t wait_started = now;
+            gil_release();
+            while ((now = host_ticks()) < deadline) {
+                uint64_t remaining = deadline - now;
+                struct timespec t = {.tv_sec=(time_t)(remaining / 1000000000), .tv_nsec=(long)(remaining % 1000000000)};
+                if (nanosleep(&t, NULL) && errno != EINTR) break;
+            }
+            uint64_t woke = host_ticks(); gil_acquire();
+            diag_idle_ns[IDLE_SLEEP] += woke - wait_started;
+            diag_idle_ns[IDLE_GIL] += host_ticks() - woke;
+        }
+        online_previous = host_ticks();
+    } else online_previous = 0;
     frame_pool_cycle();
     if (bb_rt.ms && (probe_sig & PROBE_MSAA)) bb_rt.stale = resolve_magenta = 1;   // BOOT_DIAG_PROBE msaa (probe.m)
     msaa_resolve(&bb_rt);                 // AA on: backbuffer_tex from the multisampled back buffer (see MSAA)
@@ -499,11 +539,13 @@ void render_present(void) {
     carpaint_ab_shot(shot_path, sizeof shot_path);
     int detail_ab_shot(char *path, size_t n);                                 // detail.c: same-frame detail distances
     detail_ab_shot(shot_path, sizeof shot_path);
+    int envcube_ab_shot(char *path, size_t n);
+    envcube_ab_shot(shot_path, sizeof shot_path);
     int report_shot(char *path, size_t n);                                    // report.m: the frame when the F10 menu opened
     report_shot(shot_path, sizeof shot_path);
     int due = shot_path[0] ? 0 : diag_shot_due(dev.frames);
     if (due) snprintf(shot_path, sizeof shot_path, "%s/frame_%05llu.%s", diag_dir, (unsigned long long)dev.frames, due == 2 ? "png" : "jpg");
-    if (due == 2) postfx_ab_shot(shot_path, sizeof shot_path);              // a full-size frame shot also starts a postfx A/B set (front end)
+    if (due == 2) { postfx_ab_shot(shot_path, sizeof shot_path); carpaint_ab_shot(shot_path, sizeof shot_path); } // full-size front-end A/B sets
     if (shot_path[0]) {
         id<MTLTexture> shot_src = hdr_shot_source(cmd, show); // SDR bytes for BOOT_DIAG and F10 reports
         shot = [mtl newBufferWithLength:backbuffer_tex.width * backbuffer_tex.height * 4 options:MTLResourceStorageModeShared];

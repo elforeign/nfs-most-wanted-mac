@@ -29,7 +29,7 @@ ASSET_SITES = [0x75187D, 0x739DE8, 0x747FDE, 0x7493F3, 0x7494C8, 0x756F72, 0x757
 REVIEWED_REVISION = "840955712b681f4ad3efcdc11d43f75cf55fbae7"
 
 
-def fixtures(tmp):
+def fixtures(tmp, fit=False):
     game = Path(recomp.EXE).parent
     bundle = (game / "GLOBAL/GLOBALB.BUN").read_bytes()
     needle = struct.pack("<II", 0x34600, 0x4448)
@@ -56,7 +56,10 @@ def fixtures(tmp):
                 bases.append((addresses[dep], len(blob), str(path)))
             group = len(rows)
             for key, typ, size, off in vault.exports:
-                if typ == 0x8E112EB7 and vault.u32(v, off + 4) in (0x4A97EC8F, 0x85885722, 0xA5B543B7):
+                classes = (0x4A97EC8F, 0x85885722, 0xA5B543B7)
+                if fit:
+                    classes += (0xAFA210F0, 0xBD38D1CA, 0x93C171E4)
+                if typ == 0x8E112EB7 and vault.u32(v, off + 4) in classes:
                     rows.append((group, addresses[0] + off))
     return bases, rows
 
@@ -119,6 +122,8 @@ void f_00751860_orig(Cpu *c) { c->esp+=4; }
 void f_00752940_orig(Cpu *c) { c->esp+=12; }
 void f_00752B60_orig(Cpu *c) { c->esp+=12; }
 void f_00755800_orig(Cpu *c) { c->esp+=4; }
+void f_00750B20_orig(Cpu *c) { c->esp+=4; }
+void f_00739B40_orig(Cpu *c) { c->esp+=20; }
 void f_0075F5D0_orig(Cpu *c) { c->esp+=8; }
 static uint32_t allocate(Cpu *c) { return gmalloc(M32(c->esp+4)); }
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {
@@ -415,7 +420,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
             elif variant == "asset_names":
                 modified = actual.replace("if (off == 0 || off == 0x10)", "if (0)")
             elif variant == "collision":
-                modified = actual.replace("M32(at) = additions[i].donor_model;", "M32(at) = key;")
+                modified = actual.replace("M32(at) = a->donor_model;", "M32(at) = key;")
             elif variant == "metadata":
                 modified = actual.replace("uint32_t copy = gmalloc(bytes);", "uint32_t copy = ld;")
             elif variant == "unrelated_vaults":

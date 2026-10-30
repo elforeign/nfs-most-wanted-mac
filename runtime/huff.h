@@ -80,6 +80,7 @@ static inline uint32_t huff_native(const uint8_t *in, uint32_t inlen, uint8_t *o
         if (len > 16) return 0;
         base[len] = code * 2 - nsym;
         if (!huff_num(&b, &c)) return 0;
+        if (c > 256 - nsym) return 0;
         cnt[len] = c;
         code = code * 2 + c; nsym += c;
         bound[len] = c ? (code << (16 - len)) & 0xffff : 0;

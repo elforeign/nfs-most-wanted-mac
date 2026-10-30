@@ -22,7 +22,7 @@ Every NFS_* / BOOT_* name the code reads is a row in `runtime/switches.tsv` (kin
 - `NFS_COP_TEST_WARM`: exercises warm cop-speech cache behavior.
 - `NFS_FRAME_LIMIT`: overrides the frame pacing limit.
 - `NFS_FRAME_MEMORY_KB`: sets the frame-memory budget in kilobytes.
-- `NFS_HDR_OUTPUT`: selects the HDR output mode.
+- `NFS_HDR_OUTPUT=auto|off|edr`: HDR output mode (default Auto, based on display potential EDR headroom; restart required).
 - `NFS_MUSIC_TEST_PREF`: selects the music preference test case.
 - `NFS_NO_CATCHUP`: disables simulation catch-up steps.
 - `NFS_TEST_ADDCARS_SEED_META`: injects added-car seed metadata for tests.

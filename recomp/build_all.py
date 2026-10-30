@@ -21,11 +21,14 @@ import concurrent.futures
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import listing  # noqa: E402
 import recomp  # noqa: E402
+import build_inputs  # noqa: E402
+from car_render_diag import car_render_diagnostics  # noqa: E402
 from difftest import load_functions  # noqa: E402
 
 OUT = os.path.join(HERE, "out")
@@ -286,10 +289,17 @@ def main():
     ap.add_argument("--exe", help="the player's speed.exe (default: $NFS_SPEED_EXE, else the owner's game folder)")
     ap.add_argument("--server-dll", help="optional server.dll (default: $NFS_SERVER_DLL, else beside speed.exe)")
     ap.add_argument("--skip-server", action="store_true", help="build speed.exe only")
+    ap.add_argument("--if-stale", action="store_true", help="reuse outputs only when all production input bytes match")
     args = ap.parse_args()
     if args.exe:
         recomp.EXE = args.exe
     os.makedirs(OUT, exist_ok=True)
+    fingerprint = build_inputs.recomp_key(exe=recomp.EXE, server=args.server_dll, skip_server=args.skip_server)
+    stamp = Path(OUT) / 'build-inputs.json'
+    if args.if_stale and build_inputs.fresh(stamp, fingerprint, build_inputs.outputs()):
+        print('recompiler: production inputs and outputs unchanged')
+        return
+    stamp.unlink(missing_ok=True)
     # A failed translation, compiler launch or archive must never leave an older
     # library looking like the output of this invocation.
     lib = os.path.join(OUT, "speed.a")
@@ -314,6 +324,7 @@ def main():
         code = split_shadow_operands(a, code)
         code = split_capture_operands(a, code)
         code = split_fx_operands(a, code)
+        code = car_render_diagnostics(a, code)
         bodies[k] = (a, name, code)
         if a in hooks:
             # The runtime replaces this function: the translated body becomes f_X_orig, and f_X a weak wrapper that a
@@ -323,6 +334,7 @@ def main():
             bodies[k] = (a, name, code)
     with open(os.path.join(OUT, "funcs.h"), "w") as h:
         h.write('#pragma once\n#include "runtime.h"\nvoid untranslated(Cpu *c, uint32_t addr);\n')
+        h.write('extern int diag_on;\nvoid diag_car_observe(Cpu *c, uint32_t site);\nvoid diag_car_reject(uint32_t site);\n')
         h.write('uint32_t x360_water_reflection_level(void);\nfloat x360_water_reflection_wetness(uint32_t site, float wetness);\n')
         h.write('uint32_t split_capture_address(uint32_t original);\nuint32_t split_capture_player(uint32_t original);\n')
         h.write('uint32_t split_fx_view(uint32_t original);\nuint32_t split_fx_player(uint32_t original);\n'
@@ -394,6 +406,7 @@ def main():
         server_path = (args.server_dll or os.environ.get("NFS_SERVER_DLL") or
                        os.path.join(os.path.dirname(recomp.EXE), "server.dll"))
         server_module.build(server_path, args.jobs, speed_pe=rc.pe)
+    build_inputs.record(stamp, fingerprint, build_inputs.outputs())
 
 
 if __name__ == "__main__":

@@ -28,10 +28,11 @@
 #include <stdlib.h>
 
 #include "d3d9_internal.h"
+#include "pipeline_cache.h"
 
 // ---------------- level: menu, app.txt, NFS_OVERLAY ----------------
 static int level = -1;
-static const char *const level_names[] = {"off", "compact", "full"};
+static const char *const level_names[] = {"off", "compact", "full", "notice"};
 static int parse_level(const char *s) {
     for (int i = 0; i < 3; ++i) if (s && !strcasecmp(s, level_names[i])) return i;
     return s && *s >= '0' && *s <= '2' && !s[1] ? *s - '0' : -1;
@@ -45,6 +46,16 @@ int overlay_level(void) {
     }
     return level;
 }
+// A message for NOTICE_S seconds (game thread): drawn as the panel's first line, or alone when the overlay is off.
+#define NOTICE_S 2.0
+static char notice_text[64];
+static double notice_until;
+static volatile int notice_live;     // set by the game thread while a notice shows, read by the present queue
+void overlay_notice(const char *text) {
+    snprintf(notice_text, sizeof notice_text, "%s", text);
+    notice_until = host_ticks() / 1e9 + NOTICE_S;
+    if (diag_on) diag_event("overlay: notice \"%s\"", text);
+}
 void overlay_set_level(int l) {
     if (l < 0 || l > 2) return;
     overlay_level();
@@ -57,6 +68,7 @@ void overlay_set_level(int l) {
 typedef struct {
     double t;                    // host_ticks seconds
     int level;
+    char notice[64];             // the message showing, or ""
     float scale;                 // backing scale of the window
     // last second of frames
     int n;                       // frames
@@ -133,7 +145,9 @@ static void snapshot(Snap *s, int lv) {
     memset(s, 0, sizeof *s);
     s->t = host_ticks() / 1e9;
     s->level = lv;
+    if (host_ticks() / 1e9 < notice_until) snprintf(s->notice, sizeof s->notice, "%s", notice_text);
     s->scale = layer ? (float)backing_scale() : 1;
+    if (lv == OVERLAY_NOTICE) return;   // nothing else is shown: no counters
     // the last second of frames, newest first (the same window stats.log uses)
     static float ft[PERF_RING];
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
@@ -225,8 +239,13 @@ typedef struct { char label[16], text[160]; int dim; } Line;
 static int panel_lines(const Snap *s, int lv, Line *L) {
     int n = 0;
 #define LN(lab, ...) do { snprintf(L[n].label, sizeof L[n].label, "%s", lab); snprintf(L[n].text, sizeof L[n].text, __VA_ARGS__); L[n].dim = 0; ++n; } while (0)
+    if (lv == OVERLAY_NOTICE) {
+        LN("", "%s", s->notice);
+        return n;
+    }
     if (lv == OVERLAY_COMPACT) {
         LN("", "%5.1f fps  %5.2f ms p50  %5.2f p99  sim %d Hz", s->fps, s->p50, s->p99, pacing_sim_hz());
+        if (s->notice[0]) LN("", "%s", s->notice);
         return n;
     }
     LN("frames", "%5.1f fps  %5.2f ms p50  %5.2f p99  %6.2f max", s->fps, s->p50, s->p99, s->max);
@@ -260,6 +279,7 @@ static int panel_lines(const Snap *s, int lv, Line *L) {
                                                                                         : "silent (NFS_AUDIO=null)");
     LN("input", "%s  %s%s", s->pad, s->pad_xbox == 2 ? "native bindings (Options > Controls)" : s->pad_xbox ? "Xbox layout" : "PlayStation layout", s->rumble_off ? "  rumble off" : "");
     LN("rumble", "heavy %*s light", 14, "");
+    if (s->notice[0]) LN("notice", "%s", s->notice);
 #undef LN
     return n;
 }
@@ -408,7 +428,7 @@ static int pso_init(void) {
     ca.blendingEnabled = YES;
     ca.sourceRGBBlendFactor = ca.sourceAlphaBlendFactor = MTLBlendFactorOne;
     ca.destinationRGBBlendFactor = ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+    pso = pipeline_build(pd, __func__, &err);
     if (!pso) { fprintf(stderr, "boot: overlay: %s\n", err.localizedDescription.UTF8String); return 0; }
     MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
     sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;   // the panel is drawn 1:1
@@ -484,7 +504,7 @@ static void encode(id<MTLRenderCommandEncoder> e, const Panel *p) {
 
 // render_present.m present_show, on the nfsmw.present queue, in the command buffer that shows the game's frame.
 void overlay_present(id<MTLCommandBuffer> cb) {
-    if (level <= OVERLAY_OFF || !olayer || olayer.hidden) return;
+    if ((level <= OVERLAY_OFF && !notice_live) || !olayer || olayer.hidden) return;
     os_unfair_lock_lock(&panel_lock);
     Panel p = panel;
     os_unfair_lock_unlock(&panel_lock);
@@ -507,7 +527,7 @@ void overlay_present(id<MTLCommandBuffer> cb) {
 // diag: the panel at both levels for this snapshot, as drawn (with alpha), for composites with the frame's PNG.
 static void capture(const Snap *s, uint64_t frame) {
     if (!pso_init()) return;
-    for (int lv = OVERLAY_COMPACT; lv <= OVERLAY_FULL; ++lv) {
+    for (int lv = s->level == OVERLAY_NOTICE ? OVERLAY_NOTICE : OVERLAY_COMPACT; lv <= (s->level == OVERLAY_NOTICE ? OVERLAY_NOTICE : OVERLAY_FULL); ++lv) {
         Panel p = build_panel(s, lv);
         if (!p.tex) continue;
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:(NSUInteger)p.w height:(NSUInteger)p.h mipmapped:NO];
@@ -546,7 +566,7 @@ static CGFloat backing_scale(void) {
 static void layer_update(void) {
     if (!layer) return;
     CAMetalLayer *parent = layer;
-    int show = level > OVERLAY_OFF;
+    int show = level > OVERLAY_OFF || notice_live;
     if (!olayer) {
         if (!show) return;
         olayer = [CAMetalLayer layer];
@@ -583,6 +603,8 @@ static void layer_update(void) {
 // takes a counters snapshot 4 times a second for the overlay queue to turn into the next panel.
 void overlay_frame(void) {
     int lv = overlay_level();
+    notice_live = host_ticks() / 1e9 < notice_until;
+    if (!lv && notice_live) lv = OVERLAY_NOTICE;      // a notice alone: the overlay is off
     if (diag_on && lv && getenv("BOOT_DIAG_SHOTS") && diag_frame_wanted(dev.frames, "BOOT_DIAG_SHOTS")) { capture_due = 1; capture_frame = dev.frames; }
     if (!lv) { if (olayer && !olayer.hidden) olayer.hidden = YES; return; }
     layer_update();
@@ -590,6 +612,11 @@ void overlay_frame(void) {
     double now = host_ticks() / 1e9;
     static int last_lv;
     if (now < next && lv == last_lv && !capture_due) return;
+    if (lv == OVERLAY_NOTICE && last_lv != lv) {      // no leftover panel from an earlier notice while the new one builds
+        os_unfair_lock_lock(&panel_lock);
+        panel.tex = nil;
+        os_unfair_lock_unlock(&panel_lock);
+    }
     next = now + 0.25;
     last_lv = lv;
     if (!overlay_q) overlay_q = dispatch_queue_create("nfsmw.overlay", DISPATCH_QUEUE_SERIAL);

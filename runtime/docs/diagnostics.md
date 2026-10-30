@@ -2,6 +2,69 @@
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
+## Car render rejection trace
+
+With `BOOT_DIAG`, `car-reject:` lines in `events.log` sample each car/view/reflection
+combination every `BOOT_DIAG_CAR_EVERY` frames (default 120; positive integer).
+The diagnostic observes the original Render decisions: adjusted pixel size at
+0074E213, visibility at 0074E34B, selected body/tire LODs at 0074E5A2, and the
+camera bounding-box result at 0074E694. The outer 0074E160 hook can read bounds,
+radius, view threshold and the connected part table, but cannot see these locals;
+the four inline observation points and taken false edges supply them. The
+diagnostic does not repeat visibility, pixel-size or camera tests.
+
+The line format (after the standard frame/thread prefix) is:
+
+```text
+car-reject: frame=N self=PTR car=NAME type=ID view=ID refl=FLAG result=BOOL reason=REASON site=PC bounds=(X,Y,Z)..(X,Y,Z) radius=R pixel=P minpixel=P lod=MIN..MAX chosen=BODY/TIRE visible=STATE camera_inside=BOOL models=L0[SLOT:HASH->found@MODEL/SOLID,SLOT:HASH->null@MODEL/SOLID];L1[...];L2[...];L3[...];L4[...]
+```
+
+`reason` is the **first taken false edge**, not a predicted condition:
+`pixel-size` (0074E223), `visibility` (0074E34D), `lod` (0074E5B1),
+`camera-inside` (0074E696), or `frame-allocation` (0074E2D4/2DC/2E8/2F0).
+`none` means Render returned true; `other-false` identifies any uninstrumented
+false return. `na` means the original code never reached that observation;
+camera-inside is also `na` when the selected LOD, distance, view or NIS condition
+skips the bounding-box test. Chosen LODs include the original forced overrides.
+
+Bounds are the instance's local min/max at +90/+A0; radius is +17A8. Pixel size
+includes the original special-view and view-mode adjustments. Slots are hexadecimal
+part-table indices (body is 00). Each of the five LOD lanes shows nonzero requested
+hashes and live connections; an empty lane has neither. `found` requires a live
+solid at eModel+0C, not merely an allocated eModel. Null slots recover their
+requested hash using the original part-name and special-LOD-range queries, with
+the added car's model namespace temporarily restored. These read-only queries
+use a private Cpu after Render returns. A lane outside the instance's min/max
+can therefore show a requested hash with a null connection; this is not evidence
+that the solid is absent from loaded packs. No extra solid lookup is performed.
+
+Sampling state is independent per instance/ride/type/view/reflection on each
+render thread, so shadow/reflection calls cannot hide the main view's reason.
+The wrapper starts with `if (!diag_on) { f_0074E160_orig(c); return; }`, and all
+inline observers/rejection hooks use `if (diag_on)`: off makes no diagnostic
+helper calls or guest queries. `BOOT_DIAG_DRAWS` remains independent.
+
+With the installed XK enabled, collect one guarded run:
+
+```sh
+runtime/run_guarded.sh 60 /tmp/xkdiag NFS_TEST_PRIVATE_CARS_ROOT="$HOME/Library/Application Support/NFSMW-port/private-cars" BOOT_RACE=15.1.1 BOOT_RACE_CAR=JAGUARXK BOOT_RACE_AI=0 BOOT_AUTODRIVE=1 BOOT_DIAG_CAR_EVERY=120
+```
+
+The launcher sets `BOOT_DIAG=/tmp/xkdiag`; inspect `/tmp/xkdiag/events.log` for
+`car-reject:` rows for JAGUARXK in view 1. Registration and `cars1` totals remain
+in the existing logs. The root override reads the installed approved catalog;
+without it a fresh scratch userdata directory has no added cars.
+The offline suite autodiscovers `runtime/diag_car_test.py`: it executes the actual
+translated Render and production diagnostic wrapper against synthetic car/view
+data, with external renderer services replaced. It checks all four rejection
+paths, first-false ordering, allocation failure, view exemptions, adjusted pixels,
+forced LODs, model connection/hash pairs, namespace restoration, sampling, original
+Cpu results and zero calls when off. Swapped-reason, missing-namespace and removed
+off-guard controls each exit 1: normal 616/616 checks, swapped reason 2 failures,
+missing namespace 151, removed off guard 1 (2 helper entries/11 guest queries/1
+log while off, against 0/0/0 normally). This establishes diagnostic correctness;
+the XK's live rejection still requires the guarded run.
+
 ## Starting a race directly
 
 `BOOT_RACE=1` (or a race ID from `GLOBAL/gameplay.bin`, e.g. `15.1.1`; IDs `N.1.M` are circuits, `N.2.M` sprints) uses the game's own developer switches: `boot.c` writes `SkipFE`, `SkipMovies`, `SkipFERaceID`, `SkipFEPlayerCar`, laps and opponents before the entry point, and `main()` then calls `RaceStarter::StartSkipFERace` instead of loading the front end (retail never reads `online.cfg`). The race is running (game-flow state 6) about 4 s after launch. `BOOT_RACE_CAR` (default `bmwm3gtre46`), `BOOT_RACE_LAPS` (10), `BOOT_RACE_AI` (3 opponents). Add `BOOT_AUTODRIVE=1` for the game's AI to drive the player's car.

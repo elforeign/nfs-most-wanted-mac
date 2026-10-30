@@ -46,7 +46,7 @@ static uint8_t *G;
 int x360_post_ssao_enabled(void){return enabled;}
 int x360_post_chain_on(void){return chain;}
 static struct{uint32_t rs[256];} dev;
-typedef struct { int alpha_func;float alpha_ref;} SmPSAux;
+typedef struct { int alpha_func;float alpha_ref;unsigned alpha_to_coverage;} SmPSAux;
 static struct { SmPSAux pa;} eb;
 static struct { int alpha_ref;} mat_trees_draw;
 static struct { id pso,pso1;float k[32][4]; } trees_now;
@@ -322,6 +322,7 @@ int main(void){@autoreleasepool{
     xpost=(ROOT/'runtime/render_post.m').read_text()
     builder=function(xpost,'x_contact_multiply')
     stub=layout.replace('@implementation Device', '@implementation Device\n-(id)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor*)d error:(NSError**)e{(void)e;return d;}')
+    stub+='\nstatic id pipeline_build(MTLRenderPipelineDescriptor *d,const char *pass,NSError **e){(void)pass;return [mtl newRenderPipelineStateWithDescriptor:d error:e];}\n'
     for mode in ('multiply-fixed','multiply-unshaded'):
         actual=builder if mode=='multiply-fixed' else builder.replace('MTLBlendFactorSourceAlpha','MTLBlendFactorOne')
         body=stub+actual+r'''

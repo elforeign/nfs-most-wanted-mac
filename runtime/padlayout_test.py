@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Mixed-layout P2 bindings: real defaults + control hook + translated evaluator.
 ASan/UBSan, retail PE table and translated Xbox defaults; fake physical state only.
-PASS: 1,304 checks / 0 failures. Old shared-layout mutant: 80 / 1,304
-failures; missing restore: 4 / 1,304 failures (both rejected). No game or hardware.
+PASS: 1,688 checks / 0 failures. Old shared-layout mutant: 80 / 1,688
+failures; missing restore: 8 / 1,688 failures; P1 identity reused for P2 pedals:
+16 / 1,688 failures (all rejected). Mixed PlayStation/Xbox pairs; no game/hardware.
 """
 from pathlib import Path
 import importlib.util
@@ -71,6 +72,25 @@ int main(int argc,char **argv) {
         // Same-layout custom binding still wins without a defaults swap.
         second_ps=ps0; set_rec(rec(accept,2),T_BUTTON,0,15);
         CHECK(padbind_port_begin(1)==0); CHECK(M32(rec(accept,2)+8)==15);
+        // Trigger preset follows each port's identity, including mixed layouts.
+        second_ps=!ps0; s_type.value=0;
+        for(int pressed=0;pressed<2;pressed++) {
+            memset(fake_pad,0,sizeof fake_pad);
+            fake_put(1,8,32768); fake_put(1,0x214,49151);
+            if(pressed) fake_put(1,0xc,128); // native Cross
+            for(int p=0;p<2;p++) memcpy(G+0x121000+0x1000*p,fake_pad[p],0x224);
+            uint8_t saved[76*52]; memcpy(saved,G+GA,sizeof saved);
+            s_pedals.value=0; c=cpu(d[1]); f_006349B0(&c);
+            float prior[76]; for(int a=0;a<76;a++) prior[a]=value(1,a);
+            s_pedals.value=1; c=cpu(d[1]); f_006349B0(&c); abi(&c,0);
+            CHECK(padbind_pedals(1)==second_ps);
+            if(second_ps) {
+                CHECK(fabsf(value(1,0)-.5f)<.0001f && fabsf(value(1,1))<.0001f);
+                CHECK(value(1,8)==pressed && !value(1,7));
+            } else for(int a=0;a<76;a++) CHECK(value(1,a)==prior[a]);
+            CHECK(!memcmp(saved,G+GA,sizeof saved)); CHECK(swaps==0);
+        }
+        s_pedals.value=0;
     }
     printf("padlayout: %d checks, %d failures\n",checks,failures);
     free(G); return failures!=0;
@@ -92,6 +112,8 @@ def main():
     defaults=pb[pb.index('// ---------------- defaults'):pb.index('// ---------------- the sets')]
     pre=re.sub(r'int padbind_port_begin.*?\nvoid padbind_follow', 'void padbind_follow',h.PRE,flags=re.S)
     pre=re.sub(r'\bput\(', 'fake_put(', pre)
+    pre=pre.replace('int padbind_pedals(int port) { (void)port; return 0; }', '')
+    pre+='\n#define PEDALS_NO_TRACE 1\n#include "pedals.c"\n'
     pad=re.search(r'int pad_count\(void\) \{.*?\n\}',(R/'user32.m').read_text(),re.S).group()
     bodies='\n'.join(h.translated(file,name) for file,names in (
         ('speed_31.c',('00634B50','006349B0','0063CD80')),
@@ -99,6 +121,7 @@ def main():
     ) for name in names)
     hook=(R/'controltype.c').read_text()
     sources={'normal':hook,'old-shared-layout':hook.replace('padbind_port_begin(1)', '0'),
+             'primary-pedals':hook.replace('int pedal_layout = padbind_pedals(port);', 'int pedal_layout = padbind_pedals(0);'),
              'missing-restore':hook.replace('padbind_port_end(port_swapped);','(void)port_swapped;')}
     with tempfile.TemporaryDirectory(prefix='padlayout-') as tmp:
         tmp=Path(tmp); (tmp/'memory').write_bytes(memory)

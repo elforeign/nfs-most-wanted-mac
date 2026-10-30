@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#define PEDALS_NO_TRACE 1
+#include "pedals.c"
+void pedals_trace_sample(unsigned step,float lt,float rt) { (void)step;(void)lt;(void)rt; }
 #include "controltype.c"
 #include "padbind.c"
 

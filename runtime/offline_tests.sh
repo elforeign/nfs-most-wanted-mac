@@ -6,7 +6,8 @@
 # gate instead of failing silently until someone runs it. With names: only those (e.g. `offline_tests.sh x360music_test aa_setting`).
 #
 # What runs (autodiscovered, so a new test joins by existing):
-#   runtime/*_test.py  recomp/*_test.py  tools_snapshot/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
+#   runtime/*_test.py (including roam_online_test.py codecs/loopback relay and roam_session_test.py lifecycle)
+#   recomp/*_test.py  tools_snapshot/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
 #   the standalone C/ObjC/shell tests listed in run_one below (aa_setting_test.c, feedback_test.c, framecap_test.c incl. its
 #   --broken run, heap_test.c, settings_look_test.c, rumble_test.m, jdlz_test.c, x360abk_test.c g3, lampbatch_test.m,
 #   msaa_resolve_test.m, rectangle_clear_test.m (via rectangle_clear_test.py), dsound_dup_test.sh, wfx_cb_test.sh, defaults_check.py)
@@ -22,12 +23,20 @@
 # Scan proof: tests/scanproof/test_scanproof.py (new folder) -> OFFLINE FAIL: unregistered:tests/scanproof/test_scanproof.py. Clean tree: 0 unregistered.
 # Security-fixture sandbox guard: harmless fixture skips (exit 3, 0 executions); broken pattern runs it (exit 0,
 # 1 execution). Publication fixture check, 2026-10-28; no game process involved.
+# Deadline tests (<5s wall-clock polling/waits) run serially after the parallel batch:
+#   private tool tests listed in runtime/offline_serial.txt (1-3 s stub, polling and shutdown deadlines; load caused a false timeout)
+#   test_backend 3s ready-file polling deadline
 # Offline-tested by itself: break any test (e.g. flip an assertion in runtime/framecap_test.c) -> OFFLINE FAIL: framecap.
-# Discovery proof: 139 registered names (7 Setup), 0 collisions, exit 0; injecting a duplicate test_app exits 1.
+# Discovery proof: 140 registered names (7 Setup), 0 collisions, exit 0; injecting a duplicate test_app exits 1.
+# test_release_artifact is autodiscovered: builds packaged Setup with bundled Python
+# and scratch HOME/CLT (no game launch); exit 3 without the Setup artifact or PC input.
+# Artifact scan proof: packaged source + Python added 319 spurious test paths;
+# excluding generated root build/dist output leaves 0 artifact paths in the scan.
 . "$(dirname "$0")/env.sh"; nfs_need_py
 cd "$(dirname "$0")/.." || exit 2
-here=$PWD; self=$here/runtime/offline_tests.sh
-[ "${1:-}" = --one ] || "$TOOLS_PY" -I tools/gen_tables.py --if-stale || { echo "OFFLINE FAIL: gen_tables"; exit 1; }   # runtime/gen/*.inc
+here=$PWD; self=$here/runtime/${0##*/}
+[ "${1:-}" = --one ] || [ "${OFFLINE_TESTS_PLAN:-0}" = 1 ] || "$TOOLS_PY" -I tools/gen_tables.py --if-stale || { echo "OFFLINE FAIL: gen_tables"; exit 1; }   # runtime/gen/*.inc
+export NFS_RUMBLE=off NFS_PAD_TRIGGERS=off NFS_PAD_LIGHT=off NFS_PAD_PLAYERS=off NFS_PAD_ROAD=off NFS_HDR_OUTPUT=${NFS_HDR_OUTPUT:-off}
 py=$TOOLS_PY
 X360=$NFS_PARENT/x360/files
 LIMIT=${OFFLINE_TEST_LIMIT:-420}      # seconds per test
@@ -59,6 +68,10 @@ run_one() {
             fi ;;
         esac
         case $n in
+        test_release_artifact)
+            version=$(sed -n 's/^PUBLIC_VERSION = "\([^"]*\)".*/\1/p' tools/setup_kit/backend.py)
+            [ -n "$version" ] || { echo 'missing current Setup version'; return 1; }
+            exec "$py" -I "$f" --expected-version "$version" ;;
         test_x360_fe_textures)          # needs the X360 ISO, the game folder and the generated HD set
             iso="$NFS_PARENT/Need for Speed - Most Wanted x360 (USA).iso"
             [ -f "$iso" ] && [ -d "$NFS_GAME" ] && [ -d "$NFS_PARENT/x360/hd_textures_mips_alpha" ] || { echo "SKIP: needs the X360 ISO, game folder and x360/hd_textures_mips_alpha"; return 3; }
@@ -66,7 +79,32 @@ run_one() {
         esac
         exec "$py" -I "$f" ;;
     aa_setting)  clang $CF -I recomp runtime/aa_setting_test.c runtime/aa_setting.c runtime/settings.c runtime/offline_stubs.c -o "$d/t" && exec "$d/t" ;;
-    feedback)    clang $CF -I recomp runtime/feedback_test.c -o "$d/t" && exec "$d/t" ;;
+    padfx)       sed -n '/^int padbind_trigger_role(/,/^}/p' runtime/padbind.c >"$d/padfx_roles.inc"
+                 clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp -I "$d" \
+                     runtime/padfx_test.m -framework Foundation -o "$d/t" || return 1
+                 "$d/t" || return 1
+                 for broken in 1 2 3 4 5; do
+                     "$d/t" "$broken" >"$d/broken-$broken.log" 2>&1; rc=$?
+                     tail -1 "$d/broken-$broken.log"
+                     [ "$rc" = 1 ] || { echo "padfx broken $broken unexpectedly passed/crashed"; return 1; }
+                 done
+                 sed 's/if (applied_generation < token) release_all();/(void)token; release_all();/' runtime/padfx.m >"$d/late-stop.m"
+                 sed 's/{ invalidate_locked(); release_all();/{ release_all();/' runtime/padfx.m >"$d/stale-sink.m"
+                 sed -E 's/!getenv\("(NFS_PAD_[A-Z]+)"\) \|\| env_on\("NFS_PAD_[A-Z]+"\)/env_on("\1")/g' runtime/padfx.m >"$d/default-off.m"
+                 sed 's/0.10f + 0.15f \* travel/0.20f/; s/0.30f + 1.25f \* (travel - 0.60f)/0.15f + 0.45f * travel/' runtime/padfx.m >"$d/pedal-curves.m"
+                 for broken in late-stop stale-sink default-off pedal-curves; do
+                     cmp -s runtime/padfx.m "$d/$broken.m" && { echo "padfx $broken mutation did not apply"; return 1; }
+                     clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp -I runtime -I "$d" \
+                         -DPADFX_SOURCE="\"$d/$broken.m\"" runtime/padfx_test.m -framework Foundation -o "$d/$broken" || return 1
+                     "$d/$broken" >"$d/$broken.log" 2>&1; rc=$?
+                     tail -1 "$d/$broken.log"
+                     [ "$rc" = 1 ] || { echo "padfx $broken unexpectedly passed/crashed"; return 1; }
+                 done ;;
+    feedback)    clang $CF -I recomp runtime/feedback_test.c -o "$d/t" || return 1
+                 "$d/t" || return 1
+                 "$d/t" --broken-padfx >"$d/broken.log" 2>&1; rc=$?
+                 tail -1 "$d/broken.log"
+                 [ "$rc" = 1 ] ;;
     heap)        clang -O2 -DHEAP_TEST -o "$d/t" runtime/heap_test.c runtime/heap.c && exec "$d/t" ;;
     rumble)      clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp runtime/rumble_test.m \
                      -framework Foundation -framework IOKit -lz -o "$d/t" && exec "$d/t" ;;
@@ -95,10 +133,15 @@ run_one() {
 
 if [ "$1" = "--one" ]; then      # internal: run one test with a watchdog, log + result in $OT_DIR
     n=$2
+    # A fresh player build includes FFmpeg and the complete recompiler/runtime.
+    [ "$n" != test_release_artifact ] || LIMIT=${OFFLINE_TEST_LIMIT:-1800}
     log=$OT_DIR/$n.log; s=$(date +%s)
     ( run_one "$n" "$OT_DIR/work/$n" ) >"$log" 2>&1 &
     pid=$!
-    ( sleep "$LIMIT"; kill "$pid" 2>/dev/null; echo "offline_tests: killed after ${LIMIT}s" >>"$log" ) &
+    # The watchdog's own sleep must die with it: an orphaned sleep kept the caller's output pipe open for $LIMIT s
+    # (362 leftover sleeps after one morning of suites; a `| tail` caller waited on them).
+    ( trap 'kill "$sp" 2>/dev/null; exit 0' TERM; sleep "$LIMIT" & sp=$!; wait "$sp"
+      kill "$pid" 2>/dev/null; echo "offline_tests: killed after ${LIMIT}s" >>"$log" ) </dev/null >/dev/null 2>&1 &
     wd=$!
     wait "$pid"; rc=$?
     kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
@@ -111,10 +154,33 @@ fi
 # ---- the list
 pyfiles() { for f in runtime/*_test.py recomp/*_test.py tools_snapshot/test_*.py tools/publish/test_*.py tests/setup/test_*.py runtime/defaults_check.py; do [ -f "$f" ] && echo "$f"; done; }
 pylist() { pyfiles | sed 's|.*/||; s|\.py$||'; }
-standalone="aa_setting feedback ws2_policy settings_look heap rumble framecap jdlz x360abk lampbatch msaa_resolve dsound_dup wfx_cb host_audio"
+standalone="aa_setting feedback padfx ws2_policy settings_look heap rumble framecap jdlz x360abk lampbatch msaa_resolve dsound_dup wfx_cb host_audio"
+# Short-deadline tests: public ones here, private tool tests in runtime/offline_serial.txt (absent in public trees).
+deadline_tests="test_backend roam_loopback_fixture_test $(cat runtime/offline_serial.txt 2>/dev/null | tr '\n' ' ')"
+serial=${OFFLINE_SERIAL_TESTS:-$deadline_tests}
 duplicates=$({ pylist; printf '%s\n' $standalone host_shaders; } | sort | uniq -d)
 [ -z "$duplicates" ] || { echo "OFFLINE FAIL: duplicate test names: $duplicates"; exit 1; }
 if [ $# -gt 0 ]; then names="$*"; else names="$(pylist | tr '\n' ' ')$standalone"; fi
+
+# Keep every short-deadline integration test out of the parallel batch.
+for n in $deadline_tests; do
+    case " $serial " in *" $n "*) ;; *) echo "OFFLINE FAIL: short-deadline test is not serial: $n"; exit 1 ;; esac
+done
+selected_serial=
+for n in $names; do case " $serial " in *" $n "*) selected_serial="$selected_serial $n" ;; esac; done
+par= heavy=
+for n in $names; do
+    case $n in
+        host_shaders) heavy=host_shaders ;;
+        *) case " $serial " in *" $n "*) ;; *) par="$par $n" ;; esac ;;
+    esac
+done
+[ $# -eq 0 ] && heavy=host_shaders
+if [ "${OFFLINE_TESTS_PLAN:-0}" = 1 ]; then
+    echo "PARALLEL:$par"
+    echo "SERIAL:$selected_serial"
+    exit 0
+fi
 
 # unregistered test sources (repo-wide, see the header). Not scanned: hidden dot-folders (local tooling, not port code).
 # Deliberately not run:
@@ -123,8 +189,10 @@ notrun=" runtime/roots_test.sh "
 orphans=
 if [ $# -eq 0 ]; then
     ran=$(pyfiles)
-    files=$(git ls-files --cached --others --exclude-standard 2>/dev/null) ||
-        files=$(find . -name .git -prune -o -type f -print | sed 's|^\./||')   # not a git checkout
+    # Installer output contains another source tree and Python's own tests; these
+    # are artifact contents, not additional tests belonging to this checkout.
+    files=$(git ls-files --cached --others --exclude-standard -- . ':!build/**' ':!dist/**' 2>/dev/null) ||
+        files=$(find . \( -name .git -o -path ./build -o -path ./dist \) -prune -o -type f -print | sed 's|^\./||')   # not a git checkout
     for f in $(printf '%s\n' "$files" | grep -vE '(^|/)\.' | grep -E '(^|/)(test_[^/]*\.py|[^/]*_test\.[^/]+)$'); do
         [ -f "$f" ] || continue                                 # deleted, still in the index
         case $notrun in *" $f "*) continue ;; esac
@@ -138,25 +206,25 @@ fi
 OT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/offline.XXXXXX"); export OT_DIR
 mkdir -p "$OT_DIR/work"
 OT_TOOL_TMPDIR=${TMPDIR:-/tmp/}; export OT_TOOL_TMPDIR   # xcrun resolves downloaded toolchains via its original temp cache
+export PYTHONUNBUFFERED=1             # stdout and stderr interleave in order, so a traceback lands in the tail
 export TMPDIR=$OT_DIR/work              # tests' mkdtemp scratch lands here and goes with it (reverb keeps 10 s WAVs)
 t0=$(date +%s)
-heavy=
-par=
-for n in $names; do case $n in host_shaders) heavy=host_shaders ;; *) par="$par $n" ;; esac; done
 [ "$names" = "$*" ] || :
-# host_shaders joins the list last and runs alone
-[ $# -eq 0 ] && heavy=host_shaders
 # shellcheck disable=SC2086
-printf '%s\n' $par | xargs -P "${OFFLINE_JOBS:-6}" -I{} sh "$self" --one {}
+[ -z "$par" ] || printf '%s\n' $par | xargs -P "${OFFLINE_JOBS:-6}" -I{} sh "$self" --one {}
+for n in $selected_serial; do sh "$self" --one "$n"; done
 [ -z "$heavy" ] || sh "$self" --one "$heavy"
 
 fails= nskip= skipped= nrun=0
-for n in $par $heavy; do
+for n in $par $selected_serial $heavy; do
     r=$(cat "$OT_DIR/$n.result" 2>/dev/null)
     case $r in
     PASS) nrun=$((nrun + 1)) ;;
     SKIP) skipped="$skipped $n" ;;
-    *)    fails="$fails $n"; echo "---- $n (last lines of its log)"; tail -12 "$OT_DIR/$n.log" | cut -c1-240 ;;
+    *)    fails="$fails $n"; echo "---- $n (last lines of its log)"; tail -12 "$OT_DIR/$n.log" | cut -c1-240
+          # The scratch dir is removed below; keep the whole failing log (tracebacks sit above the tail).
+          keep=${OFFLINE_FAIL_LOGS:-${OT_TOOL_TMPDIR%/}/offline-fail}; kept=$keep/$n.$(date +%Y%m%d-%H%M%S).log
+          mkdir -p "$keep" && cp "$OT_DIR/$n.log" "$kept" && echo "full log: $kept" ;;
     esac
 done
 for o in $orphans; do fails="$fails unregistered:$o"; done

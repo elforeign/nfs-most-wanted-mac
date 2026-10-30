@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 // The F10 tabs, in order. Picture / World / Cars & cutscenes / Mirror replace the old flat Graphics list.
-enum { SET_PICTURE, SET_WORLD, SET_CARS, SET_MIRROR, SET_DISPLAY, SET_AUDIO, SET_CONTROLS, SET_GAMEPLAY, SET_DIAGNOSTICS,
+enum { SET_PICTURE, SET_WORLD, SET_CARS, SET_MIRROR, SET_DISPLAY, SET_AUDIO, SET_CONTROLS, SET_GAMEPLAY, SET_ONLINE, SET_DIAGNOSTICS,
        SET_NCATEGORIES };
 typedef enum {
     SET_TOGGLE,      // Off / On (choices may rename them, e.g. {"PC", "X360"})
@@ -57,7 +57,7 @@ struct Setting {
     int restart;                      // 1: takes effect at the next start
     int live_from_default;            // live only in a run started with the default; else needs a restart
     int own_pref;                     // the feature reads its app.txt key itself: never exported to `env`
-    void (*apply)(int value);         // live change (game thread); NULL for restart-only settings
+    void (*apply)(int value);         // live change (game thread); SET_TEXT: submit on Enter; NULL for restart-only settings
     int (*get)(void);                 // the live value when it can change elsewhere (NULL: the registry's copy)
     void (*value_text)(char *buf, int n);   // SET_INFO / SET_ACTION: the value column (NULL: none)
     // ---- filled in by the registry ----
@@ -66,7 +66,7 @@ struct Setting {
     int locked;                       // its env switch is set: the environment decides
     char env_text[48];                // the switch's value as set
     int saved;                        // came from app.txt
-    int hidden;                       // needs X360 files the player's roots.txt does not provide: not listed, PC in effect (roots.h)
+    int hidden;                       // absent from F10: preset-owned preference, or missing X360 files (PC fallback)
     char text[96];                    // SET_TEXT
 };
 
@@ -77,11 +77,12 @@ void settings_dump(const char *path);       // BOOT_DIAG: the listed rows and th
 int settings_count(void);
 Setting *settings_at(int i);                // registration order (not the menu's order: use settings_rows)
 int settings_rows(int cat, Setting **out, int cap);   // a category's settings in menu order (order key, then id)
-// The Picture tab's "Look preset" (settings.c): Original PC / Xbox 360 set every PC-vs-X360 choice in one table; My picks
-// restores the user's own values; any edit of a graphics row shows Custom.
-enum { PRESET_PC, PRESET_X360, PRESET_MINE, PRESET_CUSTOM };
+// The Picture tab's look choices include the platform rows and retail visual extras.
+enum { PRESET_PORT, PRESET_X360, PRESET_PC, PRESET_MINE };
 int settings_look_state(void);              // which of them the rows are in now (what the preset row shows)
+int settings_look_choice(void);             // last requested choice, for cycling past a conflicting environment override
 int settings_look_apply(int which);         // choose one; returns the rows it changed that need a restart (-1: no saved picks)
+int settings_look_partial(void);            // an Xbox 360 look cannot use all its required files
 int settings_get(const char *id);           // the current value (-1: no such setting)
 int settings_set(Setting *s, int value);    // user change: clamps, applies live, saves; 0 if locked or unchanged
 void settings_reset(Setting *s);            // back to the default (saved key removed)

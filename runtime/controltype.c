@@ -152,11 +152,14 @@ static void ct_update(Cpu *c) {
 void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): every GameAction's value, each frame
     if (ct_type != s_type.value + 1) ct_apply(s_type.value);
     uint32_t dev = c->ecx;
-    int port_swapped = pad_count() == 2 && M32(dev + 0x24) == 1 ? padbind_port_begin(1) : 0;
-    if (ct_type < 2 || M8(dev + 0x183C)) { ct_update(c); padbind_port_end(port_swapped); return; }   // Type 1, or a binding capture in progress
+    int port = pad_count() == 2 && M32(dev + 0x24) == 1;
+    int port_swapped = port ? padbind_port_begin(1) : 0;
+    if (pedals_selected() && !port) padbind_follow(c);
+    int pedal_layout = padbind_pedals(port);
+    if ((ct_type < 2 && !pedal_layout) || M8(dev + 0x183C)) { ct_update(c); padbind_port_end(port_swapped); return; }   // saved bindings, or a binding capture in progress
     // FUN_00628940 reads each non-empty binding and the largest wins: the controller slots of the actions this type
     // changes hold the preset's control for the call (slot 3 empty), then the user's own come back.
-    if (pad_count() != 2 || M32(dev + 0x24) == 0)
+    if (!port && !pedals_selected())
         padbind_follow(c);                      // only port 0 follows shared binding/identity changes
     uint32_t saved[12][6];
     int acts[12], ramp[12], n = 0;
@@ -165,10 +168,17 @@ void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): e
         float low;
         const char *src = ct_map(ct_type, a, &low);
         const CtSource *s = src ? ct_source(src) : NULL;
-        if (!s) continue;
+        uint32_t pedal[6];
+        int override = pedal_layout && pedals_binding(a, pedal);
+        if (!s && !override) continue;
         uint32_t r = GA + 0x34u * (uint32_t)a + 4 + 24u;
         for (int k = 0; k < 6; ++k) saved[n][k] = M32(r + 4 * (uint32_t)k);
-        M32(r) = s->type; M32(r + 4) = 0; M32(r + 8) = s->obj; M32(r + 12) = M32(r + 16) = M32(r + 20) = 0;
+        if (override) {
+            for (int k = 0; k < 6; ++k) M32(r + 4 * (uint32_t)k) = pedal[k];
+            low = 0; // the game's pedal clamp already supplies its 5%/95% endpoints
+        } else {
+            M32(r) = s->type; M32(r + 4) = 0; M32(r + 8) = s->obj; M32(r + 12) = M32(r + 16) = M32(r + 20) = 0;
+        }
         acts[n] = a; lows[n] = low; ramp[n] = low > 0; ++n;
     }
     padbind_swap(1);                            // the joystick reads inside it must not see the preset

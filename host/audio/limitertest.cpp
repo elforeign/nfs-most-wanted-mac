@@ -151,6 +151,37 @@ static void quiet_and_link() {
     Fixture game(signal(0));
     check(db(peak(game.render(48096))) <= -0.9, "limiting resumes after movie");
 }
+// Minimum-gain proof: full fixture 48 checks / 0 failed; minimum update removed: 3 failed.
+// Reader reports 0.445625 for +6 dB; no update reports unity. Diagnostic-off processing skips the update.
+static void gain_stats() {
+    PeakLimiter limiter;
+    limiter.reset(48000);
+    auto loud = std::vector<float>(256 * 6, 2.0f);
+    limiter.process(loud.data(), 256, true);
+    const double expected = PeakLimiter::threshold / 2.0;
+    check(std::fabs(limiter.take_min_gain() - expected) < 1e-7, "limiter reports minimum gain");
+    check(limiter.take_min_gain() == 1.0, "empty limiter stats window is unity");
+    loud.assign(256 * 6, 2.0f);
+    limiter.process(loud.data(), 256); // diagnostics disabled
+    check(limiter.take_min_gain() == 1.0, "diagnostics off never tracks gain");
+    loud.assign(256 * 6, 2.0f);
+    limiter.process(loud.data(), 256, true);
+    limiter.reset(44100);
+    check(std::fabs(limiter.take_min_gain() - expected) < 1e-7, "DSP reset preserves stats window minimum");
+    setenv("BOOT_DIAG", "1", 1);
+    ds_set_peak_limiter(1);
+    Fixture f(signal(0));
+    f.render(48096);
+    DsStats st{}; ds_device_get_stats(f.d, &st);
+    check(st.limited > 0 && st.limit_min_gain > 0 && st.limit_min_gain < 0.5,
+          "host stats report linked minimum next to limited samples");
+    ds_device_get_stats(f.d, &st);
+    check(st.limited == 0 && st.limit_min_gain == 1.0, "host stats window resets minimum and samples together");
+    unsetenv("BOOT_DIAG");
+    Fixture off(signal(0)); off.render(48096);
+    ds_device_get_stats(off.d, &st);
+    check(st.limited > 0 && st.limit_min_gain == 1.0, "non-diagnostic mix preserves samples but skips gain tracking");
+}
 static void benchmark() {
     auto source = signal(0);
     PeakLimiter p; p.reset(48000);
@@ -189,7 +220,7 @@ int main(int argc, char **argv) {
         bool off = getenv("NFS_AUDIO_LIMITER") && !strcmp(getenv("NFS_AUDIO_LIMITER"), "off");
         check(off ? peak(out) == 1.0f : db(peak(out)) <= -0.9, "startup default/override");
     }
-    proof(0); proof(1); quiet_and_link(); benchmark();
+    proof(0); proof(1); quiet_and_link(); gain_stats(); benchmark();
     printf("%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

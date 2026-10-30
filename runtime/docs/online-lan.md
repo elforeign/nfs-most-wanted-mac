@@ -94,3 +94,7 @@ deliberate host run.
                                                                                                                     
                                                                                                            
                  
+
+| Feature | Format / behavior |
+| --- | --- |
+| Online free roam code (F10 > Online > Host / Join) | Nine symbols as `XXXX-XXXXX`: eight base32 symbols encode IPv4 plus UDP port offset 47800–48055; the final symbol is a GF(32) checksum. Example: `TE29-43A2W` for 203.0.113.5:47800. Compact nine-symbol and lowercase input are accepted. Every one-symbol substitution and adjacent swap of distinct symbols is rejected immediately as “Invalid code”; old eight-symbol codes must be regenerated. Host tries finite router leases only; routers requiring permanent UPnP mappings need a manual UDP forward. |

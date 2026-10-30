@@ -7,6 +7,7 @@
 //   texkill/alpha test), optionally `kernel sm_test_kernel` = the body on flat buffers.
 #include "sm_ir.h"
 #include "sm_translate.h"
+#include "sm_coverage.h"
 
 #include <algorithm>
 #include <array>
@@ -108,8 +109,8 @@ static inline bool sm_alpha_test(uint f, float a, float ref) {
 }
 
 struct SmVSAux { float4 pos_fixup; float point_size; float pad0, pad1, pad2; };
-struct SmPSAux { uint alpha_func; float alpha_ref; uint pad0, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };
-)MSL";
+struct SmPSAux { uint alpha_func; float alpha_ref; uint alpha_to_coverage, pad1; float4 bumpenv[8]; float4 bumplum[8]; float lodbias[16]; };
+)MSL" SM_ALPHA_COVERAGE_MSL;
 
 struct VsOutMap { int slot; int index; };  // vs_3_0 o# -> canonical slot
 
@@ -994,8 +995,9 @@ bool Emitter::run(std::string &msl) {
         o += "    si.vpos = float4(pi.pos.xy - 0.5f, pi.pos.z, pi.pos.w);\n";
         o += std::string("    si.face = ") + (uses_vface ? "front ? 1.0f : -1.0f" : "1.0f") + ";\n";
         o += "    SmPSOut so;\n    sm_body(si, so, c, ci, cb, aux" + tex_param_args() + ");\n";
-        o += "    if (so.killed) discard_fragment();\n";
+        o += SM_ALPHA_COVERAGE_APPLY("so.oc[0].w");
         o += "    if (aux.alpha_func != 0u && !sm_alpha_test(aux.alpha_func, so.oc[0].w, aux.alpha_ref)) discard_fragment();\n";
+        o += "    if (so.killed) discard_fragment();\n";
         o += "    SmPSStageOut r;\n";
         for (int k = 0; k < 4; k++)
             if (color_out & (1 << k)) o += fmt("    r.c%d = so.oc[%d];\n", k, k);

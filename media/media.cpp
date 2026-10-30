@@ -891,6 +891,12 @@ public:
         return have;
     }
 };
+// Hardware timing is expressed at the nominal device rate, while the PCM queue uses the stream rate.
+static int pcm_queue_frames(UInt32 period, UInt32 safety, double device_rate, int stream_rate) {
+    if (!period || !std::isfinite(device_rate) || device_rate <= 0) return 0;
+    return (int)std::min(2147483647.0, std::ceil((2.0 * period + safety) * stream_rate / device_rate));
+}
+
 struct AudioOutput::Impl {
     AudioComponentInstance unit = nullptr;
     std::atomic<int64_t> last_callback{0};   // last consumption / valid idle callback, or the start (open grace period)
@@ -913,6 +919,53 @@ struct AudioOutput::Impl {
     std::unique_ptr<FakeRx> rx;     // the fake TV's receiver (fake_tv.log)
     OutputMode mode = OutputMode::Pcm51;
     int rate = 48000, channels = 6;
+    std::atomic<int> minimum_queue{0};  // property listener publishes; mixer reads without a HAL call
+    std::mutex timing_lock;
+    bool timing_active = false;
+    bool timing_listeners[3] = {};
+    static AudioObjectPropertyAddress timing_address(int i) {
+        return {i == 0 ? kAudioDevicePropertyBufferFrameSize :
+                i == 1 ? kAudioDevicePropertySafetyOffset : kAudioDevicePropertyNominalSampleRate,
+                i == 1 ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain};
+    }
+    // With timing_lock held. Never called on the render or mixer thread.
+    void refresh_pcm_timing() {
+        UInt32 period = 0, safety = 0;
+        Float64 device_rate = rate;
+        for (int i = 0; i < 3; ++i) {
+            auto a = timing_address(i);
+            UInt32 size = i == 2 ? sizeof device_rate : sizeof period;
+            void *value = i == 0 ? (void *)&period : i == 1 ? (void *)&safety : (void *)&device_rate;
+            AudioObjectGetPropertyData(opened_on, &a, 0, nullptr, &size, value);
+        }
+        minimum_queue.store(pcm_queue_frames(period, safety, device_rate, rate), std::memory_order_relaxed);
+    }
+    static OSStatus timing_changed(AudioObjectID device, UInt32, const AudioObjectPropertyAddress *, void *self) {
+        auto *s = (Impl *)self;
+        std::lock_guard<std::mutex> g(s->timing_lock);
+        if (s->timing_active && device == s->opened_on) s->refresh_pcm_timing();
+        return noErr;
+    }
+    void start_pcm_timing() {
+        // Register before the initial read so a timing change during open cannot leave a stale floor.
+        for (int i = 0; i < 3; ++i) {
+            auto a = timing_address(i);
+            timing_listeners[i] = AudioObjectAddPropertyListener(opened_on, &a, timing_changed, this) == noErr;
+        }
+        std::lock_guard<std::mutex> g(timing_lock);
+        timing_active = true;
+        refresh_pcm_timing();
+    }
+    void stop_pcm_timing() {
+        { std::lock_guard<std::mutex> g(timing_lock); timing_active = false; }
+        for (int i = 0; i < 3; ++i) if (timing_listeners[i]) {
+            auto a = timing_address(i);
+            AudioObjectRemovePropertyListener(opened_on, &a, timing_changed, this);
+            timing_listeners[i] = false;
+        }
+        minimum_queue.store(0, std::memory_order_relaxed);
+    }
     mutable std::mutex lock;
     Ring<float> fq{1u << 18};       // Pcm51 / Stereo samples
     Ring<uint8_t> bq{1u << 18};     // DolbyDigital / DolbyDigitalPlus bytes (IEC 61937 as s16le stereo)
@@ -1124,6 +1177,12 @@ bool AudioOutput::Impl::open_fake() {
     fake = true;
     passthrough = bitstream();                         // exclusive(), like the real passthrough
     opened_on = on;
+    if (!bitstream()) {
+        minimum_queue = pcm_queue_frames(4096, 128, 48000, rate);
+#ifdef MEDIA_AUDIO_CALLBACK_TEST
+        start_pcm_timing();  // fixture supplies fake HAL properties/listeners; no CoreAudio device
+#endif
+    }
     if (passthrough) { ++g_fake_hogs; g_devices_gen.fetch_add(1, std::memory_order_relaxed); }
     last_callback = now_ns();
     rx.reset(new FakeRx(mode, rate, channels, device_name(on)));
@@ -1135,7 +1194,7 @@ bool AudioOutput::Impl::open_fake() {
         int64_t t0 = now_ns();
         uint64_t done = 0;
         while (fake_run) {
-            usleep(5000);
+            usleep(bitstream() ? 5000 : (unsigned)(4096.0 / 48000 * 1e6));
             int64_t t = now_ns();
             uint64_t due = (uint64_t)((double)(t - t0) * dev_rate / 1e9);
             size_t frames = (size_t)(due - done);
@@ -1157,6 +1216,7 @@ AudioOutput::~AudioOutput() { close(); }
 
 bool AudioOutput::open(OutputMode mode, int rate) {
     if (g_fail_opens > 0 && g_fail_opens-- > 0) return false;
+    d->minimum_queue = 0;
     d->mode = mode;
     d->rate = rate;
     d->channels = mode == OutputMode::Pcm51 ? 6 : 2;
@@ -1200,10 +1260,14 @@ bool AudioOutput::open(OutputMode mode, int rate) {
     d->last_callback = now_ns();                 // stalled() counts from here (passthrough: from its IOProc's start)
     UInt32 sz = sizeof d->opened_on;
     AudioUnitGetProperty(d->unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &d->opened_on, &sz);
-    return AudioOutputUnitStart(d->unit) == noErr;
+    d->start_pcm_timing();
+    if (AudioOutputUnitStart(d->unit) == noErr) return true;
+    d->stop_pcm_timing();
+    return false;
 }
 
 bool AudioOutput::open_offline(OutputMode mode, int rate) {
+    d->minimum_queue = 0;
     d->mode = mode;
     d->rate = rate;
     d->channels = mode == OutputMode::Pcm51 ? 6 : 2;
@@ -1220,11 +1284,13 @@ size_t AudioOutput::device_frame_bytes() const { return d->bitstream() ? 4 : siz
 int AudioOutput::device_rate() const {
     return d->mode == OutputMode::DolbyDigitalPlus ? 192000 : d->mode == OutputMode::TrueHd ? 768000 : d->rate;
 }
+int AudioOutput::minimum_queue_frames() const { return d->minimum_queue.load(std::memory_order_relaxed); }
 size_t AudioOutput::pending_frames() const {   // the encoders belong to the writer's thread: no lock
     return !d->bitstream() ? 0 : d->mode == OutputMode::TrueHd ? d->thd.pending_frames() : d->ac3.pending_frames();
 }
 
 void AudioOutput::close() {
+    d->stop_pcm_timing();
     d->offline = false;
     if (d->fake) {
         d->stop_fake();

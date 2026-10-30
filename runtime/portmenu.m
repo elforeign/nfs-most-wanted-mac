@@ -1,7 +1,7 @@
 // portmenu.m - the port's settings menu: F10 (Fn-F10 on Mac keyboards), the controller's touchpad click.
 //
 // What it shows: the settings registry (settings.h) by category, Picture / World / Cars & cutscenes / Mirror / Display &
-// performance / Audio / Controls / Gameplay / Diagnostics, one row per setting with its value, in each setting's order
+// performance / Audio / Controls / Gameplay / Help, one row per setting with its value, in each setting's order
 // key, with section headings; a one-sentence description of the selected row and the controls of the device in use
 // (keys, or the layout's console buttons) below. Locked rows (an NFS_* switch is set) show the switch; rows that need a
 // restart carry a ⟳ after the value (amber once a change is waiting for it).
@@ -33,6 +33,8 @@
 
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "guide.h"
+#include "report_github.h"
 #include "onscreen_keyboard.h"
 void osk_pass(Cpu *c);
 
@@ -76,7 +78,10 @@ void portmenu_open_folder(const char *path) {
 }
 
 // The rows of a category, in menu order (each setting's order key; settings.c).
-static int rows(int cat, Setting **out, int cap) { return settings_rows(cat, out, cap); }
+static int rows(int cat, Setting **out, int cap) {
+    if (cat == SET_DIAGNOSTICS) guide_refresh();
+    return settings_rows(cat, out, cap);
+}
 static int selectable(const Setting *s) { return s->type != SET_HEADING && s->type != SET_INFO; }
 static int value_of(const Setting *s) { return s->get ? s->get() : s->value; }
 static int visible_rows(void) { return (int)(LIST_H / ROW); }
@@ -135,10 +140,23 @@ static void change(Setting *s, int d) {
     if (!s || s->locked) return;
     if (s->type == SET_CHOICE || s->type == SET_TOGGLE) {
         int n = s->type == SET_TOGGLE && !s->choices ? 2 : s->nchoices;
-        if (settings_set(s, (value_of(s) + d + n) % n)) changed(s);
+        int v = !strcmp(s->id, "graphics.look_preset") ? settings_look_choice() : value_of(s);
+        if (settings_set(s, (v + d + n) % n)) changed(s);
     } else if (s->type == SET_SLIDER) {
         if (settings_set(s, value_of(s) + d * (s->step > 0 ? s->step : 1))) changed(s);
     }
+}
+static void paste_text(void) {
+    Setting *s = current();
+    if (!is_open || !editing || !s || s->type != SET_TEXT) return;
+    NSString *paste = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+    if (!paste) return;
+    const char *p = paste.UTF8String; size_t used = 0;
+    while (p && *p && used + 1 < sizeof s->text) {
+        unsigned char ch = (unsigned char)*p++;
+        if (ch >= 32 && ch < 127) s->text[used++] = (char)ch;
+    }
+    s->text[used] = 0; dirty = 1;
 }
 static void activate(Setting *s) {
     if (!s) return;
@@ -155,10 +173,19 @@ static void set_open(int o) {
     feedback_poll_pause();
     feedback_suppress(FEEDBACK_MENU, o); // stop before holding the sim; independent of the game's own pause menu
     if (o) {
+        static id paste_monitor;
+        if (!paste_monitor) paste_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+            if (is_open && editing && event.keyCode == 9 && (event.modifierFlags & NSEventModifierFlagCommand)) {
+                paste_text(); return nil;
+            }
+            return event;
+        }];
         user32_menu_opening();           // keys and buttons held now are released to the game first
         report_request_shot();           // the frame as it is, for a problem report
         clamp_sel();
     }
+    if (!o) guide_close();
+    if (!o) report_github_close();
     is_open = o;
     editing = 0; dragging = -1; hover = -1;
     dirty = 1;
@@ -202,9 +229,29 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
     swallowed[vk] = (uint8_t)down;
     if (!down) return 1;
     if (device != 0) { device = 0; dirty = 1; }
+    if (report_github_active()) { report_github_key(vk); dirty = 1; return 1; }
+    if (guide_active()) {
+        switch (vk) {
+        case 0x1B: case 0x08: guide_command(GUIDE_BACK); break;
+        case 0x26: guide_command(GUIDE_UP); break;
+        case 0x28: guide_command(GUIDE_DOWN); break;
+        case 0x21: guide_command(GUIDE_PAGE_UP); break;
+        case 0x22: guide_command(GUIDE_PAGE_DOWN); break;
+        case 0x24: guide_command(GUIDE_HOME); break;
+        case 0x23: guide_command(GUIDE_END); break;
+        }
+        dirty = 1;
+        return 1;
+    }
     Setting *s = current();
     if (editing) {
-        if (vk == 0x0D || vk == 0x1B) { editing = 0; dirty = 1; }
+        if (vk == 0x0D || vk == 0x1B) {
+            editing = 0; dirty = 1; osk_note_end(vk == 0x1B);
+            if (vk == 0x0D && s && s->apply) s->apply(0);
+        }
+        else if (vk == 'V' && (NSEvent.modifierFlags & NSEventModifierFlagCommand) && s) {
+            paste_text();
+        }
         else if (vk == 0x08 && s && s->text[0]) { s->text[strlen(s->text) - 1] = 0; dirty = 1; }
         return 1;
     }
@@ -231,6 +278,7 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
 // Characters (WM_CHAR): the note being typed; all of them are the menu's while it's open.
 int portmenu_char(uint32_t ch) {
     if (!is_open) return 0;
+    if (report_github_active()) return 1;
     Setting *s = current();
     if (editing && s && s->type == SET_TEXT && ch >= 32 && ch < 256 && ch != 127) {
         size_t n = strlen(s->text);
@@ -242,7 +290,8 @@ int portmenu_char(uint32_t ch) {
 // ---------------- geometry (design points, top-left origin) ----------------
 static double fit_scale(CGSize view) {
     double f = fmin((view.width - 24) / PW, (view.height - 24) / PH);
-    return f > 1 ? 1 : f < 0.3 ? 0.3 : f;
+    double cap = guide_scale_cap();
+    return f > cap ? cap : f < 0.3 ? 0.3 : f;
 }
 static void panel_origin(CGSize view, double f, double *ox, double *oy) { *ox = (view.width - PW * f) / 2; *oy = (view.height - PH * f) / 2; }
 static double tab_x[SET_NCATEGORIES + 1];  // tab i spans tab_x[i]..tab_x[i+1] (set while drawing)
@@ -260,6 +309,13 @@ int portmenu_mouse(int kind, double vx, double vy, double dy) {
     panel_origin(view, f, &ox, &oy);
     double x = (vx - ox) / f, y = (vy - oy) / f;
     if (device != 1 && kind != 0) { device = 1; dirty = 1; }
+    if (report_github_active()) { report_github_mouse(kind, x, y, dy); dirty = 1; return 1; }
+    if (guide_active()) {
+        if (kind == 4) guide_scroll(-dy);
+        if (kind == 1 && x >= PW - 160 && y >= 44 && y < 100) guide_command(GUIDE_BACK);
+        dirty = 1;
+        return 1;
+    }
     Setting *r[128];
     int n = rows(tab, r, 128);
     int row = row_at(y);
@@ -311,37 +367,19 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
     *inject = 0;
     double now = host_ticks() / 1e9;
     static uint32_t last_phys, hold_after_close;
-    static int last_home, last_touch, chord_done, view_done;
-    static double chord_at, view_at, inject_until;
-    int choice = settings_get("controls.menu_button");
-    int trig = 0;
-    // the shortcut: edges and holds
-    int touch_edge = touchpad && !last_touch, home_edge = home && !last_home;
-    last_touch = touchpad; last_home = home;
-    int chord = (phys & (B_L3 | B_R3)) == (B_L3 | B_R3);
-    if (!chord) { chord_at = 0; chord_done = 0; }
-    else if (!chord_at) chord_at = now;
-    int use_view = choice == 3 || (choice == 0 && !has_touchpad);
-    int view = (phys & B_CREATE) != 0;
-    uint32_t hide = 0;
-    if (use_view && !is_open) {
-        if (view) {
-            if (!view_at) view_at = now;
-            hide |= B_CREATE;            // held back until it's clearly a tap or a hold
-            if (!view_done && now - view_at >= 0.5) { view_done = 1; trig = 1; }
-        } else {
-            if (view_at && !view_done) inject_until = now + 0.12;   // a tap: the game gets it now (reset car, select)
-            view_at = 0; view_done = 0;
-        }
-    }
-    if (!view) { view_at = 0; view_done = 0; }
-    if (now < inject_until) *inject |= B_CREATE;
-    if ((choice == 0 && touch_edge) || ((choice == 1 || (choice == 0 && !has_touchpad)) && home_edge)) trig = 1;
-    if (choice == 2 && chord && !chord_done && now - chord_at >= 0.4) { chord_done = 1; trig = 1; }
-    if (is_open && use_view && (phys & B_CREATE) && !(last_phys & B_CREATE)) trig = 1;   // a press closes it
-    if (trig) {
-        if (diag_on) diag_event("pad: menu shortcut (%s)", choice == 0 ? (touch_edge ? "touchpad" : home_edge ? "home" : "view held")
-                                                              : choice == 1 ? "home" : choice == 2 ? "L3+R3" : "view");
+    static GuideShortcut shortcut;
+    GuideShortcutResult input = guide_shortcut(&shortcut, now, phys, home, touchpad, has_touchpad,
+        settings_get("controls.menu_button"), settings_get("controls.guide_button") == 0, is_open);
+    uint32_t hide = input.hide;
+    *inject = input.inject;
+    int trig = input.action != 0;
+    if (trig && diag_on) diag_event("pad: %s shortcut", input.action == 2 ? "guide" : "menu");
+    if (input.action == 2) {
+        set_tab(SET_DIAGNOSTICS);
+        set_open(1);
+        guide_open(0);
+        dirty = 1;
+    } else if (input.action == 1) {
         set_open(!is_open);
         if (!is_open) hold_after_close = phys;
     }
@@ -350,6 +388,8 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
         last_phys = phys;
         return hide | hold_after_close;
     }
+    // The opening sample belongs entirely to the shortcut, including stick/D-pad navigation.
+    if (trig) { last_phys = phys; return ~0u; }
     // navigation with repeat
     int dir_up = up || ly > 0.5f, dir_down = down || ly < -0.5f, dir_left = left || lx < -0.5f, dir_right = right || lx > 0.5f;
     int dir = dir_up ? 1 : dir_down ? 2 : dir_left ? 3 : dir_right ? 4 : 0;
@@ -358,13 +398,22 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
     if (dir && (dir != last_dir || now >= dir_next)) {
         dir_next = now + (dir != last_dir ? 0.40 : 0.09);
         Setting *s = current();
-        if (dir == 1) move(-1); else if (dir == 2) move(1); else if (!editing) change(s, dir == 3 ? -1 : 1);
+        if (report_github_active()) { report_github_pad(dir, 0); dirty = 1; }
+        else if (guide_active()) { if (dir == 1 || dir == 2) { guide_command(dir == 1 ? GUIDE_UP : GUIDE_DOWN); dirty = 1; } }
+        else if (dir == 1) move(-1); else if (dir == 2) move(1); else if (!editing) change(s, dir == 3 ? -1 : 1);
     }
     last_dir = dir;
     uint32_t edge = phys & ~last_phys;
     last_phys = phys;
     if ((edge || dir) && device != 2) { device = 2; dirty = 1; }
-    if (trig) return ~0u;
+    if (report_github_active()) { report_github_pad(0, edge); if (edge) dirty = 1; return ~0u; }
+    if (guide_active()) {
+        if (edge & B_CIRCLE) guide_command(GUIDE_BACK);
+        if (edge & B_L1) guide_command(GUIDE_PAGE_UP);
+        if (edge & B_R1) guide_command(GUIDE_PAGE_DOWN);
+        if (edge) dirty = 1;
+        return ~0u;
+    }
     Setting *s = current();
     if (edge & B_CROSS) activate(s);
     if (edge & B_CIRCLE) { if (editing) { editing = 0; dirty = 1; } else { set_open(0); hold_after_close = phys; } }
@@ -388,40 +437,52 @@ static CTFontRef fnt(int which, double size) {
     return f[which][k];
 }
 static CGColorRef rgba(double r, double g, double b, double a) { return CGColorCreateSRGB(r, g, b, a); }
-static CGColorRef c_text, c_dim, c_faint, c_accent, c_amber, c_bg, c_line, c_sel, c_hover, c_dark;
+static CGColorRef c_text, c_dim, c_faint, c_accent, c_amber, c_bg, c_line, c_sel, c_hover, c_dark, c_tab;
 static void colors(void) {
     if (c_text) return;
+    c_tab = rgba(0.08, 0.06, 0.04, 1);
     c_text = rgba(0.95, 0.96, 0.97, 1); c_dim = rgba(0.62, 0.66, 0.70, 1); c_faint = rgba(0.45, 0.48, 0.52, 1);
     c_accent = rgba(1.00, 0.62, 0.20, 1); c_amber = rgba(1.00, 0.78, 0.30, 1); c_bg = rgba(0.055, 0.062, 0.075, 0.94);
     c_line = rgba(1, 1, 1, 0.10); c_sel = rgba(1, 1, 1, 0.10); c_hover = rgba(1, 1, 1, 0.05); c_dark = rgba(1, 1, 1, 0.16);
 }
-// Text at x (align 0 left, 1 right edge, 2 centre), its top at y (design points, top-left origin); returns the width.
+// CoreText layout is independent of the destination bitmap. Keep a bounded working set
+// of exact text/font/color combinations; drawing still uses the original CTLine/CTFrame.
+static NSMutableDictionary<NSArray *, id> *text_layouts;
+static id cached_layout(const char *s, CTFontRef f, CGColorRef col, int frame) {
+    if (!s) return nil;
+    NSString *str = [[NSString alloc] initWithUTF8String:s];
+    if (!str) return nil;
+    if (!text_layouts) text_layouts = [NSMutableDictionary dictionary];
+    NSArray *key = @[str, (__bridge id)f, (__bridge id)col, @(frame)];
+    id found = text_layouts[key];
+    if (found) return found;
+    NSDictionary *attr = @{(__bridge id)kCTFontAttributeName:(__bridge id)f,
+                          (__bridge id)kCTForegroundColorAttributeName:(__bridge id)col};
+    NSAttributedString *as = [[NSAttributedString alloc] initWithString:str attributes:attr];
+    id result = frame ? CFBridgingRelease(CTFramesetterCreateWithAttributedString((__bridge CFAttributedStringRef)as)) :
+                        CFBridgingRelease(CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)as));
+    if (text_layouts.count >= 512) [text_layouts removeAllObjects];
+    if (result) text_layouts[key] = result;
+    return result;
+}
+// Text at x (align 0 left, 1 right edge, 2 centre), its top at y; returns the width.
 static double text(CGContextRef ctx, const char *s, double x, double y, CTFontRef f, CGColorRef col, int align) {
     if (!s || !*s) return 0;
-    CFStringRef str = CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
-    if (!str) return 0;
-    const void *k[2] = {kCTFontAttributeName, kCTForegroundColorAttributeName}, *v[2] = {f, col};
-    CFDictionaryRef attr = CFDictionaryCreate(NULL, k, v, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFAttributedStringRef as = CFAttributedStringCreate(NULL, str, attr);
-    CTLineRef line = CTLineCreateWithAttributedString(as);
+    CTLineRef line = (__bridge CTLineRef)cached_layout(s, f, col, 0);
+    if (!line) return 0;
     double w = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
     double px = align == 1 ? x - w : align == 2 ? x - w / 2 : x;
     CGContextSetTextPosition(ctx, px, PH - (y + CTFontGetAscent(f)));
     CTLineDraw(line, ctx);
-    CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(str);
     return w;
 }
 static void wrapped(CGContextRef ctx, const char *s, double x, double y, double w, double h, CTFontRef f, CGColorRef col) {
-    CFStringRef str = s ? CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8) : NULL;
-    if (!str) return;
-    const void *k[2] = {kCTFontAttributeName, kCTForegroundColorAttributeName}, *v[2] = {f, col};
-    CFDictionaryRef attr = CFDictionaryCreate(NULL, k, v, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFAttributedStringRef as = CFAttributedStringCreate(NULL, str, attr);
-    CTFramesetterRef fs = CTFramesetterCreateWithAttributedString(as);
+    CTFramesetterRef fs = (__bridge CTFramesetterRef)cached_layout(s, f, col, 1);
+    if (!fs) return;
     CGPathRef path = CGPathCreateWithRect(CGRectMake(x, PH - y - h, w, h), NULL);
     CTFrameRef fr = CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), path, NULL);
     CTFrameDraw(fr, ctx);
-    CFRelease(fr); CGPathRelease(path); CFRelease(fs); CFRelease(as); CFRelease(attr); CFRelease(str);
+    CFRelease(fr); CGPathRelease(path);
 }
 static void fill(CGContextRef ctx, double x, double y, double w, double h, double r, CGColorRef col) {
     CGContextSetFillColorWithColor(ctx, col);
@@ -453,7 +514,25 @@ static void help_line(char *buf, size_t n) {
 static CALayer *panel_layer, *dim_layer;
 static CGContextRef last_ctx;            // the last panel bitmap (diag captures)
 static size_t last_w, last_h;
+static uint64_t panel_rasters, keyboard_full_rasters, keyboard_region_rasters, keyboard_changed_regions;
 
+static CGContextRef panel_background;
+static double panel_background_scale;
+static Setting *readout_rows[128];
+static char readout_text[128][160];
+static void readout(Setting *s, int i, char *b, size_t n) {
+    if (s->value_text) s->value_text(b, (int)n);
+    readout_rows[i] = s;
+    snprintf(readout_text[i], sizeof readout_text[i], "%s", b);
+}
+static CGContextRef bitmap(size_t W, size_t H, double sx, double sy) {
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef ctx = CGBitmapContextCreate(NULL, W, H, 8, W * 4, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (ctx) { CGContextScaleCTM(ctx, sx, sy); CGContextSetShouldSmoothFonts(ctx, false); }
+    return ctx;
+}
 static int render(void) {
     colors();
     CGSize view = layer.bounds.size;
@@ -461,17 +540,28 @@ static int render(void) {
     CGFloat backing = [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2;
     double f = fit_scale(view), k = f * backing;
     size_t W = (size_t)ceil(PW * k), H = (size_t)ceil(PH * k);
-    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef ctx = CGBitmapContextCreate(NULL, W, H, 8, W * 4, cs, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-    CGColorSpaceRelease(cs);
+    if (!panel_background || W != CGBitmapContextGetWidth(panel_background) ||
+        H != CGBitmapContextGetHeight(panel_background) || k != panel_background_scale) {
+        CGContextRef ctx = bitmap(W, H, k, k);
+        if (!ctx) return 0;
+        fill(ctx, 0, 0, PW, PH, 14, c_bg);
+        CGContextSetStrokeColorWithColor(ctx, c_line);
+        CGContextSetLineWidth(ctx, 1);
+        CGPathRef border = CGPathCreateWithRoundedRect(CGRectMake(0.5, 0.5, PW - 1, PH - 1), 14, 14, NULL);
+        CGContextAddPath(ctx, border); CGContextStrokePath(ctx); CGPathRelease(border);
+        if (panel_background) CGContextRelease(panel_background);
+        panel_background = ctx; panel_background_scale = k;
+    }
+    CGContextRef ctx = bitmap(W, H, k, k);
     if (!ctx) return 0;
-    CGContextScaleCTM(ctx, k, k);
-    CGContextSetShouldSmoothFonts(ctx, false);
-    fill(ctx, 0, 0, PW, PH, 14, c_bg);
-    CGContextSetStrokeColorWithColor(ctx, c_line);
-    CGContextSetLineWidth(ctx, 1);
-    CGPathRef border = CGPathCreateWithRoundedRect(CGRectMake(0.5, 0.5, PW - 1, PH - 1), 14, 14, NULL);
-    CGContextAddPath(ctx, border); CGContextStrokePath(ctx); CGPathRelease(border);
+    memcpy(CGBitmapContextGetData(ctx), CGBitmapContextGetData(panel_background), W * H * 4);
+    memset(readout_rows, 0, sizeof readout_rows);
+    if (report_github_active()) {
+        report_github_draw(ctx, PH, CGRectMake(32, LIST_Y, PW - 64, LIST_H), user32_pad_layout_xbox());
+    } else if (guide_active()) {
+        guide_draw(ctx, PH, CGRectMake(32, LIST_Y, PW - 64, LIST_H), user32_pad_layout_xbox());
+        text(ctx, "Back to Help", PW - 36, 62, fnt(0, 18), c_accent, 1);
+    } else {
     // title
     text(ctx, "Settings", 28, 20, fnt(1, 22), c_text, 0);
     char b[512];
@@ -483,18 +573,13 @@ static int render(void) {
     x += text(ctx, prev, x, TAB_Y + 5, fnt(0, 12), c_faint, 0) + 12;
     for (int t = 0; t < SET_NCATEGORIES; ++t) {
         CTFontRef tf = fnt(t == tab ? 1 : 0, 14);
-        CFStringRef str = CFStringCreateWithCString(NULL, settings_category_names[t], kCFStringEncodingUTF8);
-        const void *kk[1] = {kCTFontAttributeName}, *vv[1] = {tf};
-        CFDictionaryRef attr = CFDictionaryCreate(NULL, kk, vv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFAttributedStringRef as = CFAttributedStringCreate(NULL, str, attr);
-        CTLineRef line = CTLineCreateWithAttributedString(as);
+        CTLineRef line = (__bridge CTLineRef)cached_layout(settings_category_names[t], tf, c_text, 0);
         double w = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-        CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(str);
         tab_x[t] = x;
-        if (t == tab) fill(ctx, x, TAB_Y - 4, w + 24, 30, 15, c_accent);
-        else if (t == hover_tab) fill(ctx, x, TAB_Y - 4, w + 24, 30, 15, c_hover);
-        text(ctx, settings_category_names[t], x + 12, TAB_Y + 1, tf, t == tab ? rgba(0.08, 0.06, 0.04, 1) : c_text, 0);
-        x += w + 30;
+        if (t == tab) fill(ctx, x, TAB_Y - 4, w + 16, 30, 15, c_accent);
+        else if (t == hover_tab) fill(ctx, x, TAB_Y - 4, w + 16, 30, 15, c_hover);
+        text(ctx, settings_category_names[t], x + 8, TAB_Y + 1, tf, t == tab ? c_tab : c_text, 0);
+        x += w + 20;
         tab_x[t + 1] = x - 6;
     }
     text(ctx, next, x + 6, TAB_Y + 5, fnt(0, 12), c_faint, 0);
@@ -522,7 +607,7 @@ static int render(void) {
         text(ctx, s->label, 32, ty, fnt(0, 15), s->type == SET_INFO ? c_dim : lc, 0);
         double vx = VX + 24;
         int val = value_of(s);
-        char vb[160] = "";
+        char vb[512] = "";
         double w = 0;
         switch (s->type) {
         case SET_TOGGLE: case SET_CHOICE:
@@ -549,13 +634,15 @@ static int render(void) {
             } else w = text(ctx, s->text[0] ? s->text : "(none)", vx, ty, fnt(0, 15), s->text[0] ? c_text : c_faint, 0);
             break;
         case SET_ACTION:
-            if (s->value_text) s->value_text(vb, sizeof vb);
+            readout(s, i, vb, sizeof vb);
             w = text(ctx, vb[0] ? vb : i == sel ? (device == 2 ? (user32_pad_layout_xbox() ? "A" : "✕") : "Enter") : "", vx, ty,
                      fnt(0, 13), c_dim, 0);
             break;
         case SET_INFO:
-            if (s->value_text) s->value_text(vb, sizeof vb);
-            w = text(ctx, vb, vx, ty, fnt(0, 15), c_text, 0);
+            readout(s, i, vb, sizeof vb);
+            if (!strcmp(s->id, "online.status")) {
+                wrapped(ctx, vb, vx, ty, PW - vx - 36, ROW - 3, fnt(0, 11), c_text); w = 0;
+            } else w = text(ctx, vb, vx, ty, fnt(0, 15), c_text, 0);
             break;
         default: break;
         }
@@ -580,11 +667,18 @@ static int render(void) {
     double now = host_ticks() / 1e9;
     Setting *s = current();
     if (now < status_until) wrapped(ctx, status, 32, PH - 96, PW - 64, 44, fnt(0, 13), c_amber);
-    else if (s && s->help) {
+    else if (s && !strcmp(s->id, "graphics.look_preset") && settings_look_state() == PRESET_X360 && settings_look_partial()) {
+        wrapped(ctx, "partial: your Xbox 360 files are not installed. Applies the available picture settings, closest to retail.",
+                32, PH - 96, PW - 64, 44, fnt(0, 13), c_amber);
+    } else if (s && !strcmp(s->id, "online.status") && s->value_text) {
+        char detail[512]; s->value_text(detail, sizeof detail);
+        wrapped(ctx, detail, 32, PH - 96, PW - 64, 44, fnt(0, 11), c_text);
+    } else if (s && s->help) {
         wrapped(ctx, s->help, 32, PH - 96, PW - 64, 44, fnt(0, 13), c_dim);
     }
     help_line(b, sizeof b);
     text(ctx, b, PW / 2, PH - 38, fnt(0, 12), c_faint, 2);
+    }
     // to the layer
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     if (!img) { CGContextRelease(ctx); return 0; }
@@ -600,6 +694,7 @@ static int render(void) {
     CGImageRelease(img);
     if (last_ctx) CGContextRelease(last_ctx);
     last_ctx = ctx; last_w = W; last_h = H;
+    if (diag_on) ++panel_rasters;
     return 1;
 }
 
@@ -632,6 +727,30 @@ static void layers(int show) {
 // A transparent upper half leaves the game's field visible above the keyboard.
 static CALayer *keyboard_layer;
 static CGContextRef keyboard_ctx;
+typedef struct {
+    unsigned key;
+    int enabled, selected;
+    char label[16];
+} KeyboardKey;
+typedef struct {
+    size_t W, H;
+    int xbox, count[5];
+    char title[128], text[512];
+    KeyboardKey keys[5][16];
+} KeyboardPixels;
+static KeyboardPixels keyboard_previous;
+static CGContextRef keyboard_background;
+// Restore from the pristine background in device pixels. A copy, rather than a
+// blend, preserves the translucent background and antialiasing exactly.
+static void keyboard_restore(CGContextRef ctx, CGRect rect) {
+    size_t W = CGBitmapContextGetWidth(ctx), H = CGBitmapContextGetHeight(ctx);
+    int x0 = (int)fmax(0, floor(rect.origin.x * W / PW));
+    int x1 = (int)fmin(W, ceil(CGRectGetMaxX(rect) * W / PW));
+    int y0 = (int)fmax(0, floor(rect.origin.y * H / PH));
+    int y1 = (int)fmin(H, ceil(CGRectGetMaxY(rect) * H / PH));
+    unsigned char *dst = CGBitmapContextGetData(ctx), *src = CGBitmapContextGetData(keyboard_background);
+    for (int y = y0; y < y1; ++y) memcpy(dst + (y * W + x0) * 4, src + (y * W + x0) * 4, (x1 - x0) * 4);
+}
 static void keyboard_update(void) {
     int show = osk_visible();
     if (!layer) return;
@@ -647,99 +766,140 @@ static void keyboard_update(void) {
     keyboard_layer.hidden = !show;
     if (!show) return;
     const OskCapture *s = osk_capture();
-    // Redraw only when text, selection, geometry or input type changes.
-    static char previous[2048];
-    char signature[2048], keys[600] = "";
-    for (int r = 0; r < 5; ++r) for (int col = 0; col < osk_key_count(r); ++col) {
-        size_t n = strlen(keys);
-        snprintf(keys + n, sizeof keys - n, "%u%c,", osk_key(r, col), osk_selected(r, col) ? '*' : ' ');
-    }
     CGSize view = layer.bounds.size;
     id v = layer.delegate;
     CGFloat backing = [v isKindOfClass:NSView.class] && ((NSView *)v).window ? ((NSView *)v).window.backingScaleFactor : 2;
     double f = fmin(fit_scale(view), fmax(0.3, (view.height * 0.46 - 12) / (PH - 298)));
-    snprintf(signature, sizeof signature, "%llu:%u:%u:%d:%.0f:%.0f:%.2f:%s:%s", (unsigned long long)s->generation,
-             s->length, s->limit, osk_xbox(), view.width, view.height, backing, s->text, keys);
-    if (!strcmp(previous, signature)) return;
-    colors();
-    size_t W = (size_t)ceil(PW * f * backing), H = (size_t)ceil(PH * f * backing);
-    if (!W || !H) return;
-    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef ctx = CGBitmapContextCreate(NULL, W, H, 8, W * 4, cs, kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
-    CGColorSpaceRelease(cs);
-    if (!ctx) return;
-    CGContextScaleCTM(ctx, (double)W / PW, (double)H / PH);
-    fill(ctx, 12, 298, PW - 24, PH - 304, 12, c_bg);
-    char b[128];
-    snprintf(b, sizeof b, "%s  %u / %u", s->note ? "Note" : "Text", s->length, s->limit);
-    text(ctx, b, 32, 310, fnt(1, 16), c_accent, 0);
-    // UTF-8 text is clipped, rather than truncated through a multi-byte character.
-    CGContextSaveGState(ctx);
-    CGContextClipToRect(ctx, CGRectMake(215, PH - 339, PW - 245, 26));
-    text(ctx, s->text, 220, 309, fnt(0, 17), c_text, 0);
-    CGContextRestoreGState(ctx);
+    KeyboardPixels pixels = {0};
+    pixels.W = (size_t)ceil(PW * f * backing); pixels.H = (size_t)ceil(PH * f * backing);
+    pixels.xbox = osk_xbox();
+    snprintf(pixels.title, sizeof pixels.title, "%s  %u / %u", s->note ? "Note" : "Text", s->length, s->limit);
+    snprintf(pixels.text, sizeof pixels.text, "%s", s->text);
     for (int r = 0; r < 5; ++r) {
-        int count = osk_key_count(r);
+        pixels.count[r] = osk_key_count(r);
+        for (int col = 0; col < pixels.count[r]; ++col) {
+            KeyboardKey *key = &pixels.keys[r][col];
+            key->key = osk_key(r, col); key->enabled = osk_key_enabled(key->key); key->selected = osk_selected(r, col);
+            char label[16];
+            snprintf(key->label, sizeof key->label, "%s", osk_key_label(key->key, label));
+        }
+    }
+    // Position can change without changing the bitmap (for example a wider window).
+    double ox = (view.width - PW * f) / 2, oy = view.height - PH * f - 12;
+    CGRect frame = CGRectMake(ox, oy, PW * f, PH * f);
+    if (!CGRectEqualToRect(keyboard_layer.frame, frame) || keyboard_layer.contentsScale != backing) {
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        keyboard_layer.contentsScale = backing;
+        keyboard_layer.frame = frame;
+        [CATransaction commit];
+    }
+    if (keyboard_ctx && !memcmp(&pixels, &keyboard_previous, sizeof pixels)) return;
+    size_t W = pixels.W, H = pixels.H;
+    if (!W || !H) return;
+    uint64_t raster_start = diag_on ? host_ticks() : 0;
+    colors();
+    int full = !keyboard_ctx || W != keyboard_previous.W || H != keyboard_previous.H ||
+               pixels.xbox != keyboard_previous.xbox || memcmp(pixels.count, keyboard_previous.count, sizeof pixels.count);
+    CGContextRef ctx = bitmap(W, H, (double)W / PW, (double)H / PH);
+    if (!ctx) return;
+    // Match the original keyboard's default font smoothing (the panel disables it).
+    CGContextSetShouldSmoothFonts(ctx, true);
+    if (!keyboard_background || W != CGBitmapContextGetWidth(keyboard_background) || H != CGBitmapContextGetHeight(keyboard_background)) {
+        CGContextRef bg = bitmap(W, H, (double)W / PW, (double)H / PH);
+        if (!bg) { CGContextRelease(ctx); return; }
+        fill(bg, 12, 298, PW - 24, PH - 304, 12, c_bg);
+        if (keyboard_background) CGContextRelease(keyboard_background);
+        keyboard_background = bg;
+    }
+    // New storage avoids modifying a bitmap still held by Core Animation.
+    memcpy(CGBitmapContextGetData(ctx), CGBitmapContextGetData(full ? keyboard_background : keyboard_ctx), W * H * 4);
+    int text_changed = full || strcmp(pixels.title, keyboard_previous.title) || strcmp(pixels.text, keyboard_previous.text);
+    if (text_changed) {
+        if (!full) keyboard_restore(ctx, CGRectMake(28, 306, PW - 54, 36));
+        text(ctx, pixels.title, 32, 310, fnt(1, 16), c_accent, 0);
+        CGContextSaveGState(ctx);
+        CGContextClipToRect(ctx, CGRectMake(215, PH - 339, PW - 245, 26));
+        text(ctx, pixels.text, 220, 309, fnt(0, 17), c_text, 0);
+        CGContextRestoreGState(ctx);
+    }
+    unsigned regions = text_changed;
+    for (int r = 0; r < 5; ++r) {
+        int count = pixels.count[r];
         double width = r == 4 ? 240 : count > 10 ? 54 : 72;
         double x = (PW - count * (width + 6) + 6) / 2;
         for (int col = 0; col < count; ++col) {
-            unsigned key = osk_key(r, col);
+            KeyboardKey *key = &pixels.keys[r][col];
+            if (!full && !memcmp(key, &keyboard_previous.keys[r][col], sizeof *key)) continue;
             double xx = x + col * (width + 6), y = 350 + r * 44;
-            int enabled = osk_key_enabled(key), selected = osk_selected(r, col);
-            fill(ctx, xx, y, width, 38, 5, selected ? c_accent : c_sel);
-            char label[16];
-            text(ctx, osk_key_label(key, label), xx + width / 2, y + 9, fnt(1, 16),
-                 enabled ? selected ? c_bg : c_text : c_faint, 2);
+            if (!full) keyboard_restore(ctx, CGRectMake(xx - 2, y - 2, width + 4, 42));
+            fill(ctx, xx, y, width, 38, 5, key->selected ? c_accent : c_sel);
+            text(ctx, key->label, xx + width / 2, y + 9, fnt(1, 16),
+                 key->enabled ? key->selected ? c_bg : c_text : c_faint, 2);
+            ++regions;
         }
     }
-    text(ctx, osk_xbox() ? "A  Type     B  Delete     X  Accept     Y  Cancel" : "✕  Type     ○  Delete     □  Accept     △  Cancel",
-         PW / 2, 578, fnt(1, 15), c_text, 2);
-    text(ctx, osk_xbox() ? "D-pad / Left stick  Move       LB  Shift       RB  Symbols" :
-                         "D-pad / Left stick  Move       L1  Shift       R1  Symbols", PW / 2, 606, fnt(0, 12), c_dim, 2);
-    CGImageRef img = CGBitmapContextCreateImage(ctx);
-    if (img) {
-        double ox = (view.width - PW * f) / 2, oy = view.height - PH * f - 12;
-        [CATransaction begin]; [CATransaction setDisableActions:YES];
-        keyboard_layer.contents = (__bridge id)img;
-        keyboard_layer.contentsScale = backing;
-        keyboard_layer.frame = CGRectMake(ox, oy, PW * f, PH * f);
-        [CATransaction commit];
-        CGImageRelease(img);
-        snprintf(previous, sizeof previous, "%s", signature);
-        if (diag_on) diag_event("osk: drawn generation=%llu length=%u owner=%d", (unsigned long long)s->generation, s->length, s->owner);
+    if (full) {
+        text(ctx, pixels.xbox ? "A  Type     B  Delete     X  Accept     Y  Cancel" : "✕  Type     ○  Delete     □  Accept     △  Cancel",
+             PW / 2, 578, fnt(1, 15), c_text, 2);
+        text(ctx, pixels.xbox ? "D-pad / Left stick  Move       LB  Shift       RB  Symbols" :
+                             "D-pad / Left stick  Move       L1  Shift       R1  Symbols", PW / 2, 606, fnt(0, 12), c_dim, 2);
     }
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    if (!img) { CGContextRelease(ctx); return; }
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    keyboard_layer.contents = (__bridge id)img;
+    [CATransaction commit];
+    CGImageRelease(img);
     if (keyboard_ctx) CGContextRelease(keyboard_ctx);
-    keyboard_ctx = ctx;
+    keyboard_ctx = ctx; keyboard_previous = pixels;
+    if (diag_on) {
+        if (full) ++keyboard_full_rasters; else ++keyboard_region_rasters;
+        keyboard_changed_regions += regions;
+    }
+    if (diag_on) diag_event("osk: raster full=%llu regions=%llu changed=%u ms=%.3f generation=%llu length=%u owner=%d",
+        (unsigned long long)keyboard_full_rasters, (unsigned long long)keyboard_region_rasters, regions,
+        (host_ticks() - raster_start) / 1e6, (unsigned long long)s->generation, s->length, s->owner);
 }
 
 // The panel follows: every Present (diag.c) and after each batch of input (user32.m pump). Nothing while closed.
 void portmenu_update(void) {
     if (editing && !osk_note_active()) { editing = 0; dirty = 1; }
     if (osk_note_active() && (!is_open || !editing)) osk_note_end(0);
-    keyboard_update();
+    @autoreleasepool { keyboard_update(); }
     if (!is_open) { if (panel_layer && !panel_layer.hidden) layers(0); return; }
     // Keep the redraw pending until the window can hold a bitmap.
     if (!layer || layer.bounds.size.width <= 0 || layer.bounds.size.height <= 0) return;
     double now = host_ticks() / 1e9;
     static CGSize last_size;
-    if (layer && !CGSizeEqualToSize(layer.bounds.size, last_size)) { last_size = layer.bounds.size; dirty = 1; }
+    static CGFloat last_backing;
+    id view = layer.delegate;
+    CGFloat backing = [view isKindOfClass:NSView.class] && ((NSView *)view).window ? ((NSView *)view).window.backingScaleFactor : 2;
+    if (!CGSizeEqualToSize(layer.bounds.size, last_size) || backing != last_backing) {
+        last_size = layer.bounds.size; last_backing = backing; dirty = 1;
+    }
     if (now >= next_refresh) {           // live readouts (once a second, on tabs that have them), the status line's timeout
         next_refresh = now + 1;
-        Setting *r[128];
-        int n = rows(tab, r, 128);
-        for (int i = 0; i < n; ++i) if (r[i]->type == SET_INFO || r[i]->type == SET_ACTION) dirty = 1;
-        if (status_until && now >= status_until) { status_until = 0; dirty = 1; }
+        if (!guide_active() && !report_github_active()) {
+            Setting *r[128];
+            int n = rows(tab, r, 128);
+            for (int i = top; i < n && i < top + visible_rows(); ++i) {
+                if (r[i]->type != SET_INFO && r[i]->type != SET_ACTION) continue;
+                char b[160] = "";
+                if (r[i]->value_text) r[i]->value_text(b, sizeof b);
+                if (readout_rows[i] != r[i] || strcmp(readout_text[i], b)) dirty = 1;
+            }
+            if (status_until && now >= status_until) { status_until = 0; dirty = 1; }
+        }
     }
     if (!dirty) return;
     @autoreleasepool {
         // First open must create/attach the layers before render assigns their contents and frames.
         layers(1);
-        uint64_t t0 = host_ticks();
+        uint64_t t0 = diag_on ? host_ticks() : 0;
         if (!render()) return;
         dirty = 0;
-        static int logged;
-        if (diag_on && logged++ < 3) diag_event("menu: panel %zux%zu rasterized in %.2f ms (layers attached %d, visible %d)",
-            last_w, last_h, (host_ticks() - t0) / 1e6,
+        if (diag_on) diag_event("menu: raster full=%llu panel %zux%zu ms=%.3f (layers attached %d, visible %d)",
+            (unsigned long long)panel_rasters, last_w, last_h, (host_ticks() - t0) / 1e6,
             panel_layer.superlayer == layer && dim_layer.superlayer == layer,
             !panel_layer.hidden && !dim_layer.hidden && panel_layer.contents != nil);
     }

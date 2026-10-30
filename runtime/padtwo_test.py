@@ -10,6 +10,10 @@
 
 
 
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -99,6 +103,12 @@ void rumble_update(void) { ++rumble_calls; }
 void padfx_update(void *ctl, int ds, float lt, float rt) {
     (void)ctl; (void)ds; (void)lt; (void)rt; ++fx_calls;
 }
+static void *led_slots[2];
+static int disconnect_calls, connect_calls, led_calls, real_opens, real_writes;
+static void *last_connect;
+void padfx_disconnect(void *ctl) { (void)ctl; ++disconnect_calls; }
+void padfx_connect(void *ctl) { last_connect=ctl; ++connect_calls; }
+void padfx_player_update(int slot, void *ctl) { if (slot<0 || slot>1) abort(); led_slots[slot]=ctl; ++led_calls; }
 int settings_get(const char *name) { (void)name; return 0; }
 uint32_t portmenu_pad(uint32_t phys, int u, int d, int l, int r, float lx, float ly,
                      int home, int touch, int has_touch, uint32_t *inject) {
@@ -192,6 +202,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     GCController *a = controller(0), *b = controller(1);
     fake_source = @[a, b];
     notify(GCControllerDidConnectNotification, a); notify(GCControllerDidConnectNotification, b);
+    CHECK(connect_calls == 2 && last_connect == (__bridge void *)b);
     CHECK(pad_count() == count);
     CHECK(invoke(i_EnumDevices, 5, 0u, 4u, 1u, 0u, 0u) == DI_OK);
     CHECK(enumerated == count); CHECK(guids[0] == PAD_GUID);
@@ -207,7 +218,12 @@ int main(int argc, const char **argv) { @autoreleasepool {
     CHECK(invoke(d_GetCapabilities, 2, dev0, caps) == DI_OK); CHECK(M32(caps+16) == PAD_BUTTONS_PS);
     int before_reads = source_reads;
     PadState ps; CHECK(pad_read(&ps));
+    CHECK(led_slots[0] == (__bridge void *)a);
     CHECK(source_reads - before_reads == (count == 1 ? 1 : 0)); // default adds no controller-list read
+    int fallback_before = disconnect_calls;
+    pad_presence(0, 0, NULL);
+    CHECK(disconnect_calls == fallback_before + 1);
+    pad_read(&ps);
     char name0[64], name1[64];
     CHECK(pad_identity(name0,64) == PAD_KIND_DUALSHOCK4);
     CHECK(pad_identity_n(0,name1,64) == PAD_KIND_DUALSHOCK4); CHECK(!strcmp(name0,name1));
@@ -221,6 +237,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         int rb = rumble_calls, fx = fx_calls, pb = binding_calls, mk = menu_calls, kc = key_calls;
         int pc = prompts_calls, seen = prompts_seen;
         uint32_t p1 = state(dev1);
+        CHECK(led_slots[0] == (__bridge void *)a && led_slots[1] == (__bridge void *)b);
         CHECK(M32(p1) == 57343); CHECK(M32(p1+8) == 52428); CHECK(M32(p1+20) == 42598);
         CHECK(M32(p1+32) == 9000); CHECK(M8(p1+48) == 0x80);
         CHECK(rumble_calls == rb && fx_calls == fx && binding_calls == pb);
@@ -238,13 +255,18 @@ int main(int argc, const char **argv) { @autoreleasepool {
         // Reordering the framework list cannot swap identities or state.
         fake_source = @[b,a]; CHECK(M32(state(dev0)) == 16384); CHECK(M32(state(dev1)) == 57343);
         // Removing slot 0 leaves slot 1 where it was, even when it is now the only controller.
+        int disconnect_before = disconnect_calls;
         fake_source = @[b]; notify(GCControllerDidDisconnectNotification,a);
+        CHECK(disconnect_calls == disconnect_before + 1);
         CHECK(!pad_read_n(0,&ps)); CHECK(pad_read_n(1,&ps) && ps.lx == .75f);
+        CHECK(led_slots[0] == NULL && led_slots[1] == (__bridge void *)b);
         CHECK(M32(state(dev0)) == 32768); CHECK(M32(state(dev1)) == 57343);
         CHECK(invoke(i_GetDeviceStatus,2,0u,guid) == DI_OK);
         write_guid(guid,PAD_GUID); CHECK(invoke(i_GetDeviceStatus,2,0u,guid) != DI_OK);
         CHECK(pad_identity_n(0,name0,64) == PAD_KIND_DUALSHOCK4); // last identity survives unplug
+        int connect_before = connect_calls;
         fake_source = @[b,a]; notify(GCControllerDidConnectNotification,a);
+        CHECK(connect_calls == connect_before + 1 && last_connect == (__bridge void *)a);
         CHECK(pad_read_n(0,&ps) && ps.lx == -.5f); CHECK(pad_read_n(1,&ps) && ps.lx == .75f);
         notify(GCControllerDidDisconnectNotification,b); CHECK(!pad_read_n(1,&ps));
         CHECK(M32(state(dev1)) == 32768); CHECK(invoke(i_GetDeviceStatus,2,0u,guid) == DI_OK);
@@ -261,6 +283,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     menu_hide=1; CHECK(pad_read(&ps) && ps.connected && ps.lx==0 && ps.buttons==0 && ps.lt==0 && ps.rt==0);
     menu_hide=0; setenv("BOOT_PAD","sim",1); CHECK(pad_read(&ps) && !ps.native && ps.connected);
     setenv("BOOT_PAD","sim:dualsense@999",1); CHECK(!pad_read(&ps) && !ps.connected);
+    CHECK(real_opens == 0 && real_writes == 0 && !strcmp(getenv("NFS_RUMBLE"), "off"));
     printf("padtwo_test NFS_PADS=%s: %d checks, %d failures\n",getenv("NFS_PADS") ?: "unset", checks,fails);
     return fails ? 1 : 0;
 } }
@@ -268,6 +291,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
 
 
 def run(cmd, **kwargs):
+    kwargs.setdefault('env', dict(os.environ, NFS_RUMBLE='off'))
     p = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if p.returncode:
         raise RuntimeError(f"command failed ({p.returncode}): {' '.join(map(str, cmd))}\n{p.stdout[-3000:]}{p.stderr[-5000:]}")
@@ -283,17 +307,26 @@ def main():
     assert di.count(mutation) == 1
     with tempfile.TemporaryDirectory(prefix='padtwo_') as td:
         td = Path(td)
-        for broken in (False, "index", "menu"):
+        for broken in (False, "index", "menu", "led", "disconnect", "connect"):
             sample = user if broken != "menu" else user.replace(' : (portmenu_is_open() ? ~0u : 0);', ' : 0;')
             assert broken != "menu" or sample != user
+            if broken == "led":
+                sample = user.replace("padfx_player_update(idx,", "padfx_player_update(0,")
+                assert sample != user
+            if broken == "disconnect":
+                sample = user.replace("padfx_disconnect((__bridge void *)ctl);", "(void)ctl;").replace("if (!first) padfx_disconnect(NULL);", "(void)first;")
+                assert sample != user
+            if broken == "connect":
+                sample = user.replace("padfx_connect((__bridge void *)n.object);", "(void)n;")
+                assert sample != user
             src = td / (str(broken) + '.m')
             src.write_text(FAKE + sample + '\n' + (di.replace(mutation, 'd->pad_idx = 0;') if broken == 'index' else di) + MAIN)
             exe = src.with_suffix('')
             run(['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fobjc-arc',
                  '-Wno-deprecated-declarations', '-fsanitize=address,undefined', '-I', str(R), '-I', str(R.parent / 'recomp'),
                  str(src), '-framework', 'Foundation', '-o', str(exe)])
-            for setting in (['2'] if broken else [None, '1', '2', 'invalid']):
-                env = dict(os.environ)
+            for setting in (['1', '2'] if broken == 'connect' else ['2'] if broken else [None, '1', '2', 'invalid']):
+                env = dict(os.environ, NFS_RUMBLE='off')
                 env.pop('BOOT_PAD', None)
                 env.pop('BOOT_PAD2', None)
                 env.pop('NFS_PADS', None)
@@ -308,7 +341,7 @@ def main():
                     raise RuntimeError(p.stdout + p.stderr[-3000:])
                 else:
                     print(p.stdout.strip())
-    print('padtwo_test: PASS (index-0 and F10 bypass negatives rejected)')
+    print('padtwo_test: PASS (index-0, F10 bypass, LED alias, disconnect and reconnect negatives rejected)')
 
 
 if __name__ == '__main__':

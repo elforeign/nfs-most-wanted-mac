@@ -8,6 +8,8 @@ rejected 3/3.
 PASS: 32 checks for two pads; 19 each unset/1/invalid. Rejected mutants:
 slot 1 absent: 14/32 failures; script alias: 1/32; no release: 7/32;
 slot 1 menu leak: 1/32.
+Launcher output safety: 6 actual environment recipes PASS (0 violations); broken
+player/road overrides FAIL (12 violations). Only /usr/bin/env is executed.
 The sequence harness retains production clock/release and pad dispatch verbatim;
 unrelated Cocoa keyboard/window/package commands are omitted.
 """
@@ -17,12 +19,15 @@ import os
 import subprocess
 import tempfile
 import struct
+import ast
+import re
 
 R=Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('padtwo_harness',R/'padtwo_test.py')
 h=importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
 PRE=r'''
 static int checks,fails;
+int diag_fixed_step;
 #define CHECK(x) do { ++checks; if(!(x)) { ++fails; printf("FAIL %d: %s\n",__LINE__,#x); } } while(0)
 int pacing_lockstep_now(void) { return 0; }
 int pacing_sim_hz(void) { return 60; }
@@ -96,7 +101,51 @@ int main(int argc,char **argv) {
 }
 '''
 
+def launcher_safety():
+    # Execute only the launchers' environment assignments with /usr/bin/env as the sink.
+    # No launcher, game binary, discovery API or output API is invoked.
+    keys = ('NFS_PAD_PLAYERS', 'NFS_PAD_ROAD')
+    inherited = dict(os.environ, NFS_RUMBLE='off', **{k: 'on' for k in keys})
+    recipes = []
+    for name in ('run_guarded.sh', 'probe.sh', 'soak.sh', 'offline_tests.sh'):
+        for line in (R / name).read_text().splitlines():
+            if line.lstrip().startswith('#') or 'NFS_PAD_TRIGGERS=' not in line:
+                continue
+            parts = re.findall(r'\b(?:NFS_RUMBLE|NFS_PAD_[A-Z]+)=(?:\$\{[^}]+\}|[^ \t]+)', line)
+            recipes.append((name, ' '.join(parts)))
+    assert len(recipes) == 5, recipes
+    counts = []
+    for broken in (False, True):
+        violations = 0
+        for name, recipe in recipes:
+            if broken:
+                recipe = re.sub(r'\bNFS_PAD_(?:PLAYERS|ROAD)=off', '', recipe)
+            result = h.run(['sh', '-c', 'env ' + recipe + ' /usr/bin/env'], env=inherited)
+            env = dict(row.split('=', 1) for row in result.stdout.splitlines() if '=' in row)
+            violations += sum(env.get(k) != 'off' for k in keys)
+            assert env['NFS_RUMBLE'] == 'off', name
+        # Evaluate the actual proof runner's environment assignment alone, never its subprocess (private trees only).
+        runners = sorted(R.glob('*_proof.py'))
+        if not runners:
+            counts.append(violations)
+            continue
+        tree = ast.parse(runners[0].read_text())
+        suite = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'suite')
+        assignment = suite.body[0]
+        if broken:
+            assignment.value.keywords = [k for k in assignment.value.keywords if k.arg not in keys]
+        scope = {'os': type('Environment', (), {'environ': inherited}), 'root': R.parent}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[assignment], type_ignores=[])), '<proof env>', 'exec'), scope)
+        violations += sum(scope['env'].get(k) != 'off' for k in keys)
+        assert scope['env']['NFS_RUMBLE'] == 'off'
+        counts.append(violations)
+    runners = 1 if sorted(R.glob('*_proof.py')) else 0
+    assert counts == [0, 2 * (len(recipes) + runners)], counts
+    print(f'launcher safety: {len(recipes)+runners} recipes PASS, {counts[0]} violations; broken {counts[1]} violations')
+
+
 def main():
+    launcher_safety()
     full=(R/'user32.m').read_text(); user=full[full.index('static uint32_t bit('):]
     seq=full[full.index('static void script_seq('):full.index('    // find step `step`',full.index('static void script_seq('))]
     a=full.index('    } else if (!strncmp(tok, "pad:", 4)'); b=full.index('    } else if (!strncmp(tok, "sim:", 4))',a)
@@ -120,7 +169,7 @@ def main():
         for name,(u,q) in variants.items():
             out=compile_one(name,u,q,MAIN)
             for mode in ([None,'1','invalid','2'] if name=='normal' else ['2']):
-                env=dict(os.environ); env.pop('NFS_PADS',None); env.pop('BOOT_PAD',None); env.pop('BOOT_PAD2',None)
+                env=dict(os.environ, NFS_RUMBLE='off'); env.pop('NFS_PADS',None); env.pop('BOOT_PAD',None); env.pop('BOOT_PAD2',None)
                 if mode: env['NFS_PADS']=mode
                 p=subprocess.run([out],env=env,capture_output=True,text=True)
                 assert p.returncode==(0 if name=='normal' else 1),p.stdout[-2000:]+p.stderr[-2000:]
@@ -130,7 +179,7 @@ def main():
         for label,u in [('before',old),('after',user)]:
             out=compile_one(label,u,'',BASEMAIN)
             for mode in [None,'1','invalid']:
-                env=dict(os.environ); env.pop('NFS_PADS',None);env.pop('BOOT_PAD',None);env.pop('BOOT_PAD2',None)
+                env=dict(os.environ, NFS_RUMBLE='off'); env.pop('NFS_PADS',None);env.pop('BOOT_PAD',None);env.pop('BOOT_PAD2',None)
                 if mode: env['NFS_PADS']=mode
                 h.run([out,tmp/(label+str(mode))],env=env)
         for mode in [None,'1','invalid']:

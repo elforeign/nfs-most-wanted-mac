@@ -22,8 +22,9 @@
 // The glyph art: the PC packs have none of it except L1/R1 (PC arrows in a ring). The PlayStation layout gets
 // PlayStation glyphs drawn here at start-up (64x64 A8R8G8B8, CoreGraphics), the Xbox layout the X360's own glyphs
 // (32x32 DXT5 in X360 GLOBAL/GLOBALB.BUN, which keeps the PS2 texture names with Xbox art in them), through the
-// extra-texture list (x360_textures.m). Both sets are made; the list holds one entry per glyph under a private hash
-// (PADPROMPT_<name>) whose TextureInfo is the current layout's (GetTextureInfo 00503400 doesn't cache list entries).
+// texture creation path (x360_textures.m). Both sets are made; GetTextureInfo resolves each private hash
+// (PADPROMPT_<name>) directly to the current layout's TextureInfo. The game's 30-entry extra-texture list already
+// holds the loading backdrop and arrest textures, so it cannot also hold every prompt.
 // Which art each texture gets follows what the button does in menus (user32.m pad_apply_layout): the table below,
 // checked with BOOT_DIAG's fepad: lines (the FE pad events, 008F3434) and the FE input mapping in prompts.txt.
 #include <CoreGraphics/CoreGraphics.h>
@@ -42,7 +43,6 @@ static int glyphs_xbox(void) { return user32_pad_layout_xbox() && !user32_pad_na
 uint32_t extra_texture_add(Cpu *c, const uint8_t rec[124], const uint8_t pl[32], uint32_t fmt, uint32_t data, uint32_t size, int add);
 uint32_t x360_texture_load(Cpu *c, const char *file, uint32_t hash, uint32_t as_hash);
 
-#define FN_ADD_OTHER_TEXTURE 0x004FAF10u   // cdecl (uint hash, TextureInfo *)
 #define OTHER_TEX_HASH 0x009159A0u         // OtherEcstacyTextures: hashes, TextureInfo *, count
 #define OTHER_TEX_TI 0x00915A30u
 #define OTHER_TEX_N 0x00915FA8u
@@ -133,7 +133,6 @@ static const struct { const char *name; int ps; const char *xb; } glyphs[] = {
 };
 #define NGLYPH (sizeof glyphs / sizeof *glyphs)
 static uint32_t glyph_hash[NGLYPH], glyph_private[NGLYPH], glyph_ti[2][NGLYPH];   // [0] PlayStation, [1] Xbox
-static int glyph_slot[NGLYPH] = {[0 ... NGLYPH - 1] = -1};   // index in the extra-texture list
 static int art_made, art_layout = -1;
 
 #define S 64                               // art size (the FE draws the glyphs at ~32 px per 480 lines)
@@ -299,13 +298,11 @@ static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) 
     }
     return ti;
 }
-// Puts the layout's art in the list entries (made at start-up, swapped when the Controller menu changes the layout).
+// Selects the layout's art (made at start-up, selected when the Controller menu changes the layout).
 static void use_layout(void) {
     int xb = glyphs_xbox();
     if (xb == art_layout) return;
     art_layout = xb;
-    for (unsigned i = 0; i < NGLYPH; ++i)
-        if (glyph_slot[i] >= 0) M32(OTHER_TEX_TI + 4u * (uint32_t)glyph_slot[i]) = glyph_ti[xb][i] ? glyph_ti[xb][i] : glyph_ti[0][i];
     if (diag_on) diag_event("prompts: %s glyphs", xb ? "Xbox" : "PlayStation");
 }
 static int have_art(void) {                // the layout has its glyphs (the Xbox ones come from the X360 files)
@@ -326,22 +323,27 @@ void prompts_textures(Cpu *c) {            // x360_textures.m, at the first text
         nxb += (glyph_ti[1][i] = x360_texture_load(c, "GLOBAL/GLOBALB.BUN", str_hash(glyphs[i].xb), glyph_private[i])) != 0;
     }
     if (nxb < (int)NGLYPH) for (unsigned i = 0; i < NGLYPH; ++i) glyph_ti[1][i] = 0;   // all or nothing
-    for (unsigned i = 0; i < NGLYPH; ++i) {
-        uint32_t ti = glyph_ti[0][i] ? glyph_ti[0][i] : glyph_ti[1][i];
-        if (!ti || M32(OTHER_TEX_N) >= 36) continue;           // the list's capacity (x360_textures.m)
-        glyph_slot[i] = (int)M32(OTHER_TEX_N);
-        uint32_t esp = c->esp, eax = c->eax, ecx = c->ecx, edx = c->edx, a[2] = {glyph_private[i], ti};
-        call_guest(c, FN_ADD_OTHER_TEXTURE, 2, a);
-        c->esp = esp; c->eax = eax; c->ecx = ecx; c->edx = edx;
-        if (M32(OTHER_TEX_HASH + 4u * (uint32_t)glyph_slot[i]) != glyph_private[i]) glyph_slot[i] = -1;
-    }
     fprintf(stderr, "boot: button prompt glyphs: %d PlayStation, %d Xbox (prompts %s)\n", nps, nxb < (int)NGLYPH ? 0 : nxb,
             mode() == 1 ? "console" : "auto");
     if (diag_on) diag_event("prompts: %d PlayStation glyphs, %d of %u Xbox glyphs from the X360 files", nps, nxb, (unsigned)NGLYPH);
 }
 static uint32_t glyph_sub(uint32_t tex) {  // the private hash to draw instead of a console glyph texture (0: none)
-    for (unsigned i = 0; i < NGLYPH; ++i) if (glyph_hash[i] == tex) return glyph_slot[i] >= 0 ? glyph_private[i] : 0;
+    for (unsigned i = 0; i < NGLYPH; ++i) if (glyph_hash[i] == tex) return glyph_ti[0][i] || glyph_ti[1][i] ? glyph_private[i] : 0;
     return 0;
+}
+// Private prompt hashes have process-lifetime art and bypass the fixed-size extra-texture list and pack cache.
+// Its 30 pointer entries end at 00915AA8, where RenderSunAsFlare writes 000000FE / 00FC00F6; treating the list
+// as 36 entries corrupted L1/R1 in slots 30/31 and omitted SELECT after the loading/arrest textures took 26 slots.
+void f_00503400_orig(Cpu *c);
+void f_00503400(Cpu *c) {
+    uint32_t hash = arg(c, 0);
+    if (art_made && hash) for (unsigned i = 0; i < NGLYPH; ++i) if (glyph_private[i] == hash) {
+        uint32_t ti = glyph_ti[glyphs_xbox()][i];
+        c->eax = ti ? ti : glyph_ti[0][i];
+        c->esp += 4;
+        return;
+    }
+    f_00503400_orig(c);
 }
 
 // ---------------- the hooks ----------------
@@ -385,6 +387,37 @@ void f_00514CC0(Cpu *c) {                  // FEngSetVisible (cdecl, FEObject *)
     M32(o + 0x1C) |= 0x40u;
 }
 void f_005A45B0_orig(Cpu *c);
+// BOOT_DIAG: record the texture actually passed to RenderObject, once per prompt/layout.
+static void render_inventory(Cpu *c, uint32_t o, uint32_t flags, uint32_t tex, uint32_t sub) {
+    static FILE *out;
+    static struct { uint32_t o, hash, tex; int layout; } seen[512];
+    static unsigned count;
+    int layout = glyphs_xbox();
+    for (unsigned i = 0; i < count; ++i)
+        if (seen[i].o == o && seen[i].hash == M32(o + 0x10) && seen[i].tex == tex && seen[i].layout == layout) return;
+    if (count == 512) return;
+    seen[count++] = (typeof(*seen)){o, M32(o + 0x10), tex, layout};
+    if (!out) {
+        char path[1100];
+        snprintf(path, sizeof path, "%s/prompts_render.txt", diag_dir);
+        out = fopen(path, "w");
+        if (!out) return;
+    }
+    uint32_t esp = c->esp, eax = c->eax, ecx = c->ecx, edx = c->edx, a[3] = {M32(o + 0x24), 1, 0};
+    uint32_t ti = call_guest(c, FN_GET_TEXTURE_INFO, 3, a);
+    c->esp = esp; c->eax = eax; c->ecx = ecx; c->edx = edx;
+    int slot = -1;
+    for (uint32_t i = 0; i < M32(OTHER_TEX_N) && i < 30; ++i)
+        if (M32(OTHER_TEX_HASH + 4 * i) == a[0]) { slot = (int)i; break; }
+    fprintf(out, "%s obj %08X at %08X type %u flags %08X tex %08X draw %08X swap %u slot %d ti %08X",
+            layout ? "Xbox" : "PlayStation", M32(o + 0x10), o, M32(o + 0x18), flags, tex, a[0], sub != 0, slot, ti);
+    if (ti) fprintf(out, " name %.24s size %ux%u compression %02X fmt %08X d3d %08X", G + ti + 0x0C,
+                    M16(ti + 0x44), M16(ti + 0x46), M8(ti + 0x4A), M32(M32(ti) + 0x14), M32(M32(ti) + 0x18));
+    uint32_t render = M32(o + 0x58);
+    fprintf(out, " extra %08X count %u render %08X cached_ti %08X\n", slot < 0 ? 0 : M32(OTHER_TEX_TI + 4u * (uint32_t)slot),
+            M32(OTHER_TEX_N), render, render ? M32(render + 0x14) : 0);
+    fflush(out);
+}
 static void render_prompt_object(Cpu *c) {                  // cFEngRender::RenderObject (thiscall, FEObject *, FEPackageRenderInfo *)
     if (!mode()) { f_005A45B0_orig(c); return; }
     uint32_t o = arg(c, 0), f = M32(o + 0x1C);
@@ -399,6 +432,7 @@ static void render_prompt_object(Cpu *c) {                  // cFEngRender::Rend
     }
     if (f & 0x40) M32(o + 0x1C) &= ~0x40u;
     f_005A45B0_orig(c);
+    if (diag_on && con && sub) render_inventory(c, o, f, tex, sub);
     if (f & 0x40) M32(o + 0x1C) |= 0x40u;
     if (sub) { M32(o + 0x24) = tex; M32(o + 0x1C) |= 0x2000000u; }   // and again with the PC one when drawn next
 }

@@ -31,7 +31,7 @@ uint8_t *G; int diag_on; const char *diag_dir = "/tmp";
 const char *game_dir;
 static char saved_value[16];
 const char *app_pref(const char *key) { (void)key; return NULL; }
-void app_pref_set(const char *key,const char *value) { (void)key; snprintf(saved_value,sizeof saved_value,"%s",value); }
+void app_pref_set(const char *key,const char *value) { if (!strcmp(key,"controls.chase_camera")) snprintf(saved_value,sizeof saved_value,"%s",value); }
 void app_pref_batch_begin(void) {}
 void app_pref_batch_end(void) {}
 void report_note(const char *f, ...) { (void)f; }

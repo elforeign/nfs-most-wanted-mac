@@ -61,6 +61,16 @@ when you report a problem.
 **Check for updates says nothing new** — it asks GitHub only when you press it. "No answer: press to retry" means it
 could not reach GitHub.
 
+**Update now failed or asks for sources** — choose **Open log** in Display & performance > Online. Keep the original PC and any selected Xbox 360 sources and `~/Library/Application Support/NFSMW-Setup/source-choices.json`. If missing or moved, run the latest Setup and select them again, then retry. In 4.2.0, the update check only opens the browser: quit the game and run the new Setup manually.
+
+**The triggers shift gears** — on PlayStation choose **F10 > Controls > Triggers > Pedals** for R2 gas and L2 brake/reverse. Shift is the default; returning to it restores your saved bindings. See **Help > Guide** for layouts and DualSense effects.
+
+**Online free roam won’t connect** — the beta is Off until you Host or Join. Both Macs must be in career free roam on the same game version. Check the host’s current code, firewall permissions and router setup; try swapping hosts. Some networks cannot accept incoming UDP, and there is no internet relay fallback. Follow the [Guide](runtime/docs/guide.md#online-beta); keep the firewall enabled and keep codes private.
+
+**Online frame rate or missing distant cars** — sessions have a 60-fps ceiling and show at most six nearby remote cars. The ceiling is not a frame-rate guarantee.
+
+**Cars pass through each other online** — check **Online (beta) > Ghost mode**. **D-pad Down / G** toggles it while driving.
+
 **Discord status doesn't show** — it is off by default; switch it on in F10 > Display & performance > Online. Discord
 must be running on the same Mac.
 

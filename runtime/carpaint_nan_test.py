@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual car-paint shader: powr(0,0) control 2048 bad pixels -> guarded 0.
 GPU: 67,584 finite pixels / 1,351,680 FP32+BGRA8 bytes identical; generated tables.
+Coverage helper included in the extracted source; the same finite/nonfinite controls apply.
 CPU: Xenos finite LOG_CLAMP * zero -> EXP=1; unguarded log(0)*0 -> NaN.
 Native numbers are expectations until recorded in README. Broken guard must fail.
 Bare run is autodiscovered by offline_tests.sh; no GPU exits 3 for post-run check.
@@ -63,6 +64,7 @@ with tempfile.TemporaryDirectory(prefix='carpaint-nan-') as td:
     c.write_text('''#include <stdio.h>
 #include <math.h>
 #include <float.h>
+#include "../host/shaders/sm_coverage.h"
 #include "gen/car_shadow_off.inc"
 #include "gen/pc_shader_lits.inc"
 #include "gen/x360_shader_lits.inc"

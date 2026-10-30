@@ -2,7 +2,12 @@
 """Split post: actual parameter/scope hooks, fake guest and recording Metal encoder; no GPU/Unicorn.
 ASan/UBSan hooks: 785 checks / 0 failures. Encoder: 1,313 checks / 0 failures;
 32 split composites, 26 lens submissions (two non-MSAA PC local targets), 90 bounded crops,
-zero split readback waits / eight SP waits. 29/29 mutants rejected (including forced rain).
+zero split readback waits / eight SP waits. 36/36 mutants rejected (including forced rain).
+Luminance opt-in: 1,425 recording checks / 0 failures, 12 startup waits across three
+epochs; writable storage through 16 delayed-completion frames, safe saturation/resume.
+Forced wait/oldest/pending read/overwrite mutants fail 49/1/22/44 checks;
+missing startup wait/black readiness/stale epoch readiness fail 32/13/8.
+Pinned Off/empty snapshot digest passes all four modes; omitted-wait control fails all four.
 New controls: missing PC parent 2 failures; omitted SP wait 24; missing PC probe accounting 2.
 Restart-history-stale/readback-stale 7/1; current-serial-wait 91 (50 attempted waits),
 shared-adaptation 10, P1-depth 10, whole-source 212, missing-bounds 32. Other hooks:
@@ -11,7 +16,7 @@ P1-motion-basis 10, shared-state 81, P1-camera 20, shared-deferred 25, shared-VT
 short-dev-args: ASan stack-buffer-overflow. Other encoder controls: P1-depth-rect 12,
 P1-lamp-source 22, shader-bounds 2, shared-ring 19, unsafe-slot-reuse 9, full-aspect 24, whole-lens-copy 72.
 Five MSL variants compile; SP shader identical (11,905 bytes). Two six-frame SP command/consumed-
-constant/readback snapshots match pre-split 4175000^ (57,396 bytes; unset/1), plus three exact
+constant/readback snapshots match pinned pre-split 4175000^ (57,396 bytes; unset/1), plus three exact
 SP guest/CPU/parameter snapshots match HEAD (50,331,648 guest bytes).
 Covers 1280x721/719, separate focal distances/speeds/bases/brightness/VT records/drop lists,
 PC targets/replay/failure fallback, viewport depth range/scissor, completed-only readback and ring saturation.
@@ -19,6 +24,7 @@ Recording objects prove ownership/submission contracts, not GPU pixel output; MC
 """
 from pathlib import Path
 import ast
+import hashlib
 import os
 import re
 import subprocess
@@ -250,16 +256,35 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     rt=(ROOT/'runtime/render.m').read_text().split('RenderTex *surface_rt(',1)[1].split('// Render-target view',1)[0]
     msrc=msrc.replace('SURFACE_RT_PRODUCTION','RenderTex *surface_rt('+rt)
     (tmp/'splitpost_test.m').write_text(msrc)
-    def encoder(label,text):
+    def encoder(label,text,nowait='0',negative=False):
         (tmp/'post_render.inc').write_text(text)
         exe=tmp/label
         run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'splitpost_test.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
-        p=subprocess.run([str(exe)],text=True,capture_output=True)
-        print(label+': '+(p.stdout+p.stderr)[-1800:].strip())
+        env={**os.environ}
+        if nowait is None:env.pop('NFS_LUM_NOWAIT',None)
+        else:env['NFS_LUM_NOWAIT']=nowait
+        p=subprocess.run([str(exe)],text=True,capture_output=True,env=env)
+        output=(p.stdout+p.stderr).strip()
+        if negative:
+            output='negative control: '+next((line for line in output.splitlines() if line.startswith('encoder:')),output[-1800:])
+        print(label+': '+output[-1800:])
         return p.returncode
     assert encoder('encoder-positive',renderer)==0
+    assert encoder('encoder-nowait-positive',renderer,'1')==0
+    assert encoder('encoder-nowait-unset',renderer,None)==0
     for label,old,new in [
-        ('missing-SP-wait','if (!view) {\n        for (unsigned i=0;i<X_LUM_SLOTS;++i)', 'if (0) {\n        for (unsigned i=0;i<X_LUM_SLOTS;++i)'),
+        ('nowait-still-waits','!view && (!x_lum_nowait() || !xr->lum_ready)','!view'),
+        ('nowait-no-startup-wait','!view && (!x_lum_nowait() || !xr->lum_ready)','!view && !x_lum_nowait()'),
+        ('nowait-black-ready','if (measured >= 0.002f) xr->lum_ready=1;','xr->lum_ready=1;'),
+        ('nowait-stale-ready','xr->lum_ready=0;','(void)0;'),
+        ('nowait-oldest','slot->serial > newest->serial','slot->serial < newest->serial'),
+        ('nowait-pending-read','slot->serial <= completed','1'),
+        ('nowait-reuse-pending','if (!slot->pending && !writable) writable=slot;','if (!writable) writable=slot;'),
+    ]:
+        assert old in renderer,label
+        assert encoder(label,renderer.replace(old,new,1),'1',negative=True)!=0,label+' survived'
+    for label,old,new in [
+        ('missing-SP-wait','if (!view && (!x_lum_nowait() || !xr->lum_ready)) {\n        for (unsigned i=0;i<X_LUM_SLOTS;++i)', 'if (0) {\n        for (unsigned i=0;i<X_LUM_SLOTS;++i)'),
         ('PC-lens-no-parent','if (!r && view) {', 'if (0) {'),
         ('P1-lamp-source','render_lamp_source_view(view ? view->source_view : 0)', 'render_lamp_source_view(0x00919650u)'),
         ('current-serial-wait','uint64_t completed = __atomic_load_n(&done_serial, __ATOMIC_ACQUIRE);','wait_serial(frame_serial); uint64_t completed = __atomic_load_n(&done_serial, __ATOMIC_ACQUIRE);'),
@@ -273,10 +298,11 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         ('whole-lens-copy','view ? view->destination:full','full'),
     ]:
         assert old in renderer,label
-        assert encoder(label,renderer.replace(old,new,1))!=0,label+' survived'
-    # Compare full single-player command/constants/readback snapshots with the
-    # pre-split renderer, including an incomplete previous frame on every call.
-    legacy=run(['git','show','4175000^:runtime/render_post.m']).replace('#include "render_internal.h"','')
+        assert encoder(label,renderer.replace(old,new,1),negative=True)!=0,label+' survived'
+    # Pin Off command/constants/readback bytes from the pre-split 4175000^
+    # renderer (also matched 6ba9278a), with an incomplete prior frame per call.
+    # A digest survives landing and standalone trees without any main ref.
+    off_digest='e003e52470f0cbc91d2f1f2dcdd385d44cf5fdba2c66da07add9e2f31e22ca56'
     snapshot_main=r'''int main(int argc,char **argv){@autoreleasepool{
      single_testing=1;mtl=(id)[TDevice new];cmd=(id)[TCommand new];
      if(atoi(argv[1]))setenv("NFS_PADS","1",1);else unsetenv("NFS_PADS");
@@ -295,17 +321,24 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     snap_src=msrc.split('int main(void)',1)[0]+snapshot_main
     (tmp/'post_snapshot.m').write_text(snap_src)
     snapshot_bytes=0
-    for name,body in [('legacy',legacy),('current',renderer)]:
+    broken=renderer.replace('if (!view && (!x_lum_nowait() || !xr->lum_ready)) {','if (0) {',1)
+    assert broken!=renderer
+    for name,body in [('current',renderer),('missing-Off-wait',broken)]:
         (tmp/'post_render.inc').write_text(body)
         exe=tmp/('post-snapshot-'+name)
         run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'post_snapshot.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
-        for mode in range(2):run([exe,mode,tmp/(name+str(mode)+'.post-snapshot')])
+        for mode in range(2):
+            for switch in ('','0'):
+                path=tmp/(name+str(mode)+switch+'.post-snapshot')
+                p=subprocess.run([str(exe),str(mode),str(path)],text=True,capture_output=True,env={**os.environ,'NFS_LUM_NOWAIT':switch})
+                assert p.returncode==0,(p.stdout+p.stderr)[-1800:]
+                if switch=='0':assert path.read_bytes()==(tmp/(name+str(mode)+'.post-snapshot')).read_bytes(),'explicit Off changed output/waits'
+                matches=hashlib.sha256(path.read_bytes()).hexdigest()==off_digest
+                assert matches==(name=='current'),f'{name}: pinned Off command/readback/wait snapshot {mode} differs'
     for mode in range(2):
-        before=(tmp/('legacy'+str(mode)+'.post-snapshot')).read_bytes()
         after=(tmp/('current'+str(mode)+'.post-snapshot')).read_bytes()
-        assert before==after,f'single-player renderer snapshot {mode} changed'
         snapshot_bytes+=len(after)
-    print(f'single-player renderer: 2 exact pre-split snapshots identical ({snapshot_bytes} command/constants/readback bytes; 6 frames each)')
+    print(f'single-player renderer: 2 pinned Off snapshots identical ({snapshot_bytes} command/constants/readback bytes; 6 frames each); omitted-wait control rejected in all 4 modes')
     # Compile original and view-specialized MSL offline; no Metal device is requested.
     macros=dict(re.findall(r'#define (\w+) "(.*)"',(ROOT/'runtime/gen/x360_shader_lits.inc').read_text()))
     macros.update(dict(re.findall(r'#define (\w+) "(.*)"',(ROOT/'runtime/gen/x360_engine.inc').read_text())))

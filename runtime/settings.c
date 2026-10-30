@@ -37,6 +37,7 @@ static const struct { const char *id, *feature; } kNeedsX360[] = {
     // The half-screen road reflection is listed as an X360 choice: without X360 files the PC's 320x240 is in effect and
     // the row is not shown (M4 F6).
     {"graphics.road_reflection", "world"},
+    {"graphics.look_data", "look"},
 };
 static int x360_unavailable(Setting *s) {
     for (unsigned i = 0; i < sizeof kNeedsX360 / sizeof *kNeedsX360; ++i)
@@ -55,7 +56,7 @@ static void x360_gate(Setting *s) {
     value_str(s, v, s->env_text, sizeof s->env_text);
     if (s->env && s->env_text[0]) setenv(s->env, s->env_text, 1);
 }
-const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Diagnostics"};
+const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Online (beta)", "Help"};
 static const char *const kOffOn[] = {"Off", "On"};
 
 #define MAX_SETTINGS 160
@@ -189,7 +190,11 @@ void settings_dump(const char *path) {
             fprintf(f, "%s\t%s\t%s\n", settings_category_names[c], rows[i]->id, has_value(rows[i]) ? settings_value_name(rows[i], rows[i]->value, v, sizeof v) : "");
         }
     }
-    for (int i = 0; i < nall; ++i) if (all[i]->hidden) fprintf(f, "hidden\t%s\t(needs X360 files not in roots.txt; PC in effect)\n", all[i]->id);
+    for (int i = 0; i < nall; ++i) if (all[i]->hidden) {
+        char v[64];
+        fprintf(f, "%s\t%s\t%s\n", x360_unavailable(all[i]) ? "hidden" : "preset", all[i]->id,
+            x360_unavailable(all[i]) ? "(needs X360 files not in roots.txt; PC in effect)" : settings_value_name(all[i], all[i]->value, v, sizeof v));
+    }
     fclose(f);
 }
 Setting *settings_at(int i) { return i >= 0 && i < nall ? all[i] : NULL; }
@@ -207,7 +212,9 @@ int settings_set(Setting *s, int v) {
         labels(s, &nc);
         if (v < 0 || v >= nc) return 0;
     }
-    if (v == current(s)) return 0;
+    // A partial preset may display My picks while another choice is active.
+    // Selecting My picks still has to restore its saved values in that case.
+    if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || v == settings_look_choice())) return 0;
     s->value = v;
     if (s->apply) s->apply(v);
     const char *key = pref_key(s);
@@ -247,15 +254,15 @@ const char *settings_source(const Setting *s) {
 }
 
 // ---------------- Look preset (the Picture tab's first row) ----------------
-// Every PC-vs-X360 choice of the picture, in one table with each side's saved spelling. Port extras (Natural bloom, Highlights,
-// Banding, Colour filter, World lighting, Tunnel shadows, Detail distance, World streaming, the mirror's shape...) are not in it:
-// presets leave them as they are. Not in it either: audio, controls and gameplay data (X360 sound, steering dead zone, X360 game
-// data), which are not "look". Tunnel shadows: Keep is not established X360 behaviour (VERSIONS.md), so it stays out.
+// Retail platform choices plus the visual extras that otherwise hide the authored look.
+// Port uses each row's shipped default. Device/audio/input/gameplay preferences stay outside
+// this table, except the optional chase-camera effect, explicitly disabled for retail looks.
 static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.postfx", "pc", "x360"},
     {"graphics.tone_curve", "pc", "x360"},
     {"graphics.car_paint", "pc", "x360"},
     {"graphics.car_glass", "pc", "x360"},
+    {"graphics.headlamp_glass", "retail", "retail"},
     {"graphics.car_normals", "pc", "x360"},
     {"graphics.car_flake", "pc", "x360"},
     {"graphics.x360_arrest", "pc", "x360"},      // restart
@@ -267,6 +274,7 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.parallax", "pc", "x360"},
     {"graphics.lighting_data", "pc", "x360"},        // restart
     {"graphics.road_reflection", "pc", "x360"},
+    {"graphics.road_film", "0", "0"},
     {"graphics.rain_ripples", "pc", "x360"},
     {"graphics.particles", "pc", "x360"},
     {"graphics.raindrops", "pc_before", "x360"},     // PC: as the PC drew them
@@ -275,68 +283,77 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.hd_textures", "off", "on"},           // restart
     {"graphics.ui_textures", "off", "on"},           // restart
     {"graphics.mirror_exposure", "1", "1.4"},        // the X360 mirror used 140 %
+    {"graphics.look_data", "pc", "x360"},
+    {"graphics.colour_filter", "100", "100"},
+    {"graphics.bloom", "100", "100"},
+    {"graphics.world_lighting", "original", "original"},
+    {"graphics.highlights", "clip", "clip"},
+    {"graphics.deband", "off", "off"},
+    {"graphics.hdr_output", "off", "off"},
+    {"graphics.lamp_glow", "off", "off"},
+    {"graphics.car_reflection", "pc", "pc"},         // public visible row
+    {"graphics.look_reflections", "pc", "pc"},      // private hidden override
+    {"graphics.look_contact_shadows", "off", "off"},
+    {"graphics.look_soft_smoke", "off", "off"},
+    {"controls.chase_camera", "off", "off"},
+    {"graphics.curve_glow", "x360", "x360"},
+    {"graphics.bloom_surfaces", "glow", "glow"},
+    {"graphics.mirror_size", "pc", "100"},
+    {"graphics.mirror_detail", "pc", "full"},
+    {"graphics.mirror_view", "pc", "60"},
+    {"graphics.mirror_fog", "off", "on"},
+    {"graphics.mirror_msaa", "off", "on"},
+    {"graphics.look_mirror_art", "pc", "smooth"},
+    {"graphics.look_fog", "pc", "x360"},
+    {"graphics.detail_distance", "pc", "pc"},
+    {"graphics.world_streaming", "pc", "ahead"},
+    {"graphics.tunnel_shadows", "pc", "keep"},
+    {"cars.later_games", "off", "off"},
+    {"graphics.look_later_textures", "off", "off"},
 };
 #define NLOOK (int)(sizeof kLook / sizeof *kLook)
-#define PICKS_KEY "graphics.my_picks"                // app.txt: "id=value;id=value", the values as saved
+// Each chunk fits app.txt's 1024-byte value limit. The first key also reads old picks.
+static const char *const picks_keys[] = {"graphics.my_picks", "graphics.my_picks.2", "graphics.my_picks.3"};
+#define NCHUNKS (int)(sizeof picks_keys / sizeof *picks_keys)
+#define LOOK_KEY "graphics.look_choice"
+static const char *const look_names[] = {"port", "x360", "pc", "mine"};
 static int look = -1, look_busy;
-void app_pref_batch_begin(void) __attribute__((weak));   // app.m; absent in the offline test builds
+void app_pref_batch_begin(void) __attribute__((weak));
 void app_pref_batch_end(void) __attribute__((weak));
 
-static int look_matches(int x360) {
-    for (int i = 0; i < NLOOK; ++i) {
-        Setting *s = settings_find(kLook[i].id);
-        if (!s || s->locked) continue;               // an NFS_* switch decides that row
-        if (current(s) != parse(s, x360 ? kLook[i].x360 : kLook[i].pc)) return 0;
+static const char *look_picks(void) {
+    static char buf[3100];
+    buf[0] = 0;
+    for (int i = 0; i < NCHUNKS; ++i) {
+        const char *p = app_pref(picks_keys[i]);
+        if (!p || !*p) continue;
+        size_t n = strlen(buf);
+        snprintf(buf + n, sizeof buf - n, "%s%s", n ? ";" : "", p);
     }
-    return 1;
+    return buf;
 }
-static void look_save_picks(void) {
-    char buf[1000] = "", v[64];
-    for (int i = 0; i < NLOOK; ++i) {
-        Setting *s = settings_find(kLook[i].id);
-        if (!s) continue;
-        value_str(s, current(s), v, sizeof v);
-        size_t l = strlen(buf);
-        snprintf(buf + l, sizeof buf - l, "%s%s=%s", l ? ";" : "", kLook[i].id, v);
-    }
-    app_pref_set(PICKS_KEY, buf);
+// Presets own the table; My picks also remembers device rows in Picture.
+static int look_index(const Setting *s) {
+    for (int i = 0; i < NLOOK; ++i) if (!strcmp(kLook[i].id, s->id)) return i;
+    return -1;
 }
-int settings_look_state(void) {
-    if (look < 0) look = look_matches(0) ? PRESET_PC : look_matches(1) ? PRESET_X360 : PRESET_CUSTOM;
-    return look;
+static int look_tracks(const Setting *s) {
+    return strcmp(s->id, "graphics.look_preset") && has_value(s) &&
+           (s->category == SET_PICTURE || look_index(s) >= 0);
 }
-// A user edit of one of the table's rows: the preset row reads Custom, and the values are kept as "My picks". Port extras
-// (Bloom strength, Brightness...) are outside the table: presets never touch them, so editing one leaves the preset as it is.
-static void look_row_edited(Setting *s) {
-    if (look_busy) return;
-    int in_table = 0;
-    for (int i = 0; i < NLOOK; ++i) if (!strcmp(kLook[i].id, s->id)) in_table = 1;
-    if (!in_table) return;
-    look = PRESET_CUSTOM;
-    look_save_picks();
-}
-static int look_set_all(const char *(*spell)(int i, const char *picks), const char *picks) {
-    int restart = 0;
-    look_busy = 1;
-    if (app_pref_batch_begin) app_pref_batch_begin();       // one app.txt write for the whole preset (audit4 #7)
-    for (int i = 0; i < NLOOK; ++i) {
-        Setting *s = settings_find(kLook[i].id);
-        const char *sp = s ? spell(i, picks) : NULL;
-        int v = sp ? parse(s, sp) : -1;
-        if (v < 0 || s->locked || v == current(s)) continue;
-        if (settings_set(s, v) && s->restart && s->value != s->boot_value) ++restart;
-    }
-    if (app_pref_batch_end) app_pref_batch_end();
-    look_busy = 0;
-    return restart;
-}
-static const char *spell_pc(int i, const char *p) { (void)p; return kLook[i].pc; }
-static const char *spell_x360(int i, const char *p) { (void)p; return kLook[i].x360; }
-static const char *spell_picks(int i, const char *p) {
+static const char *look_spell(Setting *s, int which, const char *picks) {
     static char v[64];
-    size_t n = strlen(kLook[i].id);
-    for (const char *q = p; q && *q; ) {
-        if (!strncmp(q, kLook[i].id, n) && q[n] == '=') {
+    int i = look_index(s);
+    if (which != PRESET_MINE) {
+        if (i < 0) return NULL;
+        if (which == PRESET_PC) return kLook[i].pc;
+        if (which == PRESET_X360) return kLook[i].x360;
+        value_str(s, s->def, v, sizeof v);
+        return v;
+    }
+    size_t n = strlen(s->id);
+    for (const char *q = picks; q && *q; ) {
+        if (!strncmp(q, s->id, n) && q[n] == '=') {
             size_t l = strcspn(q + n + 1, ";");
             snprintf(v, sizeof v, "%.*s", (int)(l < sizeof v - 1 ? l : sizeof v - 1), q + n + 1);
             return v;
@@ -344,17 +361,96 @@ static const char *spell_picks(int i, const char *p) {
         q = strchr(q, ';');
         if (q) ++q;
     }
-    return NULL;
+    return NULL;                         // legacy picks did not include the new extras
+}
+static int look_matches(int which) {
+    const char *picks = which == PRESET_MINE ? look_picks() : NULL;
+    if (which == PRESET_MINE && !*picks) return 0;
+    for (int i = 0; i < nall; ++i) {
+        Setting *s = all[i];
+        if (!look_tracks(s) || x360_unavailable(s)) continue;
+        const char *sp = look_spell(s, which, picks);
+        if (sp && current(s) != parse(s, sp)) return 0;
+    }
+    return 1;
+}
+int settings_look_partial(void) {
+    for (int i = 0; i < NLOOK; ++i) {
+        Setting *s = settings_find(kLook[i].id);
+        if (s && x360_unavailable(s)) return 1;
+    }
+    return 0;
+}
+static void look_save_picks(void) {
+    char buf[1000] = "", entry[160], v[64];
+    int chunk = 0;
+    for (int i = 0; i < nall; ++i) {
+        Setting *s = all[i];
+        if (!look_tracks(s)) continue;
+        value_str(s, current(s), v, sizeof v);
+        snprintf(entry, sizeof entry, "%s=%s", s->id, v);
+        size_t l = strlen(buf);
+        if (l + 1 + strlen(entry) >= sizeof buf) {
+            app_pref_set(picks_keys[chunk++], buf);
+            buf[0] = 0; l = 0;
+        }
+        snprintf(buf + l, sizeof buf - l, "%s%s", l ? ";" : "", entry);
+    }
+    app_pref_set(picks_keys[chunk++], buf);
+    while (chunk < NCHUNKS) app_pref_set(picks_keys[chunk++], "");
+}
+int settings_look_state(void) {
+    if (look < 0) {
+        int snapshot = 0;
+        const char *p = app_pref(LOOK_KEY);
+        if (p) for (int i = PRESET_PORT; i <= PRESET_MINE; ++i)
+            if (!strcmp(p, look_names[i])) { look = i; break; }
+        if (p && !strcmp(p, "custom")) { look = PRESET_MINE; snapshot = 1; }
+        if (look < 0) {
+            look = look_matches(PRESET_PORT) ? PRESET_PORT : look_matches(PRESET_X360) ? PRESET_X360 :
+                   look_matches(PRESET_PC) ? PRESET_PC : PRESET_MINE;
+            snapshot = look == PRESET_MINE;
+        }
+        if (snapshot) {
+            if (app_pref_batch_begin) app_pref_batch_begin();
+            look_save_picks();
+            app_pref_set(LOOK_KEY, look_names[look]);
+            if (app_pref_batch_end) app_pref_batch_end();
+        }
+    }
+    // A locked override changes the label, never the user's saved picks.
+    return look_matches(look) ? look : PRESET_MINE;
+}
+int settings_look_choice(void) { (void)settings_look_state(); return look; }
+static void look_row_edited(Setting *s) {
+    if (look_busy || !look_tracks(s)) return;
+    look = PRESET_MINE;
+    if (app_pref_batch_begin) app_pref_batch_begin();
+    look_save_picks();
+    app_pref_set(LOOK_KEY, look_names[look]);
+    if (app_pref_batch_end) app_pref_batch_end();
 }
 int settings_look_apply(int which) {
+    if (which < PRESET_PORT || which > PRESET_MINE) return -1;
+    (void)settings_look_state();
+    // Copy before saving anything: app_pref implementations may invalidate their return buffer.
+    char picks[3100];
+    snprintf(picks, sizeof picks, "%s", look_picks());
+    if (which == PRESET_MINE && !*picks) return -1;
     int restart = 0;
-    if (which == PRESET_CUSTOM) { look = PRESET_CUSTOM; return 0; }
-    if (settings_look_state() == PRESET_CUSTOM) look_save_picks();   // leaving the user's own values: keep them
-    if (which == PRESET_MINE) {
-        const char *picks = app_pref(PICKS_KEY);
-        if (!picks || !*picks) return -1;
-        restart = look_set_all(spell_picks, picks);
-    } else restart = look_set_all(which == PRESET_X360 ? spell_x360 : spell_pc, NULL);
+    if (app_pref_batch_begin) app_pref_batch_begin();
+    look_busy = 1;
+    for (int i = 0; i < nall; ++i) {
+        Setting *s = all[i];
+        if (!look_tracks(s)) continue;
+        const char *sp = look_spell(s, which, picks);
+        int v = sp ? parse(s, sp) : -1;
+        if (v >= 0) settings_set(s, v);
+        if (s->restart && current(s) != s->boot_value) ++restart;
+    }
+    look_busy = 0;
     look = which;
+    app_pref_set(LOOK_KEY, look_names[which]);
+    if (app_pref_batch_end) app_pref_batch_end();
     return restart;
 }

@@ -84,6 +84,8 @@
 
 
 
+
+
 """
 import ctypes
 import os
@@ -321,15 +323,28 @@ def main():
     materials = (RT / 'materials.m').read_text()
     renderer = (RT / 'render.m').read_text()
     original = run(['git', 'show', 'HEAD:runtime/materials.m'], cwd=ROOT)
-    assert cstring(materials, 'particles_msl') == cstring(original, 'particles_msl'), 'Off shader changed'
+    # Alpha-to-coverage adds only a shared optional epilogue. Preserve the full
+    # source-byte oracle for the particle body and its original discard branch.
+    def particle_body(text):
+        value = cstring(text, 'particles_msl')
+        value = value.replace('SM_ALPHA_COVERAGE_MSL\n', '')
+        value = value.replace('SM_ALPHA_COVERAGE_APPLY("o.c0.w")\n', '')
+        return value.replace('uint alpha_to_coverage, pad1;', 'uint pad0, pad1;')
+    assert cstring(materials, 'particles_msl').count('SM_ALPHA_COVERAGE_MSL\n') == 1
+    assert cstring(materials, 'particles_msl').count('SM_ALPHA_COVERAGE_APPLY("o.c0.w")\n') == 1
+    assert particle_body(materials) == particle_body(original), 'Off particle body changed'
+    unexpected = materials.replace('o.c0.w, aux.alpha_ref', 'o.c0.x, aux.alpha_ref')
+    assert particle_body(unexpected) != particle_body(original), 'particle body oracle lost its negative control'
     assert cstring(materials, 'particles_msl').find('smoke_fade') == -1
-    assert 'SMOKE' not in (RT / 'settings.c').read_text().split('kLook[] = {', 1)[1].split('};', 1)[0].upper()
-    print('PASS original Off particle source byte-identical; port extra outside kLook')
+    look = (RT / 'settings.c').read_text().split('kLook[] = {', 1)[1].split('};', 1)[0]
+    assert '"graphics.soft_smoke"' not in look
+    assert re.search(r'\{"graphics.look_soft_smoke",\s*"off",\s*"off"\}', look)
+    print('PASS Off particle body byte-identical with shared coverage epilogue; discard-channel control rejected')
     with tempfile.TemporaryDirectory(prefix='soft-smoke-') as tmp:
         tmp = Path(tmp)
         # Execute the real production shader patcher, rather than a Python copy.
         src = ('#include <stdint.h>\n#include <stdlib.h>\n#include <stdio.h>\n#include <string.h>\n'
-               '#include "roots.h"\n#include "gen/pc_shader_lits.inc"\ntypedef struct { int unused; } SmResult;\n')
+               '#include "roots.h"\n#include "../host/shaders/sm_coverage.h"\n#include "gen/pc_shader_lits.inc"\ntypedef struct { int unused; } SmResult;\n')
         src += cstring(materials, 'particles_msl') + cstring(materials, 'soft_smoke_math')
         src += function(materials, 'edit') + '\n'
         src += 'char *mat_replace(const uint32_t *t,uint32_t n,const SmResult *r,int *id) { *id=1; return strdup(particles_msl); }\n'

@@ -153,6 +153,7 @@ def stamp_text(pc, x360, zz=None):
 
 
 GENERATORS = ["tools_snapshot/attrib_x360.py", "tools_snapshot/x360audio_attrib.py", "runtime/trees_params.py",
+              "tools/setup_kit/huff.py", "runtime/huff.h",
               "recomp/lighting_data.py", "tools_snapshot/x360_auxlights.py", "tools_snapshot/x360_glass_uv1.py",
               "tools_snapshot/texture_compare.py", "tools_snapshot/controltype_gen.py", "tools_snapshot/vaults/compare_vaults.py",
               "tools_snapshot/vaults/vaultlib.py", "tools_snapshot/vaults/names.py",

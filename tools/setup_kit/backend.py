@@ -54,15 +54,16 @@ import unicodedata
 import uuid
 import zipfile
 
-from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, digest_tree, mark_owned, owned, real_dir,
+from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, digest_tree, mark_owned, owned, real_dir,
                       recover_interrupted, remove, transactional_install, write_synced)
+from . import stage as staging
 
 ROOT = Path(__file__).resolve().parents[2]
 FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.2.0"
+PUBLIC_VERSION = "4.3.0"
 LLVM_FLAGS = ["-mllvm", "-capture-tracking-max-uses-to-explore=100000"]
 STAGES = [
     ("preflight", "Checking developer tools"), ("pc", "Checking the installed PC game"),
@@ -272,6 +273,20 @@ class Events:
         self.enabled, self.log, self.stream = enabled, log, stream or sys.stdout
         self.current = "preflight"
         self.installed = None
+        self.ready = None
+        self.completed = False
+
+    def report_committed(self):
+        if self.completed:
+            return True
+        if self.ready is None and self.installed is None:
+            return False
+        with ignored_cancellation():
+            if self.ready is not None:
+                self.emit("ready", descriptor=str(self.ready))
+            else:
+                self.emit("done", app=str(self.installed))
+        return True
 
     def emit(self, ev, **fields):
         obj = dict(ev=ev, **fields)
@@ -280,20 +295,22 @@ class Events:
             self.log.write((line + "\n").encode())
             self.log.flush()
         except OSError:
-            if ev != "done":
+            if ev not in ("done", "ready"):
                 raise
         if self.enabled:
             try:
                 print(line, file=self.stream, flush=True)
             except OSError:
-                if ev != "done":
+                if ev not in ("done", "ready"):
                     raise
-        elif ev in ("stage", "error", "warn", "done"):
-            print(fields.get("title") or fields.get("msg") or fields.get("app"), file=self.stream, flush=True)
+        elif ev in ("stage", "error", "warn", "done", "ready"):
+            print(fields.get("title") or fields.get("msg") or fields.get("app") or fields.get("descriptor"), file=self.stream, flush=True)
+        if ev in ("done", "ready"):
+            self.completed = True
 
     def stage(self, name):
         self.current = name
-        self.emit("stage", id=name, title=dict(STAGES)[name])
+        self.emit("stage", id=name, title="Preparing the update" if name == "stage" else dict(STAGES)[name])
 
     def progress(self, done=1, total=1):
         self.emit("progress", id=self.current, done=done, total=total)
@@ -952,12 +969,12 @@ def check_locations(paths, pc, x360, dest, source):
     # state itself is not recursively deleted or used as a build output root.
 
 
-def check_space(paths, pc, dest):
+def check_space(paths, pc, dest, stage_only=False):
     size = sum(p.stat().st_size for p in pc.rglob("*") if p.is_file())
     # Keep two copies until commit (staging and permanent); allow 4 GiB for
     # generated C, libraries and toolchain output. Check every relevant volume.
     for path, required in ((paths.work, size + 4 * 1024**3), (paths.cache, 4 * 1024**3),
-                           (paths.data, size + 512 * 1024**2), (dest, 256 * 1024**2)):
+                           (dest if stage_only else paths.data, size + 512 * 1024**2), (dest, 256 * 1024**2)):
         while not path.exists():
             path = path.parent
         if shutil.disk_usage(path).free < required:
@@ -1072,9 +1089,19 @@ def migrate_3x_saves(paths, events):
 
 
 def build(args, paths, events, runner, source_root=ROOT):
-    pc, dest = clean_path(args.pc), clean_path(args.dest)
+    stage_only = getattr(args, "stage_only", False)
+    pc, selected_pc, dest = clean_path(args.pc), clean_path(args.pc), clean_path(args.dest)
+    # Normal Setup receives a destination directory; headless staging receives the app path.
+    destination = dest if stage_only else dest / f"{PUBLIC_NAME}.app"
+    if stage_only:
+        dest = destination.parent
     x360 = clean_path(args.x360) if args.x360 else None
     check_locations(paths, pc, x360, dest, source_root)
+    if stage_only:
+        check_stage_locations(args.stage, paths, pc, x360, destination, source_root)
+        if x360 and not x360.exists():
+            raise SetupError(f"X360_SOURCE_MISSING: The remembered Xbox 360 source is unavailable: {x360}",
+                             "Reconnect the Xbox 360 source or select its new location with --x360.")
     def setup_log(msg):
         events.log.write(("install: " + msg + "\n").encode())
         events.log.flush()
@@ -1091,7 +1118,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     if paths.cache_moved:
         setup_log(f"cache {paths.cache_moved} has shell characters; using {paths.cache}")
     toolchain = preflight(runner, paths.work)
-    dependencies = dependency_identity(source_root, toolchain) if args.build else None
+    dependencies = dependency_identity(source_root, toolchain) if not args.check else None
     events.progress()
     events.stage("pc")
     if is_pc_zip(pc):  # a .zip of the game folder: only read
@@ -1117,7 +1144,10 @@ def build(args, paths, events, runner, source_root=ROOT):
             record_check_x360(paths.work, x360_identity(x360, pc_hash, source_inventory(source_root), content), roots, record)
         events.progress()
         return None
-    check_space(paths, pc, dest)
+    if stage_only:
+        check_space(paths, pc, clean_path(args.stage), stage_only=True)
+    else:
+        check_space(paths, pc, dest)
     x360_before = x360_stat(x360) if x360 else None
     x360_hash = digest_tree(x360) if x360 else None
     inventory = source_inventory(source_root)
@@ -1153,6 +1183,9 @@ def build(args, paths, events, runner, source_root=ROOT):
         reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash), staged_data / "x360",
                                   events) if x360 else None
         roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env))
+        if stage_only and x360 and not (set(roots) - {"pc_root"}):
+            raise SetupError("X360_PREPARATION_MISSING: The selected Xbox 360 source produced no extras.",
+                             "Use a complete Setup build with Xbox 360 support and reconnect your source.")
         if x360 and reused is None and (x360_stat(x360) != x360_before or digest_tree(x360) != x360_hash):
             # The cache key names the bytes digested before the conversion: those must be the bytes converted.
             raise SetupError("Your Xbox 360 copy changed while Setup was converting it.", "Leave it unchanged and run Setup again.")
@@ -1205,15 +1238,50 @@ def build(args, paths, events, runner, source_root=ROOT):
         app = stage / f"{PUBLIC_NAME}.app"
         verify_app(app, runner)
         events.progress()
-        events.stage("install")
         if x360 and x360_stat(x360) != x360_before:
             raise SetupError("Your Xbox 360 copy changed while Setup was reading it.", "Leave it unchanged and run Setup again.")
+        if stage_only:
+            events.stage("stage")
+            ready = staging.publish(clean_path(args.stage), app, staged_data, roots, destination, paths.data,
+                                    PUBLIC_VERSION, dict(pc=str(selected_pc), x360=str(x360) if x360 else None,
+                                    pc_sha256=pc_hash, x360_sha256=x360_hash, source_id=identity(inventory),
+                                    executable_fingerprint=fingerprint, dependencies=dependencies, toolchain=toolchain),
+                                    on_commit=lambda path: setattr(events, "ready", path))
+            return ready
+        events.stage("install")
+        def committed(path):
+            events.installed = path
+            # Only a committed normal installation changes remembered source choices.
+            with ignored_cancellation():
+                try:
+                    staging.save_choices(paths.state, selected_pc, x360, path)
+                except (OSError, InstallError) as e:
+                    events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
         installed = transactional_install(app, staged_data, roots, paths.data, dest, lambda p: verify_app(p, runner), log=setup_log,
-                                          on_commit=lambda path: setattr(events, "installed", path),
+                                          on_commit=committed,
                                           after_commit=lambda: migrate_3x_saves(paths, events), move_data=True)
         clean_work(paths, events, key)
         events.progress()
         return installed
+
+
+def check_stage_locations(target, paths, pc, x360, destination, source):
+    target = clean_path(target)
+    if destination.name != f"{PUBLIC_NAME}.app":
+        raise SetupError("The staging destination must name NFS Most Wanted Native.app.", "Pass --dest with the installed app path.")
+    protected = [pc, source, destination, destination.parent / "NFSMW.app", paths.data, paths.legacy,
+                 paths.work, paths.cache, paths.logs, paths.state / "source-choices.json"] + ([x360] if x360 else [])
+    for keep in protected:
+        if overlaps(target, keep):
+            raise SetupError(f"The update stage overlaps a protected location: {keep}", "Choose a separate new staging directory.")
+    # Ownership records and logs are also writes, even though staging never calls the installer.
+    for writable in (paths.logs, paths.state / OWN_DIR):
+        for keep in [pc, source, destination, paths.data, paths.legacy] + ([x360] if x360 else []):
+            if overlaps(writable, keep):
+                raise SetupError(f"Setup staging logs/state overlaps a protected location: {keep}",
+                                 "Choose separate Setup logs, state, source and profile locations.")
+    if os.path.lexists(target):
+        raise SetupError("The update staging directory already exists.", "Choose a new staging directory for each update attempt.")
 
 
 def main(argv=None):
@@ -1221,20 +1289,41 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--build", action="store_true")
-    ap.add_argument("--pc", required=True, help="installed PC game folder, or a .zip of it (unpacked into --work; disc images are not supported)")
+    mode.add_argument("--stage-only", action="store_true", help="prepare a verified update without installing it")
+    ap.add_argument("--stage", help="new directory for the prepared update and ready.json (required with --stage-only)")
+    ap.add_argument("--pc", help="installed PC game folder, or a .zip of it (unpacked into --work; disc images are not supported)")
     ap.add_argument("--x360", help="your Xbox 360 game folder or ISO")
-    ap.add_argument("--dest", required=True, help="directory that receives NFS Most Wanted Native.app")
-    ap.add_argument("--work", required=True, help="disposable build/staging directory")
+    ap.add_argument("--dest", help="installation directory; with --stage-only, the installed .app path (default: remembered destination)")
+    ap.add_argument("--work", help="disposable build directory (required except with --stage-only)")
     ap.add_argument("--events", action="store_true", help="JSON-line events on stdout; full output in the run log")
     args = ap.parse_args(argv)
     paths = None
     events = None
     log_path = None
     try:
+        if args.stage_only:
+            if not args.stage:
+                raise SetupError("--stage-only requires --stage.")
+            stage_path = clean_path(args.stage)
+            args.work = args.work or str(stage_path.parent / ("." + stage_path.name + "-work"))
+        elif not (args.pc and args.dest and args.work) or args.stage:
+            raise SetupError("--check and --build require --pc, --dest and --work; --stage requires --stage-only.")
         paths = Paths(args.work)
+        if args.stage_only:
+            choices = None if args.pc and args.x360 and args.dest else staging.load_choices(paths.state, required=not args.pc)
+            remembered_destination = not args.dest
+            args.pc = args.pc or (choices and choices["pc"])
+            args.x360 = args.x360 or (choices and choices["x360"])
+            args.dest = args.dest or (choices and choices["destination"])
+            if not args.dest:
+                raise SetupError("--stage-only requires --dest or a remembered destination.")
+            if remembered_destination:
+                staging.validate_destination(clean_path(args.dest), required=True)
+            check_stage_locations(args.stage, paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
+                                  clean_path(args.dest), ROOT)
         # Validate before creating anything at a user-selected path.
         check_locations(paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
-                        clean_path(args.dest), ROOT)
+                        clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT)
         # Setup's own work folder (new, empty or marked), before anything is written into it.
         recovered = []
         if args.build:  # an interrupted install is resolved before the work folder is judged (build() finds nothing left)
@@ -1257,16 +1346,19 @@ def main(argv=None):
                     log.write(("install: " + note + "\n").encode())
             # No protocol event is added just for the log path: errors always
             # carry it, and the UI may discover the current run's log in --work.
-            (paths.work / "run-log.txt").write_text(str(log_path) + "\n")
+            log_pointer = paths.work / (".run-log-" + uuid.uuid4().hex)
+            try:
+                write_synced(log_pointer, (str(log_path) + "\n").encode(), 0o600)
+                os.replace(log_pointer, paths.work / "run-log.txt")
+            finally:
+                log_pointer.unlink(missing_ok=True)
             with cancellation(), exclusive(paths.work / ".setup.lock"), tool_tmp(paths.work) as tmp:
                 env = child_environment(paths.work / "stage/roots.txt", paths.work, tmp=tmp)
                 runner = Runner(log, env, paths.work)
                 try:
                     installed = build(args, paths, events, runner)
                 except (Exception, KeyboardInterrupt) as e:
-                    if events.installed is not None:
-                        with ignored_cancellation():
-                            events.emit("done", app=str(events.installed))
+                    if events.report_committed():
                         return 0
                     try:
                         log.write(traceback.format_exc().encode())
@@ -1282,9 +1374,14 @@ def main(argv=None):
                     return 130 if isinstance(e, (Cancelled, KeyboardInterrupt)) else 1
                 if installed is not None:
                     with ignored_cancellation():
-                        events.emit("done", app=str(installed))
+                        if args.stage_only:
+                            events.emit("ready", descriptor=str(installed))
+                        else:
+                            events.emit("done", app=str(installed))
                 return 0
     except (Exception, KeyboardInterrupt) as e:
+        if events is not None and events.report_committed():
+            return 0
         # Includes failures before a log can be opened. stdout remains parseable.
         obj = dict(ev="error", id=events.current if events else "preflight", msg=str(e) or "Setup was interrupted.", fix=getattr(e, "fix", "Choose a writable work directory and try again."), log=str(log_path or ""))
         print(json.dumps(obj) if args.events else obj["msg"], flush=True)

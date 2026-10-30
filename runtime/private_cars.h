@@ -10,6 +10,7 @@ typedef struct {
     int swap, selected;
     char name[32], donor[32], source[64], price_donor[32];
     char geometry[4096], textures[4096], wheel_fit[4096], solid_map[4096];
+    char paint[4096];
 } PrivateCar;
 int private_cars_init(const char *root, int enabled, const char *const *original_swaps, size_t original_count);
 size_t private_cars_count(void);

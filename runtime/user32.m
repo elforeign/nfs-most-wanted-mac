@@ -5,8 +5,8 @@
 // messages (keys, mouse, activation, close) in a queue; DispatchMessageA calls the guest's WndProc.
 // BOOT_HEADLESS=1 skips Cocoa entirely (windows exist only as records) for scripted runs.
 //
-// The game sees a window exactly the size of its back buffer. On the Mac it's either full screen (a borderless
-// window over the whole screen, Dock and menu bar hidden) or an ordinary resizable window, and the layer shows the
+// The game sees a window exactly the size of its back buffer. On the Mac full screen is borderless by default,
+// optionally Cocoa native full screen in its own Space. An ordinary resizable window is also available; the layer shows the
 // back buffer scaled to fit; the green button, Window > Zoom and View > Enter Full Screen (Ctrl-Cmd-F) switch. The
 // first mode is the game's own choice (a captionless window is its full-screen mode) from a terminal, the player's
 // last choice in NFSMW.app (USERDATA/app.txt, full screen the first time); NFS_FULLSCREEN=0|1 overrides both.
@@ -17,6 +17,12 @@
 #include <pthread.h>
 
 #include "host.h"
+#include "gpuclients.h"
+
+int app_native_fullscreen(void);
+int app_request_fullscreen_space(NSWindow *window, int full);
+void render_presentation_changed(void);
+void report_note(const char *fmt, ...);
 
 // ---------------- window records ----------------
 #define HWND_DESKTOP_H 0x00010000u
@@ -34,6 +40,7 @@ typedef struct {
     int cw, ch;           // client size
     int visible;
     int full;             // shown full screen (the Mac's choice, ns_fullscreen)
+    int native_transition, mode_logged;
     NSWindow *ns;
     NSView *view;
 } Win;
@@ -46,6 +53,8 @@ static double screen_scale = 1;
 static uint32_t focus_hwnd, capture_hwnd;
 static int cursor_count;
 static uint8_t key_down[256], key_toggled[256], key_scan[256];
+static int pad0_down;   // physical D-pad Down on pad 0 as of the last read (online free roam's ghost toggle; the game still sees it)
+int user32_ghost_buttons(void) { return (pad0_down ? 1 : 0) | (key_down['G'] ? 2 : 0); }   // bit 0 D-pad Down, bit 1 the G key
 static int window_occluded;     // the game window isn't on screen (windowDidChangeOcclusionState)
 static int mouse_x, mouse_y;   // screen coordinates
 
@@ -88,10 +97,12 @@ static uint32_t call_wndproc(Cpu *c, uint32_t hwnd, uint32_t msg, uint32_t wp, u
 
 static void release_keys(uint32_t hwnd);
 static void ns_set_fullscreen(Win *w, int full);
+static void ns_apply_mode(Win *w);
+static void ns_mode_changed(Win *w);
 static int cursor_hidden;               // ShowCursor count < 0: no system cursor over the game (it draws its own)
 
 // ---------------- Cocoa ----------------
-@interface GameWindow : NSWindow       // borderless while full screen, and still the key window
+@interface GameWindow : NSWindow       // borderless mode must still be able to become the key window
 @end
 @implementation GameWindow
 - (BOOL)canBecomeKeyWindow { return YES; }
@@ -128,7 +139,37 @@ static int cursor_hidden;               // ShowCursor count < 0: no system curso
 @property uint32_t hwnd;
 @end
 @implementation GameWindowDelegate
-- (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; post(self.hwnd, 0x0010, 0, 0); return NO; }  // WM_CLOSE
+- (NSApplicationPresentationOptions)window:(NSWindow *)window willUseFullScreenPresentationOptions:(NSApplicationPresentationOptions)options {
+    (void)window;
+    return (options & ~(NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar)) |
+        NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+}
+- (void)windowWillEnterFullScreen:(NSNotification *)n { (void)n; Win *w = win(self.hwnd); if (w) w->native_transition = 1; }
+- (void)windowWillExitFullScreen:(NSNotification *)n { (void)n; Win *w = win(self.hwnd); if (w) w->native_transition = 1; }
+- (void)windowDidEnterFullScreen:(NSNotification *)n {
+    (void)n; Win *w = win(self.hwnd); if (!w) return;
+    w->native_transition = 0; w->full = 1;
+    if (app_bundled) app_pref_set("fullscreen", "1");
+    ns_mode_changed(w);
+}
+- (void)windowDidExitFullScreen:(NSNotification *)n {
+    (void)n; Win *w = win(self.hwnd); if (!w) return;
+    w->native_transition = 0; w->full = 0;
+    ns_apply_mode(w);
+    if (app_bundled) app_pref_set("fullscreen", "0");
+    ns_mode_changed(w);
+}
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
+    (void)window; Win *w = win(self.hwnd); if (!w) return;
+    w->native_transition = 0; w->full = 0; ns_apply_mode(w); ns_mode_changed(w);
+    fprintf(stderr, "boot: native full screen entry failed\n");
+}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)window {
+    (void)window; Win *w = win(self.hwnd); if (!w) return;
+    w->native_transition = 0; w->full = 1; ns_mode_changed(w);
+    fprintf(stderr, "boot: native full screen exit failed\n");
+}
+- (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; user32_request_close(); return NO; }  // cleanup before WM_CLOSE
 - (void)windowDidBecomeKey:(NSNotification *)n {
     (void)n;
     feedback_poll_pause();
@@ -411,6 +452,25 @@ static int want_fullscreen(const Win *w) {
 }
 // Puts the window in the current mode: frame, style, Dock and menu bar.
 static void ns_apply_mode(Win *w) {
+    if (app_native_fullscreen()) {
+        // Cocoa owns the frame during native full screen and its asynchronous transitions.
+        if (w->native_transition) return;
+        int owns_space = !!(w->ns.styleMask & NSWindowStyleMaskFullScreen);
+        w->ns.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+        if (!owns_space) {
+            Win windowed = *w; windowed.full = 0;
+            w->ns.styleMask = windowed_style;
+            w->ns.contentAspectRatio = NSMakeSize(w->cw, w->ch);
+            [w->ns setContentSize:ns_content_rect(&windowed).size];
+            [w->ns center];
+        }
+        if (w->visible && owns_space != w->full) {
+            w->native_transition = 1;
+            app_request_fullscreen_space(w->ns, w->full);
+        } else if (!owns_space && w->visible) NSApp.presentationOptions = NSApplicationPresentationDefault;
+        [w->ns makeFirstResponder:w->view];
+        return;
+    }
     NSRect r = ns_content_rect(w);
     if (ns_fullscreen(w)) {
         w->ns.styleMask = NSWindowStyleMaskBorderless;
@@ -425,11 +485,26 @@ static void ns_apply_mode(Win *w) {
                                                                  : NSApplicationPresentationDefault;
     [w->ns makeFirstResponder:w->view];
 }
+static void ns_mode_changed(Win *w) {
+    int owns_space = !!(w->ns.styleMask & NSWindowStyleMaskFullScreen);
+    int state = 1 + w->full + 2 * owns_space + 4 * app_native_fullscreen();
+    if (w->mode_logged == state) return;
+    w->mode_logged = state;
+    render_presentation_changed();
+    RenderPresentation ps; render_presentation_stats(&ps);
+    GPUClientsSample gpu; gpuclients_cached(&gpu);
+    char line[256];
+    snprintf(line, sizeof line, "fullscreen: mode=%s full=%d owns_space=%d gpu_mhz=%s (cached); adaptive requested/applicable=%d/%d",
+        app_native_fullscreen() ? "Native" : "Borderless", w->full, owns_space, gpu.mhz, ps.vrr_requested, ps.adaptive_scheduling);
+    fprintf(stderr, "boot: %s\n", line);
+    report_note("%s", line);
+}
 static void ns_set_fullscreen(Win *w, int full) {
-    if (!w->ns || w->full == full) return;
+    if (!w->ns || w->native_transition || w->full == full) return;
     w->full = full;
     ns_apply_mode(w);
-    if (app_bundled) app_pref_set("fullscreen", full ? "1" : "0");
+    if (app_bundled && !w->native_transition) app_pref_set("fullscreen", full ? "1" : "0");
+    if (!w->native_transition) ns_mode_changed(w);
 }
 static void ns_close(Win *w) {
     if (!w->ns) return;
@@ -443,13 +518,13 @@ static void ns_create(Win *w, const char *title) {
     @autoreleasepool {
         w->full = want_fullscreen(w);
         NSRect r = ns_content_rect(w);
-        w->ns = [[GameWindow alloc] initWithContentRect:r styleMask:ns_fullscreen(w) ? NSWindowStyleMaskBorderless : windowed_style
+        w->ns = [[GameWindow alloc] initWithContentRect:r styleMask:ns_fullscreen(w) && !app_native_fullscreen() ? NSWindowStyleMaskBorderless : windowed_style
                                                 backing:NSBackingStoreBuffered defer:NO];
         w->ns.releasedWhenClosed = NO;
         NSString *t = title && *title ? [NSString stringWithCString:title encoding:NSWindowsCP1252StringEncoding] : nil;
         w->ns.title = t ? t : @"Need for Speed Most Wanted";
         w->ns.acceptsMouseMovedEvents = YES;
-        w->ns.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;   // full screen is ours (no Space of its own)
+        w->ns.collectionBehavior = app_native_fullscreen() ? NSWindowCollectionBehaviorFullScreenPrimary : NSWindowCollectionBehaviorFullScreenNone;
         w->ns.backgroundColor = NSColor.blackColor;
         GameWindowDelegate *d = [GameWindowDelegate new];
         d.hwnd = hwnd_of(w);
@@ -471,15 +546,18 @@ static void ns_show(Win *w, int show) {
     w->visible = show;
     if (!w->ns) return;
     if (show) {
-        if (ns_fullscreen(w)) NSApp.presentationOptions = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+        if (ns_fullscreen(w) && !app_native_fullscreen()) NSApp.presentationOptions = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
         if (getenv("BOOT_BACKGROUND")) { [w->ns orderBack:nil]; [w->ns makeFirstResponder:w->view]; }   // test runs: behind, never key (app.m)
         else { [w->ns makeKeyAndOrderFront:nil]; [w->ns makeFirstResponder:w->view]; [NSApp activateIgnoringOtherApps:YES]; }
+        if (app_native_fullscreen()) ns_apply_mode(w);
+        if (!w->native_transition) ns_mode_changed(w);
     }
     else [w->ns orderOut:nil];
 }
 static void ns_resize(Win *w) {           // the game changed resolution
     if (!w->ns) return;
-    if (ns_fullscreen(w)) [w->ns setFrame:ns_content_rect(w) display:YES];
+    if (app_native_fullscreen() && (w->full || w->native_transition)) { /* Cocoa owns the frame. */ }
+    else if (ns_fullscreen(w)) [w->ns setFrame:ns_content_rect(w) display:YES];
     else { w->ns.contentAspectRatio = NSMakeSize(w->cw, w->ch); [w->ns setContentSize:ns_content_rect(w).size]; }
     ((CAMetalLayer *)w->view.layer).drawableSize = CGSizeMake(w->cw, w->ch);
 }
@@ -585,6 +663,7 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     else wall_ns += now_ns - prev_ns;
     prev_ns = now_ns;
     uint64_t frame = 1 + wall_ns * 60 / 1000000000ull + (lock_frames ? lock_frames * 60 / (uint64_t)pacing_sim_hz() : 0);
+    if (diag_fixed_step) frame = real_frame;
     if (release_at && frame >= release_at) {
         float diag_car_speed(void);
         if (!strcmp(held, "pad")) { script_pad = script_raw = 0; script_axis[0] = 0; if (diag_on) diag_event("scripted pad up (car %.1f m/s)", diag_car_speed()); }
@@ -810,7 +889,7 @@ static void display_poll(void) {
         screen_dirty = 0;
         fprintf(stderr, "boot: display changed: %dx%d points at %.0fx\n", screen_w, screen_h, screen_scale);
         Win *w = game_window();
-        if (w && w->ns && ns_fullscreen(w)) { [w->ns setFrame:ns_content_rect(w) display:YES]; fprintf(stderr, "boot: full screen window re-fit\n"); }
+        if (w && w->ns && ns_fullscreen(w) && !app_native_fullscreen()) { [w->ns setFrame:ns_content_rect(w) display:YES]; fprintf(stderr, "boot: full screen window re-fit\n"); }
         widescreen_display_changed();
     }
 }
@@ -1229,6 +1308,7 @@ void user32_set_pad_layout_xbox(int xbox) {
     if (diag_on) diag_event("pad: layout %s", xbox ? "xbox" : "playstation");
 }
 static uint32_t bit(uint32_t phys, int b) { return (phys >> b) & 1; }
+static int pad0_down;   // (defined after bit(): the pad harnesses compile user32.m from there)
 static void pad_menu_keys(uint32_t keys) {  // menus: FE BUTTON4 / BUTTON0 / START as keys 2 / 3 / 4 (DIK 03 / 04 / 05)
     static uint32_t held;
     for (int k = 0; k < 3; ++k)
@@ -1403,13 +1483,15 @@ static void pad_presence(int idx, int present, const char *what) {
     } else {
         fprintf(stderr, first ? "boot: no controller connected yet (one connecting later is picked up)\n"
                               : "boot: controller disconnected: the game reads it centred until one connects\n");
+        if (!first) padfx_disconnect(NULL); // polling fallback also invalidates a missed unplug notification
         if (idx == 0) pad_menu_keys(0);                 // the menu keys it held are released
     }
     if (diag_on) diag_event("pad: %s%s (app active %d)", present ? "connected: " : first ? "none at start-up" : "disconnected",
                             present ? what : "", headless ? 0 : (int)NSApp.isActive);
 }
 // Cache the restart-only opt-in once: default reads retain the original single-controller scan,
-// without observers, locks, allocation or a second GCController.controllers fetch.
+// without slot locks, allocation or a second GCController.controllers fetch.
+// A disconnect observer in both modes releases any owned output immediately.
 int pad_count(void) {
     static int count;
     if (!count) { const char *e = getenv("NFS_PADS"); count = e && !strcmp(e, "2") ? 2 : 1; }
@@ -1427,23 +1509,24 @@ static void pad_slot_connect(GCController *ctl) {
     }
 }
 static void pad_slot_disconnect(GCController *ctl) {
+    padfx_disconnect((__bridge void *)ctl);
     @synchronized (GCController.class) {
         for (int i = 0; i < 2; ++i) if (pad_slots[i] == ctl) pad_slots[i] = nil;
     }
 }
 static void pad_slots_init(void) {
-    if (pad_count() != 2) return;
     const char *sim = getenv("BOOT_PAD");
     if (sim && (!strcmp(sim, "sim") || !strncmp(sim, "sim:", 4))) return;
     @autoreleasepool {
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-            pad_slot_connect(n.object);
+            padfx_connect((__bridge void *)n.object);
+            if (pad_count() == 2) pad_slot_connect(n.object);
         }];
         [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             pad_slot_disconnect(n.object);
         }];
-        @synchronized (GCController.class) {
+        if (pad_count() == 2) @synchronized (GCController.class) {
             for (GCController *ctl in GCController.controllers) pad_slot_connect(ctl);
         }
     }
@@ -1474,6 +1557,7 @@ __attribute__((constructor)) static void pad_clock(void) { start_ns = host_ticks
 // bare word is the pad's identity: dualsense, ds4, edge, or xbox, the default; a last @T1-T2-T3... connects it T1
 // seconds after start-up, disconnects it at T2, connects it again at T3, ...). 0: no controller (st centred).
 int pad_read_n(int idx, PadState *st) {
+    if (!idx) pad0_down = 0;
     memset(st, 0, sizeof *st);
     st->pov = -1;
     if (idx < 0 || idx >= pad_count()) return 0;
@@ -1530,6 +1614,7 @@ int pad_read_n(int idx, PadState *st) {
         if (axis[0] && (!strncmp(axis, "lx", 2) || !strncmp(axis, "ly", 2)) && strchr(axis, '='))   // BOOT_KEYS padaxis: the menu sees a scripted left stick
             (axis[1] == 'x' ? &st->lx : &st->ly)[0] = (float)atof(strchr(axis, '=') + 1);
         pov_dirs(st->pov, &u, &d, &l, &r);
+        if (!idx) pad0_down = d;
         if (osk_pad(idx, pad_activity(st->buttons, st, 1), u, d, l, r, st->lx, st->ly, 1,
                     pad_layout_xbox() && !kind_native(kind))) { pad_neutral(idx, st); return 1; }
         uint32_t inject = 0, hide = idx ? (portmenu_is_open() ? ~0u : 0) : portmenu_pad(st->buttons & 0xFFF, u, d, l, r, st->lx, st->ly, (st->buttons >> 12) & 1, (st->buttons >> 13) & 1, 1, &inject);
@@ -1566,7 +1651,8 @@ int pad_read_n(int idx, PadState *st) {
             pad_presence(idx, g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
                                         ctl.productCategory ?: @"?", (unsigned long)GCController.controllers.count].UTF8String : NULL);
         if (idx == 0) prompts_pad_seen(g != nil);
-        if (!g) { osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+        padfx_player_update(idx, (__bridge void *)ctl);
+        if (!g) { if (!idx) padfx_update(NULL, 0, 0, 0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
         // Pad 1 feedback would hook here once the model and legacy single-output HID transport have player routing.
         if (idx == 0) rumble_update();
         st->connected = 1;
@@ -1587,6 +1673,7 @@ int pad_read_n(int idx, PadState *st) {
         for (int i = 0; i < 12; ++i) if (b[i].pressed) phys |= 1u << i;
         GCControllerDirectionPad *d = g.dpad;
         int up = d.up.pressed, down = d.down.pressed, left = d.left.pressed, right = d.right.pressed;
+        if (idx == 0) pad0_down = down;
         // the F10 menu's shortcut: the touchpad click (DualSense, DualShock 4), the PS/Guide button, or holds (portmenu.m)
         GCControllerButtonInput *touch = nil;
         if ([g isKindOfClass:GCDualSenseGamepad.class]) touch = ((GCDualSenseGamepad *)g).touchpadButton;

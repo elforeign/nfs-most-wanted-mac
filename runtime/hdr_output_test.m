@@ -1,4 +1,6 @@
-// Production presenter/quad proof, no game or window. Expected linear readback:
+// Production presenter/quad proof, no game or window.
+// Auto potential 1: SDR; 7: HDR startup/status (0 failures); old request: 1 failure.
+// Expected linear readback:
 // EDR [0, .21398926 (FP16 .214041), 1, 2, 4], above_one=2, lost=0.
 // Broken BGRA8 intermediate [0, .21569824, 1, 1, 1], above_one=0, lost=2 (exit 1).
 // Direct BGRA8 negative control bytes [0,55,255,255,255], lost=2.
@@ -33,6 +35,12 @@
 #include "hdr_output.h"
 
 static id<MTLDevice> mtl;
+static unsigned pipeline_edr_builds;
+static int pipeline_hold_test;
+static id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
+    if (!strcmp(pass,"edr")) ++pipeline_edr_builds;
+    return [mtl newRenderPipelineStateWithDescriptor:d error:e];
+}
 static id<MTLCommandQueue> queue;
 static id<MTLCommandBuffer> cmd;
 static CAMetalLayer *layer;
@@ -148,16 +156,20 @@ static int sources(const char *directory) {
     }
     return 0;
 }
+static void fixture_screen(float h);
 static int cpu(void) {
     CHECK(!getenv("NFS_HDR_OUTPUT"),"CPU switch must be unset");
     layer=[CAMetalLayer layer];
+    fixture_screen(1);
+    test_screen.maximumPotentialExtendedDynamicRangeColorComponentValue=1;
     MTLPixelFormat pf=layer.pixelFormat;
     CGColorSpaceRef cs=layer.colorspace;
     BOOL edr=layer.wantsExtendedDynamicRangeContent;
     render_hdr_output_init();
     CHECK(!hdr_output_requested && !hdr_output_on,"unset switch changed mode");
     CHECK(layer.pixelFormat==pf && layer.colorspace==cs && layer.wantsExtendedDynamicRangeContent==edr,"unset switch changed layer");
-    puts("hdr_output_test: CPU unset switch: 5 mode/layer checks PASS");
+    CHECK(!strcmp(render_hdr_output_status(),"Auto: SDR (no HDR at launch; restart to re-check)"),"Auto SDR reason");
+    puts("hdr_output_test: Auto potential 1 SDR; status reason PASS");
     const double exponents[]={.8,1,1.2};
     for(int p=0;p<3;++p) {
         uint16_t ramp[768];
@@ -178,7 +190,17 @@ static void fixture_screen(float h) {
     if(!test_view)test_view=[HDRTestView new];
     test_view.testWindow=(NSWindow *)window;layer.delegate=test_view;
 }
+// Auto startup: 0 failures; old explicit-On-only request: 1 failure (exit 1).
+static int auto_hdr(void) {
+    test_screen.maximumPotentialExtendedDynamicRangeColorComponentValue=7;
+    render_hdr_output_init();
+    CHECK(hdr_output_requested && hdr_output_on && layer.pixelFormat==MTLPixelFormatRGBA16Float &&
+          layer.wantsExtendedDynamicRangeContent && !strncmp(render_hdr_output_status(),"Auto: ",6),
+          "Auto potential 7 startup must enable HDR and explain why");
+    puts("hdr_output_test: Auto potential 7 startup HDR; 0 failures PASS");return 0;
+}
 static int lifecycle_cpu(void) {
+    setenv("NFS_HDR_OUTPUT","edr",1);
     layer=[CAMetalLayer layer];layer.pixelFormat=MTLPixelFormatRGBA16Float;
     hdr_output_requested=hdr_output_on=1;fixture_screen(1);
     unsigned samples=0,stable=0;
@@ -234,7 +256,7 @@ static int startup(void) {
     return 0;
 }
 static int sdr(int fallback) {
-    CHECK(fallback || !getenv("NFS_HDR_OUTPUT"),"SDR switch must be unset");
+    CHECK(fallback || !strcmp(getenv("NFS_HDR_OUTPUT") ?: "", "off"),"SDR switch must be off");
     render_hdr_output_init();
     CHECK(fallback ? hdr_output_on : !hdr_output_on && layer.pixelFormat==MTLPixelFormatBGRA8Unorm,"SDR mode");
     enum {W=256,H=4,N=W*H*4};
@@ -418,7 +440,18 @@ static int composition(unsigned samples) {
     copy=fs_world_rt.tex;
     x_edr_processing=1;CHECK(x_init(W,H),"floating post init");
     CHECK(xt_q0.pixelFormat==MTLPixelFormatRGBA16Float && xt_lum.pixelFormat==MTLPixelFormatRGBA16Float && xt_dof.pixelFormat==MTLPixelFormatRGBA16Float,"post precision");
+    id<MTLRenderPipelineState> direct_post=nil;
+    if(pipeline_hold_test) {
+        NSError *error=nil;
+        id<MTLLibrary> lib=[mtl newLibraryWithSource:hdrclip_shader(x_edr_source([NSString stringWithUTF8String:x360_src])) options:nil error:&error];
+        MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
+        d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_vt"];
+        d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;d.rasterSampleCount=samples;
+        direct_post=[mtl newRenderPipelineStateWithDescriptor:d error:&error];CHECK(direct_post,"direct held reference");
+    }
     for(int effects=0;effects<2;++effects)for(int grade=0;grade<3;++grade) {
+      NSData *held_reference=nil;
+      for(int held=0;held<(pipeline_hold_test?2:1);++held) {
         double exponent=grade==1?.8:grade==2?1.2:1;
         uint16_t ramp[768];for(int i=0;i<768;++i)ramp[i]=(uint16_t)lround(65535*pow((i&255)/255.,exponent));
         render_set_gamma(ramp);cmd=[queue commandBuffer];
@@ -443,7 +476,7 @@ static int composition(unsigned samples) {
         id<MTLTexture> out=bb_rt.ms?:backbuffer_tex;
         rp.colorAttachments[0].texture=out;rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];
-        [e setRenderPipelineState:x_edr_pipeline(@"fs_vt",samples,0)];
+        [e setRenderPipelineState:direct_post && held==0 ? direct_post : x_edr_pipeline(@"fs_vt",samples,0)];
         id<MTLTexture> textures[]={copy,xt_q0,xt_white,xt_bloomA,xt_dof,depth,xt_bblur};
         for(int i=0;i<7;++i)[e setFragmentTexture:textures[i] atIndex:i];
         [e setFragmentSamplerState:xs_lin atIndex:0];[e setFragmentSamplerState:xs_vig atIndex:1];
@@ -463,6 +496,9 @@ static int composition(unsigned samples) {
         [b copyFromTexture:drawable.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(W,1,1)
             toBuffer:read destinationOffset:0 destinationBytesPerRow:PITCH destinationBytesPerImage:PITCH];[b endEncoding];
         CHECK(!finish(),"composition finish");
+        NSData *pixels=[NSData dataWithBytes:read.contents length:W*8];
+        if(held==0)held_reference=pixels;
+        else CHECK([pixels isEqualToData:held_reference],"prewarmed held pixels differ");
         const __fp16 *v=read.contents;int above=0,bad=0;float peak=0;
         float hud_white=v[(W-1)*4];CHECK(hud_white==1,"HUD paper white %.8f",hud_white);
         for(int x=0;x<=1024;++x) {
@@ -477,7 +513,9 @@ static int composition(unsigned samples) {
         CHECK(hud_white==1,"HUD paper white %.8f",hud_white);
         CHECK(!bad && above>800,"composition range above=%d bad=%d",above,bad);
         if(!effects && !grade)CHECK(above==896 && fabs(v[64*4]-.21404114)<.0002,"midpoint/ramp decode");
+      }
     }
+    if(pipeline_hold_test)printf("hdr_output_test: prewarm held samples=%u frames=6 bytes=49248 identical\n",samples);
     render_float_scene_present_end();
     CHECK(backbuffer_tex==display && !fs_composing,"restore SDR before next clear/FE/movie frame");
     // No-treatment path, and a new screen headroom on the next frame. Its
@@ -500,6 +538,93 @@ static int composition(unsigned samples) {
     render_float_scene_present_end();
     puts("hdr_output_test: scene/copy/float post/HUD/continuous brightness/native drawable PASS");return 0;
 }
+// Exercise every EDR recipe before a held composition frame. This is also run
+// with a deliberately omitted downscale recipe (two frame-path builds).
+static int prewarm(unsigned samples) {
+    setenv("NFS_PSO_PREWARM","1",1);
+    dispatch_queue_t warm_queue=dispatch_queue_create("post-prewarm-test",DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t ready=dispatch_semaphore_create(0);
+    dispatch_async(warm_queue,^{@autoreleasepool{render_post_prewarm();dispatch_semaphore_signal(ready);}});
+    dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
+    unsigned loaded=pipeline_edr_builds;
+    for(int lamp=0;lamp<2;++lamp) {
+        for(NSString *fs in @[@"fs_downscale", @"fs_lum", @"fs_bright", @"fs_taps", @"fs_dofdown", @"fs_tdown"])
+            CHECK(x_edr_pipeline(fs,1,lamp),"EDR pass");
+        for(NSUInteger samples=1;samples<=8;samples*=2)if([mtl supportsTextureSampleCount:samples])
+            CHECK(x_edr_pipeline(@"fs_vt",samples,lamp),"EDR composite");
+    }
+    unsigned misses=pipeline_edr_builds-loaded;
+    printf("hdr_output_test: prewarm loaded=%u frame_builds=%u\n",loaded,misses);
+    CHECK(!misses,"EDR prewarm missed %u descriptors",misses);
+    // The existing composition proof exercises the actual half-float post chain.
+    pipeline_hold_test=1;
+    int result=composition(samples);
+    CHECK(pipeline_edr_builds==loaded+misses,"held composition built an EDR pipeline");
+    return result || misses ? 1 : 0;
+}
+// The lamp variant has a different fragment signature. Render both variants from
+// independently created libraries and compare every stored half-float byte.
+static int prewarm_lamps(void) {
+    setenv("NFS_PSO_PREWARM","1",1);
+    dispatch_queue_t q=dispatch_queue_create("post-lamp-prewarm-test",DISPATCH_QUEUE_SERIAL);
+    dispatch_sync(q,^{@autoreleasepool{render_post_prewarm();}});
+    unsigned loaded=pipeline_edr_builds;
+    const NSUInteger w=16,h=8;
+    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
+    td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;td.storageMode=MTLStorageModeShared;
+    id<MTLTexture> input=[mtl newTextureWithDescriptor:td];
+    MTLTextureDescriptor *zd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth16Unorm width:w height:h mipmapped:NO];
+    zd.usage=MTLTextureUsageShaderRead;zd.storageMode=MTLStorageModeShared;
+    id<MTLTexture> depth=[mtl newTextureWithDescriptor:zd];uint16_t z[16*8];for(unsigned i=0;i<16*8;++i)z[i]=32768;
+    [depth replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:z bytesPerRow:w*2];
+    __fp16 values[16*8*4];for(unsigned i=0;i<16*8;++i){values[4*i]=.125;values[4*i+1]=.25;values[4*i+2]=.5;values[4*i+3]=1;}
+    [input replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:values bytesPerRow:w*8];
+    unsigned pairs=0,bytes=0;
+    for(int lamp=0;lamp<2;++lamp)for(NSUInteger samples=1;samples<=4;samples*=4) {
+        NSError *error=nil;NSString *src=[NSString stringWithUTF8String:x360_src];
+        if(lamp) {
+            src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
+            src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin,uv).rgb;\n    if (patch) bl = 0;"];
+        }
+        id<MTLLibrary> library=[mtl newLibraryWithSource:hdrclip_shader(x_edr_source(src)) options:nil error:&error];CHECK(library,"held lamp library");
+        MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];d.vertexFunction=[library newFunctionWithName:@"vs_full"];d.fragmentFunction=[library newFunctionWithName:@"fs_vt"];
+        d.colorAttachments[0].pixelFormat=td.pixelFormat;d.rasterSampleCount=samples;
+        id<MTLRenderPipelineState> direct=[mtl newRenderPipelineStateWithDescriptor:d error:&error];CHECK(direct,"held lamp direct PSO");
+        NSData *reference=nil;
+        for(int held=0;held<2;++held) {
+            id<MTLTexture> out=[mtl newTextureWithDescriptor:td],target=out;
+            if(samples>1) {
+                MTLTextureDescriptor *ms=[td copy];ms.textureType=MTLTextureType2DMultisample;ms.sampleCount=samples;ms.storageMode=MTLStorageModePrivate;
+                target=[mtl newTextureWithDescriptor:ms];
+            }
+            MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=target;
+            rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=samples>1?MTLStoreActionMultisampleResolve:MTLStoreActionStore;
+            if(samples>1)rp.colorAttachments[0].resolveTexture=out;
+            id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLRenderCommandEncoder> e=[cb renderCommandEncoderWithDescriptor:rp];
+            [e setRenderPipelineState:held?x_edr_pipeline(@"fs_vt",samples,lamp):direct];
+            for(unsigned i=0;i<8;++i)[e setFragmentTexture:i==5?depth:input atIndex:i];
+            [e setFragmentSamplerState:xs_lin atIndex:0];[e setFragmentSamplerState:xs_vig atIndex:1];
+            struct {float coeffs[4][4],b[4],blurParams[4],dofp[4],misc[4],zr[4],tp[4],rx[4];} k={0};
+            k.b[0]=1;k.b[3]=1;k.misc[0]=1;k.misc[2]=1;k.misc[3]=1;
+            k.zr[0]=.5;k.zr[1]=10000;k.rx[3]=1;k.tp[3]=1;
+            k.coeffs[0][0]=1;
+            [e setFragmentBytes:&k length:sizeof k atIndex:0];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
+            [cb commit];[cb waitUntilCompleted];CHECK(cb.status==MTLCommandBufferStatusCompleted,"held lamp command buffer");
+            __fp16 pixels[16*8*4];[out getBytes:pixels bytesPerRow:w*8 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
+            NSData *data=[NSData dataWithBytes:pixels length:sizeof pixels];
+            if(!held)reference=data;
+            else {
+                unsigned differing=0;const unsigned char *a=data.bytes,*b=reference.bytes;
+                for(unsigned i=0;i<sizeof pixels;++i)differing+=a[i]!=b[i];
+                CHECK(!differing,"held lamp pixels differ lamp=%d samples=%lu differing=%u/%lu",lamp,(unsigned long)samples,differing,(unsigned long)sizeof pixels);
+                ++pairs;bytes+=sizeof pixels;
+            }
+        }
+    }
+    CHECK(pipeline_edr_builds==loaded,"held lamp render built a pipeline");
+    printf("hdr_output_test: prewarm lamp pairs=%u bytes=%u identical\n",pairs,bytes);
+    return 0;
+}
 int main(int argc,const char **argv) {@autoreleasepool{
     if(argc==3 && !strcmp(argv[1],"--sources"))return sources(argv[2]);
     if(argc==2 && !strcmp(argv[1],"--cpu"))return cpu();
@@ -513,9 +638,13 @@ int main(int argc,const char **argv) {@autoreleasepool{
     fixture_screen(1);
     layer.drawableSize=CGSizeMake(5,1);layer.framebufferOnly=NO;
     INIT_BLIT
+    if(argc==2 && !strcmp(argv[1],"--auto-hdr"))return auto_hdr();
     if(argc==2 && !strcmp(argv[1],"--startup"))return startup();
     if(argc==2 && !strcmp(argv[1],"--sdr"))return sdr(0);
     if(argc==2 && !strcmp(argv[1],"--fallback"))return sdr(1);
+    if(argc==2 && !strcmp(argv[1],"--prewarm"))return prewarm(1);
+    if(argc==2 && !strcmp(argv[1],"--prewarm-msaa"))return prewarm(4);
+    if(argc==2 && !strcmp(argv[1],"--prewarm-lamps"))return prewarm_lamps();
     if(argc==2 && !strcmp(argv[1],"--composition"))return composition(1);
     if(argc==2 && !strcmp(argv[1],"--composition-msaa"))return composition(4);
     return edr(argc==2 && !strcmp(argv[1],"--broken"));

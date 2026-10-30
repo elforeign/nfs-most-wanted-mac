@@ -2,17 +2,23 @@
 //   cc -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I ../recomp runtime/aa_setting_test.c runtime/aa_setting.c runtime/settings.c -o /tmp/aat && /tmp/aat
 // The game's variable is a plain int here (the real one is guest memory at 0x00901808). Checks: (1) the row shows the game's value
 // whichever way it changed (Video options -> row, row -> game variable), (2) a row change asks for the device Reset and stores the level
-// in the registry once, an unchanged choice does neither, (3) the row is in Picture, (4) the row never writes app.txt.
-// Result: PASS, 0 failures. Broken run (-DAA_TEST_BROKEN: the mock game ignores the row's apply, i.e. no sync from the row): FAIL, 4 failures.
+// in the registry once, an unchanged choice does neither, (3) the row is in Picture, (4) AA still writes its own value only to the registry, with a My picks snapshot in app.txt.
+// Result: PASS, 0 failures. Broken run (-DAA_TEST_BROKEN: the mock game ignores the row's apply, i.e. no sync from the row): FAIL, 5 failures.
 #include <stdio.h>
 #include <string.h>
 #include "settings.h"
 
 int diag_on = 0;
 const char *game_dir;
-static int napp;
+static int napp, look_writes;
+static char picks[1024];
 const char *app_pref(const char *key) { (void)key; return NULL; }
-void app_pref_set(const char *key, const char *value) { (void)key; (void)value; ++napp; }
+void app_pref_set(const char *key, const char *value) {
+    if (!strncmp(key, "graphics.my_picks", 17) || !strcmp(key, "graphics.look_choice")) {
+        ++look_writes;
+        if (!strcmp(key, "graphics.my_picks")) snprintf(picks, sizeof picks, "%s", value);
+    } else ++napp;
+}
 void report_note(const char *fmt, ...) { (void)fmt; }
 void diag_event(const char *fmt, ...) { (void)fmt; }
 
@@ -43,7 +49,8 @@ int main(void) {
     CHECK(settings_get("graphics.antialiasing") == 1);
     CHECK(!settings_set(aa, 1) && resets == 1);                                     // same choice: no second Reset
     CHECK(settings_set(aa, 0) && game_level == 0);
-    CHECK(napp == 0);                                                               // nothing in app.txt
+    CHECK(napp == 0);                                                               // no separate AA app.txt key
+    CHECK(look_writes == 8 && strstr(picks, "graphics.antialiasing=off")); // two automatic My picks snapshots
     printf("aa_setting_test: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures != 0;
 }

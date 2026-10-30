@@ -17,7 +17,12 @@ static uint16_t last_ramp[768];
 static const char *pref_path;
 static char saved[64];
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
+// My picks now snapshots every Picture edit; keep its keys separate from the
+// brightness file fixture so the existing byte round-trip checks remain exact.
+static const char *const look_keys[] = {"graphics.my_picks", "graphics.my_picks.2", "graphics.my_picks.3", "graphics.look_choice"};
+static char look_values[4][1024];
 const char *app_pref(const char *key) {
+    for (int i = 0; i < 4; ++i) if (!strcmp(key, look_keys[i])) return look_values[i];
     assert(!strcmp(key, "graphics.brightness"));
     FILE *f = fopen(pref_path, "r");
     saved[0] = 0;
@@ -25,6 +30,9 @@ const char *app_pref(const char *key) {
     return saved;
 }
 void app_pref_set(const char *key, const char *value) {
+    for (int i = 0; i < 4; ++i) if (!strcmp(key, look_keys[i])) {
+        snprintf(look_values[i], sizeof look_values[i], "%s", value); return;
+    }
     assert(!strcmp(key, "graphics.brightness"));
     FILE *f = fopen(pref_path, "w");
     assert(f);

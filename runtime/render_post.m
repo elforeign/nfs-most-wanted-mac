@@ -352,6 +352,11 @@ static id<MTLLibrary> x_lib;
 static id<MTLSamplerState> xs_lin, xs_vig, xs_point;
 // Resource ownership follows the source player, including odd-height scratch sizes.
 #define X_LUM_SLOTS 3
+static int x_lum_nowait(void) {
+    static int on = -1;
+    if (on < 0) { const char *e=getenv("NFS_LUM_NOWAIT"); on=e && !strcmp(e,"1"); }
+    return on;
+}
 struct XLumSlot { id<MTLBuffer> buffer; uint64_t serial; uint32_t generation; int pending, floating; };
 typedef struct {
     id<MTLTexture> q0,q1,bright,bblur,lum,bloomA,bloomB,dof,t,scene[2],lamp,drop;
@@ -360,6 +365,7 @@ typedef struct {
     id<MTLTexture> lsource,lblur,la,lb;
     uint32_t w,h,generation,epoch,mode_generation;
     struct XLumSlot readback[X_LUM_SLOTS];
+    int lum_ready;
     float alpha,masked;
 } XPostResources;
 static XPostResources x_resources[3];
@@ -394,7 +400,7 @@ static id<MTLRenderPipelineState> x_pso(id<MTLLibrary> lib, NSString *fs, MTLPix
     pd.colorAttachments[0].pixelFormat = f0;
     if (f1) pd.colorAttachments[1].pixelFormat = f1;
     NSError *err = nil;
-    id<MTLRenderPipelineState> p = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+    id<MTLRenderPipelineState> p = pipeline_build(pd, __func__, &err);
     if (!p) fprintf(stderr, "boot: x360 post: pipeline %s: %s\n", fs.UTF8String, err.localizedDescription.UTF8String);
     return p;
 }
@@ -420,8 +426,25 @@ static id<MTLRenderPipelineState> x_edr_pipeline(NSString *fs, NSUInteger sample
     d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;
     if([fs isEqualToString:@"fs_downscale"])d.colorAttachments[1].pixelFormat=MTLPixelFormatRGBA16Float;
     d.rasterSampleCount=samples;
-    p=[mtl newRenderPipelineStateWithDescriptor:d error:nil];if(p)states[key]=p;
+    p=pipeline_build(d, "edr", NULL);if(p)states[key]=p;
     return p;
+}
+static int x_pipeline_init(void);
+static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format);
+// All EDR source and PSO work completes at device loading, including both lamp variants.
+void render_post_prewarm(void) {
+    const char *setting=getenv("NFS_PSO_PREWARM");
+    if (!setting || !atoi(setting)) return;
+    int failed=!x_pipeline_init(); // the EDR chain also uses the original post setup
+    failed+=!x_contact_smoke_multiply(MTLPixelFormatBGRA8Unorm);
+    failed+=!x_contact_smoke_multiply(MTLPixelFormatRGBA16Float);
+    for (int lamp=0;lamp<2;++lamp) {
+        for (NSString *fs in @[@"fs_downscale", @"fs_lum", @"fs_bright", @"fs_taps", @"fs_dofdown", @"fs_tdown"])
+            failed+=!x_edr_pipeline(fs,1,lamp);
+        for (NSUInteger samples=1;samples<=8;samples*=2)
+            if ([mtl supportsTextureSampleCount:samples]) failed+=!x_edr_pipeline(@"fs_vt",samples,lamp);
+    }
+    if(failed && diag_on)diag_event("pipeline_prewarm: failed=post count=%d",failed);
 }
 static id<MTLTexture> x_rt_format(uint32_t w, uint32_t h, int shared, MTLPixelFormat format) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w ? w : 1 height:h ? h : 1 mipmapped:NO];
@@ -432,7 +455,7 @@ static id<MTLTexture> x_rt_format(uint32_t w, uint32_t h, int shared, MTLPixelFo
 static id<MTLTexture> x_rt(uint32_t w, uint32_t h, int shared) {
     return x_rt_format(w,h,shared,x_edr_processing&&!shared?MTLPixelFormatRGBA16Float:MTLPixelFormatRGBA8Unorm);
 }
-static int x_init(uint32_t w, uint32_t h) {
+static int x_pipeline_init(void) {
     if (!xp_vt_bgra) {
         NSError *err = nil;
         id<MTLLibrary> lib = x_lib = [mtl newLibraryWithSource:hdrclip_shader([NSString stringWithUTF8String:x360_src]) options:nil error:&err];
@@ -459,6 +482,10 @@ static int x_init(uint32_t w, uint32_t h) {
         [xt_white replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
         if (!xp_down || !xp_lum || !xp_bright || !xp_taps || !xp_dofdown || !xp_tdown || !xp_vt_bgra) return 0;
     }
+    return 1;
+}
+static int x_init(uint32_t w, uint32_t h) {
+    if (!x_pipeline_init()) return 0;
     w = w<8 ? 8 : w&~7u; h = h<8 ? 8 : h&~7u;                                                      // X360 rounds the chain to multiples of 8
     if (w != xw || h != xh || xt_q0.pixelFormat!=(x_edr_processing?MTLPixelFormatRGBA16Float:MTLPixelFormatRGBA8Unorm)) {
         xw = w; xh = h;
@@ -505,7 +532,7 @@ static id<MTLRenderPipelineState> x_vt_ms(NSUInteger samples) {
         pd.fragmentFunction = [x_lib newFunctionWithName:@"fs_vt"];
         pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         pd.rasterSampleCount = samples;
-        xp_vt_ms = [mtl newRenderPipelineStateWithDescriptor:pd error:nil];
+        xp_vt_ms = pipeline_build(pd, __func__, NULL);
     }
     return xp_vt_ms;
 }
@@ -525,7 +552,7 @@ static id<MTLRenderPipelineState> x_view_pso(NSUInteger samples) {
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
         d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_vt"];
         d.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;d.rasterSampleCount=samples;
-        pipelines[samples]=[mtl newRenderPipelineStateWithDescriptor:d error:nil];
+        pipelines[samples]=pipeline_build(d, __func__, NULL);
     }
     return pipelines[samples];
 }
@@ -553,7 +580,7 @@ static int lamp_post_init(uint32_t w, uint32_t h, NSUInteger samples, int view) 
         d.vertexFunction = [lp_lib newFunctionWithName:@"vs_full"];
         d.fragmentFunction = [lp_lib newFunctionWithName:@"fs_vt_lamp"];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm; d.rasterSampleCount = samples;
-        lp_vt[view][samples] = [mtl newRenderPipelineStateWithDescriptor:d error:nil];
+        lp_vt[view][samples] = pipeline_build(d, __func__, NULL);
     }
     if (!lt_source || lt_source.width != w / 4 || lt_source.height != h / 4) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w / 4 height:h / 4 mipmapped:NO];
@@ -621,7 +648,7 @@ int render_x360_mirror(uint32_t tex, const X360PostParams *p, float exposure, in
         pd.vertexFunction = [x_lib newFunctionWithName:@"vs_full"];
         pd.fragmentFunction = [x_lib newFunctionWithName:@"fs_mirror"];
         pd.colorAttachments[0].pixelFormat = t.pixelFormat;
-        pso = [mtl newRenderPipelineStateWithDescriptor:pd error:nil];
+        pso = pipeline_build(pd, __func__, NULL);
         pso_fmt = t.pixelFormat;
         if (!pso) return 0;
     }
@@ -752,7 +779,7 @@ static id<MTLRenderPipelineState> x_contact_multiply(id<MTLLibrary> library,MTLP
     d.colorAttachments[0].pixelFormat=format;d.colorAttachments[0].blendingEnabled=YES;
     d.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorZero;d.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorSourceAlpha;
     d.colorAttachments[0].writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
-    return [mtl newRenderPipelineStateWithDescriptor:d error:nil];
+    return pipeline_build(d, __func__, NULL);
 }
 static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format) {
     static id<MTLRenderPipelineState> pso[3];unsigned n=format==MTLPixelFormatRGBA16Float?2:format==MTLPixelFormatBGRA8Unorm;
@@ -763,9 +790,27 @@ static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_ao_smoke"];
         d.colorAttachments[0].pixelFormat=format;d.colorAttachments[0].blendingEnabled=YES;d.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorOne;d.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorSourceAlpha;
         d.colorAttachments[0].writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
-        if(lib)pso[n]=[mtl newRenderPipelineStateWithDescriptor:d error:nil];
+        if(lib)pso[n]=pipeline_build(d, __func__, NULL);
     }
     return pso[n];
+}
+static struct { id<MTLRenderPipelineState> kernel,blur,apply,multiply_rgba,multiply_bgra,multiply_float; } contact_pso;
+static int contact_state; // 0 not requested, 1 compiling, 2 ready, 3 failed
+// Contact-shadow library and pipelines, built on Metal's compiler queue; published once complete.
+void render_contact_warm(void) {
+    int expected=0;
+    if (!mtl || !__atomic_compare_exchange_n(&contact_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return;
+    NSString *src=[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]];
+    [mtl newLibraryWithSource:src options:nil completionHandler:^(id<MTLLibrary> lib, NSError *err) {
+        if (!lib) { fprintf(stderr,"boot: SSAO shader: %s\n",err.localizedDescription.UTF8String); __atomic_store_n(&contact_state,3,__ATOMIC_RELEASE); return; }
+        contact_pso.kernel=x_pso(lib,@"fs_ao",MTLPixelFormatRG16Float,0);
+        contact_pso.blur=x_pso(lib,@"fs_ao_blur",MTLPixelFormatRG16Float,0);
+        contact_pso.apply=x_pso(lib,@"fs_ao_apply",MTLPixelFormatRGBA8Unorm,0);
+        contact_pso.multiply_rgba=x_contact_multiply(lib,MTLPixelFormatRGBA8Unorm);
+        contact_pso.multiply_bgra=x_contact_multiply(lib,MTLPixelFormatBGRA8Unorm);
+        contact_pso.multiply_float=x_contact_multiply(lib,MTLPixelFormatRGBA16Float);
+        __atomic_store_n(&contact_state,2,__ATOMIC_RELEASE);
+    }];
 }
 extern uint64_t ssao_diag_post_ns;
 extern int ssao_cpu_diag;
@@ -789,23 +834,11 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
     uint32_t platform=view ? M32(view->source_view) : 0x009842D0u;
     float px=MF32(platform+0x40), py=MF32(platform+0x54);
     if (!isfinite(px)||!isfinite(py)||fabsf(px)<0.01f||fabsf(py)<0.01f) return scene;
-    static id<MTLRenderPipelineState> kernel,blur,apply,multiply_rgba,multiply_bgra,multiply_float,legacy_kernel,legacy_blur,legacy_apply;
-    if (!kernel) {
-        NSError *err=nil;
-        NSString *src=[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]];
-        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:&err];
-        if (!lib) { fprintf(stderr,"boot: SSAO shader: %s\n",err.localizedDescription.UTF8String); return scene; }
-        kernel=x_pso(lib,@"fs_ao",MTLPixelFormatRG16Float,0);
-        blur=x_pso(lib,@"fs_ao_blur",MTLPixelFormatRG16Float,0);
-        apply=x_pso(lib,@"fs_ao_apply",MTLPixelFormatRGBA8Unorm,0);
-        multiply_rgba=x_contact_multiply(lib,MTLPixelFormatRGBA8Unorm);multiply_bgra=x_contact_multiply(lib,MTLPixelFormatBGRA8Unorm);
-    }
-    if(scene.pixelFormat==MTLPixelFormatRGBA16Float && !multiply_float) {
-        NSString *src=[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]];
-        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:nil];
-        multiply_float=x_contact_multiply(lib,MTLPixelFormatRGBA16Float);
-    }
-    id<MTLRenderPipelineState> multiply=scene.pixelFormat==MTLPixelFormatRGBA16Float?multiply_float:scene.pixelFormat==MTLPixelFormatBGRA8Unorm?multiply_bgra:multiply_rgba;
+    static id<MTLRenderPipelineState> legacy_kernel,legacy_blur,legacy_apply;
+    // Compiled off the frame (first use entering free roam stalled 500+ ms under load); until ready the frame skips AO.
+    if (__atomic_load_n(&contact_state,__ATOMIC_ACQUIRE)!=2) { render_contact_warm(); return scene; }
+    id<MTLRenderPipelineState> kernel=contact_pso.kernel,blur=contact_pso.blur,apply=contact_pso.apply;
+    id<MTLRenderPipelineState> multiply=scene.pixelFormat==MTLPixelFormatRGBA16Float?contact_pso.multiply_float:scene.pixelFormat==MTLPixelFormatBGRA8Unorm?contact_pso.multiply_bgra:contact_pso.multiply_rgba;
     if (!kernel||!blur||!apply||!multiply) return scene;
     NSUInteger hw=(scene.width+1)/2, hh=(scene.height+1)/2;
     int pair=x_contact_pair();
@@ -911,6 +944,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     if (xr->generation != generation || xr->mode_generation != x_mode_generation) {
         xr->generation = generation;xr->mode_generation=x_mode_generation;++xr->epoch;
         xr->alpha=xr->masked=-1;
+        xr->lum_ready=0;
         // Keep in-flight buffers retired until completion; generation rejects their samples.
     }
     NSUInteger dl, dsl;
@@ -950,15 +984,20 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     }
     if (out.sampleCount > 1) surface_rt(dst)->stale = 1;
     float measured = -1;
-    // Single-player retains the previous-frame wait and idle accounting. Split
-    // alone uses completed-only slots, never waiting on an unsubmitted frame.
-    if (!view) {
+    // Keep the previous-frame value until this epoch has a scene measurement:
+    // black loading samples cannot initialize the caller's exposure snap.
+    // Thereafter the opt-in SP path shares split's completed-only selection.
+    // Present bounds outstanding work to two frames: three slots leave a spare.
+    uint64_t lum_wait_ns=0;
+    if (!view && (!x_lum_nowait() || !xr->lum_ready)) {
         for (unsigned i=0;i<X_LUM_SLOTS;++i) {
             struct XLumSlot *slot=&xr->readback[i];
             if (slot->pending) {
                 uint64_t w0=host_ticks();
                 wait_serial(slot->serial);
-                diag_idle_ns[IDLE_GPU]+=host_ticks()-w0;
+                uint64_t waited=host_ticks()-w0;
+                diag_idle_ns[IDLE_GPU]+=waited;
+                if (diag_on) lum_wait_ns+=waited;
             }
         }
     }
@@ -982,6 +1021,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
             measured=(float)(sum*9.536743e-07);
             xr->alpha=(float)(sa/(4096*255.0)); xr->masked=(float)(sm/(4096*255.0));
         }
+        if (measured >= 0.002f) xr->lum_ready=1;
     }
     for (unsigned i=0;i<X_LUM_SLOTS;++i) {
         struct XLumSlot *slot=&xr->readback[i];
@@ -989,6 +1029,19 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         if (!slot->pending && !writable) writable=slot;
     }
     x360_post_alpha=xr->alpha; x360_post_masked=xr->masked;
+    // No completed sample returns -1; the caller retains its previous measured
+    // luminance. Saturation skips a copy rather than overwriting pending data.
+    if (diag_on && !view) {
+        static FILE *trace;
+        if (!trace) {
+            char path[1024];snprintf(path,sizeof path,"%s/lumread.tsv",diag_dir);
+            trace=fopen(path,"w");
+            if (trace) fprintf(trace,"frame\tsample\tcompleted\tmeasured\texposure\twait_ns\twritable\n");
+        }
+        if (trace) fprintf(trace,"%llu\t%llu\t%llu\t%.9g\t%.9g\t%llu\t%d\n",
+            (unsigned long long)frame_serial,(unsigned long long)(newest?newest->serial:0),
+            (unsigned long long)completed,measured,p->exposure,(unsigned long long)lum_wait_ns,writable!=NULL);
+    }
     end_pass();
     ensure_cmd();
     id<MTLTexture> scene=view ? x_crop(sg->tex,view->source,&xr->scene[frame_serial&1]) : sg->tex;
@@ -1237,7 +1290,7 @@ static int raindrops_prepare(NSUInteger samples, MTLPixelFormat format) {
         ca.writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
         pd.rasterSampleCount = samples;
         NSError *err = nil;
-        drops_pso = [mtl newRenderPipelineStateWithDescriptor:pd error:&err];
+        drops_pso = pipeline_build(pd, __func__, &err);
         pso_samples = samples;
         pso_format = format;
         if (!drops_pso) { fprintf(stderr, "boot: raindrops: pipeline: %s\n", err.localizedDescription.UTF8String); return 0; }

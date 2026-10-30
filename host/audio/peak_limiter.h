@@ -22,7 +22,13 @@ public:
     int rate() const { return rate_; }
     int delay() const { return delay_; }
     // Returns temporal frames with gain < 1 (all six channels share that gain).
-    uint64_t process(float *pcm, size_t frames) {
+    // Window statistics are separate from DSP reset: toggles/rate changes must not erase earlier reduction.
+    double take_min_gain() { double value = min_gain_; min_gain_ = 1.0; return value; }
+    uint64_t process(float *pcm, size_t frames, bool diag = false) {
+        return diag ? process_impl<true>(pcm, frames) : process_impl<false>(pcm, frames);
+    }
+private:
+    template<bool Diag> uint64_t process_impl(float *pcm, size_t frames) {
         uint64_t limited = 0;
         const size_t cap = peaks_.size();
         for (size_t i = 0; i < frames; ++i, ++frame_) {
@@ -49,6 +55,7 @@ public:
                 if (release_left_ > 1) --release_left_;
             }
             limited += gain_ < 1.0;
+            if constexpr (Diag) min_gain_ = std::min(min_gain_, gain_);
             float *old = delay_pcm_.data() + pos_ * 6;
             for (int c = 0; c < 6; ++c) {
                 float input = s[c];
@@ -70,5 +77,5 @@ private:
     size_t head_ = 0, count_ = 0;
     uint64_t frame_ = 0;
     int rate_ = 0, delay_ = 0, pos_ = 0, release_frames_ = 0, release_left_ = 0;
-    double gain_ = 1.0;
+    double gain_ = 1.0, min_gain_ = 1.0;
 };

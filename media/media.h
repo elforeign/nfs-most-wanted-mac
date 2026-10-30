@@ -145,6 +145,7 @@ class AudioOutput {
     // Interleaved 6-channel float input at the open rate (mode conversion happens here).
     void write(const float *pcm51, size_t frames);
     size_t queued_frames() const;
+    int minimum_queue_frames() const;   // PCM: current two device periods plus safety offset; atomic input-rate frames
     // Cumulative BOOT_DIAG byte/callback totals, queue depth now, and shortage callbacks since the previous read.
     // Maxima reset only when requested (the mixer emits them once per second). No callback-thread logging.
     AudioCallbackStats take_callback_stats(bool reset_max = false);

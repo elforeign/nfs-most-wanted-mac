@@ -560,11 +560,11 @@ int dsound_output_info(const char **mode, int *live, uint64_t *underruns) {
 // Per-channel levels of the device mix since the caller's last read (skipped while a movie plays: movies.c reads the
 // same window). The device has one stats window; every read folds it into each reader's own accumulator, so the
 // report/session pass (reader 0) and BOOT_DIAG's stats line (reader 1) each see their whole second.
-typedef struct { double sumsq[6]; float peak[6], dip[6]; uint64_t clipped[6], frames, limited; int have_dip; } MixAcc;
+typedef struct { double sumsq[6]; float peak[6], dip[6]; uint64_t clipped[6], frames, limited; double limit_reduction; int have_dip; } MixAcc;
 static MixAcc mix_acc[2];
 static pthread_mutex_t mix_lock = PTHREAD_MUTEX_INITIALIZER;
 
-int dsound_mix_levels(int reader, double rms[6], float peak[6], uint64_t clipped[6], float dip[6], uint64_t *limited) {
+static int mix_levels(int reader, double rms[6], float peak[6], uint64_t clipped[6], float dip[6], uint64_t *limited, double *min_gain) {
     int movies_playing(void);
     DsDevice *dev = dsound_current_device();
     DsStats st;
@@ -583,6 +583,7 @@ int dsound_mix_levels(int reader, double rms[6], float peak[6], uint64_t clipped
             if (st.dip[0] >= 0) a->have_dip = 1;
             a->frames += st.window;
             a->limited += st.limited;
+            if (1.0 - st.limit_min_gain > a->limit_reduction) a->limit_reduction = 1.0 - st.limit_min_gain;
         }
     MixAcc *a = &mix_acc[reader & 1];
     for (int k = 0; k < 6; ++k) {
@@ -592,14 +593,19 @@ int dsound_mix_levels(int reader, double rms[6], float peak[6], uint64_t clipped
         if (dip) dip[k] = a->have_dip ? a->dip[k] : 0;
     }
     if (limited) *limited = a->limited;
+    if (min_gain) *min_gain = 1.0 - a->limit_reduction;
     if (ok) memset(a, 0, sizeof *a);
     pthread_mutex_unlock(&mix_lock);
     return ok;
 }
 
-int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited) {
+int dsound_mix_levels(int reader, double rms[6], float peak[6], uint64_t clipped[6], float dip[6], uint64_t *limited) {
+    return mix_levels(reader, rms, peak, clipped, dip, limited, NULL);
+}
+
+int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited, double *min_gain) {
     uint64_t c[6] = {0};
-    int ok = dsound_mix_levels(1, rms, NULL, c, NULL, limited);
+    int ok = mix_levels(1, rms, NULL, c, NULL, limited, min_gain);
     *clipped = 0;
     for (int k = 0; k < 6; ++k) *clipped += c[k];
     return ok;

@@ -33,10 +33,29 @@ static int call(int (*fn)(Cpu *), int n, const uint32_t *a) {
     return (int)cpu.eax;
 }
 int main(void) {
+    setenv("BOOT_DIAG", "1", 1);
     G = calloc(1, 0x01000000);
     DsConfig cfg; ds_config_default(&cfg); cfg.sink = DS_SINK_MANUAL;
     DsObj *dev = new_obj(1, 0);
     if (ds_device_create(&cfg, &dev->dev) != DS_OK) return 2;
+    // Exercise the real source limiter -> stats windows -> diagnostic reader path, without a device.
+    // Negative control removes PeakLimiter's minimum update; expected gain 0.445625, broken gain 1.
+    ds_set_peak_limiter(1);
+    float loud[256 * 6];
+    for (int i = 0; i < 256 * 6; ++i) loud[i] = 2.0f;
+    ds_device_limit_game_mix(dev->dev, loud, 256, 48000);
+    double rms[6], gain = 1;
+    uint64_t clips, limited;
+    // The report reader consumes the host window first; the diagnostic reader must retain that minimum.
+    dsound_mix_levels(0, NULL, NULL, NULL, NULL, NULL);
+    if (!dsound_mix_rms(rms, &clips, &limited, &gain) || !limited || fabs(gain - 0.445625469) > 1e-7) {
+        printf("FAIL: diagnostic limiter gain %.6f samples %llu\n", gain, (unsigned long long)limited);
+        return 1;
+    }
+    printf("limit_samples %llu limit_min_gain %.6f\n", (unsigned long long)limited, gain);
+    dsound_mix_rms(rms, &clips, &limited, &gain);
+    if (gain != 1.0 || limited != 0) { puts("FAIL: diagnostic minimum window reset"); return 1; }
+    ds_set_peak_limiter(0);
     uint32_t desc = 0x2000, wfx = 0x2100, out = 0x2200, out2 = 0x2210;
     M32(desc + 4) = 0x10000; M32(desc + 8) = 4096; M32(desc + 16) = wfx;   // GETCURRENTPOSITION2, 4096 bytes
     M16(wfx) = 1; M16(wfx + 2) = 2; M32(wfx + 4) = 48000; M32(wfx + 8) = 192000; M16(wfx + 12) = 4; M16(wfx + 14) = 16;

@@ -2,13 +2,16 @@
 """Shader frame-path regression, without Metal or a game launch.
 
 Production lookup/scheduling: normal frame-thread compile_entry calls 0; broken 1.
-Cache round-trip: normal 6 records; broken AUX whitelist 1 record.
+Cache round-trip: normal 8 records; broken AUX whitelist 1 record;
+broken Clear-lamp whitelist 6 records; broken film whitelist 7 records.
 Readiness after publication: normal pending 0; broken 1.
 Concurrent identical-source requests: normal 1 compile; broken cache 4.
 Cold profile (2026-10-28): source compiles before/after 13/0, hangs 0/0,
 stalls 0/0, deferred draws 635515/0 (game_run runs 1 and 5).
 MSL identity: normal 1744 comparisons / 0 differences; broken shadow mask
 rejected at its first difference. These are source comparisons, not frame proof.
+Contact shadows (free-roam entry stalled 500+ ms on a frame-path compile): synchronous
+newLibraryWithSource calls in x_contact_scene_impl, normal 0; the previous source 2.
 Optional --diag DIR checks real frame_sync counters and hang/stall reports.
 The translator check compares exact MSL before/after option canonicalization.
 """
@@ -54,7 +57,7 @@ PRELUDE = r'''
 #include "host/shaders/sm_translate.h"
 enum { MAT_VARIANT_WATER=0x100, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
-       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_AUX=0x200 };
+       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_AUX=0x200 };
 typedef struct {
  uint64_t key; SmResult refl; volatile int pending; int ok; dispatch_semaphore_t ready;
  uint32_t *tokens, ntokens; SmOptions opt; uint32_t variant;
@@ -139,9 +142,9 @@ int main(int argc, char **argv) { @autoreleasepool {
  if (check(get_shader_variant(&s,&irrelevant,0)==e && get_shader_variant(&s,&irrelevant,0)==e,
            "unread texture options share the pending shader")) return 1;
  uint32_t variants[]={MAT_VARIANT_AUX,MAT_VARIANT_SOFT_SMOKE,
-    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP};
- for (int i=0;i<5;i++) get_shader_variant(&s,&o,variants[i]);
- for (int i=0;i<6;i++) dispatch_semaphore_signal(allow_compile);
+    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP,MAT_VARIANT_HEADLAMP_CLEAR,MAT_VARIANT_ROAD_FILM};
+ for (int i=0;i<7;i++) get_shader_variant(&s,&o,variants[i]);
+ for (int i=0;i<8;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
  mtl=[CompileHitchDevice new];diag_on=1;
  id results[4];
@@ -162,15 +165,15 @@ int main(int argc, char **argv) { @autoreleasepool {
    if(one||two||a.code!=7||b.code!=7)abort();
  }});
  if(check(library_requests==2,"failed compile publishes error and wakes followers"))return 1;
- if (check(!e->pending && e->ok && compiled==6,"release/acquire publication")) return 1;
+ if (check(!e->pending && e->ok && compiled==8,"release/acquire publication")) return 1;
  if (check(!shader_pending(e),"ready shader no longer pending")) return 1;
  if (check(get_shader_variant(&s,&o,0)==e,"ready lookup reused")) return 1;
  // Keep shape metadata, but rebuild the shader/cache index exactly as a new launch does.
  nshaders=capshaders=0; shaders=NULL; memset(vcache,0,sizeof vcache);
  shader_cache_warm();
  printf("cache records=%d frame_sync=%d\n",nshaders,frame_sync);
- if (check(nshaders==6,"cache accepts AUX and every soft-smoke record")) return 1;
- for (int i=0;i<6;i++) dispatch_semaphore_signal(allow_compile);
+ if (check(nshaders==8,"cache accepts AUX, soft smoke, lamp and film profiles")) return 1;
+ for (int i=0;i<8;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
  int comparisons=0;
  for (int a=2;a<argc;a++) {
@@ -198,7 +201,25 @@ int main(int argc, char **argv) { @autoreleasepool {
 '''
 
 
+def contact_sync_compiles(post):
+    body = post.split("static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene", 1)[1]
+    body = body.split("\n}\n", 1)[0]
+    return len(re.findall(r"newLibraryWithSource:[^\]]*error:", body))
+
+
+def contact_off_frame():
+    post = (ROOT / "runtime/render_post.m").read_text()
+    normal = contact_sync_compiles(post)
+    old = subprocess.run(["git", "-C", str(ROOT), "show", "0f5b708c:runtime/render_post.m"], capture_output=True, text=True)
+    assert normal == 0, f"contact shadows compile on the frame: {normal}"
+    if old.returncode == 0:
+        broken = contact_sync_compiles(old.stdout)
+        assert broken > 0, "previous source should show the frame-path compile"
+        print(f"contact shadows: frame-path compiles normal {normal}, previous source {broken}")
+
+
 def offline():
+    contact_off_frame()
     shape = between("// BEGIN offline shader options test\n", "// END offline shader options test")
     submit = between("// BEGIN offline shader scheduling test\n", "// END offline shader scheduling test")
     ready = between("// BEGIN offline shader readiness test\n", "// END offline shader readiness test")
@@ -231,6 +252,12 @@ def offline():
         broken_cache = code.replace(" && variant != MAT_VARIANT_AUX", "")
         assert broken_cache != code
         print("broken cache: " + run(build("broken-cache", broken_cache), 1).strip())
+        broken_clear = code.replace(" && variant != MAT_VARIANT_HEADLAMP_CLEAR", "")
+        assert broken_clear != code
+        print("broken Clear cache: " + run(build("broken-clear-cache", broken_clear), 1).strip())
+        broken_film = code.replace(" && variant != MAT_VARIANT_ROAD_FILM", "")
+        assert broken_film != code
+        print("broken film cache: " + run(build("broken-film-cache", broken_film), 1).strip())
         broken_ready = code.replace("if (!__atomic_load_n(&e->pending, __ATOMIC_ACQUIRE)) return 0;",
                                     "if (!__atomic_load_n(&e->pending, __ATOMIC_ACQUIRE)) return 1;")
         assert broken_ready != code

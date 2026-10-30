@@ -39,6 +39,7 @@ case "$BUNDLE_ID" in ''|*[!A-Za-z0-9.-]*) echo "bundle.sh: invalid bundle identi
 case "$VERSION" in *[!0-9.]*|.*|*.|*..*) echo "bundle.sh: version must contain numeric dot components" >&2; exit 2 ;; esac
 APP="$OUT/$NAME.app"
 [ -x boot ] || { echo "bundle.sh: runtime/boot missing, run runtime/build.sh first" >&2; exit 1; }
+[ -f docs/guide.md ] || { echo "bundle.sh: runtime/docs/guide.md missing" >&2; exit 1; }
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 0)
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 if [ -n "$VERSION" ] && [ -z "$BUILD_VERSION" ]; then BUILD_VERSION=$VERSION; fi
@@ -50,6 +51,12 @@ MINOS=$(otool -l boot | awk '/LC_BUILD_VERSION/ { f = 1 } f && $1 == "minos" { p
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp boot "$APP/Contents/MacOS/$EXEC_NAME"
+cp docs/guide.md "$APP/Contents/Resources/Guide.md"
+# The checklist is optional and is never included in a public build.
+TESTING_MD=${NFS_TESTING_MD:-docs/testing.md}
+if [ "${NFS_PUBLIC:-0}" != 1 ] && [ -f "$TESTING_MD" ]; then
+    cp "$TESTING_MD" "$APP/Contents/Resources/Testing.md"
+fi
 
 # Private owner-approved art only. Public packaging never copies later-game payloads.
 if [ "${NFS_PUBLIC:-0}" != 1 ] && [ -d ../recomp/out/later_textures ]; then
@@ -59,6 +66,13 @@ fi
 # Icon: drawn by app_icon.m (a generic speedometer), every iconset size from the 1024 px master.
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Build the delivery helper separately. Test URL overrides are compiled out of this binary.
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-deprecated-declarations -mmacosx-version-min="$MINOS" pub_update_helper.m -framework Foundation -o "$TMP/pub_update_helper"
+cp "$TMP/pub_update_helper" "$APP/Contents/MacOS/pub_update_helper"
+codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_helper"
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-unused-function -Wno-deprecated-declarations -DPUB_UPDATE_WORKER=1 -mmacosx-version-min="$MINOS" pub_update.m -framework Cocoa -o "$TMP/pub_update_worker"
+cp "$TMP/pub_update_worker" "$APP/Contents/MacOS/pub_update_worker"
+codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_worker"
 clang -fobjc-arc -w app_icon.m -framework Cocoa -framework ImageIO -framework UniformTypeIdentifiers -o "$TMP/app_icon"
 "$TMP/app_icon" "$TMP/icon.png"
 mkdir "$TMP/AppIcon.iconset"
@@ -89,6 +103,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>LSArchitecturePriority</key>          <array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key>       <string>public.app-category.racing-games</string>
     <key>LSSupportsGameMode</key>              <true/>
+    <key>NSLocalNetworkUsageDescription</key>     <string>Online free roam finds your router to host a session.</string>
     <key>NSHighResolutionCapable</key>         <true/>
     <key>NSPrincipalClass</key>                <string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key>  <false/>

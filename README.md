@@ -24,7 +24,7 @@ Details: [NOTICE](NOTICE).
 Step by step, including the one-time "Open Anyway" for an app that is not notarized by Apple:
 **[Getting started](GETTING_STARTED.md)**. Problems: **[Troubleshooting](TROUBLESHOOTING.md)**.
 
-**Coming from 3.x?** 4.0.0 is a new build, not an update of 3.x. Download the 4.0.0 Setup and build again. 4.0.0 replaces the 3.x app in place
+**Coming from 3.x?** 4.0.0 is a new build, not an update of 3.x. Download the latest Setup and build again. Setup replaces the 3.x app in place
 (same name, same Dock icon) and keeps it as "NFS Most Wanted Native 3.x.app". See the
 [changelog](CHANGELOG.md).
 
@@ -48,9 +48,11 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 - **Xbox 360 features, only if you give Setup your own Xbox 360 copy:** Setup lists them as world, audio, reverb,
   music, police, nis (cutscenes), vinyls, textures and movies. Without that copy the PC game alone is used and these
   are absent.
-- **Discord status** (off by default) and **Check for updates** (only when you press it), both in the F10 menu under
-  Display & performance > Online.
-- The public build includes the original MW car catalog. Other-game car preparation is private and excluded from Setup.
+- **Guide and look presets:** F10 > Help > Guide explains the settings; Picture offers Port, PC retail, Xbox 360 retail and My picks.
+- **PlayStation trigger pedals:** the new Controls > Triggers selector offers Shift or Pedals; DualSense resistance follows the trigger bindings.
+- **Online free roam beta:** Off until you Host or Join. Hosting needs incoming UDP and may need router setup; some networks cannot host. See the [Guide](runtime/docs/guide.md#online-beta) for controls and limits.
+- **Updates:** Check for updates runs when you press it; Update now prepares an available update for the next launch. Keep Setup’s remembered sources available. Discord status is off by default.
+- The original Most Wanted car catalog.
 
 ## How it works
 

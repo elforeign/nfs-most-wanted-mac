@@ -136,7 +136,7 @@ static inline const char *roots_caches(void) { return roots_get("caches"); }
 
 // Is an X360 feature usable? Legacy (no manifest): always (the generated tables and a sibling extract are there).
 // Manifest: the X360 root exists and holds the feature's files. Features: "audio" "music" "police" "nis" "reverb"
-// "movies" "textures" "ui" "arrest" "vinyls" "world" (tables built from X360 data) - a Setting names one.
+// "movies" "textures" "ui" "arrest" "vinyls" "world" "look" (tables built from X360 data) - a Setting names one.
 static inline int roots_file_ok_(const char *root, const char *rel) {
     char p[2300];
     snprintf(p, sizeof p, "%s/%s", root, rel);
@@ -185,5 +185,6 @@ static inline int roots_x360_has(const char *feature) {
     if (!strcmp(feature, "nis")) return roots_file_ok_(x, "SOUND/STREAMS/NISAUDIO.BIG");
     if (!strcmp(feature, "vinyls")) return roots_file_ok_(x, "CARS");
     if (!strcmp(feature, "world")) return roots_file_ok_(x, "GLOBAL/GLOBALB.BUN");
+    if (!strcmp(feature, "look")) return roots_file_ok_(x, "GLOBAL/ATTRIBUTES.BIN");
     return 1;
 }

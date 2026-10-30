@@ -1,7 +1,7 @@
 """X360 arrest-scene characters for the PC: the PC NIS bundles rebuilt with the X360's higher-detail character meshes.
 
 Usage: python -I x360_nis_arrest.py <X360 files> <PC game> <out dir>
-Writes <out>/Scene_Arrest*_BundleB.bun (the PC bundle with each character solid's mesh replaced) and
+Writes <out>/Scene_Arrest*_BundleB.bun (the PC bundle with compatible character meshes replaced) and
 <out>/textures.tsv (the X360 textures those meshes use: hash, the alias the meshes name, X360 file), which
 runtime/x360_textures.m registers and boot.c serves the bundles under NFS_X360_ARREST=x360.
 
@@ -22,7 +22,8 @@ Checks per solid (fail = no output): every X360 triangle kept, indices inside th
 palette slots integral and < 16, unit normals, normals agreeing with the PC mesh's at the nearest PC vertex
 (median dot > 0.9), positions inside the X360 bbox. Negative controls run on each solid: weights/uv swapped and one
 index out of range must both be rejected.
-Verified 2026-10-25: see the printed summary (5 characters, 13 bundles each side).
+PC bind-pose coverage must also match: at most 5% of PC vertices may be more than 0.1 m from their nearest X360
+vertex. Solids failing coverage retain their original PC mesh, textures and palettes, with one fallback log line.
 """
 import os
 import re
@@ -117,6 +118,25 @@ def nearest(a, b):
     return j
 
 
+def pc_vertices(d, s):
+    o, size = s["b01"][0]
+    start = (o + 0x87) & ~0x7f
+    return np.frombuffer(d[start:start + (o + 8 + size - start) // 60 * 60], "<f4").reshape(-1, 15)
+
+
+def pc_coverage(draws, pc_v):
+    """PC vertices farther than 0.1 m from X360, total PC vertices, maximum distance in metres."""
+    positions = np.concatenate([v[:, :3] for _, v, _ in draws])
+    j = nearest(pc_v[:, :3], positions)
+    distances = np.linalg.norm(pc_v[:, :3] - positions[j], axis=1)
+    return int((distances > 0.1).sum()), len(pc_v), float(distances.max())
+
+
+def coverage_report(coverage):
+    missing, total, maximum = coverage
+    return f"PC coverage {missing}/{total} ({100 * missing / total:.3f}%) beyond 0.1 m, max {maximum:.6f} m"
+
+
 def validate(draws, bbox, pc_v):
     """Reasons the converted draws are wrong (empty: fine)."""
     bad = []
@@ -140,6 +160,9 @@ def validate(draws, bbox, pc_v):
     dot = np.median((allv[:, 3:6] * pc_v[j, 3:6]).sum(1))
     if dot < 0.9:
         bad.append(f"normals disagree with the PC's (median dot {dot:.3f})")
+    coverage = pc_coverage(draws, pc_v)
+    if coverage[0] / coverage[1] > 0.05:
+        bad.append(coverage_report(coverage))
     return bad
 
 
@@ -214,9 +237,7 @@ def convert_solid(pc_d, pc_s, x_d, x_s, pos):
     draws = x360_mesh(x_d, x_s)
     xo = x_s[0x134011][0]
     bbox = struct.unpack_from("<3f4x3f", x_d, xo + 8 + 40)
-    po, psz = pc_s["b01"][0]
-    pa = (po + 0x87) & ~0x7f
-    pc_v = np.frombuffer(pc_d[pa:pa + (po + 8 + psz - pa) // 60 * 60], "<f4").reshape(-1, 15)
+    pc_v = pc_vertices(pc_d, pc_s)
     bad = validate(draws, bbox, pc_v)
     if bad:
         raise ValueError("; ".join(bad))
@@ -298,16 +319,20 @@ def convert_bundle(pc_d, x_d, log):
         pt = struct.unpack_from("<I", pc_d, s[0x134011][0] + 8 + 28)[0]
         xt = struct.unpack_from("<I", x_d, x[0x134011][0] + 8 + 28)[0]
         if xt > pt:
-            swaps[s["solid"][0]] = (name, s, x)
+            coverage = pc_coverage(x360_mesh(x_d, x), pc_vertices(pc_d, s))
+            if coverage[0] / coverage[1] > 0.05:
+                log(f"  {name}: PC fallback; {coverage_report(coverage)}")
+            else:
+                swaps[s["solid"][0]] = (name, s, x, coverage)
     out, used = bytearray(), set()
     for depth, cid, off, size in walk(pc_d, 0, len(pc_d)):
         if depth:
             continue
         if off in swaps:
-            name, s, x = swaps[off]
+            name, s, x, coverage = swaps[off]
             new, report, textures = convert_solid(pc_d, s, x_d, x, len(out))
             used.update(textures)
-            log(f"  {name}: {report}")
+            log(f"  {name}: {report}; {coverage_report(coverage)}")
             out += new
             # later chunks keep the PC's offset mod 0x1000: the loaders find their data by aligning the chunk
             # address (EAGL anim banks 00449130 and scene entities 0044e530: (chunk + 0x17) & ~0xf; solids by

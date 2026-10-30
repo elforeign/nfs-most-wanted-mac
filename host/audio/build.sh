@@ -70,3 +70,40 @@ if build/limiter_guest_test_broken > build/limiter_guest_test_broken.txt 2>&1; t
 fi
 grep -q '^FAIL.*clips(on, SAMPLES)' build/limiter_guest_test_broken.txt
 echo ok
+
+# Callback/parking and large-period PCM fixture: synthetic callbacks, fake device only, with/without diagnostics.
+# Fixed: 141 checks / 0 failures each; old 1024-frame floor: 12 failures, 48 underruns/mode, 72.8% zero fill.
+$CXX -DMEDIA_AUDIO_CALLBACK_TEST -I"$F/include" dstest.cpp -o build/audio_callback_test $LIBS
+BOOT_DIAG=1 build/audio_callback_test > build/audio_callback_test.txt 2>&1 || { tail -30 build/audio_callback_test.txt; exit 1; }
+env -u BOOT_DIAG build/audio_callback_test > build/audio_callback_nodiag_test.txt 2>&1 || { tail -30 build/audio_callback_nodiag_test.txt; exit 1; }
+sed 's/target = std::max(target, d.out->minimum_queue_frames())/target = target/' dsound_host.cpp > build/dsound_host_period_broken.cpp
+# Include the mutated mixer from the generated fixture while retaining the real media implementation.
+sed -e 's|#include "dsound_host.cpp"|#include "build/dsound_host_period_broken.cpp"|' dstest.cpp > build/audio_period_broken.cpp
+$CXX -DMEDIA_AUDIO_CALLBACK_TEST -I. -I"$F/include" build/audio_period_broken.cpp -o build/audio_period_broken $LIBS
+if BOOT_DIAG=1 build/audio_period_broken > build/audio_period_broken.txt 2>&1; then
+    echo 'error: large-period PCM negative control unexpectedly passed'; exit 1
+fi
+grep -q 'FAIL: large-period PCM has no zero-fill or underruns' build/audio_period_broken.txt
+
+# Timing-change negative control: retain the open-time floor but ignore HAL notifications.
+# Fixed: target 8320, 0 shortage callbacks; cached: target 1024, 1 shortage callback (3072/4096 frames zero).
+sed 's/if (s->timing_active \&\& device == s->opened_on) s->refresh_pcm_timing();/if (s->timing_active \&\& device == s->opened_on) (void)0;/' ../../media/media.cpp > build/media_timing_broken.cpp
+grep -q 'device == s->opened_on) (void)0;' build/media_timing_broken.cpp
+sed 's|#include "../../media/media.cpp"|#include "build/media_timing_broken.cpp"|' dstest.cpp > build/audio_timing_broken.cpp
+$CXX -DMEDIA_AUDIO_CALLBACK_TEST -I. -I../../media -I"$F/include" build/audio_timing_broken.cpp -o build/audio_timing_broken $LIBS
+if BOOT_DIAG=1 build/audio_timing_broken > build/audio_timing_broken.txt 2>&1; then
+    echo 'error: cached PCM timing negative control unexpectedly passed'; exit 1
+fi
+grep -q 'FAIL: running mixer follows same-device period growth' build/audio_timing_broken.txt
+grep -q 'FAIL: grown period callback has no zero fill' build/audio_timing_broken.txt
+
+# Diagnostic minimum negative control: remove only the per-frame minimum update, preserving limiter audio.
+# Fixed: 48 checks / 0 failures; minimum update removed: 3 failures (minimum reported as unity).
+sed 's/if constexpr (Diag) min_gain_ = std::min(min_gain_, gain_);/if constexpr (Diag) (void)0;/' peak_limiter.h > build/peak_limiter_stats_broken.h
+sed 's|"peak_limiter.h"|"build/peak_limiter_stats_broken.h"|' dsound_host.cpp > build/dsound_host_stats_broken.cpp
+sed 's|"peak_limiter.h"|"build/peak_limiter_stats_broken.h"|' limitertest.cpp > build/limitertest_stats_broken.cpp
+$CXX -I. build/limitertest_stats_broken.cpp build/dsound_host_stats_broken.cpp -o build/limitertest_stats_broken build/libmedia.a $LIBS
+if build/limitertest_stats_broken > build/limitertest_stats_broken.txt 2>&1; then
+    echo 'error: limiter minimum negative control unexpectedly passed'; exit 1
+fi
+grep -q 'FAIL: host stats report linked minimum next to limited samples' build/limitertest_stats_broken.txt

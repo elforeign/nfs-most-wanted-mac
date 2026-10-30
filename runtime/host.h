@@ -56,6 +56,7 @@ void gil_release(void);
 void gil_acquire(void);
 // diag.c
 extern int diag_on;
+extern int diag_fixed_step;             // BOOT_DIAG_FIXED_STEP: capture animation/script time at 60 Hz
 extern const char *diag_dir;
 void diag_init(void);
 void diag_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -109,15 +110,25 @@ void feedback_poll_pause(void);         // main-loop pass / pad read: Sim::GetSt
 void rumble_suppress(int on);           // also gates queued HID reports; never opens the device
 void rumble_stop(void);
 void rumble_close(void);                // quitting: motors off for good
-// padfx.m: DualSense adaptive triggers and the lightbar (NFS_PAD_TRIGGERS / NFS_PAD_LIGHT, default off)
-int padfx_wanted(void);                 // either output is on, or BOOT_DIAG (the logic runs and logs what it would send)
+// padfx.m: built-in triggers, lightbar, road loading and player indicators (all default on)
+int padfx_wanted(void);                 // any output is on, or BOOT_DIAG (the logic runs and logs what it would send)
 void padfx_game_tick(Cpu *c, uint32_t local_player);   // feedback.c, each LocalPlayer::DoFFB: heat, pursuit, speedbreaker
 void padfx_update(void *gc_controller, int dualsense, float lt, float rt);   // user32.m pad_read: NULL = simulated pad
-void padfx_stop(void);                  // focus lost / quitting: triggers off, the lightbar's own colour back
+void padfx_stop(void);                  // stop: discard the frame, free triggers, restore light and player indices
 void padfx_close(void);                 // quitting: the same, for good
 void rumble_signals(void);              // rumble.m: SIGTERM / SIGINT stop the rumble and padfx before the process ends
-void padfx_set_triggers(int on);        // the F10 menu
+void padfx_set_triggers(int on);        // internal output override
 void padfx_set_light(int on);
+void padfx_set_players(int on);          // NFS_PAD_PLAYERS, default on; stable slots -> Index1/Index2
+void padfx_set_road(int on);             // NFS_PAD_ROAD, default on; requires adaptive triggers
+int padfx_road_wanted(void);
+void padfx_player_update(int slot, void *gc_controller);
+void padfx_disconnect(void *gc_controller);
+void padfx_connect(void *gc_controller); // settle detached restoration debt before accepting new effects
+void padfx_suppress(unsigned reason, int on); // same independent lifecycle holds as feedback
+void padfx_poll(void);                   // main-loop stale-frame stop even without pad reads
+void feedback_invalidate_effects(void); // atomic publication gate, also used on disconnect
+void feedback_road_state(float *speed, float *surface); // last frame, m/s and speed-curve peak 0..1
 void padfx_diag_text(char *buf, int n); // diag.c stats.log: this second's trigger modes and light colour
 void feedback_trigger_state(float slip[2], float hz[2], int *nos);   // feedback.c: last DoFFB frame, [0] rear [1] front
 void widescreen_setup(void);
@@ -157,9 +168,10 @@ typedef struct {
 void render_presentation_stats(RenderPresentation *out);   // game thread; counters from Metal callbacks
 const char *render_hdr_output_status(void); // effective output for the current frame
 // overlay.m: the performance overlay (View > Performance Overlay, Cmd-Option-P; NFS_OVERLAY=off|compact|full)
-enum { OVERLAY_OFF, OVERLAY_COMPACT, OVERLAY_FULL };
+enum { OVERLAY_OFF, OVERLAY_COMPACT, OVERLAY_FULL, OVERLAY_NOTICE };   // NOTICE: internal, only a notice is showing
 int overlay_level(void);
 void overlay_set_level(int level);      // from the menu: applied at once, saved as `overlay` in app.txt
+void overlay_notice(const char *text);  // game thread: a one-line message for ~2 s (with the overlay off too)
 void overlay_frame(void);               // game thread, every Present: counters snapshot a few times a second
 void feedback_last_levels(float *heavy, float *light);   // feedback.c: the motor levels last sent (no side effects)
 int x360_shadow_map_size(void);         // x360.m: the shadow map's size when shadows are on
@@ -221,6 +233,7 @@ uint32_t split_fx_drop_count(uint32_t original);
 // Lens raindrops in the X360 order and look (x360_post.m drives it after the composite): one drop record of the game's
 // Rain object (FUN_0073CFA0's view of it, with the variant the PC ignores)
 typedef struct { float x, y, life, size; uint32_t variant; } RainDrop;
+void render_contact_warm(void);   // contact-shadow pipelines, compiled off the frame (render init)
 void render_x360_raindrops_warm(uint32_t dst_surface, uint32_t displace_texture, uint32_t alpha_texture);   // once per sample count, from the composite
 int render_x360_raindrops(uint32_t dst_surface, const RainDrop *d, int n, uint32_t displace_texture, uint32_t alpha_texture, int signature);
 int render_x360_raindrops_view(uint32_t dst_surface, const RainDrop *d, int n, uint32_t displace_texture,
@@ -261,6 +274,10 @@ void padbind_follow(Cpu *c);                // padbind.c: the same change check,
 int padbind_port_begin(int idx);             // temporary P2 layout defaults; returns whether a restore is needed
 void padbind_port_end(int swapped);
 void padbind_swap(int on);                    // padbind.c: controltype.c has preset bindings in the table (padbind_sync leaves the pad alone)
+int pedals_selected(void);
+int pedals_binding(int action, uint32_t out[6]); // effective joystick slots 2/3; no pressure remapping
+int padbind_pedals(int port);               // selected and this logical port has a native PlayStation pad
+void pedals_trace_sample(unsigned step, float lt, float rt);
 enum { PADBIND_ROLE_GAS = 1, PADBIND_ROLE_BRAKE, PADBIND_ROLE_SHIFT, PADBIND_ROLE_OTHER, PADBIND_ROLE_NONE };
 int padbind_trigger_role(int right);        // padbind.c: what L2 (0) / R2 (1) is bound to (a PlayStation pad's set)
 

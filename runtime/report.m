@@ -42,6 +42,7 @@
 
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "report_privacy.h"
 #include "gpuclients.h"
 
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
@@ -91,6 +92,7 @@ static uint64_t nsecs;
 // Cached on the game thread every few seconds, so a report from the hang watchdog or a crash handler needs no
 // Cocoa / GameController calls.
 static char sys_display[160] = "?", sys_edr[128] = "?", sys_presentation[256] = "?", sys_pad[128] = "none", sys_device[96] = "?";
+static char sys_os[128] = "?", sys_model[128] = "?";
 
 static int cmp_f(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
 static AudioDeviceID default_device(void) {
@@ -682,6 +684,8 @@ const char *report_write(const char *category, const char *note, const char *why
         fprintf(f, "note:       %s\n", note && *note ? note : "(none)");
         fprintf(f, "reason:     %s\n", why && *why ? why : "reported from the F10 menu");
         fprintf(f, "build:      %s (speed.exe code %.12s)\n", port_build_id(), speed_exe_fingerprint);
+        fprintf(f, "macOS:      %s\n", sys_os);
+        fprintf(f, "Mac model:  %s\n", sys_model);
         fprintf(f, "game:       %s (game-flow %u), frame %llu, %.0f s since start%s\n", flow_name(flow), flow,
                 (unsigned long long)diag_current_frame(), uptime(), diag_on ? ", BOOT_DIAG on" : "");
         fprintf(f, "display:    %s\n", sys_display);
@@ -710,6 +714,7 @@ const char *report_write(const char *category, const char *note, const char *why
             fmin = fminf(fmin, s->fps); fsum += s->fps; p99max = fmaxf(p99max, s->p99); gsum += s->gpu;
         }
         if (n) fprintf(f, "last %ds:   fps mean %.1f min %.1f, worst p99 %.2f ms, GPU mean %.2f ms\n", n, fsum / n, fmin, p99max, gsum / n);
+        else fprintf(f, "last 60s:   no frame samples yet (fps / p99 / GPU unavailable)\n");
         fprintf(f, "\nsettings that differ from their defaults or are set by a switch:\n");
         int any = print_nondefault(f);
         if (!any) fprintf(f, "  (none)\n");
@@ -717,6 +722,7 @@ const char *report_write(const char *category, const char *note, const char *why
                 logp[0] ? ", log.txt" : "", attach ? ", crash.txt" : "");
         fclose(f);
     }
+    ReportRedactBundle([NSString stringWithUTF8String:dir]);
     snprintf(last_report, sizeof last_report, "%s", dir);
     report_note("report written: %s (%s)", dir, category ? category : "?");
     fprintf(stderr, "boot: problem report written: %s\n", dir);
@@ -755,6 +761,11 @@ static void *watchdog(void *p) {
 // boot.c, after settings_init and before diag_init.
 void report_init(void) {
     t_start = host_ticks();
+    size_t model_size = sizeof sys_model;
+    sysctlbyname("hw.model", sys_model, &model_size, NULL, 0);
+    @autoreleasepool {
+        snprintf(sys_os, sizeof sys_os, "%s", NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String ?: "?");
+    }
     if (!getenv("BOOT_DIAG") && settings_get("diag.full_logging") == 1) {
         char dir[1200], stamp[32];
         time_t now = time(NULL);

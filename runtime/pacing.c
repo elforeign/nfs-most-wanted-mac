@@ -74,7 +74,13 @@ static int catching_up;                    // Scheduler requested multiple ticks
 // switches' held passes draw the same scene: no camera mover or emitter may move either), none otherwise. It quantizes to 1/3600 s (RealTimeElapsed) and carries the rest, so 1/hz s comes out
 // exactly for 60 Hz and its divisors of 3600.
 void f_00661280(Cpu *c) {
-    if (sim_hz && lockstep_now()) MF32(c->esp + 4) = lock_tick ? 1.0f / (float)sim_hz : 0.0f;
+    if (diag_fixed_step) {
+        // Front-end captures: loading can run several main-loop passes per Present.
+        // Advance animation once per image, including the script's frame clock.
+        static uint32_t prepared;
+        MF32(c->esp + 4) = presents != prepared ? 1.0f / 60.0f : 0.0f;
+        prepared = presents;
+    } else if (sim_hz && lockstep_now()) MF32(c->esp + 4) = lock_tick ? 1.0f / (float)sim_hz : 0.0f;
     f_00661280_orig(c);
 }
 
@@ -248,7 +254,8 @@ void f_0065C6D0(Cpu *c) {
     int postfx_ab_hold(void);              // x360_post.m, BOOT_DIAG_POSTFX_AB: drop this pass's time (the next draws the same scene)
     int carpaint_ab_hold(void);            // materials.m, BOOT_DIAG_CARPAINT_AB: same-frame X360 / PC car paint
     int detail_ab_hold(void);              // detail.c, BOOT_DIAG_DETAIL_AB: same-frame detail distances
-    int held = postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold();   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
+    int envcube_ab_hold(void);
+    int held = postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold() | envcube_ab_hold();   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
     if (held) hold_real_time(c);
     uint32_t s = M32(SCHEDULER);
     int frame_pass = presents != presents_adv, lock = sim_hz && s && lockstep_now();

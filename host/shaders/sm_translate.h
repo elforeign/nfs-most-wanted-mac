@@ -73,7 +73,8 @@ typedef struct SmVSAux {
 typedef struct SmPSAux {
     uint32_t alpha_func;     /* D3DCMPFUNC (1 NEVER .. 8 ALWAYS); 0 = alpha test off */
     float    alpha_ref;      /* D3DRS_ALPHAREF / 255 */
-    uint32_t pad0, pad1;
+    uint32_t alpha_to_coverage; /* sharpen alpha for host-enabled MSAA coverage; otherwise exact discard */
+    uint32_t pad1;
     float    bumpenv[8][4];  /* per stage: BUMPENVMAT00, 01, 10, 11 (texbem/bem) */
     float    bumplum[8][4];  /* per stage: BUMPENVLSCALE, BUMPENVLOFFSET, 0, 0 (texbeml) */
     float    lodbias[16];    /* per sampler: D3DSAMP_MIPMAPLODBIAS, added to implicit-LOD lookups (and texldb's bias) */

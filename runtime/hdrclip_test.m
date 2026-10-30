@@ -11,12 +11,17 @@ static int diag_on=1;
 static char *diag_dir="/tmp";
 static uint64_t frame_serial=1;
 static id<MTLDevice> mtl;
+static id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **error) {
+    (void)pass; return [mtl newRenderPipelineStateWithDescriptor:d error:error];
+}
 static id<MTLCommandBuffer> cmd;
 #define M32(a) 6
 #define MF32(a) 15.0f
 #define diag_event(...) ((void)0)
 static void end_pass(void) {}
 static void ensure_cmd(void) {}
+// Standalone SDR display fixture; Auto output startup is tested by hdr_output_test.
+float render_hdr_display_potential(void) { return 1; }
 #include "hdrclip.m"
 int main(int argc,const char **argv) { @autoreleasepool {
     // A real CPU source transform check runs even without a Metal device.

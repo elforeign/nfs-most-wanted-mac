@@ -5,7 +5,8 @@
 // the first time, or when Option is held at launch), and Quit closes the game window, so the game leaves through its
 // own exit path (WM_CLOSE sets ExitTheGameFlag; the main loop ends and DeInitializeEverything runs). Run as
 // runtime/boot <game folder> from a terminal, nothing changes: output stays on the terminal and the folder comes from
-// the command line. user32.m owns the game window and the event pump; this file only builds NSApp and its menus.
+// the command line. user32.m owns the game window and event pump; this file builds NSApp, its menus and the native
+// full-screen request policy.
 #include "roots.h"
 #import <Cocoa/Cocoa.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -28,11 +29,30 @@ extern const char speed_exe_sha256[];   // recomp/out/table.c: the speed.exe the
 int app_bundled;
 extern char **environ;
 
+// BEGIN offline fullscreen policy: nativefs_test.py uses a fake window, without NSApp.
+int app_native_fullscreen(void) {
+    const char *mode = getenv("NFS_FULLSCREEN_MODE");
+    return mode && !strcasecmp(mode, "native");
+}
+int app_request_fullscreen_space(NSWindow *window, int full) {
+    window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+    if (!!(window.styleMask & NSWindowStyleMaskFullScreen) == !!full) return 0;
+    [window toggleFullScreen:nil];
+    return 1;
+}
+// END offline fullscreen policy
+
 // Capture the launch environment before settings_init/report_init export saved switches. Reusing those exports
-// would lock stale app.txt values in the replacement process. Explicit launch overrides are preserved verbatim.
+// would lock stale app.txt values in the replacement process. Preserve launch overrides and their original cwd.
 static char **restart_argv, **restart_env;
 static char *restart_exe;
 static int restart_requested, restart_clean, restart_guarded;
+static void restart_restore_cwd(void) {
+    const char *cwd = getenv("_NFS_RESTART_CWD");
+    if (!cwd) return;
+    // LaunchServices chooses its own cwd. Restore ours before logs, profiles, roots or arguments are read.
+    if (chdir(cwd)) { perror("boot: restart working directory"); _exit(126); }
+}
 static char **copy_strings(char **src, int prefix) {
     int n = 0;
     while (src[n]) ++n;
@@ -46,7 +66,7 @@ static char **copy_strings(char **src, int prefix) {
     return dst;
 }
 // A second invocation of this executable is only a waiter, never a second running game. Register NOTE_EXIT
-// before waiting (or detect an already reaped parent); exec happens after all of the old process has exited.
+// before waiting (or detect an already reaped parent); relaunch happens after all of the old process has exited.
 static void restart_wait(int argc, char **argv) {
     if (argc < 4 || strcmp(argv[1], "--port-restart-wait")) return;
     if (getenv("BOOT_DEADLINE") || getenv("BOOT_BACKGROUND")) _exit(125);
@@ -64,6 +84,32 @@ static void restart_wait(int argc, char **argv) {
             if (rc != 1 || (ev.flags & EV_ERROR)) _exit(125);
         }
         close(q);
+    }
+    if (NSBundle.mainBundle.bundleIdentifier) {
+        @autoreleasepool {
+            // LaunchServices gives the replacement its own process responsibility for privacy prompts.
+            // The waiter has already observed the old game's exit, so saves/audio are fully closed.
+            NSWorkspaceOpenConfiguration *config = [NSWorkspaceOpenConfiguration configuration];
+            config.createsNewApplicationInstance = YES;
+            config.environment = NSProcessInfo.processInfo.environment;
+            NSMutableArray *args = [NSMutableArray array];
+            for (int i = 4; i < argc; ++i) [args addObject:[NSString stringWithUTF8String:argv[i]]];
+            config.arguments = args;
+            dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+            __block int result = 126;
+            [NSWorkspace.sharedWorkspace openApplicationAtURL:NSBundle.mainBundle.bundleURL configuration:config
+                completionHandler:^(NSRunningApplication *app, NSError *error) {
+                    if (app && !error) result = 0;
+                    else fprintf(stderr, "boot: restart LaunchServices failed: %s\n", error.description.UTF8String);
+                    dispatch_semaphore_signal(finished);
+                }];
+            // The completion handler runs on a concurrent queue; synchronize before exiting the waiter.
+            if (dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC))) {
+                fprintf(stderr, "boot: restart LaunchServices timed out\n");
+                _exit(126);
+            }
+            _exit(result);
+        }
     }
     execve(argv[0], argv + 3, environ);
     perror("boot: restart exec");
@@ -98,9 +144,16 @@ static void restart_capture(char **argv) {
     restart_guarded = getenv("BOOT_DEADLINE") != NULL || getenv("BOOT_BACKGROUND") != NULL;
     if (restart_guarded) return;
     if (_NSGetExecutablePath(path, &n) || !realpath(path, absolute)) return;
+    char *cwd = getcwd(NULL, 0), *cwd_env = NULL;
+    if (!cwd) return;
+    int rc = asprintf(&cwd_env, "_NFS_RESTART_CWD=%s", cwd);
+    free(cwd);
+    if (rc < 0) return;
     restart_exe = strdup(absolute);
     restart_argv = copy_strings(argv, 3);
-    restart_env = copy_strings(environ, 0);
+    restart_env = copy_strings(environ, 1);
+    if (!restart_exe || !restart_argv || !restart_env) { free(cwd_env); return; }
+    restart_env[0] = cwd_env;
     atexit(restart_at_exit);             // registered first: audio/rumble/report/save cleanup precedes it
 }
 
@@ -613,11 +666,15 @@ static void profile_lock(void) {
 }
 
 const char *app_start(int argc, char **argv) {
+    restart_restore_cwd();
     restart_wait(argc, argv);
-    restart_capture(argv);
+    unsetenv("_NFS_RESTART_CWD"); // the waiter forwards it; only the replacement consumes it
     @autoreleasepool {
         app_bundled = NSBundle.mainBundle.bundleIdentifier != nil;
         log_setup();
+        extern void pub_update_launch(int *, char ***, const char *);
+        pub_update_launch(&argc, &argv, userdata_dir());
+        restart_capture(argv);  // update startup tokens have been consumed before a later settings restart
         profile_lock();
         const char *arg = NULL;
         for (int i = 1; i < argc; ++i) if (strncmp(argv[i], "-psn_", 5)) { arg = argv[i]; break; }   // Finder's old -psn_ argument

@@ -47,8 +47,10 @@
 #include <unistd.h>
 
 #include "host.h"
+#include "diag_car.h"
 
 int diag_on;
+int diag_fixed_step;
 const char *diag_dir;
 static FILE *events_f, *frames_f;
 static uint64_t frame_now, last_frame_ns;
@@ -774,10 +776,11 @@ static void stats_second(uint64_t frame, uint64_t now, uint32_t state) {
     void render_live_stats(int64_t *tex, int64_t *tex_mb, int64_t *buf, int64_t *buf_mb);
     int64_t lt, ltm, lb, lbm;
     render_live_stats(&lt, &ltm, &lb, &lbm);
-    int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited);
+    int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited, double *min_gain);
     double rms[6] = {0};
     uint64_t mix_clip = 0, mix_limited = 0;
-    int have_rms = dsound_mix_rms(rms, &mix_clip, &mix_limited);
+    double mix_min_gain = 1.0;
+    int have_rms = dsound_mix_rms(rms, &mix_clip, &mix_limited, &mix_min_gain);
     void render_frame_timing(double *wait_ms, double *gpu_ms);
     double wait_ms, gpu_ms;
     render_frame_timing(&wait_ms, &gpu_ms);
@@ -811,7 +814,7 @@ static void stats_second(uint64_t frame, uint64_t now, uint32_t state) {
     char pfx[160];                             // the DualSense's trigger modes and light colour (padfx.m), sent or not
     padfx_diag_text(pfx, sizeof pfx);
     fprintf(stats_f, "t %.1f frame %llu fps %.1f ms p50 %.2f p99 %.2f max %.2f busy %.2f ms (sleep %.2f gil %.2f drawable %.2f) "
-                     "shown %llu/%llu/%llu/%llu/%llu shown_ms_8.3_16.7_25_other_drop %llu/%llu/%llu/%llu/%llu frame_limit %d present_min %.3f ms adaptive %d/%d rss %llu MB (peak %llu) bump %u KB (peak %u) gmalloc %u KB (peak %u) heap %u KB (peak %u) gputex %lld (%lld MB) gpubuf %lld (%lld MB) presentwait %.2f ms gpu %.2f ms mixrms %s%.3f %.3f %.3f %.3f %.3f %.3f clip %llu limit_samples %llu car %.1f flow %u vinyls %u (%u MB) skins %u (%u MB) msaa %dx (%lld MB, %.1f resolves) sstr %u (peak %u) %u/%u B (peak %u) padfx %s\n",
+                     "shown %llu/%llu/%llu/%llu/%llu shown_ms_8.3_16.7_25_other_drop %llu/%llu/%llu/%llu/%llu frame_limit %d present_min %.3f ms adaptive %d/%d rss %llu MB (peak %llu) bump %u KB (peak %u) gmalloc %u KB (peak %u) heap %u KB (peak %u) gputex %lld (%lld MB) gpubuf %lld (%lld MB) presentwait %.2f ms gpu %.2f ms mixrms %s%.3f %.3f %.3f %.3f %.3f %.3f clip %llu limit_samples %llu limit_min_gain %.6f car %.1f flow %u vinyls %u (%u MB) skins %u (%u MB) msaa %dx (%lld MB, %.1f resolves) sstr %u (peak %u) %u/%u B (peak %u) padfx %s\n",
             now / 1e9, (unsigned long long)frame, secs > 0 ? (frame - sec_start_frame) / secs : 0, p50, p99, mx,
             busy, idle_ms[IDLE_SLEEP], idle_ms[IDLE_GIL], idle_ms[IDLE_DRAWABLE],
             (unsigned long long)ph[0], (unsigned long long)ph[1], (unsigned long long)ph[2], (unsigned long long)ph[3], (unsigned long long)ph[4],
@@ -819,7 +822,7 @@ static void stats_second(uint64_t frame, uint64_t now, uint32_t state) {
             (unsigned long long)shown[3], (unsigned long long)shown[4], ps.limit, ps.duration_ms, ps.vrr_requested, ps.adaptive_scheduling,
             (unsigned long long)(rss >> 20), (unsigned long long)(peak_rss >> 20), bump >> 10, peak_bump >> 10, gm >> 10, peak_gm >> 10, hp >> 10, peak_heap >> 10,
             (long long)lt, (long long)ltm, (long long)lb, (long long)lbm, wait_ms, gpu_ms, have_rms ? "" : "(n/a) ",
-            rms[0], rms[1], rms[2], rms[3], rms[4], rms[5], (unsigned long long)mix_clip, (unsigned long long)mix_limited, diag_car_speed(), state, vnv, vmv, vns, vms,
+            rms[0], rms[1], rms[2], rms[3], rms[4], rms[5], (unsigned long long)mix_clip, (unsigned long long)mix_limited, mix_min_gain, diag_car_speed(), state, vnv, vmv, vns, vms,
             render_msaa_samples(), (long long)(render_msaa_bytes() >> 20), resolves, sn, spn, sb, ssz, spb, pfx);
     fflush(stats_f);
     nft = 0;
@@ -991,6 +994,11 @@ void diag_init(void) {
         return;
     }
     diag_on = 1;
+    diag_car_init();
+    diag_fixed_step = getenv("BOOT_DIAG_FIXED_STEP") && atoi(getenv("BOOT_DIAG_FIXED_STEP")) > 0;
+    // Movies decode against wall time. Use the game's own bypass so their EOF
+    // cannot move the title/menu's starting frame in a reference capture.
+    if (diag_fixed_step) M32(0x00926144u) = 1;   // SkipMovies (MoviePlayer/FEngMovieStarter)
     mkdir(diag_dir, 0755);
     char path[1024];
     snprintf(path, sizeof path, "%s/events.log", diag_dir);
@@ -1317,6 +1325,9 @@ static inline float car_f32(uint32_t a) { float f; memcpy(&f, G + a, 4); return 
 FILE *dump_file(void);
 void f_0074E160_orig(Cpu *c);
 void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags, p8, reflection, float, min LOD, max LOD)
+    if (!diag_on) { f_0074E160_orig(c); return; }
+    DiagCarRender sample;
+    diag_car_begin(c, &sample, frame_now);
     FILE *df = diag_on ? dump_file() : NULL;
     uint32_t self = c->ecx, view = arg(c, 0);
     if (df) fprintf(df, "car: Render %08X view %u flags %X p8 %u refl %u lod %d..%d (+0x1628 %d +0x162C %d) from %08X\n", self,
@@ -1324,6 +1335,7 @@ void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags
                     (int)M32(self + 0x162C), M32(c->esp));
     uint32_t fail0 = M32(0x00915F98u), vid = M32(view + 4);
     f_0074E160_orig(c);
+    diag_car_end(c, &sample);
     if (df) fprintf(df, "car: Render %08X view %u -> %u\n", self, M32(view + 4), c->eax & 0xFF);
     if (vid == 1) { ++diag_car1[0]; diag_car1[1] += c->eax & 1; diag_car1[2] += M32(0x00915F98u) != fail0; }   // frames.log `cars1`
     else if (vid == 4) ++diag_car1[3];

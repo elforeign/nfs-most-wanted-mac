@@ -162,7 +162,7 @@ static void hc_scan_texture(id<MTLCommandBuffer> cb,id<MTLTexture> t,id<MTLBuffe
         NSError *error=nil;id<MTLLibrary> l=[mtl newLibraryWithSource:src options:nil error:&error];
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[l newFunctionWithName:@"hc_vs"];pd.fragmentFunction=[l newFunctionWithName:@"hc_scan"];
         pd.colorAttachments[0].pixelFormat=MTLPixelFormatR8Unorm;pd.colorAttachments[0].writeMask=MTLColorWriteMaskNone;
-        scan[ms]=[mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+        scan[ms]=pipeline_build(pd, __func__, &error);
         if(!scan[ms]){diag_event("hdrclip: scan compile failed %s",error.localizedDescription.UTF8String);return;}
     }
     NSUInteger w=(t.width+31)/32,h=t.height;
@@ -197,7 +197,7 @@ static void hdrclip_pair(id<MTLTexture> src,id<MTLTexture> dst,unsigned stage) {
         NSString *source=[NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 vs(uint v [[vertex_id]]){float2 p=float2((v<<1)&2,v&2);return float4(p*2-1,0,1);}\nfragment void fs(float4 pos [[position]],%@ s [[texture(0)]],%@ d [[texture(1)]],device atomic_uint *b [[buffer(0)]],constant uint &stage [[buffer(1)]]){uint n[4]={};for(uint x=uint(pos.x)*32;x<min(uint(pos.x)*32+32,s.get_width());x++){uint2 p=uint2(x,uint(pos.y));%@%@n[0]++;for(uint k=0;k<3;k++){n[1]+=uint(a[k]>1);n[2]+=uint(a[k]>1 && c[k]<=1);}n[3]+=uint(any((as_type<uint4>(c)&0x7f800000u)==0x7f800000u));}for(uint k=0;k<4;k++)if(n[k])atomic_fetch_add_explicit(b+stage*4+k,n[k],memory_order_relaxed);}",src.sampleCount>1?ms:type,dst.sampleCount>1?ms:type,readA,readB];
         NSError *error=nil;id<MTLLibrary> lib=[mtl newLibraryWithSource:source options:nil error:&error];
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[lib newFunctionWithName:@"vs"];pd.fragmentFunction=[lib newFunctionWithName:@"fs"];pd.colorAttachments[0].pixelFormat=MTLPixelFormatR8Unorm;pd.colorAttachments[0].writeMask=MTLColorWriteMaskNone;
-        psos[variant]=[mtl newRenderPipelineStateWithDescriptor:pd error:&error];
+        psos[variant]=pipeline_build(pd, __func__, &error);
         if(!psos[variant]){diag_event("hdrclip pair compile: %s",error.localizedDescription.UTF8String);return;}
     }
     NSUInteger w=(src.width+31)/32,h=src.height;

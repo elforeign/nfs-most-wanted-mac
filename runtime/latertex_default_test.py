@@ -73,6 +73,8 @@ def packaging(root):
     runtime.mkdir(parents=True)
     script = runtime / 'bundle.sh'
     script.write_bytes((RUNTIME / 'bundle.sh').read_bytes())
+    (runtime / 'docs').mkdir()
+    (runtime / 'docs/guide.md').write_bytes((RUNTIME / 'docs/guide.md').read_bytes())
     boot = runtime / 'boot'
     boot.write_text('#!/bin/sh\nexit 0\n')
     boot.chmod(0o755)

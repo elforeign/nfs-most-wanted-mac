@@ -4,14 +4,22 @@
 #include <stdlib.h>
 #include <strings.h>
 
-static inline int nfs_hdr_output_requested(void) {
+// Sampled on the main thread by the presenter, before float-scene startup.
+float render_hdr_display_potential(void);
+static inline int nfs_hdr_output_mode(void) {
     const char *value=getenv("NFS_HDR_OUTPUT");
-    if(!value)return 0;
+    if(!value)return 0; // Auto
     while(isspace((unsigned char)*value))++value;
-    if(strncasecmp(value,"edr",3))return 0;
-    value+=3;
-    while(isspace((unsigned char)*value))++value;
-    return !*value;
+    const char *end=value;
+    while(*end)++end;
+    while(end>value && isspace((unsigned char)end[-1]))--end;
+    if(end-value==3 && !strncasecmp(value,"edr",3))return 2;
+    if(end-value==4 && !strncasecmp(value,"auto",4))return 0;
+    return 1; // Off, including unsupported spellings
+}
+static inline int nfs_hdr_output_requested(void) {
+    int mode=nfs_hdr_output_mode();
+    return mode==2 || (mode==0 && render_hdr_display_potential()>1);
 }
 
 #ifdef __OBJC__

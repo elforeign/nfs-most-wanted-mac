@@ -30,6 +30,9 @@ static int diag_on=1,gpt_on;
 static char *diag_dir="/tmp";
 static uint64_t frame_serial=1;
 static id<MTLDevice> mtl;
+static id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
+    (void)pass; return [mtl newRenderPipelineStateWithDescriptor:d error:e];
+}
 static id<MTLCommandBuffer> cmd;
 static id<MTLLibrary> blit_lib;
 static id<MTLRenderPipelineState> blit_pso;
@@ -43,6 +46,8 @@ static void end_pass(void){}
 static void ensure_cmd(void){}
 static uint32_t mipdim(uint32_t x,uint32_t l){return (x>>l)?x>>l:1;}
 #define HDRCLIP_COPY_TEST 1
+// Standalone SDR display fixture; Auto output startup is tested by hdr_output_test.
+float render_hdr_display_potential(void) { return 1; }
 #include "hdrclip.m"
 '''
 main=r'''

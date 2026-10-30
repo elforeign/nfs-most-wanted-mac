@@ -195,6 +195,7 @@ typedef struct DsStats {
     uint64_t window;          /* mixed frames in that window */
     uint64_t limited;         /* samples with look-ahead gain < 1, all 6 channels; Snd counts at its source clock,
                                 other streams at the mix clock; excludes the post-resampler safety bound */
+    double limit_min_gain;    /* BOOT_DIAG: minimum linked gain this window; 1 when idle/bypassed/off */
     float dip[6];             /* per-channel lowest RMS of a 50 ms stretch (2400 frames) in that window, -1 if none ended */
 } DsStats;
 DsResult ds_device_get_stats(DsDevice *dev, DsStats *stats);

@@ -62,6 +62,10 @@ static int console(void) { return con; }
 static int keep_get(uint32_t o) { (void)o; return 0; }
 static uint32_t cap_get(uint32_t o) { (void)o; return 0; }
 static uint32_t glyph_sub(uint32_t tex) { return tex==111 ? 222:0; }
+// Prompt diagnostics are a sink; this harness exercises render ownership and routing.
+static void render_inventory(Cpu *c,uint32_t o,uint32_t f,uint32_t tex,uint32_t sub) {
+ (void)c;(void)o;(void)f;(void)tex;(void)sub;
+}
 uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *a) {
  (void)n; ++devcalls; CHECK(a[0]==0x420000);
  switch(fn) {

@@ -25,8 +25,25 @@ int mat_aux_constants(const SmResult *vs, const float (*vsc)[4], float out[52][4
 char *mat_aux_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint);
 
 // Extra constants of a replacement pixel shader: fragment buffer(MAT_PS_BUF), filled per draw by the entry.
+void materials_set_headlamp_glass(int clear);
+
 enum { MAT_PS_BUF = 4 };
 typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all 12; the others declare 4 and ignore the rest
+
+// Clear polycarbonate cover: n=1.5848 gives F0=0.0511871368; no diffuse colour.
+// Measured PC reference: n=1.5849 at 587.6 nm, 20 C (Table 1):
+// https://joam.inoe.ro/articles/application-of-optical-polymers-in-plastic-or-hybrid-glass-plastic-optics/fulltext
+// The separate aluminium reflector retains its material (F0 0.81-0.916).
+#define CLEAR_HEADLAMP_MSL \
+"static float4 clear_lamp(float4 tex, float4 light, float3 specular, float3 environment, float nv, float native_cover) {\n" \
+"    float n = 1.5848f;\n" \
+"    float r = (n - 1.0f) / (n + 1.0f);\n" \
+"    float f0 = r * r;\n" \
+"    float f = f0 + (1.0f - f0) * pow(1.0f - saturate(nv), 5.0f);\n" \
+"    float a = native_cover > 0.5f ? tex.a * (0.1f + 0.9f * f) : tex.a * light.a;\n" \
+"    if (a <= 0.0f) return float4(0.0f);\n" \
+"    return float4((specular * f0 + environment * f) / a, a);\n" \
+"}\n"
 
 #ifndef NFS_PUBLIC
 #include "carbon_lamp_private.h"
@@ -35,7 +52,10 @@ typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all
 #define CARBON_LAMP_MSL \
 "static float4 carbon_lamp(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) {\n" \
 "    return float4(light.rgb * shade * tex.rgb + specular + reflection, tex.a * light.a);\n" \
-"}\n"
+"}\n" \
+"static float4 carbon_lamp_retail(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) { return carbon_lamp(tex, light, shade, specular, reflection, masks); }\n" \
+CLEAR_HEADLAMP_MSL
+#define CARBON_LAMP_RETAIL_MSL "static float4 carbon_lamp(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) { return float4(light.rgb * shade * tex.rgb + specular + reflection, tex.a * light.a); }\n"
 #endif
 
 // Called by render.m's compile_entry (any thread) after sm_translate succeeded: the replacement MSL (malloc'd) when
@@ -43,8 +63,10 @@ typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all
 // The replacement keeps the translation's binding contract, so `refl` stays valid for binding.
 char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 // Lamp-only cache variant: native/Off retains mat_replace's original source.
-enum { MAT_VARIANT_CARBON_LAMP = 0x107 };
+enum { MAT_VARIANT_CARBON_LAMP = 0x107, MAT_VARIANT_HEADLAMP_CLEAR = 0x108 };
 int mat_carbon_lamp_draw(void);
+int mat_headlamp_clear_draw(void);
+char *mat_headlamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 enum { MAT_VARIANT_SOFT_SMOKE = 0x104, MAT_VARIANT_SOFT_SMOKE_RESOLVED = 0x105, MAT_VARIANT_SOFT_SMOKE_LATE = 0x106 };
 int mat_is_particle(int id);

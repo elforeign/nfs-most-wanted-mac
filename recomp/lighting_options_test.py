@@ -213,8 +213,7 @@ const char *app_pref(const char *key) {
     return !strcmp(key, "graphics.tunnel_shadows") ? saved_tunnel : "50"; // stale shade preference
 }
 void app_pref_set(const char *key, const char *v) {
-    assert(!strcmp(key, "graphics.tunnel_shadows"));
-    snprintf(saved_tunnel, 16, "%s", v);
+    if (!strcmp(key, "graphics.tunnel_shadows")) snprintf(saved_tunnel, 16, "%s", v);
 }
 void report_note(const char *fmt, ...) { }
 int postfx_look_variant(const char *v) { return 0; }

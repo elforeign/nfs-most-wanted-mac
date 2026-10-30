@@ -204,6 +204,7 @@ struct DsDevice {
     bool follow_rate = false;          // the mix rate follows the primary buffer's SetFormat (not in Dolby Digital)
     int format_rate = 0;               // the primary buffer's SetFormat rate, 0 until set
     int fixed_rate = 0;                // NFS_AUDIO_RATE / cfg.mix_rate when given
+    int requested_latency = 0;
     bool fixed_latency = false;        // cfg.latency_frames was given
     std::mutex reconf;                 // serializes output restarts
     std::unique_ptr<media::AudioOutput> out;
@@ -238,6 +239,7 @@ struct DsDevice {
     Clock::time_point snap_time, t0;   // t0: null sink clock origin
 
     std::vector<float> tmp, scratch, block;
+    const bool diag = getenv("BOOT_DIAG") && *getenv("BOOT_DIAG");
     PeakLimiter limiter;
     bool limiter_on = false;
     bool source_limiter = false;
@@ -294,6 +296,13 @@ void launch_opened(DsDevice &d) {
 // Frames the mixer keeps ahead of the device: more for the bitstreams, whose encoders hold frames back (an AC-3 frame;
 // TrueHD's 16-unit restart interval plus a 960-frame MAT frame) and whose devices take whole bursts.
 int default_latency(DsOutputMode m) { return m == DS_OUT_TRUEHD ? 4096 : bitstream(m) ? 3072 : 1024; }
+// Apply after every open/reuse and while mixing: device timing can change without a reopen.
+// Even an explicit PCM target must cover the hardware callback period.
+void output_latency(DsDevice &d) {
+    int target = d.fixed_latency ? d.requested_latency : default_latency(d.cfg.mode);
+    if (d.out && !bitstream(d.cfg.mode)) target = std::max(target, d.out->minimum_queue_frames());
+    d.cfg.latency_frames = target;
+}
 DsOutputMode ds_mode(media::OutputMode m) {
     switch (m) {
     case media::OutputMode::TrueHd: return DS_OUT_TRUEHD;
@@ -523,7 +532,7 @@ void mix_block(DsDevice &d, size_t n, std::vector<uint32_t> &events) {
     if (limit && !d.source_limiter) {
         if (!d.limiter_on || d.limiter.rate() != d.cfg.mix_rate) d.limiter.reset(d.cfg.mix_rate);
         d.limiter_on = true;
-        d.limited += d.limiter.process(out, n) * kOut;
+        d.limited += d.limiter.process(out, n, d.diag) * kOut;
     } else if (limit) {
         // Snd has already limited before int16 conversion. Catmull-Rom can overshoot between those
         // samples: bound the resampled frame with one gain, without adding another delay/release.
@@ -604,6 +613,7 @@ void mixer_thread(DsDevice *dp) {
         size_t pending = 0;
         {
             std::lock_guard<std::mutex> g(d.m);
+            if (d.cfg.sink == DS_SINK_DEVICE && !bitstream(d.cfg.mode)) output_latency(d);
             wall = d.cfg.sink == DS_SINK_NULL || d.detached;
             dd = !wall && bitstream(d.cfg.mode);
             if (wall) {
@@ -944,7 +954,7 @@ void follow_output(DsDevice &d) {
             std::lock_guard<std::mutex> g(d.m);
             uint64_t p = played_now(d);
             d.cfg.mode = mode;
-            if (!d.fixed_latency) d.cfg.latency_frames = default_latency(mode);
+            output_latency(d);
             if (rate != d.cfg.mix_rate) rebase_rate(d, rate);
             else { d.snap_played = p; d.snap_time = Clock::now(); d.primed = false; }
             d.detached = false;
@@ -988,6 +998,7 @@ void stop_thread(DsDevice &d) {
 }
 
 void start_thread(DsDevice &d) {
+    if (d.cfg.sink == DS_SINK_DEVICE) output_latency(d);
     if (d.cfg.sink == DS_SINK_MANUAL) return;
     d.running = true;
     d.thread = std::thread(mixer_thread, &d);
@@ -1059,7 +1070,7 @@ void ds_device_limit_game_mix(DsDevice *d, float *pcm6, size_t frames, int rate)
     if (d->limiter_generation != generation) { d->limiter_on = false; d->limiter_generation = generation; }
     if (!d->limiter_on || d->limiter.rate() != rate) d->limiter.reset(rate);
     d->limiter_on = true;
-    d->limited += d->limiter.process(pcm6, frames) * kOut;
+    d->limited += d->limiter.process(pcm6, frames, d->diag) * kOut;
 }
 
 void ds_device_launch_reopen_tick(DsDevice *d, int paused) {
@@ -1128,6 +1139,7 @@ DsResult ds_device_create(const DsConfig *cfg_in, DsDevice **out) {
     d->choice_gen = g_choice_gen.load();             // the choice this config was made with
     d->fixed_rate = fixed_rate;
     d->fixed_latency = fixed_latency;
+    d->requested_latency = fixed_latency ? cfg.latency_frames : 0;
     if (cfg.speaker_config) d->speaker = cfg.speaker_config;
     make_format(d->primary_fmt, 2, 22050, 8);  // DirectSound's default primary format
     d->t0 = d->snap_time = d->retry_at = d->created = Clock::now();
@@ -1384,6 +1396,7 @@ DsResult ds_device_get_stats(DsDevice *d, DsStats *s) {
     }
     s->window = d->stat_frames;
     s->limited = d->limited;
+    s->limit_min_gain = d->limiter.take_min_gain();
     d->limited = 0;
     d->stat_frames = 0;
     return DS_OK;

@@ -84,6 +84,7 @@
 00516230    padprompts.c: FEngHidePCObjects::Callback (console prompts: nothing hidden, the set chosen when drawn)
 00514CC0    padprompts.c: FEngSetVisible (also shows the console prompt set)
 005A45B0    padprompts.c: cFEngRender::RenderObject (keycaps or console glyphs by the active input; glyph art)
+00503400    padprompts.c: GetTextureInfo (private prompt art outside the fixed extra-texture list)
 00525520    padprompts.c: cFEngGameInterface::PackageWasLoaded (diagnostics: prompts.txt; the controller-diagram loading screen's image)
 006C6300    lighting.c: world DiffuseColour setter (World lighting: elevation-based direct sun)
 006C6450    lighting.c: world AmbientColour setter (World lighting: Neutral ambient desaturation)
@@ -118,10 +119,11 @@
 007A77F0    gameplay_opts.c: FEMarkerSelection::Redraw (Markers per Rival: Selections Remaining counts from N)
 00443BA0    gameplay_opts.c: AIPursuit::OnTask (Heat Level: the pursuit's heat range)
 005992E0    gameplay_opts.c: cFrontendDatabase::cFrontendDatabase (Black Edition content after the INGAMEC.BUN check)
+0057A110    roam_hud.c: Minimap::UpdateAiRacerElements (online names and spare racer icons)
 005DD090    gameplay_opts.c: GRaceBin::EnableBarriers (Open Map: the career's region barriers)
 005FF990    gameplay_opts.c: GRaceStatus::ComputeCatchUpSkill (No Catch-up, default on: no rubber banding)
 00518B40    gameplay_opts.c: MemoryCard::ListOldSaveFilesPC (Starting Bonus: the NFSU2-save $10,000)
-0074E160    diag.c: CarRenderInfo::Render (BOOT_DIAG_DRAWS: view, flags, LOD range per car render)
+0074E160    diag.c/diag_car.c: CarRenderInfo::Render (BOOT_DIAG: sampled rejection edges; BOOT_DIAG_DRAWS: view, flags, LOD)
 007387E0    diag.c: CarRenderInfo::RenderPart (BOOT_DIAG_DRAWS: part slot, LOD, model per view)
 00457F90    attrib_x360.c: Attrib::Collection::Collection (X360 data laid over the PC collections as the vaults load)
 00457670    attrib_x360.c: Attrib::Vault::Initialize (the X360-only collections appended to the five drag-race vaults)
@@ -255,6 +257,8 @@
 00752940    car85.c: LoadedWheel (RideInfo model namespace)
 00752B60    car85.c: LoadedCar model hashes (RideInfo model namespace)
 00755800    car85.c: CarRenderInfo parts (RideInfo model namespace)
+00750B20    car85.c: CarRenderConn::OnLoaded (owned stock-rim blur period)
+00739B40    car85.c: RideInfo cabin LOD range (owned near interiors and driver)
 0075F5D0    car85.c: CarRenderInfo constructor (RideInfo model namespace)
 00739870    car85.c: MapCarTypeNameHashToIndex (CAR85 reuses donor part namespace)
 00681340    car85.c: CollisionGeometry::Collections::Find (CAR85 reuses donor collision bounds)
@@ -267,3 +271,8 @@
 0057F1D0    onscreen_keyboard.c: text capture generation and physical pad ownership
 00586580    onscreen_keyboard.c: retire text target before destruction
 00516520    onscreen_keyboard.c: initiating FE joy mask for text ownership
+006A8870    pedals.c: diagnostic human input identity after FetchInput
+0069D4D0    pedals.c: diagnostic physics pedal values after ComputeState
+0075AAD0    roam_game.c: World_Service (online free roam: local car out, friends' poses in; NFS_ROAM)
+00663D30    roam_game.c: MainLoop (online session cleanup also runs without a simulation)
+0069B740    roam_game.c: RBVehicle::CanCollideWith (online free roam: ghosted friend cars collide with nothing)
