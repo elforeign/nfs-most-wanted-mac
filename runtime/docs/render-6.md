@@ -34,3 +34,7 @@ Offline width reference: an opaque projected strip retains its RGB contrast and 
 ## Display changes mid-run (`user32.m` display_poll, `widescreen.c`)
 
 The main display can change under a running game (a TV waking, mirroring). `NSApplicationDidChangeScreenParametersNotification` marks it; 0.7 s after the last one (a debounce for the burst), and not while the F10 menu is open, full screen windows re-fit the screen. If the game is on the native resolution (and `g_RacingResolution` isn't a BOOT_REG override, Options not mid-edit), the resolution list is rebuilt for the new display and the game's own resolution change runs (`LoadedFlagMaybe` 982C39: eDisplayFrame resets the device at the new size). A resolution picked in Options stays. Log: `boot: display changed`, `boot: native resolution A -> B`, then the new swap chain. Test: `NFS_TEST_DISPLAY_CHANGE=<secs>:<WxH>` (with `NFS_DISPLAY_PIXELS` for the start size) pretends the display became WxH pixels after that many seconds.
+
+| Internal switch | Default | Behavior |
+|---|---|---|
+| `NFS_POST_CUTS` | `0` | `1`: discard the final treatment load for complete non-split targets; use 25 weighted bilinear curve taps at 3840×2160 only. Discard ordinary coverage D16 after use; resolve R8 without storing MS samples only for empty coverage, resetting it to Clear for any continuation. Nonempty MS masks retain their samples for incremental reuse; split/partial-source, proof and nonempty reuse paths retain all stores. Off retains the legacy shader source and attachment actions. |

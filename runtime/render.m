@@ -10,6 +10,7 @@
 // Split by owner (ARCHITECTURE.md, renderer file map): render_target.m (MSAA, resolves), render_present.m (Present, frame
 // timing, diag capture encoding), render_post.m (X360 post + mirror), render_query.m (occlusion queries); what they
 // share is declared in render_internal.h. This file keeps the draw, pipeline, sampler and texture core.
+#include "post_cuts.h"
 #include "render_internal.h"
 #include "lampbatch.h"
 #include "alpha_to_coverage.h"
@@ -951,28 +952,33 @@ static int ssao_depth_prepare(id<MTLTexture> z) {
     [e setRenderPipelineState:ssao_depth_pipeline];[e setDepthStencilState:ssao_write_depth];[e setFragmentTexture:z atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];ssao_half_serial=frame_serial;return 1;
 }
-static void ssao_open(id<MTLTexture> z) {
+static void ssao_open(id<MTLTexture> z, int allow_cuts) {
     end_pass();ensure_cmd();RenderTex *target=ssao_target();
+    unsigned cuts=allow_cuts?post_cuts_ao(ssao_proof(),target==&ssao_mask && z==ssao_half_depth,
+                               ssao_cleared==frame_serial,rt_render_list_ops(ssao_rec)==0):0;
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture=target->ms?target->ms:target->tex;
     rp.colorAttachments[0].loadAction=ssao_reference_record||ssao_cpu_reference_record||ssao_cleared!=frame_serial?MTLLoadActionClear:MTLLoadActionLoad;
     rp.colorAttachments[0].clearColor=MTLClearColorMake(1,1,1,1);rp.colorAttachments[0].storeAction=MTLStoreActionStore;
-    if(target->ms){rp.colorAttachments[0].resolveTexture=target->tex;rp.colorAttachments[0].storeAction=MTLStoreActionStoreAndMultisampleResolve;[rp setSamplePositions:ssao_samples count:4];}
-    rp.depthAttachment.texture=z;rp.depthAttachment.loadAction=MTLLoadActionLoad;rp.depthAttachment.storeAction=MTLStoreActionStore;
+    if(target->ms){rp.colorAttachments[0].resolveTexture=target->tex;rp.colorAttachments[0].storeAction=(cuts&POST_CUTS_AO_MS)?MTLStoreActionMultisampleResolve:MTLStoreActionStoreAndMultisampleResolve;[rp setSamplePositions:ssao_samples count:4];}
+    rp.depthAttachment.texture=z;rp.depthAttachment.loadAction=MTLLoadActionLoad;rp.depthAttachment.storeAction=(cuts&POST_CUTS_AO_DEPTH)?MTLStoreActionDontCare:MTLStoreActionStore;
     if(z.pixelFormat==MTLPixelFormatDepth32Float_Stencil8){rp.stencilAttachment.texture=z;rp.stencilAttachment.loadAction=MTLLoadActionDontCare;rp.stencilAttachment.storeAction=MTLStoreActionDontCare;}
     if(gpt_on)gpt_render_auto(rp,ssao_reference_record?"ssao reference coverage":"ssao half coverage");
     enc=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(enc);enc_samples=(uint32_t)rp.colorAttachments[0].texture.sampleCount;
     memset(&eb,0,sizeof eb);pass_dirty=0;if(!ssao_reference_record)ssao_cleared=frame_serial;
+    // A discarded all-white MS mask can be reconstructed by the next Clear.
+    // Leave nonempty/reused masks and proof bookkeeping on the original path.
+    if(cuts&POST_CUTS_AO_MS)ssao_cleared=0;
 }
-id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth) {
+id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth, int allow_cuts) {
     if (!x360_post_ssao_enabled() || !ssao_mask.tex || ssao_serial!=frame_serial || ssao_depth!=depth) return nil;
     uint64_t t0=ssao_cpu_diag?host_ticks():0;
     if (!ssao_depth_prepare(depth)) return nil;
     if (ssao_cleared!=frame_serial || rt_render_list_ops(ssao_rec)) {
-        ssao_open(ssao_half_depth);rt_render_list_replay(ssao_rec,enc);end_pass();memset(&ssao_eb,0,sizeof ssao_eb);
+        ssao_open(ssao_half_depth,allow_cuts);rt_render_list_replay(ssao_rec,enc);end_pass();memset(&ssao_eb,0,sizeof ssao_eb);
     }
-    if(ssao_proof()&&ssao_reference_rec){ssao_reference_record=1;ssao_open(depth);lamprec_replay(ssao_reference_rec,enc);end_pass();ssao_reference_record=0;memset(&ssao_reference_eb,0,sizeof ssao_reference_eb);}
-    if(ssao_proof()&&ssao_cpu_reference_rec){ssao_cpu_reference_record=1;ssao_open(ssao_half_depth);lamprec_replay(ssao_cpu_reference_rec,enc);end_pass();ssao_cpu_reference_record=0;memset(&ssao_cpu_reference_eb,0,sizeof ssao_cpu_reference_eb);}
+    if(ssao_proof()&&ssao_reference_rec){ssao_reference_record=1;ssao_open(depth,0);lamprec_replay(ssao_reference_rec,enc);end_pass();ssao_reference_record=0;memset(&ssao_reference_eb,0,sizeof ssao_reference_eb);}
+    if(ssao_proof()&&ssao_cpu_reference_rec){ssao_cpu_reference_record=1;ssao_open(ssao_half_depth,0);lamprec_replay(ssao_cpu_reference_rec,enc);end_pass();ssao_cpu_reference_record=0;memset(&ssao_cpu_reference_eb,0,sizeof ssao_cpu_reference_eb);}
     if(ssao_cpu_diag)ssao_diag_replay_ns+=host_ticks()-t0;
     return ssao_mask.tex;
 }

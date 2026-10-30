@@ -1,6 +1,7 @@
 // render_post.m - the X360 post passes and the mirror pass (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 #include "hdrclip.h"
+#include "post_cuts.h"
 #include "gen/x360_shader_lits.inc"   // tools/gen_tables.py: X360S_VT_* (the X360 visualtreatment PS literals, fs_vt)
 #include "gen/x360_engine.inc"         // X360E_DROP_* (the lens raindrops, from default.xex)
 
@@ -168,6 +169,24 @@ static const char *x360_src =
 "}\n";
 
 #include "lampglow_shader.h"
+
+// Separate curve library: Off never compiles or appends this source.
+id<MTLRenderPipelineState> post_cuts_curve_pipeline(id<MTLDevice> device, MTLPixelFormat format) {
+    static id<MTLLibrary> lib;
+    static id<MTLRenderPipelineState> pipelines[2];
+    unsigned slot=format==MTLPixelFormatRGBA16Float;
+    if (!pipelines[slot]) {
+        NSError *error=nil;
+        if (!lib) lib=[device newLibraryWithSource:hdrclip_shader([NSString stringWithUTF8String:post_cuts_curve_source()]) options:nil error:&error];
+        if (!lib) return nil;
+        MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
+        d.vertexFunction=[lib newFunctionWithName:@"vs_full"];
+        d.fragmentFunction=[lib newFunctionWithName:@"fs_tdown"];
+        d.colorAttachments[0].pixelFormat=format;
+        pipelines[slot]=pipeline_build(d,"post_curve",&error);
+    }
+    return pipelines[slot];
+}
 
 // BEGIN HDR output M post variant (also compiled by hdr_output_test.py).
 // The legacy shader source is untouched. Only EDR composition uses this variant:
@@ -708,7 +727,7 @@ static id<MTLTexture> x_crop(id<MTLTexture> src, const uint32_t r[4], id<MTLText
 // Only available after the optional renderer coverage hook has captured this
 // frame. Missing coverage fails closed, never darkening transparency by guess.
 extern int x360_post_ssao_enabled(void);
-extern id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth);
+extern id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth, int allow_cuts);
 extern id<MTLTexture> render_ssao_reference_coverage(void);
 extern id<MTLTexture> render_ssao_cpu_reference_coverage(void);
 extern int postfx_look_variant(const char *v);
@@ -825,7 +844,7 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
                                     const X360PostParams *p, const X360PostView *view) {
     xr->ao_ready=0;
     if (!x360_post_ssao_enabled() || !depth) return scene;
-    id<MTLTexture> mask=render_ssao_coverage(depth);
+    id<MTLTexture> mask=render_ssao_coverage(depth,!view && scene.width==depth.width && scene.height==depth.height);
     if (!mask) {
         static int warned;
         if (diag_on && !warned) { warned=1;diag_event("ssao: On requested, skipped without current transparency coverage"); }
@@ -1146,7 +1165,12 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         if (!xt_t || xt_t.width != tw || xt_t.height != th) xt_t = x_rt(tw, th, 0);
         memset(&k, 0, sizeof k);
         k.p0[0] = 2.0f * (s - 1.0f); k.p0[1] = ceilf(k.p0[0] - 1e-4f); k.p0[2] = 1.0f / (w / 4); k.p0[3] = 1.0f / (h / 4);
-        x_pass(xp_tdown, xt_t, nil, xt_q0, xs_lin, &k, nil, HC_CURVE);
+        id<MTLRenderPipelineState> curve=xp_tdown;
+        if (post_cuts_curve((uint32_t)scene.width,(uint32_t)scene.height,view!=NULL)) {
+            id<MTLRenderPipelineState> cut=post_cuts_curve_pipeline(mtl,xt_t.pixelFormat);
+            if (cut) curve=cut;
+        }
+        x_pass(curve, xt_t, nil, xt_q0, xs_lin, &k, nil, HC_CURVE);
         tsrc = xt_t;
     }
     // speed-blur taps: the X360's 7 steps at 720p; more over the same length at higher resolutions so the steps stay
@@ -1187,7 +1211,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     }
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = proof<4?proof_color:out; rp.colorAttachments[0].level = proof<4?0:dl; rp.colorAttachments[0].slice = proof<4?0:dsl;
-    rp.colorAttachments[0].loadAction = proof<4?MTLLoadActionDontCare:MTLLoadActionLoad;
+    rp.colorAttachments[0].loadAction = proof<4 || post_cuts_full_target(view!=NULL,(unsigned)dl,(unsigned)dsl,w,h,(uint32_t)out.width,(uint32_t)out.height)?MTLLoadActionDontCare:MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (proof<4&&out.sampleCount>1) {
         rp.colorAttachments[0].resolveTexture=proof_resolved;

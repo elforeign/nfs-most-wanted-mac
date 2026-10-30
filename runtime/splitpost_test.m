@@ -22,7 +22,7 @@ void render_soft_smoke_late(id<MTLTexture> scene){(void)scene;}
 id<MTLTexture> render_soft_smoke_layer(void){return nil;}
 void render_soft_smoke_layer_applied(void){}
 void render_soft_smoke_late_finish(id<MTLTexture> scene){(void)scene;}
-id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth){(void)depth;CHECK(0);return nil;}
+id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth,int allow_cuts){(void)allow_cuts;(void)depth;CHECK(0);return nil;}
 void diag_png(const char *path,const void *p,uint32_t w,uint32_t h,uint32_t pitch,int alpha){
  (void)path;(void)p;(void)w;(void)h;(void)pitch;(void)alpha;CHECK(0);
 }

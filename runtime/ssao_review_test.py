@@ -299,7 +299,7 @@ static void gpt_name(id x){(void)x;}
     for mode in ('r8-fixed','bgra-mutant'):
         alloc=function(src,'ssao_prepare')
         if mode=='bgra-mutant':alloc=alloc.replace('MTLPixelFormatR8Unorm','MTLPixelFormatBGRA8Unorm')
-        body=layout+alloc+chr(10)+function(src,'ssao_open')+r'''
+        body=layout+'\n#include "post_cuts.h"\nstatic id ssao_rec; static unsigned rt_render_list_ops(id x){(void)x;return 0;}\n'+alloc+chr(10)+function(src,'ssao_open')+r'''
 int main(void){@autoreleasepool{
  mtl=(id)[Device new];Command*c=[Command new];cmd=(id)c;
  Texture*z=[Texture new];z.width=3440;z.height=2160;z.sampleCount=4;z.pixelFormat=MTLPixelFormatDepth32Float_Stencil8;
@@ -308,13 +308,13 @@ int main(void){@autoreleasepool{
  CHECK(ssao_mask.tex.pixelFormat==MTLPixelFormatR8Unorm);CHECK(ssao_mask.tex.sampleCount==1&&ssao_mask.ms.sampleCount==4);
  CHECK(ssao_half_depth.width==1720&&ssao_half_depth.height==1080&&ssao_half_depth.sampleCount==4&&ssao_half_depth.pixelFormat==MTLPixelFormatDepth16Unorm);
  Texture*resolved=[Texture new];resolved.width=3440;resolved.height=2160;resolved.sampleCount=1;resolved.pixelFormat=z.pixelFormat;
- ssao_open(ssao_half_depth);CHECK(c.last.depthAttachment.texture==ssao_half_depth);
+ ssao_open(ssao_half_depth,0);CHECK(c.last.depthAttachment.texture==ssao_half_depth);
  CHECK(c.last.colorAttachments[0].texture==ssao_mask.ms);CHECK(c.last.colorAttachments[0].resolveTexture==ssao_mask.tex);CHECK(c.last.depthAttachment.loadAction==MTLLoadActionLoad);
  CHECK(enc_samples==4);printf("coverage layout failures: %d",failures);puts("");return 0;
 }}
 '''
         f=td/(mode+'.m');f.write_text(body);exe=td/mode
-        run(['clang','-O1','-w','-fobjc-arc',f,'-framework','Metal','-framework','Foundation','-o',exe])
+        run(['clang','-O1','-w','-fobjc-arc','-I',ROOT/'runtime',f,ROOT/'runtime/post_cuts.c','-framework','Metal','-framework','Foundation','-o',exe])
         output=run([exe]);print(mode,output.strip())
         assert int(re.search(r': (\d+)',output)[1])==(0 if mode=='r8-fixed' else 1)
 

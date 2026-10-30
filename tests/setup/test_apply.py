@@ -595,7 +595,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             path = self.root / (name + ".m")
             put(path, source)
             exe = self.root / name
-            result = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", str(path),
+            result = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "runtime"), str(path),
                 "-framework", "Cocoa", "-o", str(exe)], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr.decode()[-2000:])
             return exe

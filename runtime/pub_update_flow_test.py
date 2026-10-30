@@ -249,7 +249,7 @@ def cancelled_launch(root):
     for broken in (False, True):
         path=root/'launch.m'; path.write_text((source.replace(guard, '', 1) if broken else source)+main)
         exe=root/'launch'
-        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', path, '-framework', 'Cocoa', '-o', exe])
+        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-o', exe])
         result=subprocess.run([str(exe),str(root)], capture_output=True, env=env)
         assert result.returncode == (99 if broken else 0), (broken, result.returncode, result.stdout, result.stderr)
         assert (b'retained tools failed verification' in result.stderr) == broken, result.stderr

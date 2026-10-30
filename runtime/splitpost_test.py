@@ -259,7 +259,7 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     def encoder(label,text,nowait='0',negative=False):
         (tmp/'post_render.inc').write_text(text)
         exe=tmp/label
-        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'splitpost_test.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
+        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'splitpost_test.m',ROOT/'runtime/post_cuts.c','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
         env={**os.environ}
         if nowait is None:env.pop('NFS_LUM_NOWAIT',None)
         else:env['NFS_LUM_NOWAIT']=nowait
@@ -326,7 +326,7 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     for name,body in [('current',renderer),('missing-Off-wait',broken)]:
         (tmp/'post_render.inc').write_text(body)
         exe=tmp/('post-snapshot-'+name)
-        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'post_snapshot.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
+        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'post_snapshot.m',ROOT/'runtime/post_cuts.c','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
         for mode in range(2):
             for switch in ('','0'):
                 path=tmp/(name+str(mode)+switch+'.post-snapshot')

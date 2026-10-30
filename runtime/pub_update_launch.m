@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <CommonCrypto/CommonDigest.h>
+#include "pub_update_write.h"
 
 extern const char *game_dir;  // assigned only after app_start validates the PC root
 
@@ -173,23 +174,7 @@ void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
             NSDictionary *receipt = @{@"token":token, @"identity":identity};
             NSData *body = [NSJSONSerialization dataWithJSONObject:receipt options:0 error:nil];
             NSString *path = [profile stringByAppendingPathComponent:[@".update-ack-" stringByAppendingString:token]];
-            // Exclusive temporary creation, durable contents, then atomic publication.
-            NSString *temporary = [path stringByAppendingString:@".tmp"];
-            int fd = open(temporary.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-            if (fd < 0) return;
-            const char *bytes = body.bytes;
-            size_t remaining = body.length;
-            while (remaining) {
-                ssize_t count = write(fd, bytes, remaining);
-                if (count <= 0) { close(fd); return; }
-                bytes += count; remaining -= (size_t)count;
-            }
-            BOOL ok = fsync(fd) == 0;
-            close(fd);
-            if (ok && rename(temporary.fileSystemRepresentation, path.fileSystemRepresentation) == 0) {
-                int directory = open(profile.fileSystemRepresentation, O_RDONLY);
-                if (directory >= 0) { fsync(directory); close(directory); }
-            }
+            PUReplaceFile(path, body, 0600);
         });
         return;
     }
@@ -230,7 +215,7 @@ void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
         UpdateError(@"The prepared update is missing its recovery tools. Run Setup again.");
         if (needsRecovery) exit(1);
         NSString *failed = [ready.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".apply-failed.json"];
-        [@"{\"state\":\"failed\"}\n" writeToFile:failed atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        PUReplaceFile(failed, [@"{\"state\":\"failed\"}\n" dataUsingEncoding:NSUTF8StringEncoding], 0666);
         return;
     }
     NSTask *helper = [NSTask new];

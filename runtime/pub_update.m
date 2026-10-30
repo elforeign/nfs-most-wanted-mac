@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include "pub_update_core.h"
 #include "pub_update_rehearsal.h"
+#include "pub_update_write.h"
 
 static NSDictionary *PURead(NSString *path) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
@@ -29,7 +30,7 @@ static NSDictionary *PURead(NSString *path) {
 }
 static BOOL PUWrite(NSString *path, NSDictionary *value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
-    return data && [data writeToFile:path options:NSDataWritingAtomic error:nil] && chmod(path.fileSystemRepresentation, 0600) == 0;
+    return PUReplaceFile(path, data, 0600);
 }
 static NSString *PUCanonical(NSString *path) {
     char resolved[PATH_MAX];
@@ -181,6 +182,8 @@ int main(int argc, const char **argv) {
         if (active < 0 || flock(active, LOCK_EX | LOCK_NB)) return 1;
         int fd = open([job stringByAppendingPathComponent:@"helper.log"].fileSystemRepresentation, O_CREAT | O_APPEND | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd < 0) { WorkerProgress(@"failed", @"Cannot open the update log. Check folder access and free disk space"); return 1; }
+        // The supervisor is detached; keep its own state-write errors in the job log too.
+        if (dup2(fd, STDERR_FILENO) < 0) return 1;
         NSFileHandle *log = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
         NSArray *delivery = @[job, [NSString stringWithUTF8String:argv[2]], [NSString stringWithUTF8String:argv[3]],
             [NSString stringWithUTF8String:argv[4]], [NSString stringWithUTF8String:argv[5]]];
@@ -193,7 +196,7 @@ int main(int argc, const char **argv) {
 #endif
         if (ok && [receipt[@"state"] isEqual:@"verified"] && [receipt[@"setup_path"] isEqual:setup]) {
             NSString *script = [job stringByAppendingPathComponent:@"prepare.py"];
-            ok = [prepareScript writeToFile:script atomically:YES encoding:NSUTF8StringEncoding error:nil] && chmod(script.fileSystemRepresentation, 0600) == 0;
+            ok = PUReplaceFile(script, [prepareScript dataUsingEncoding:NSUTF8StringEncoding], 0600);
             if (ok) ok = Run([setup stringByAppendingPathComponent:@"Contents/Resources/python/bin/python3"],
                 @[@"-I", @"-B", @"-c", prepareScript, job, setup, profile, destination], log);
         } else ok = NO;

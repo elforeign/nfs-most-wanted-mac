@@ -242,7 +242,7 @@ def bundle_check(root, release):
     shutil.copy2(ROOT / 'bundle.sh', runtime / 'bundle.sh')
     (runtime / 'docs').mkdir()
     shutil.copy2(ROOT / 'docs/guide.md', runtime / 'docs/guide.md')
-    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h'):
+    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h', 'pub_update_write.h'):
         shutil.copy2(ROOT / name, runtime / name)
     shutil.copy2(release, runtime / 'boot')
     (runtime / 'app_icon.m').touch()

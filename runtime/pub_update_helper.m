@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include "pub_update_rehearsal.h"
+#include "pub_update_write.h"
 
 static const uint64_t ChecksumCap = 4096;
 #if defined(PUB_UPDATE_HELPER_TESTING)
@@ -69,13 +70,7 @@ static void Progress(NSString *state, NSString *message, uint64_t received, uint
         @"received_bytes": @(received), @"total_bytes": @(total)} mutableCopy];
     if (extra) [d addEntriesFromDictionary:extra];
     NSData *data = [NSJSONSerialization dataWithJSONObject:d options:NSJSONWritingPrettyPrinted error:nil];
-    // Unlink only our temporary name: never follow existing links in a reused job.
-    unlinkat(jobFD, "progress.json.tmp", 0);
-    int fd = openat(jobFD, "progress.json.tmp", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd < 0) Fail(@"Cannot create progress file in the update job.");
-    BOOL ok = WriteAll(fd, data.bytes, data.length) && fsync(fd) == 0;
-    close(fd);
-    if (!ok || renameat(jobFD, "progress.json.tmp", jobFD, "progress.json") || fsync(jobFD))
+    if (!PUReplaceFileAt(jobFD, [jobPath stringByAppendingPathComponent:@"progress.json"], data, 0600))
         Fail(@"Cannot save update progress.");
 }
 static BOOL Matches(NSString *s, NSString *pattern) {
