@@ -77,8 +77,16 @@ static NSString *ToolHash(NSString *root) {
     for (NSURL *url in walk) [names addObject:[url.path substringFromIndex:root.length + 1]];
     if (failed) return nil;
     [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-        int order = strcmp(a.UTF8String, b.UTF8String);
-        return order < 0 ? NSOrderedAscending : order > 0 ? NSOrderedDescending : NSOrderedSame;
+        // pathlib orders components, so a/b precedes a-b/c and a.b.
+        NSArray<NSString *> *left = [a componentsSeparatedByString:@"/"];
+        NSArray<NSString *> *right = [b componentsSeparatedByString:@"/"];
+        NSUInteger count = MIN(left.count, right.count);
+        for (NSUInteger i = 0; i < count; ++i) {
+            int order = strcmp(left[i].UTF8String, right[i].UTF8String);
+            if (order) return order < 0 ? NSOrderedAscending : NSOrderedDescending;
+        }
+        return left.count < right.count ? NSOrderedAscending :
+            left.count > right.count ? NSOrderedDescending : NSOrderedSame;
     }];
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
