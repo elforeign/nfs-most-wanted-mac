@@ -1,20 +1,28 @@
 """Player update flow, driven by the real local progress reader and F10 actions.
-Proof: 19 good checks (12 UI, 7 preparation/launch); 13 broken controls rejected
-(9 UI, 4 preparation/launch), including automatic fetch and false-success controls.
+Core proof: 27 good checks (12 UI, 15 preparation/launch); 17 broken controls rejected
+(9 UI, 8 preparation/launch), including automatic fetch and false-success controls.
 Launch fixture: inherited BOOT_BACKGROUND=1 skipped the normal-launch guard
 (broken rc=0); clear launch-mode flags in this stub child (good rc=0, broken rc=99).
 No network, game, or desktop app is started. The normal offline discovery runs this file.
 Transport compilation: production UI good=1 has the fixed release URL and no
 fixture environment; the fixture-enabled build fails that same release oracle (1/1).
+Detach proof: first-phase order good=2 (fresh/existing marker), original-order
+broken=2 rejected; retained detach good=6, broken retry policy=2 rejected.
+Mounted interpreter proof: good=1 detached before build (rc=0) / original-order
+broken=1 rejected with Resource busy (rc=1). Direct restricted run: image refused
+with "Device not configured" (rc=3); --mounted-prepare skips only image refusal.
 """
+import io
 import json
 import os
 from pathlib import Path
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
@@ -156,6 +164,190 @@ def bridge_script():
     return ''.join(json.loads(line[1:]) for line in text.splitlines())
 
 
+def preparation_fixture(job, script):
+    job.mkdir()
+    setup = job / 'setup.app'
+    resources = setup / 'Contents/Resources'
+    (resources / 'python/bin').mkdir(parents=True)
+    (resources / 'python/bin/python3').write_text('interpreter fixture')
+    (resources / 'third_party/dl').mkdir(parents=True)
+    with tarfile.open(resources / 'source.tar.gz', 'w:gz') as archive:
+        for name, text in {
+            'tools/setup_kit/__init__.py': '',
+            'tools/setup_kit/backend.py': 'from pathlib import Path\nimport sys\ndef main(args):\n'
+                '    job=Path(args[args.index("--stage")+1]).parent\n'
+                '    assert not (job/"mount").is_mount(), "image still mounted at build"\n'
+                '    assert Path(sys.executable).is_relative_to(job/"python"), sys.executable\n'
+                '    (job/"built").touch()\n    return 0\n',
+            'tools/setup_kit/apply.py': 'def publish_ready(*args): pass\n',
+        }.items():
+            data = text.encode(); member = tarfile.TarInfo(name); member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    (job / 'prepare.py').write_text(script)
+    return setup
+
+
+# Python releases before extraction filters need this only for the small test
+# archive above. Released Setup supplies its own newer interpreter.
+def extract_fixture(archive, path, members, **kwargs):
+    for member in members:
+        archive.extract(member, path)
+
+
+ORIGINAL_DETACH = "        subprocess.run(['/usr/bin/hdiutil', 'detach', str(job / 'mount')], check=True, stdout=sys.stderr)\n"
+
+
+def original_order(script):
+    anchor = '        # Re-exec the retained interpreter'
+    assert anchor in script
+    return script.replace(anchor, ORIGINAL_DETACH + anchor, 1)
+
+
+def detach_order_cases(root):
+    script = bridge_script()
+    class Reexecuted(BaseException): pass
+    for broken in (False, True):
+        for marker in (False, True):
+            job = root / ('order-%s-%s' % (broken, marker))
+            setup = preparation_fixture(job, script)
+            if marker: (job / 'retained').touch()
+            def reexec(path, args):
+                assert path == str(job / 'python/bin/python3') and args[6] == '--retained', args
+                raise Reexecuted()
+            with mock.patch.object(sys, 'argv', ['prepare', str(job), str(setup), str(job/'profile'), str(job/'app')]), \
+                 mock.patch.object(os, 'execv', side_effect=reexec) as execute, \
+                 mock.patch.object(Path, 'is_mount', return_value=True), \
+                 mock.patch.object(subprocess, 'run', side_effect=AssertionError('detach before re-exec')) as detach, \
+                 mock.patch.object(tarfile.TarFile, 'extractall', extract_fixture):
+                try:
+                    exec(original_order(script) if broken else script, {})
+                except Reexecuted:
+                    assert not broken
+                except AssertionError as error:
+                    assert broken and str(error) == 'detach before re-exec', error
+                else:
+                    raise AssertionError('first phase did not re-exec')
+                assert execute.call_count == (0 if broken else 1)
+                assert detach.call_count == (1 if broken else 0)
+    print('Detach order good=2 PASS; original-order broken=2 rejected (detach before re-exec)')
+
+
+DETACH_DRIVER = r'''
+import json, sys, subprocess, time, types
+from pathlib import Path
+job=Path(sys.argv[1]); codes=json.loads(sys.argv[2]); cancel=sys.argv[3]=='cancel'; events=[]
+def detach(args, **kwargs):
+    assert args == ['/usr/bin/hdiutil', 'detach', str(job/'mount')], args
+    code=codes.pop(0); events.append(['detach', code])
+    return types.SimpleNamespace(returncode=code)
+def sleep(seconds):
+    assert seconds == 1; events.append(['sleep', seconds])
+    if cancel: (job/'cancel').touch()
+def build(args): events.append(['build']); return 0
+subprocess.run=detach; time.sleep=sleep
+Path.is_mount=lambda self: bool(codes)
+package=types.ModuleType('setup_kit'); package.backend=types.SimpleNamespace(main=build)
+package.apply=types.SimpleNamespace(publish_ready=lambda *args: events.append(['publish']))
+sys.modules['setup_kit']=package
+sys.argv=['prepare', str(job), '--retained', str(job/'profile'), str(job/'app')]
+try: exec((job/'prepare.py').read_text(), {})
+except RuntimeError: pass
+(job/'events.json').write_text(json.dumps(events))
+'''
+
+
+def detach_retry_cases(root):
+    script = bridge_script()
+    def check(name, codes, cancel, expected, success):
+        job = root/name; job.mkdir(); (job/'prepare.py').write_text(script)
+        run([sys.executable, '-I', '-B', '-c', DETACH_DRIVER, job, json.dumps(codes), 'cancel' if cancel else 'run'])
+        events = json.loads((job/'events.json').read_text())
+        assert events == expected + ([['build'], ['publish']] if success else []), (name, events)
+        progress = json.loads((job/'progress.json').read_text())
+        assert progress['state'] == ('ready' if success else 'failed'), progress
+        if not success:
+            assert ('cancelled' if cancel else 'Cannot detach the update image') in progress['message'], progress
+    check('absent', [], False, [], True)
+    check('immediate', [0], False, [['detach', 0]], True)
+    check('busy', [16, 16, 0], False, [['detach', 16], ['sleep', 1]]*2 + [['detach', 0]], True)
+    check('exhausted', [16]*5, False, [['detach', 16], ['sleep', 1]]*4 + [['detach', 16]], False)
+    check('error', [1], False, [['detach', 1]], False)
+    check('cancel', [16, 0], True, [['detach', 16], ['sleep', 1]], False)
+    for name, before, after, codes in [
+        ('no-busy-retry', 'result.returncode != 16', 'result.returncode != 0', [16, 0]),
+        ('retries-other-errors', 'result.returncode != 16', 'False', [1, 0]),
+    ]:
+        assert before in script
+        job=root/name; job.mkdir(); (job/'prepare.py').write_text(script.replace(before, after, 1))
+        run([sys.executable, '-I', '-B', '-c', DETACH_DRIVER, job, json.dumps(codes), 'run'])
+        ready=json.loads((job/'progress.json').read_text())['state']=='ready'
+        assert ready == (name == 'retries-other-errors'), name
+    print('Retained detach good=6 PASS (0/1/3/5/1/1 attempts, bounded waits); broken retry policy=2 rejected')
+
+
+def mounted_prepare():
+    """Real mapped executable on a scratch volume; no released image required."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root=Path(tmp).resolve(); image=root/'scratch.dmg'
+        # Probe disk-image access before constructing the interpreter fixture.
+        result=subprocess.run(['/usr/bin/hdiutil', 'create', '-size', '32m', '-fs', 'HFS+',
+                               '-volname', 'UpdateDetachTest', str(image)], capture_output=True, text=True)
+        def refused(result):
+            message=result.stderr.lower()
+            return result.returncode and any(reason in message for reason in
+                ('operation not permitted', 'permission denied', 'device not configured'))
+        if refused(result):
+            print('SKIP: scratch disk image refused: '+result.stderr.strip()); return 3
+        assert result.returncode == 0, result.stderr
+        outcomes=[]
+        for broken in (False, True):
+            job=root/('broken' if broken else 'good'); script=original_order(bridge_script()) if broken else bridge_script()
+            setup=preparation_fixture(job, script)
+            python=setup/'Contents/Resources/python/bin/python3'
+            original=Path(sys.executable).resolve()
+            # Framework bin/python is a launcher that spawns this actual main.
+            framework_main=Path(sys.base_prefix)/'Resources/Python.app/Contents/MacOS/Python'
+            if framework_main.is_file(): original=framework_main
+            shutil.copy2(original, python)
+            # Keep the framework library on the image too: a launcher linked to
+            # the host library does not reproduce the live image dependency.
+            libraries=run(['/usr/bin/otool', '-L', original]).stdout
+            for library in sorted(set(line.strip().split(' (', 1)[0] for line in libraries.splitlines()
+                                      if line.strip().startswith('@executable_path/'))):
+                resolved=(original.parent/library.removeprefix('@executable_path/')).resolve()
+                target=python.parent.parent/resolved.name
+                shutil.copy2(resolved, target)
+                run(['/usr/bin/install_name_tool', '-change', library,
+                     '@executable_path/../'+resolved.name, python])
+            run(['/usr/bin/codesign', '--force', '--sign', '-', python])
+            mount=job/'mount'; mount.mkdir()
+            result=subprocess.run(['/usr/bin/hdiutil', 'attach', '-nobrowse', '-noautoopen', '-mountpoint', str(mount), str(image)], capture_output=True, text=True)
+            if refused(result):
+                print('SKIP: scratch disk image attach refused: '+result.stderr.strip()); return 3
+            assert result.returncode == 0, result.stderr
+            try:
+                mounted=mount/'Setup.app'
+                if mounted.exists(): shutil.rmtree(mounted)
+                shutil.copytree(setup, mounted)
+                # The test archive contains only the regular fixture files above.
+                prefix='import tarfile\ntarfile.TarFile.extractall='+extract_fixture.__name__+'\n'
+                import inspect
+                wrapper=inspect.getsource(extract_fixture)+prefix+script
+                result=subprocess.run([str(mounted/'Contents/Resources/python/bin/python3'), '-I', '-B', '-c', wrapper,
+                                       str(job), str(mounted), str(job/'profile'), str(job/'app')], cwd=job, capture_output=True, text=True, timeout=45)
+                state=json.loads((job/'progress.json').read_text())
+                assert (result.returncode == 0) == (not broken), (result.stderr[-3000:], state)
+                assert (state['state']=='ready') == (not broken), state
+                assert (job/'built').exists() == (not broken)
+                assert mount.is_mount() == broken
+                if broken: assert 'busy' in result.stderr.lower(), result.stderr
+                outcomes.append(result.returncode)
+            finally:
+                if mount.is_mount(): run(['/usr/bin/hdiutil', 'detach', mount])
+        print('Mounted interpreter good=1 detached before build; original-order broken=1 busy; rc='+str(outcomes))
+    return 0
+
+
 def bridge_cases(root):
     """Run the retained preparation bridge, with a stub offline build protocol."""
     script = bridge_script()
@@ -293,9 +485,17 @@ def main():
         ready_while_playing(root/"locked-profile")
         cancelled_launch(root/"cancelled-launch")
         production_transport(root/'production-transport')
-        print('Preparation/launch good=7 PASS; broken=13 detected')
+        detach_order_cases(root)
+        retry=root/'detach-retry'; retry.mkdir(); detach_retry_cases(retry)
+        mounted=subprocess.run([sys.executable, '-I', '-B', __file__, '--mounted-prepare'], capture_output=True, text=True, timeout=120)
+        assert mounted.returncode in (0, 3), (mounted.returncode, mounted.stdout[-1000:], mounted.stderr[-3000:])
+        print(mounted.stdout.strip())
+        print('Mounted interpreter case rc='+str(mounted.returncode))
+        print('Preparation/launch good=15 PASS; broken=17 detected (9 UI, 8 preparation/launch)')
     print('PUB UPDATE FLOW TEST PASS')
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--mounted-prepare']:
+        raise SystemExit(mounted_prepare())
     main()
