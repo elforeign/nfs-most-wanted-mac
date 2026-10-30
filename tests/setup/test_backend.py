@@ -1,5 +1,8 @@
 """Public Setup offline proofs; run with the project's Python -I.
 
+Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
+two real child commands sharing one log entry independent of the caller TMPDIR.
+
 Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.3.0;
 changing it to 4.2.0 fails 1/1 against the independent 4.3.0 expectations.
 
@@ -243,6 +246,20 @@ class FakeRunner:
 
 
 class ToolchainTests(Fixture):
+    def test_runner_logs_effective_tmpdir_once_before_commands(self):
+        with b.tool_tmp(self.paths.work) as tmp:
+            env = b.child_environment(self.paths.work / 'stage/roots.txt', self.paths.work, tmp=tmp)
+            with mock.patch.dict(os.environ, {'TMPDIR': str(self.home / 'caller-tmp')}):
+                runner = b.Runner(self.log, env, self.paths.work)
+                for _ in range(2):
+                    output = runner.run(['/bin/sh', '-c', 'printf "%s" "$TMPDIR"'], capture=True)
+                    self.assertEqual(output, str(tmp))
+            self.log.seek(0)
+            log = self.log.read().decode()
+            self.assertEqual(log.splitlines()[0], f'tmp: {tmp}')
+            self.assertEqual(log.count(f'tmp: {tmp}\n'), 1)
+            self.assertNotIn(str(self.home / 'caller-tmp'), log)
+
     def stub_tools(self):
         tools = self.home / "stub tools"
         tools.mkdir()

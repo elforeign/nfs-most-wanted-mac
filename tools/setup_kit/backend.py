@@ -320,6 +320,8 @@ class Runner:
     """Log every byte; own each child process group, including grandchildren."""
     def __init__(self, log, env, work):
         self.log, self.env, self.work = log, env, work
+        self.log.write(("tmp: " + self.env.get("TMPDIR", "") + "\n").encode())
+        self.log.flush()
 
     def run(self, argv, cwd=None, capture=False):
         argv = [str(a) for a in argv]
