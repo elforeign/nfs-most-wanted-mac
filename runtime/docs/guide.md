@@ -220,7 +220,7 @@ They need files from your own Xbox 360 copy. A PC-only installation can still pl
 
 Choose the installed folder containing **speed.exe**, GLOBAL, TRACKS, CARS, FRONTEND and SOUND, or a .zip of that folder. Choose the folder from one level up if the Choose button is grey.
 
-A PC installer or disc image is not an installed game folder. The executable must contain the PC game's version 1.3 code.
+A PC installer is not an installed game folder. Your game discs work too: choose **PC disc images** in Setup, then disc 1 (as an .iso, with the other discs beside it), the official 1.3 update and a speed.exe with the 1.3 code. The executable must contain the PC game's version 1.3 code.
 
 ## FAQ: Why does macOS block Setup?
 

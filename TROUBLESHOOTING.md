@@ -22,13 +22,27 @@ Update**, or run `xcode-select --install`, then build again. The macOS SDK must 
 
 **"The PC folder has no ... directory" / "is missing ..."** — choose the installed game folder that holds `speed.exe`
 together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` that contains that folder. A PC
-installer or PC disc image is not enough (an Xbox 360 `.iso` is fine for the Xbox 360 copy).
+installer is not enough. For your game discs, choose **PC disc images** instead (below).
 
 **"The .zip contains an unsafe path" / "a link" / "is far larger than the game" / "can't be read"** — Setup only
 unpacks a `.zip` that holds plain game files. Download it again, or unzip it yourself and choose the folder.
 
-**"Not available yet; choose an installed PC game folder"** — building from a PC disc image is not available yet.
-Install the game first and choose its folder, or choose a `.zip` of that folder. (Your Xbox 360 `.iso` works.)
+**"Disc N of the set ... was not found"** — Setup looks for the other discs beside the one you chose. It shows a
+**Disc N** row for each disc it couldn't find: choose that disc there, from any folder and under any name (Setup reads
+each disc's number from the disc itself). Or keep the `.iso` images of all your discs in one folder.
+
+**"Your discs have an earlier version of the PC game than 1.3"** — also choose the game's official 1.3 update
+(`nfsmwpatch1.3.exe`). Setup applies it to its own copy of the game; it only reads the update and never runs it.
+
+**"The speed.exe on your discs and in the 1.3 update is copy-protected"** — Setup can't translate copy-protected
+code. Also choose a `speed.exe` that has the 1.3 code; Setup checks it the same way as for a game folder.
+
+**"Setup can't read this update" / "does not match its checksum"** — the chosen file is not the official 1.3 update,
+or it is damaged. Download the update again.
+
+**"The disc image is truncated" / "not a disc image Setup can read"** — the image is incomplete (for example an
+interrupted download) or in a format Setup doesn't read. Make the image again, or mount it in Finder and choose the
+mounted disc.
 
 **The `speed.exe` can't be used** — the port is a translation of the PC game's version 1.3 code. Other versions contain
 different code and would not work. Any `speed.exe` that has the 1.3 code is accepted; the log shows the code region

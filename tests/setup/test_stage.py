@@ -1,6 +1,6 @@
 """Headless staging proofs using synthetic PC/Xbox sources and stub compilers.
 
-Verification: 16/16 tests pass. Good/broken controls: 3/3 good pipeline oracles (failed build has no readiness,
+Verification: 17/17 tests pass (remembered disc update and speed.exe round-trip; earlier choices still load). Good/broken controls: 3/3 good pipeline oracles (failed build has no readiness,
 stage preserves active files, remembered Xbox extras survive); 3/3 deliberately
 broken pipelines must fail those same oracles (publish after failure, install
 early, forget Xbox). All paths are temporary; no game, network or real installs.
@@ -203,6 +203,23 @@ class StageTests(Fixture):
                 result = self.run_stage(remembered=True)
                 self.assert_failed(self.home / "update", result)
                 self.assertIn("SOURCE_CHOICES_INVALID", result[1][-1]["msg"])
+
+    def test_disc_update_and_exe_choices_round_trip_and_earlier_choices_still_load(self):
+        update, exe = self.home / "nfsmwpatch1.3.exe", self.home / "speed.exe"
+        s.save_choices(self.paths.state, self.pc, None, self.dest, update, exe)
+        saved = s.load_choices(self.paths.state, required=True)
+        self.assertEqual((saved["pc_update"], saved["pc_exe"]), (str(update), str(exe)))
+        earlier = dict(format_version=1, pc=str(self.pc), x360=None, destination=str(self.dest))  # before disc images
+        write(self.paths.state / "source-choices.json", json.dumps(earlier))
+        self.assertEqual(s.load_choices(self.paths.state, required=True), earlier)
+        s.save_choices(self.paths.state, self.pc, None, self.dest, update, exe, [self.home / "disc 2.iso"])
+        self.assertEqual(s.load_choices(self.paths.state, required=True)["pc_discs"], [str(self.home / "disc 2.iso")])
+        for key, value in (("pc_update", "relative/speed.exe"), ("pc_exe", "relative/speed.exe"),
+                           ("pc_discs", ["relative.iso"]), ("pc_discs", "/not/a/list.iso"), ("pc_discs", [None])):
+            with self.subTest(key=key, value=value):
+                write(self.paths.state / "source-choices.json", json.dumps(dict(earlier, **{key: value})))
+                with self.assertRaisesRegex(ins.InstallError, "SOURCE_CHOICES_INVALID"):
+                    s.load_choices(self.paths.state, required=True)
 
     def test_explicit_inputs_ignore_corrupt_choices(self):
         write(self.paths.state / "source-choices.json", "{broken")

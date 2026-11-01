@@ -19,8 +19,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 from setup_kit import backend
 
 
-def extract_function(source):
-    start = source.index("func pcRoot")
+def extract_function(source, name="func pcRoot"):
+    start = source.index(name)
     brace = source.index("{", start)
     depth = 0
     for i in range(brace, len(source)):
@@ -30,7 +30,7 @@ def extract_function(source):
             depth -= 1
             if depth == 0:
                 return source[start:i + 1]
-    raise AssertionError("pcRoot closing brace not found")
+    raise AssertionError(name + " closing brace not found")
 
 
 def compile_root(tmp, function, label):
@@ -87,6 +87,35 @@ class PickerTests(unittest.TestCase):
             except backend.SetupError:
                 failures += 1
             self.assertEqual(failures, 1, "broken pcRoot control must fail the speed.exe acceptance oracle")
+
+    def test_missing_disc_numbers_read_from_the_backend_messages(self):
+        """The disc page offers "Disc N: Choose..." for exactly the discs the backend's check could not find."""
+        sys.path.insert(0, str(ROOT / "tests/setup"))
+        from test_backend import make_iso
+        from setup_kit import pc_disc
+        with tempfile.TemporaryDirectory(prefix="setup-discs-") as td:
+            scratch = Path(td)
+            inf = "[Special]\r\nDisk={}\r\nProductGuiID={{FIXTURE}}\r\n"
+            listing = "1,1,speed.exe\r\n2,1,\r\n3,1,\r\n4,1,\r\n"
+            make_iso(scratch / "a.iso", {"autorun.inf": inf.format(1).encode(), "common_filelist.txt": listing.encode(),
+                                         "speed.exe": b"x", "0compressed.zip": b"z"})
+            make_iso(scratch / "b.iso", {"autorun.inf": inf.format(3).encode(), "2compressed.zip": b"z"})
+            (scratch / "alone").mkdir()
+            make_iso(scratch / "alone/c.iso", {"autorun.inf": inf.format(2).encode(), "1compressed.zip": b"z"})
+            messages = {}
+            for chosen, expected in ((scratch / "a.iso", [2, 4]), (scratch / "alone/c.iso", [1])):
+                with self.assertRaises(pc_disc.DiscError) as caught:
+                    pc_disc.disc_set(chosen)
+                messages[str(caught.exception)] = expected
+            messages["The .zip can't be read: Bad magic number"] = []
+            messages["Disc 1 has no speed.exe."] = []
+            source = scratch / "missing.swift"
+            source.write_text("import Foundation\n" + extract_function(SWIFT.read_text(), "func missingDiscNumbers") +
+                              "\nfor line in CommandLine.arguments.dropFirst() { print(missingDiscNumbers(line)) }\n")
+            subprocess.run(["swiftc", "-module-cache-path", str(scratch / "modules"), str(source), "-o", str(scratch / "missing")],
+                           check=True, capture_output=True)
+            output = subprocess.run([str(scratch / "missing"), *messages], capture_output=True, text=True, check=True)
+            self.assertEqual(output.stdout.splitlines(), [str(v) for v in messages.values()])
 
 
 if __name__ == "__main__":

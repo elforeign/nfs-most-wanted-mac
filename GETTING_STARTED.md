@@ -9,7 +9,8 @@ nothing it makes is meant to be shared.
 | | |
 |---|---|
 | **Mac** | Apple Silicon (M1 or later) with **macOS 14.5 or later** (provisional). |
-| **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC, **version 1.3**, installed: the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` of that folder (Setup unpacks a copy into its work folder and only reads the `.zip`). Any `speed.exe` that has the 1.3 code is accepted; Setup checks it first and changes nothing if it can't be used. A **PC** disc image (`.iso`) isn't supported yet (the Xbox 360 `.iso` is, below). |
+| **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC, **version 1.3**, installed: the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` of that folder (Setup unpacks a copy into its work folder and only reads the `.zip`). Any `speed.exe` that has the 1.3 code is accepted; Setup checks it first and changes nothing if it can't be used. |
+| **Or: the game discs** | Instead of an installed game: your PC game discs as `.iso` images or mounted in Finder, the game's official 1.3 update (`nfsmwpatch1.3.exe`), and a `speed.exe` that has the 1.3 code (the one on the discs and in the update is copy-protected). Setup installs the game from the discs into its work folder and applies the update without running it; your files are only read. |
 | **Xcode Command Line Tools** | Apple's free developer tools. Setup offers to install them; in Terminal, `xcode-select --install`. |
 | **Disk space** | About 12 GB free while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy). |
 | **Optional: Xbox 360 copy** | Your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features (below). |
@@ -22,7 +23,9 @@ This project does not provide, link to, or explain how to obtain any game file. 
    [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest) and open it.
 2. Open **NFS Most Wanted Native - Setup**. The app is not notarized by Apple, so the first time macOS blocks it: click **Done**, then go to
    **System Settings > Privacy & Security** and click **Open Anyway** next to its name. You only do this once.
-3. **Choose your game folder, or a .zip of it.** Optionally choose your Xbox 360 copy. Choose where the app goes.
+3. **Choose your game folder, or a .zip of it.** Or choose **PC disc images**, then disc 1, the 1.3 update and a
+   `speed.exe` with the 1.3 code. Setup finds the other discs beside disc 1 whatever their names, and asks for any it
+   can't find. Optionally choose your Xbox 360 copy. Choose where the app goes.
 4. If asked, install Apple's Command Line Tools and wait for them.
 5. Click **Build**. You see each step and its progress. The first build compiles the whole game on your Mac, so it
    takes a while. **Cancel** stops it and leaves anything already installed as it was.

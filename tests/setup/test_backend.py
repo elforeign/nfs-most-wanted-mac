@@ -35,6 +35,13 @@ configurations (plus a bypass caught by its oracle); T4 rejects 4 changed code
 regions and 5 missing directories (ignoring .text is caught); T8 good compile
 returns 0, bad compile returns 1 with no archive, restored old behavior returns
 0 with a stale archive and fails the oracle; T10 checks 8 transaction faults.
+PC disc images (2026-11-01): synthetic ISO 9660/Joliet discs with EA's archive layout and an RTPatch 7.00 update
+install like the folder from either disc, also as folders (mounted discs); the inputs keep their hashes and times. An
+older or copy-protected speed.exe, a missing disc, an unsafe, missing or extra update record, a flipped bit in an
+update file (its checksum), a truncated image and an archive path escaping work are refused before anything is left
+in work or outside it. RTPatchOwnerTests decodes the owner's 1.3 update (NFS_PC_UPDATE): its server.dll matches the
+SHA-256 recomp/server_module.py pins and a changed checksum is refused. Owner run: 4 CD images + update + speed.exe
+install in 52 s (1414 files, 3.03 GB) and pass validate_pc with the supported fingerprint.
 No game launch, network or real Library/Applications writes. All fixtures live
 under a temporary NFSMW_SETUP_HOME. Production libraries/signing are stubbed in
 pipeline tests; toolchain probes use executable stubs; compile proof uses clang.
@@ -45,12 +52,14 @@ import concurrent.futures
 from contextlib import contextmanager
 import errno
 import functools
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import signal
 import struct
@@ -415,8 +424,8 @@ class PCTests(Fixture):
             with self.subTest(missing=folder), self.assertRaises(b.SetupError):
                 b.validate_pc(self.pc, self.source)
             moved.rename(source)
-        with self.assertRaisesRegex(b.SetupError, "Not available yet"):
-            b.validate_pc(self.home / "disc.iso", self.source)
+        with self.assertRaisesRegex(b.SetupError, "open it in Finder"):
+            b.validate_pc(self.home / "game.dmg", self.source)
 
     def test_T4_broken_region_checker_is_detected(self):
         module = self.source / "recomp/exe_fingerprint.py"
@@ -1088,6 +1097,313 @@ class PCZipTests(Fixture):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(z.read(info))
         self.assertNotEqual(self.outside_work(), before)
+
+
+def make_iso(path, files, label="FIXTURE", joliet=True):
+    """A minimal ISO 9660 image (with a Joliet volume, as the PC discs have) holding files at its root."""
+    def record(extent, size, flags, name):
+        n = 33 + len(name) + (len(name) + 1) % 2
+        r = bytearray(n)
+        r[0] = n
+        struct.pack_into("<I", r, 2, extent)
+        struct.pack_into(">I", r, 6, extent)
+        struct.pack_into("<I", r, 10, size)
+        struct.pack_into(">I", r, 14, size)
+        r[25], r[32] = flags, len(name)
+        struct.pack_into("<H", r, 28, 1)
+        struct.pack_into(">H", r, 30, 1)
+        r[33:33 + len(name)] = name
+        return bytes(r)
+    first = 21
+    extents, sector = {}, first
+    for name, data in files.items():
+        extents[name] = sector
+        sector += max(1, -(-len(data) // 2048))
+    def directory(at, encode):
+        body = record(at, 2048, 2, b"\0") + record(at, 2048, 2, b"\1")
+        body += b"".join(record(extents[name], len(data), 0, encode(name)) for name, data in files.items())
+        assert len(body) <= 2048
+        return body.ljust(2048, b"\0")
+    def descriptor(kind, root_at, escape=b""):
+        d = bytearray(2048)
+        d[0], d[1:6], d[6] = kind, b"CD001", 1
+        d[40:72] = label.encode().ljust(32)
+        struct.pack_into("<I", d, 80, sector)
+        struct.pack_into(">I", d, 84, sector)
+        d[88:88 + len(escape)] = escape
+        struct.pack_into("<H", d, 128, 2048)
+        struct.pack_into(">H", d, 130, 2048)
+        d[156:190] = record(root_at, 2048, 2, b"\0")
+        return bytes(d)
+    terminator = bytes([255]) + b"CD001\x01" + bytes(2041)
+    image = bytearray(16 * 2048) + descriptor(1, 19) + (descriptor(2, 20, b"%/E") if joliet else terminator) + terminator
+    image += directory(19, lambda n: n.upper().encode() + b";1") + directory(20, lambda n: (n + ";1").encode("utf-16-be"))
+    for name, data in files.items():
+        image += bytes(data).ljust(max(1, -(-len(data) // 2048)) * 2048, b"\0")
+    path.write_bytes(image)
+    return path
+
+
+LITERALS = ["0" + format(c, "08b") for c in range(256)]  # a raw literal token: flag 0, then the byte
+
+
+def rtp_update(path, files, damaged=None):
+    """An update program in the 1.3 update's form: a small PE, then an RTPatch 7.00 file replacing `files`
+    ({Windows path: bytes}) whole. The compressed streams use raw literals (no Huffman model to mirror here);
+    the adaptive Huffman decoder is proved on the player's own update (RTPatchOwnerTests)."""
+    def lp(text):
+        data = text.encode("latin-1") + b"\0"
+        return bytes([len(data)]) + data
+    def stream(data, damage):
+        bits = "1011010110011100" + "00000001" + "00000000" + "000000010000" + "000000000100" + "1000"
+        bits += "".join(map(LITERALS.__getitem__, data))
+        if damage:  # one bit of the middle literal's value: the stream still decodes, to the wrong bytes
+            at = 60 + 9 * (len(data) // 2) + 3
+            bits = bits[:at] + "10"[int(bits[at])] + bits[at + 1:]
+        bits += "0" * (-len(bits) % 8)
+        return int(bits, 2).to_bytes(len(bits) // 8, "big")
+    from setup_kit import rtpatch
+    body = b"K*" + struct.pack("<HHIH", 0x02BC, 0x92E4, 0x00010000, 0x0030) + bytes(18)
+    body += b"\x07\x00\x00\x00\x01\x00\x00\x04\x00" + lp("SOFTWARE\\EA GAMES\\Need for Speed Most Wanted") + lp("Install Dir")
+    body += b"\x00\x00\x02\x00" + lp("FRONTEND") + lp("GLOBAL")
+    for name, data in files.items():
+        short = name.split("\\")[-1]
+        packed = stream(data, damaged == name)
+        entry = short.encode().ljust(12, b"\0") + struct.pack("<HHII", 0, 0x20, len(data), 0)
+        sums = bytes(2) + struct.pack("<II", rtpatch.rolling(data, 31), rtpatch.rolling(data, 30))
+        body += struct.pack("<H", 0x2444) + lp(name) + bytes(10) + b"\x01" + struct.pack("<II", len(data), len(packed))
+        body += entry + sums + bytes(8) + lp(short) + packed
+    body += struct.pack("<H", 0x1000) + bytes(8)
+    pe = bytearray(0x400)
+    pe[:2] = b"MZ"
+    struct.pack_into("<I", pe, 0x3C, 0x80)
+    pe[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<HH", pe, 0x84, 0x14C, 1)
+    struct.pack_into("<H", pe, 0x80 + 20, 224)
+    struct.pack_into("<8sIIII", pe, 0x80 + 24 + 224, b".text", 0x200, 0x1000, 0x200, 0x200)
+    path.write_bytes(bytes(pe) + body)
+    return path
+
+
+class PCDiscTests(Fixture):
+    """--pc accepts the PC disc images: every disc's archives and disc 1's loose files are installed into work,
+    then the 1.3 update (--pc-update) and a speed.exe with the 1.3 code (--pc-exe). Inputs are only read."""
+    def setUp(self):
+        super().setUp()
+        import zipfile
+        self.discs = self.home / "My discs"
+        self.discs.mkdir()
+        self.old_exe = bytearray(self.data)
+        self.old_exe[self.offsets[".text"] + 5] ^= 1  # the discs' exe: not the 1.3 code
+        self.protected = b"MZ" + bytes(254) + b"stands for the update's copy-protected 1.3 exe"
+        self.patched = {"FRONTEND\\FrontB.lzc": b"front end 1.3", "GLOBAL\\gameplay.bin": b"gameplay 1.3" * 300,
+                        "GLOBAL\\gameplay.lzc": b"gameplay.lzc 1.3", "GLOBAL\\InGameB.bun": b"in game 1.3",
+                        "GLOBAL\\InGameB.lzc": b"in game.lzc 1.3", "server.dll": b"server 1.3"}
+        game = sorted(p for p in self.pc.rglob("*") if p.is_file() and p.name != "speed.exe")
+        def archive(members, extra=()):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+                for p in members:  # Windows paths, as EA's archives store them
+                    z.writestr(str(p.relative_to(self.pc)).replace("/", "\\"), p.read_bytes())
+                for name, data in extra:
+                    z.writestr(name, data)
+            return buffer.getvalue()
+        inf = "[autorun]\r\nopen=RunGame.exe\r\n\r\n[Special]\r\nDisk={}\r\nProductGuiID={{ADE91A13-FIXTURE}}\r\n"
+        listing = "1,1,Support\\EA Help\\*.* /s\r\n1,1,Support\\*.*\r\n1,1,speed.exe\r\n1,1,server.dll\r\n2,1,\r\n"
+        self.disc1 = make_iso(self.discs / "NFSMW_DISC_1.iso", {
+            "autorun.inf": inf.format(1).encode(), "common_filelist.txt": listing.encode(), "speed.exe": bytes(self.old_exe),
+            "server.dll": b"server 1.0", "AutoRun.exe": b"not installed", "0compressed.zip": archive(game[:2], [("GLOBAL\\gameplay.bin", b"gameplay 1.0")])}, "NFSMW_DISC1")
+        self.disc2 = make_iso(self.discs / "NFSMW_DISC_2.iso", {
+            "autorun.inf": inf.format(2).encode(), "1compressed.zip": archive(game[2:]), "RunGame.exe": b"x"}, "NFSMW_DISC2")
+        make_iso(self.discs / "Other game.iso", {"autorun.inf": b"[Special]\r\nDisk=2\r\nProductGuiID={OTHER}\r\n",
+                                                 "1compressed.zip": archive([])})
+        self.update = rtp_update(self.home / "nfsmwpatch1.3.exe", dict(self.patched, **{"speed.exe": self.protected}))
+        self.exe = self.home / "speed.exe"
+        write(self.exe, self.data)
+
+    def inputs(self):
+        return [(p, b.sha_file(p), p.stat().st_mtime_ns) for p in sorted(self.discs.iterdir()) + [self.update, self.exe]]
+
+    def extract(self, disc=None, update=True, exe=True):
+        return b.extract_pc_disc(disc or self.disc1, self.update if update else None, self.exe if exe else None,
+                                 self.paths.work, self.events, self.source)
+
+    def test_discs_install_like_the_folder_any_disc_chosen_inputs_untouched(self):
+        before = self.inputs()
+        root = self.extract(self.disc2)  # disc 2 chosen: disc 1 is found beside it, the other game's disc is not used
+        self.assertEqual(root, self.paths.work / "pc_src")
+        self.assertEqual(b.validate_pc(root, self.source)[1], b.validate_pc(self.pc, self.source)[1])
+        for p in self.pc.rglob("*"):
+            relative = str(p.relative_to(self.pc)).replace("/", "\\")
+            if p.is_file() and relative not in self.patched:
+                self.assertEqual((root / p.relative_to(self.pc)).read_bytes(), p.read_bytes(), relative)
+        for name, data in self.patched.items():
+            self.assertEqual((root / name.replace("\\", "/")).read_bytes(), data)
+        self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(["speed.exe", "server.dll", *b.PC_DIRS]))
+        self.assertFalse(any("\\" in p.name for p in root.rglob("*")))
+        self.assertEqual(self.inputs(), before)
+        # The --check and --build routes with the disc images, and an install from them.
+        def args(check):
+            a = self.args(check=check)
+            a.pc, a.pc_update, a.pc_exe = str(self.disc1), str(self.update), str(self.exe)
+            return a
+        with self.pipeline_stubs():
+            self.assertIsNone(b.build(args(True), self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source))
+            app = b.build(args(False), self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
+        self.assertTrue(app.exists())
+        self.assertIn("Reusing the game unpacked earlier from the disc images", self.stream.getvalue())
+        roots = dict(l.split("=", 1) for l in (self.paths.data / "roots.txt").read_text().splitlines())
+        self.assertEqual(b.validate_pc(Path(roots["pc_root"]), self.source)[1], b.validate_pc(self.pc, self.source)[1])
+        choices = json.loads((self.paths.state / "source-choices.json").read_text())
+        self.assertEqual((choices["pc"], choices["pc_update"], choices["pc_exe"]), (str(self.disc1), str(self.update), str(self.exe)))
+        self.assertEqual(self.inputs(), before)
+
+    def test_disc_folders_mounted_in_finder_work_too(self):
+        import zipfile
+        volumes = self.home / "Volumes"
+        for image in (self.disc1, self.disc2):
+            from setup_kit import pc_disc
+            disc = pc_disc.Disc(image)
+            folder = volumes / image.stem
+            for key, (name, _, _) in disc.files.items():
+                write(folder / name, disc.read(name, 1 << 30))
+            disc.close()
+        (volumes / "Macintosh HD/GLOBAL").mkdir(parents=True)
+        root = self.extract(volumes / "NFSMW_DISC_1")
+        self.assertEqual(b.validate_pc(root, self.source)[1], b.validate_pc(self.pc, self.source)[1])
+        self.assertTrue(b.pc_disc.is_disc(volumes / "NFSMW_DISC_2"))
+        self.assertFalse(b.pc_disc.is_disc(self.pc))
+
+    def test_versions_missing_disc_and_inputs_refused_before_unpacking(self):
+        cases = [
+            ("earlier version of the PC game", dict(update=False, exe=False)),
+            ("copy-protected", dict(exe=False)),
+        ]
+        for message, kwargs in cases:
+            with self.subTest(message), self.assertRaisesRegex(b.SetupError, message):
+                self.extract(**kwargs)
+            self.assertFalse((self.paths.work / "pc_src").exists())
+        write(self.exe, self.old_exe)
+        with self.assertRaisesRegex(b.SetupError, "differs"):
+            self.extract()
+        write(self.exe, self.data)
+        # An update whose own speed.exe has the 1.3 code needs no separate speed.exe.
+        rtp_update(self.update, dict(self.patched, **{"speed.exe": self.data}))
+        self.assertEqual((self.extract(exe=False) / "speed.exe").read_bytes(), self.data)
+        elsewhere = self.home / "Other drive" / "renamed.iso"  # any name: discs are known by their autorun.inf
+        elsewhere.parent.mkdir()
+        self.disc2.rename(elsewhere)
+        with self.assertRaisesRegex(b.SetupError, r"^Disc 2 of the set \(2 discs\) was not found with disc 1"):
+            self.extract()
+        with self.assertRaisesRegex(b.SetupError, "^Disc 1 of the set was not found with the chosen disc"):
+            self.extract(elsewhere)
+        with self.assertRaisesRegex(b.SetupError, "only used with PC disc images"):
+            b.pc_extras(self.pc, self.update, None)
+        with self.assertRaisesRegex(b.SetupError, "only used with PC disc images"):
+            b.pc_extras(self.pc, None, None, [elsewhere])
+        with self.assertRaisesRegex(b.SetupError, "not a disc image"):
+            b.pc_extras(self.disc1, None, None, [self.exe])
+        self.assertEqual(b.pc_extras(self.disc1, self.update, self.exe, [elsewhere]), [self.update, self.exe, elsewhere])
+
+    def test_discs_chosen_one_by_one_from_any_folder(self):
+        elsewhere = self.home / "Other drive" / "my second disc.iso"
+        elsewhere.parent.mkdir()
+        self.disc2.rename(elsewhere)
+        root = b.extract_pc_disc(self.disc1, self.update, self.exe, self.paths.work, self.events, self.source, [elsewhere])
+        self.assertEqual(b.validate_pc(root, self.source)[1], b.validate_pc(self.pc, self.source)[1])
+        # Chosen the other way round: disc 1 is found beside the disc picked by hand.
+        b.remove(self.paths.work / "pc_src")
+        (self.paths.work / "pc_src.json").unlink()
+        root = b.extract_pc_disc(elsewhere, self.update, self.exe, self.paths.work, self.events, self.source, [self.disc1])
+        self.assertTrue((root / "TRACKS/fixture.bin").is_file())
+        cases = [("not a disc of the same game set", [self.discs / "Other game.iso"]),
+                 ("is disc 1, which is already chosen", [self.disc1])]
+        for message, extra in cases:
+            with self.subTest(message), self.assertRaisesRegex(b.SetupError, message):
+                b.extract_pc_disc(self.disc1, self.update, self.exe, self.paths.work, self.events, self.source, extra)
+        # Through build: the hand-picked disc is remembered with the others.
+        args = self.args()
+        args.pc, args.pc_update, args.pc_exe, args.pc_disc = str(self.disc1), str(self.update), str(self.exe), [str(elsewhere)]
+        with self.pipeline_stubs():
+            self.assertTrue(b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source).exists())
+        choices = json.loads((self.paths.state / "source-choices.json").read_text())
+        self.assertEqual(choices["pc_discs"], [str(elsewhere)])
+
+    def test_damaged_update_and_images_refused_nothing_left_or_outside_work(self):
+        import zipfile
+        rtp_update(self.update, dict(self.patched, **{"speed.exe": self.protected}), damaged="GLOBAL\\gameplay.bin")
+        with self.assertRaisesRegex(b.SetupError, "gameplay.bin does not match its checksum"):
+            self.extract()
+        self.assertFalse((self.paths.work / "pc_src").exists())
+        rtp_update(self.update, dict(self.patched, **{"speed.exe": self.protected}))
+        write(self.home / "not an update.exe", self.data)
+        with self.assertRaisesRegex(b.SetupError, "does not carry an RTPatch update"):
+            b.extract_pc_disc(self.disc1, self.home / "not an update.exe", self.exe, self.paths.work, self.events, self.source)
+        # An unsafe name, or a record missing or added, is refused: the rest of the chain is never used on its own.
+        others = dict(self.patched, **{"speed.exe": self.data})
+        for name, files in (("unsafe", {"..\\..\\escaped.txt": b"x", **others}), ("missing", dict(list(others.items())[1:])),
+                            ("extra", dict(others, **{"GLOBAL\\extra.bin": b"x"}))):
+            with self.subTest(name), self.assertRaisesRegex(b.SetupError, "can't read this update"):
+                b.extract_pc_disc(self.disc1, rtp_update(self.home / f"{name}.exe", files), self.exe, self.paths.work,
+                                  self.events, self.source)
+        self.assertFalse((self.home / "escaped.txt").exists())
+        good = self.disc1.read_bytes()
+        self.disc1.write_bytes(good[:len(good) - 4096])
+        with self.assertRaisesRegex(b.SetupError, "truncated"):
+            self.extract()
+        self.disc1.write_bytes(good)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as z:
+            z.writestr("..\\..\\escaped.txt", b"x")
+        from setup_kit import pc_disc
+        disc = pc_disc.Disc(self.disc2)
+        files = {name: disc.read(name, 1 << 30) for name, _, _ in disc.files.values()}
+        disc.close()
+        make_iso(self.disc2, dict(files, **{"1compressed.zip": buffer.getvalue()}))
+        outside = sorted(str(p) for p in self.home.rglob("*") if self.paths.work not in p.parents)
+        with self.assertRaisesRegex(b.SetupError, "1compressed.zip on disc 2 contains an unsafe path"):
+            self.extract()
+        self.assertEqual(sorted(str(p) for p in self.home.rglob("*") if self.paths.work not in p.parents), outside)
+        self.assertFalse((self.paths.work / "pc_src").exists())
+
+    def test_iso_reader_bounds_and_names(self):
+        from setup_kit import pc_disc
+        plain = make_iso(self.home / "plain.iso", {"autorun.inf": b"", "0compressed.zip": b"z"}, joliet=False)
+        disc = pc_disc.Disc(plain)  # without Joliet: ISO 9660 names, version suffix dropped
+        self.assertEqual(disc.archives, ["0COMPRESSED.ZIP"])
+        self.assertEqual(disc.read("0compressed.zip", 10), b"z")
+        disc.close()
+        data = bytearray(plain.read_bytes())
+        struct.pack_into("<I", data, 19 * 2048 + 68 + 2, 10**6)  # the first file (after . and ..) far past the end
+        (self.home / "bad.iso").write_bytes(data)
+        with self.assertRaisesRegex(pc_disc.DiscError, "truncated"):
+            pc_disc.Disc(self.home / "bad.iso")
+        write(self.home / "not.iso", b"x" * 40000)
+        with self.assertRaisesRegex(pc_disc.DiscError, "no ISO 9660"):
+            pc_disc.Disc(self.home / "not.iso")
+        for name in ("..", "a/b", "c:d", "x\\y"):
+            with self.subTest(name), self.assertRaises(pc_disc.DiscError):
+                pc_disc.safe_name(name)
+
+
+class RTPatchOwnerTests(unittest.TestCase):
+    """The adaptive Huffman decoder against the player's own 1.3 update (NFS_PC_UPDATE=<nfsmwpatch1.3.exe>): its
+    server.dll must come out as the one recomp/server_module.py pins, and every file must match its checksums."""
+    def test_owner_update_decodes_to_pinned_server_dll(self):
+        path = os.environ.get("NFS_PC_UPDATE")
+        if not path:
+            raise unittest.SkipTest("needs the owner's 1.3 update (NFS_PC_UPDATE)")
+        from setup_kit import rtpatch
+        update = rtpatch.Update(path)
+        self.assertEqual([r.path for r in update.records], ["FRONTEND\\FrontB.lzc", "GLOBAL\\gameplay.bin", "GLOBAL\\gameplay.lzc",
+                         "GLOBAL\\InGameB.bun", "GLOBAL\\InGameB.lzc", "server.dll", "speed.exe"])
+        pinned = re.search(r'SHA256 = "([0-9a-f]{64})"', (ROOT / "recomp/server_module.py").read_text()).group(1)
+        self.assertEqual(hashlib.sha256(update.decode(update.record("server.dll"))).hexdigest(), pinned)
+        record = update.record("GLOBAL\\gameplay.bin")
+        self.assertEqual(len(update.decode(record)), record.size)  # decode() raises on a checksum mismatch
+        broken = rtpatch.Record(record.path, record.size, record.w1 ^ 1, record.w2, record.offset, record.length)
+        with self.assertRaisesRegex(rtpatch.PatchError, "checksum"):
+            update.decode(broken)
 
 
 class ProtocolTests(Fixture):

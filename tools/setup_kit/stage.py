@@ -19,9 +19,13 @@ def load_choices(state, required=False):
     path = Path(state) / "source-choices.json"
     try:
         value = json.loads(path.read_text())
+        def absolute(v):  # or None; pc_update, pc_exe and pc_discs (disc images) are absent from earlier choices
+            return v is None or isinstance(v, str) and Path(v).is_absolute()
+        discs = value.get("pc_discs", [])
         if (value.get("format_version") != 1 or "x360" not in value or not isinstance(value.get("pc"), str)
-                or not isinstance(value.get("destination"), str)
-                or not (value["x360"] is None or isinstance(value["x360"], str) and Path(value["x360"]).is_absolute())
+                or not isinstance(value.get("destination"), str) or not absolute(value["x360"])
+                or not absolute(value.get("pc_update")) or not absolute(value.get("pc_exe"))
+                or not isinstance(discs, list) or not all(v is not None and absolute(v) for v in discs)
                 or not Path(value["pc"]).is_absolute() or not Path(value["destination"]).is_absolute()):
             raise ValueError("invalid choices")
         return value
@@ -35,13 +39,16 @@ def load_choices(state, required=False):
                            "Run Setup again to select your original sources.") from e
 
 
-def save_choices(state, pc, x360, destination):
+def save_choices(state, pc, x360, destination, pc_update=None, pc_exe=None, pc_discs=()):
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     temporary = state / (".source-choices-" + uuid.uuid4().hex)
     try:
+        extras = {k: str(v) for k, v in (("pc_update", pc_update), ("pc_exe", pc_exe)) if v}  # disc images only
+        if pc_discs:
+            extras["pc_discs"] = [str(p) for p in pc_discs]
         write_synced(temporary, json.dumps(dict(format_version=1, pc=str(pc),
-                     x360=str(x360) if x360 else None, destination=str(destination)), sort_keys=True).encode(), 0o600)
+                     x360=str(x360) if x360 else None, destination=str(destination), **extras), sort_keys=True).encode(), 0o600)
         os.replace(temporary, state / "source-choices.json")
         sync_dir(state)
     finally:
