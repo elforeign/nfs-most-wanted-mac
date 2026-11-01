@@ -24,12 +24,15 @@ typedef struct {
     const uint8_t *src;
     size_t i, n;                                   // next unread byte, input size (reads past n are refused)
     uint32_t buf; int left;
+    int pad;                                       // zero words appended past the end (lookahead only, see lzx)
 } Bits;
 static void ensure(Bits *b, int n) {
     while (b->left < n) {
-        if (b->i + 2 > b->n) die("LZX: input truncated");
-        uint32_t w = (uint32_t)(b->src[b->i + 1] << 8 | b->src[b->i]);
-        b->i += 2;
+        uint32_t w = 0;
+        // A Huffman lookup peeks 16 bits even when the stream's last code is shorter: past the end it sees zero
+        // words. They may only be looked at, never consumed (checked when the image is complete).
+        if (b->i + 2 <= b->n) { w = (uint32_t)(b->src[b->i + 1] << 8 | b->src[b->i]); b->i += 2; }
+        else if (++b->pad > 2) die("LZX: input truncated");
         b->buf |= w << (16 - b->left);
         b->left += 16;
     }
@@ -96,7 +99,7 @@ static void lzx(const uint8_t *src, size_t n, uint8_t *out, size_t want, size_t 
     Tree *mt = malloc(sizeof *mt), *lt = malloc(sizeof *lt), *at = malloc(sizeof *at), *pt = malloc(sizeof *pt);
     if (!mt || !lt || !at || !pt) die("out of memory");
     int lt_ok = 0;
-    Bits b = {src, 0, n, 0, 0};
+    Bits b = {src, 0, n, 0, 0, 0};
     uint32_t r0 = 1, r1 = 1, r2 = 1;
     if (bits(&b, 1)) die("LZX: Intel E8 translation (not in an X360 executable)");
     size_t pos = 0, frame_end = 32768;
@@ -130,6 +133,7 @@ static void lzx(const uint8_t *src, size_t n, uint8_t *out, size_t want, size_t 
                 lt_ok = r > 0;
             } else if (type == 3) {
                 ensure(&b, 16);
+                if (b.pad) die("LZX: input truncated");
                 if (b.left > 16) b.i -= 2;
                 b.left = 0; b.buf = 0;
                 if (b.i + 12 > b.n) die("LZX: input truncated");
@@ -169,6 +173,7 @@ static void lzx(const uint8_t *src, size_t n, uint8_t *out, size_t want, size_t 
             remaining -= len;
         }
     }
+    if (b.left < 16 * b.pad) die("LZX: input truncated");   // a code used bits past the end of the stream
     free(mt); free(lt); free(at); free(pt);
 }
 

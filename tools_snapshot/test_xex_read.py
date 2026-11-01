@@ -8,7 +8,10 @@ executable (own session key, one SHA-1-valid block, a 3-symbol LZX stream "MZ" +
   python -I tools_snapshot/test_xex_read.py [--source xex_read.c]
 Proof (2026-10-26): the pre-hardening reader (git show 6a42cfd:tools_snapshot/xex_read.c) -> 6 of 7 FAIL (ASan
 heap-buffer-overflow for the optional-header count and the image-size overrun, ASan memcpy overlap for the 65535-byte
-chunk, UBSan shift exponent 32 for the window field; another title and another build accepted); hardened -> 7/7 PASS."""
+chunk, UBSan shift exponent 32 for the window field; another title and another build accepted); hardened -> 7/7 PASS.
+End of stream (2026-11-01): the reader before the lookahead fix (git show 96a38eb:tools_snapshot/xex_read.c) refuses
+the stream that ends right after its last code ("LZX: input truncated", as with the PAL build's executable) -> 8 of 9
+PASS; fixed -> 9/9 PASS, the cut-off code still refused."""
 import argparse
 import ctypes
 import hashlib
@@ -54,8 +57,9 @@ class Bits:
         return b"".join(struct.pack("<H", w) for w in words)
 
 
-def lzx_mz_match():
-    """A verbatim block of 4 output bytes: literals 'M' 'Z', then a 2-byte match at the repeated offset (R0 = 1)."""
+def lzx_mz_match(pad_words=4):
+    """A verbatim block of 4 output bytes: literals 'M' 'Z', then a 2-byte match at the repeated offset (R0 = 1).
+    pad_words: spare zero words after the last code (a retail stream may end right after it, as the PAL build's does)."""
     b = Bits()
     b.put(0, 1)                       # no Intel E8 header
     b.put(1, 3); b.put(0, 16); b.put(4, 8)
@@ -71,7 +75,7 @@ def lzx_mz_match():
         b.put(0, 1)
     for sym in (0x4D, 0x5A, 256):
         b.put_code(main[sym])
-    return b.data()
+    return b.data(pad_words)
 
 
 def xex(stream, image_size=4, nopt=3, window=0x8000, title=TITLE, chunk_len=None, size=None):
@@ -109,6 +113,8 @@ def main():
         ("window field 0x80000001", xex(stream, window=0x80000001), 4, "unsupported LZX window size"),
         ("another title ID", xex(stream, title=0x41560817), 4, "another title"),
         ("right title, another build (image hash)", xex(stream), 4, "another build"),
+        ("stream ending right after its last code decodes", xex(lzx_mz_match(0)), 4, None),
+        ("a last code cut off at the end of the stream", xex(lzx_mz_match(0)[:-2]), 4, "input truncated"),
     ]
     fails = 0
     with tempfile.TemporaryDirectory(prefix="xex_read_test-") as tmp:

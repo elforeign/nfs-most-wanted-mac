@@ -10,6 +10,8 @@ and, when the player's X360 default.xex is reachable (NFS_X360_XEX, else <x360 r
 beside a sibling x360/files), a second part:
   3. the real executable yields numbers in plausible ranges (brightness low < 1 < high);
   4. a copy with one byte changed is refused (no table is written from an executable that is not the supported build).
+Parts 1 and the controls run for the address tables of both supported builds (USA and the European PAL build); part 3
+uses the build the player's executable is.
 Exit 3 = part 3-4 skipped (no executable). Run: tools/.venv/bin/python -I tools_snapshot/test_x360_engine.py"""
 import math
 import os
@@ -41,16 +43,17 @@ def number(t):
 LI_IMMEDIATE = 0x0123      # an arbitrary synthetic immediate (not any retail value)
 
 
-def synthetic_image(shift=None):
+def synthetic_image(shift=None, build="USA"):
     """A synthetic image: every constant 1.5, each load site a `lis rK,hi` + `lfs f0,lo(rK)` pair (a distinct register per
     site) that addresses its constant; `shift` = (name, bytes) makes that one load address a different word."""
+    engine, engine_dec, engine_li, load_sites = pg.tables(build)
     img = bytearray(pg.IMAGE_SIZE)
-    for _, va in pg.ENGINE + pg.ENGINE_DEC:
+    for _, va in engine + engine_dec:
         struct.pack_into(">f", img, va - pg.IMAGE_BASE, 1.5)
-    for _, va in pg.ENGINE_LI:
+    for _, va in engine_li:
         struct.pack_into(">I", img, va - pg.IMAGE_BASE, (14 << 26) | LI_IMMEDIATE)
-    byname = dict(pg.ENGINE + pg.ENGINE_DEC)
-    for k, (name, site) in enumerate(sorted(pg.LOAD_SITES.items())):
+    byname = dict(engine + engine_dec)
+    for k, (name, site) in enumerate(sorted(load_sites.items())):
         va = byname[name] + (shift[1] if shift and shift[0] == name else 0)
         reg = 3 + k
         hi, lo = (va + 0x8000) >> 16, va & 0xFFFF
@@ -77,20 +80,34 @@ def find_xex():
 
 
 def main():
-    text = pg.engine_text(synthetic_image(), "synthetic image (test)")
+    for build in sorted(pg.XEX_BUILDS):
+        synthetic_build(build)
+    try:       # the tables are per build: a USA image read with the PAL addresses is refused, and the reverse
+        pg.engine_text(synthetic_image(build="USA"), "USA image as PAL", build="PAL")
+    except SystemExit as e:
+        assert "is not what the load" in str(e) or "not an lfs" in str(e) or "not a known constant" in str(e), e
+    else:
+        raise AssertionError("a USA image was accepted with the PAL tables")
+    print("PASS: a USA image is refused with the PAL address tables")
+    return stub_and_owner_parts()
+
+
+def synthetic_build(build):
+    load_sites = pg.tables(build)[3]
+    text = pg.engine_text(synthetic_image(build=build), "synthetic image (test)", build=build)
     got = macros(text)
     missing = REQUIRED - set(got)
     assert not missing, "missing macros: %s" % sorted(missing)
     assert all(math.isfinite(number(v)) for v in got.values())
     assert got["X360E_SHADOW_SIZE"] == str(LI_IMMEDIATE), got["X360E_SHADOW_SIZE"]      # the decoded immediate
-    print("PASS: synthetic image -> %d macros, every runtime macro present, immediate decoded" % len(got))
-    for name in pg.LOAD_SITES:       # control: an address that its load instruction does not read is refused
+    print("PASS (%s): synthetic image -> %d macros, every runtime macro present, immediate decoded" % (build, len(got)))
+    for name in load_sites:       # control: an address that its load instruction does not read is refused
         try:
-            pg.engine_text(synthetic_image((name, 4)), "shifted")
+            pg.engine_text(synthetic_image((name, 4), build), "shifted", build=build)
         except SystemExit as e:
             assert "is not what the load" in str(e), e
         else:
-            raise AssertionError("%s shifted by 4 bytes was accepted" % name)
+            raise AssertionError("%s shifted by 4 bytes was accepted (%s)" % (name, build))
     for kind, word in (("ori", lambda r: (24 << 26) | (r << 21) | (r << 16) | 4),               # ori rK,rK,4
                        ("or", lambda r: (31 << 26) | (r << 21) | (r << 16) | (5 << 11) | (444 << 1)),     # or rK,rK,r5
                        ("addis", lambda r: (15 << 26) | (r << 21) | (r << 16) | 1),             # addis rK,rK,1
@@ -100,29 +117,32 @@ def main():
                        ("lfsu", lambda r: (49 << 26) | (1 << 21) | (r << 16) | 4),              # lfsu f1,4(rK)
                        ("lmw", lambda r: (46 << 26) | (r << 21) | (1 << 16)),                   # lmw rK,0(r1)
                        ("sc", lambda r: 0x44000022)):                                           # sc 1 (may change any GPR)
-        for k, (name, site) in enumerate(sorted(pg.LOAD_SITES.items())):
-            if site - 4 in pg.LOAD_SITES.values():       # the word before is another site's lfs
+        for k, (name, site) in enumerate(sorted(load_sites.items())):
+            if site - 4 in load_sites.values():       # the word before is another site's lfs
                 continue
-            img = bytearray(synthetic_image())
+            img = bytearray(synthetic_image(build=build))
             struct.pack_into(">I", img, site - 4 - pg.IMAGE_BASE, word(3 + k))     # right before the lfs
             try:
-                pg.engine_text(bytes(img), "tampered")
+                pg.engine_text(bytes(img), "tampered", build=build)
             except SystemExit as e:
                 assert "not a known constant" in str(e), e
             else:
                 raise AssertionError("%s on the base register before %s was accepted" % (kind, name))
-    print("PASS: ori / or / addis / rlwinm / lwzu / stwu / lfsu / lmw / sc on the tracked base register invalidate it "
-          "(refused for every site with a free word before it)")
+    print("PASS (%s): ori / or / addis / rlwinm / lwzu / stwu / lfsu / lmw / sc on the tracked base register invalidate "
+          "it (refused for every site with a free word before it)" % build)
     try:       # a site that is not an lfs
-        img = bytearray(synthetic_image())
-        struct.pack_into(">I", img, pg.LOAD_SITES["X360E_FB_HIT_SOFT"] - pg.IMAGE_BASE, 0x60000000)
-        pg.engine_text(bytes(img), "nop")
+        img = bytearray(synthetic_image(build=build))
+        struct.pack_into(">I", img, load_sites["X360E_FB_HIT_SOFT"] - pg.IMAGE_BASE, 0x60000000)
+        pg.engine_text(bytes(img), "nop", build=build)
     except SystemExit as e:
         assert "not an lfs" in str(e), e
     else:
         raise AssertionError("a non-lfs load site was accepted")
-    print("PASS: +4-byte address shift refused for all %d checked constants; non-lfs site refused" % len(pg.LOAD_SITES))
+    print("PASS (%s): +4-byte address shift refused for all %d checked constants; non-lfs site refused" %
+          (build, len(load_sites)))
 
+
+def stub_and_owner_parts():
     stub = macros(pg.ENGINE_STUB)
     assert REQUIRED <= set(stub), sorted(REQUIRED - set(stub))
     assert "#define X360_ENGINE_CONSTS 0" in pg.ENGINE_STUB
@@ -138,7 +158,9 @@ def main():
         return 3
     with tempfile.TemporaryDirectory(prefix="x360-engine-") as d:
         work = Path(d)
-        real = macros(pg.engine_consts(xex, work))
+        build = pg.xex_build(xex, work)
+        real = macros(pg.engine_consts(xex, work, build))
+        print("PASS: the player's executable is the %s build" % build)
         assert REQUIRED <= set(real)
         assert number(real["X360E_BRIGHT_LOW"]) < 1 < number(real["X360E_BRIGHT_HIGH"])
         assert number(real["X360E_FB_RAMP_LO"]) < number(real["X360E_FB_RAMP_HI"])
@@ -158,7 +180,7 @@ def main():
             path = work / "bad.xex"
             path.write_bytes(bad)
             try:
-                pg.engine_consts(path, work)
+                pg.engine_consts(path, work, build)
             except SystemExit as e:
                 assert "not the supported" in str(e), e
             else:

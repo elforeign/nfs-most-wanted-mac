@@ -17,9 +17,12 @@
     x360_engine.inc     default.xex: the X360 post chain's engine constants (auto-exposure, speed blur, middle gray, bloom
                         scale, mirror brightness) at their addresses in the identity-checked image (x360_post.m; no
                         X360 executable: zeros and X360_ENGINE_CONSTS 0, the PC chain)
+  The executable is the USA or the European (PAL) retail build, told apart by the hash of the whole decoded image; each
+  build has its own address tables (tables()).
 
 usage: pubtables_gen.py --pc DIR [--x360 FILES_DIR] [--xex PATH] --out DIR [--work DIR]
-       pubtables_gen.py --engine-image IMAGE.bin --out DIR   (test: x360_engine.inc from a decoded image at 82000000)"""
+       pubtables_gen.py --engine-image IMAGE.bin --out DIR [--build USA|PAL]
+                        (test: x360_engine.inc from a decoded image at 82000000)"""
 import argparse
 import math
 import os
@@ -270,14 +273,37 @@ def grass_x360(x360):
 CALLOUT_VA, CALLOUT_WORDS = 0x828FFBB0, 17 * 5
 # The one supported X360 executable: NFS:MW's title ID and the SHA-256 of its whole decoded image (USA retail disc).
 # xex_read refuses any other title or build, so another executable's bytes never become labels.
-XEX_TITLE, XEX_IMAGE_SHA256 = 0x454107D9, "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618"
+XEX_TITLE = 0x454107D9
+XEX_BUILDS = {   # the supported builds: SHA-256 of the whole decoded image
+    "USA": "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618",
+    "PAL": "027c50f93d9015f2f20683bed65b188952b49d73519e926bceb5bd220b7ab146",   # European retail disc
+}
 
 
-def callout_labels(xex, work):
+def xex_reader(work):
     exe = work / "xex_read"
-    subprocess.run(["clang", "-O2", "-w", "-o", str(exe), str(HERE / "xex_read.c")], check=True)
-    r = subprocess.run([str(exe), str(xex), "0x%X" % CALLOUT_VA, str(4 * CALLOUT_WORDS), "0x%08X" % XEX_TITLE,
-                        XEX_IMAGE_SHA256], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
+    if not exe.exists():
+        subprocess.run(["clang", "-O2", "-w", "-o", str(exe), str(HERE / "xex_read.c")], check=True)
+    return exe
+
+
+def xex_build(xex, work):
+    """Which supported build the executable is ("USA" or "PAL"); SystemExit for any other (xex_read checks the title
+    and the whole decoded image's hash)."""
+    errors = []
+    for build, digest in XEX_BUILDS.items():
+        r = subprocess.run([str(xex_reader(work)), str(xex), "0x%X" % IMAGE_BASE, "4", "0x%08X" % XEX_TITLE, digest],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if r.returncode == 0:
+            return build
+        errors.append(r.stderr.decode(errors="replace").strip())
+    raise SystemExit("pubtables_gen: %s is not a supported NFS:MW X360 executable (USA or PAL retail): %s" %
+                     (xex, errors[-1]))
+
+
+def callout_labels(xex, work, build="USA"):
+    r = subprocess.run([str(xex_reader(work)), str(xex), "0x%X" % CALLOUT_VA, str(4 * CALLOUT_WORDS),
+                        "0x%08X" % XEX_TITLE, XEX_BUILDS[build]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
     if r.returncode:
         raise SystemExit("pubtables_gen: %s is not the supported NFS:MW X360 executable: %s" %
                          (xex, r.stderr.decode(errors="replace").strip()))
@@ -385,6 +411,33 @@ LOAD_SITES = {
 }
 
 
+# The European (PAL) build: the same code and constants, partly moved. Its constants at 820A0000-820BFFFF lie 0xD0 higher,
+# the rumble code 0x18 lower, ShadowMap_FitLiSPSM 0x190 higher and the shadow map setup 0x50 higher; the brightness slider,
+# the post chain, the other constants and the label table are where the USA build has them. Each address was found as
+# the instruction that loads the USA one (the same base register and displacement pattern) and is checked again by
+# engine_text like the USA ones; the labels by the code that builds 828FFBB0.
+PAL_MOVED = {"X360E_BLUR_RAMP": 0x820B0668, "X360E_SHADOW_FOCUS_FE": 0x820B03F4, "X360E_FB_GROUND_SLOPE": 0x820AFE9C}
+PAL_LI = [("X360E_SHADOW_SIZE", 0x8243C298)]
+PAL_LOAD_SITES = {
+    "X360E_BRIGHT_LOW": 0x8223A2DC, "X360E_BRIGHT_HIGH": 0x8223A2F0,
+    "X360E_SHADOW_LIGHT_Z_MIN": 0x82456438, "X360E_SHADOW_N_SCALE": 0x82456508, "X360E_SHADOW_N_OFFSET": 0x82456534,
+    "X360E_SHADOW_EYE_BACK": 0x824567E8, "X360E_SHADOW_Y_SCALE": 0x82456818, "X360E_SHADOW_DEPTH_SCALE": 0x82456808,
+    "X360E_FB_HIT_SOFT": 0x823A50C4, "X360E_FB_HIT_SLOPE": 0x823A51F0, "X360E_FB_WORLD_SLOPE": 0x823A50B8,
+    "X360E_FB_GROUND_SLOPE": 0x823A50A4, "X360E_FB_SAME_DOT": 0x823A517C, "X360E_FB_RAMP_LO": 0x823A5218,
+    "X360E_FB_RAMP_HI": 0x823A5210, "X360E_FB_SHIFT_TIME": 0x823A4CC4, "X360E_FB_SHIFT_GOOD": 0x823A4C50,
+    "X360E_FB_SHIFT_PERFECT": 0x823A4C28, "X360E_FB_NOS_TIME": 0x823A4E2C, "X360E_FB_NOS_END": 0x823A4E34,
+    "X360E_FB_DAMAGE_END": 0x823A4D78, "X360E_FB_GEAR_TIME": 0x823A4EE8, "X360E_FB_GEAR_LEVEL": 0x823A4EEC,
+}
+
+
+def tables(build):
+    """(ENGINE, ENGINE_DEC, ENGINE_LI, LOAD_SITES) as the given build has them."""
+    if build == "USA":
+        return ENGINE, ENGINE_DEC, ENGINE_LI, LOAD_SITES
+    moved = lambda rows: [(name, PAL_MOVED.get(name, va)) for name, va in rows]
+    return moved(ENGINE), moved(ENGINE_DEC), PAL_LI, PAL_LOAD_SITES
+
+
 # primary opcodes that write no GPR: tw/twi, cmpli/cmpi, branches and CR ops (a call is handled apart), stores without update,
 # stmw, FPR loads without update, FP arithmetic. Any other instruction is treated as writing both its rD and rA fields.
 NO_GPR_WRITE = {3, 10, 11, 16, 18, 19, 36, 38, 44, 47, 48, 50, 52, 54, 59, 63}
@@ -440,24 +493,25 @@ def f32_text(v):
     return "%.9gf" % v
 
 
-def engine_text(img, source, sites=None):
+def engine_text(img, source, sites=None, build="USA"):
+    engine, engine_dec, engine_li, load_sites = tables(build)
     out = [HDR % source + "#define X360_ENGINE_CONSTS 1"]
-    for name, va in ENGINE + ENGINE_DEC:       # a constant's address must be what its guest load instruction addresses
-        site = (LOAD_SITES if sites is None else sites).get(name)
+    for name, va in engine + engine_dec:       # a constant's address must be what its guest load instruction addresses
+        site = (load_sites if sites is None else sites).get(name)
         if site and load_address(img, site) != va:
             raise SystemExit("pubtables_gen: %s at %08X is not what the load at %08X reads (%08X): refused" %
                              (name, va, site, load_address(img, site)))
-    for name, va in ENGINE_DEC:
+    for name, va in engine_dec:
         v = struct.unpack_from(">f", img, va - IMAGE_BASE)[0]
         if not math.isfinite(v) or not 0.0 < v < 100.0:
             raise SystemExit("pubtables_gen: %s at %08X is not a plausible number (%r): refused" % (name, va, v))
         out.append("#define %s %s" % (name, f32_text(v)[:-1]))
-    for name, va in ENGINE:
+    for name, va in engine:
         v = struct.unpack_from(">f", img, va - IMAGE_BASE)[0]
         if not math.isfinite(v):
             raise SystemExit("pubtables_gen: %s at %08X is not a finite number (%r): refused" % (name, va, v))
         out.append("#define %s %s" % (name, f32_text(v)))
-    for name, va in ENGINE_LI:
+    for name, va in engine_li:
         w = struct.unpack_from(">I", img, va - IMAGE_BASE)[0]
         if w >> 26 != 14 or (w >> 16) & 0x1F:
             raise SystemExit("pubtables_gen: %08X is not an li instruction (%08X): refused" % (va, w))
@@ -498,16 +552,13 @@ def steer_text(word):
     return "#define X360E_STEER_LOW_WORD 0x%08Xu\n" % word
 
 
-def engine_consts(xex, work):
-    exe = work / "xex_read"
-    if not exe.exists():
-        subprocess.run(["clang", "-O2", "-w", "-o", str(exe), str(HERE / "xex_read.c")], check=True)
-    r = subprocess.run([str(exe), str(xex), "0x%X" % IMAGE_BASE, str(IMAGE_SIZE), "0x%08X" % XEX_TITLE,
-                        XEX_IMAGE_SHA256], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
+def engine_consts(xex, work, build="USA"):
+    r = subprocess.run([str(xex_reader(work)), str(xex), "0x%X" % IMAGE_BASE, str(IMAGE_SIZE), "0x%08X" % XEX_TITLE,
+                        XEX_BUILDS[build]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
     if r.returncode or len(r.stdout) != IMAGE_SIZE:
         raise SystemExit("pubtables_gen: %s is not the supported NFS:MW X360 executable: %s" %
                          (xex, r.stderr.decode(errors="replace").strip()))
-    return engine_text(r.stdout, "X360 default.xex (engine constants)")
+    return engine_text(r.stdout, "X360 default.xex (%s build, engine constants)" % build, build=build)
 
 
 ENGINE_STUB = (NO_X360 % "executable" + "#define X360_ENGINE_CONSTS 0\n" +
@@ -523,9 +574,10 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--work", type=Path)
     ap.add_argument("--engine-image", type=Path)
+    ap.add_argument("--build", choices=sorted(XEX_BUILDS), default="USA")
     a = ap.parse_args()
     if a.engine_image:                     # test hook: the engine table from a raw decoded image (no xex identity)
-        (a.out / "x360_engine.inc").write_text(engine_text(a.engine_image.read_bytes(), "decoded image (test)"))
+        (a.out / "x360_engine.inc").write_text(engine_text(a.engine_image.read_bytes(), "decoded image (test)", build=a.build))
         return
     if not a.pc:
         ap.error("--pc is required")
@@ -549,8 +601,9 @@ def main():
         files["glass_x360.inc"] = NO_X360 % "copy" + "static const GlassX360 glass_x360[1];\n#define GLASS_X360_COUNT 0\n"
         files["grass_x360.inc"] = NO_X360 % "copy"
     if a.xex and a.xex.exists():
-        files["callout_labels.inc"] = callout_labels(a.xex, work)
-        files["x360_engine.inc"] = engine_consts(a.xex, work)
+        build = xex_build(a.xex, work)
+        files["callout_labels.inc"] = callout_labels(a.xex, work, build)
+        files["x360_engine.inc"] = engine_consts(a.xex, work, build)
     else:
         files["x360_engine.inc"] = ENGINE_STUB
         files["callout_labels.inc"] = (NO_X360 % "executable" + "// Zero labels: the diagram's callouts stay hidden.\n"

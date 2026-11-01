@@ -46,7 +46,10 @@ SELECTED_DIRS = {"GLOBAL", "TRACKS", "CARS", "SOUND", "NIS", "FRONTEND", "LANGUA
 ARREST = re.compile(r"SCENE_ARREST[FM]\d+B?_BUNDLEB\.BUN$", re.I)
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_\\/%.\-]+\.[A-Za-z0-9]{2,4}".encode())
 XEX_TITLE = "0x454107D9"
-XEX_SHA256 = "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618"
+XEX_BUILDS = {   # the supported executables: SHA-256 of the whole decoded image (tools_snapshot/pubtables_gen.py XEX_BUILDS)
+    "USA": "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618",
+    "PAL": "027c50f93d9015f2f20683bed65b188952b49d73519e926bceb5bd220b7ab146",   # European retail disc
+}
 
 
 class X360Error(Exception):
@@ -168,12 +171,15 @@ def _game_names(xex, pc_root, work):
     tool = work / "xex_read"
     _run(["clang", "-O2", "-w", SNAPSHOT / "xex_read.c", "-o", tool], work, timeout=120)
     image = work / "xex-image.bin"
-    with image.open("wb") as output, (work / "xex-read.log").open("wb") as errors:
-        result = subprocess.run([str(tool), str(xex), hex(base), str(size), XEX_TITLE, XEX_SHA256],
-                                stdout=output, stderr=errors, timeout=120)
-    if result.returncode or image.stat().st_size != size:
-        raise X360Error("X360 executable is damaged or is not the supported NFS:MW USA retail build",
-                        "Select the supported USA retail X360 disc, or continue without X360 assets.")
+    for digest in XEX_BUILDS.values():
+        with image.open("wb") as output, (work / "xex-read.log").open("ab") as errors:
+            result = subprocess.run([str(tool), str(xex), hex(base), str(size), XEX_TITLE, digest],
+                                    stdout=output, stderr=errors, timeout=120)
+        if not result.returncode and image.stat().st_size == size:
+            break
+    else:
+        raise X360Error("X360 executable is damaged or is not a supported NFS:MW retail build (USA or PAL)",
+                        "Select your USA or European (PAL) retail X360 disc, or continue without X360 assets.")
     for path in (pc_root / "speed.exe", image):
         if not path.is_file() or path.stat().st_size > 256 << 20:
             raise X360Error(f"Missing or oversized game executable: {path.name}")

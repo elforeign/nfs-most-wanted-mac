@@ -214,7 +214,7 @@ It uses the PC game's original colour treatment at full strength. Choose **Port 
 
 ## FAQ: Why are some Xbox 360 settings missing?
 
-They need files from your own Xbox 360 copy. A PC-only installation can still play, but cannot show every console effect. Setup accepts a complete Xbox 360 folder or an Xbox 360 .iso.
+They need files from your own Xbox 360 copy. A PC-only installation can still play, but cannot show every console effect. Setup accepts a complete Xbox 360 folder or an Xbox 360 .iso, from the USA or the European (PAL) retail disc.
 
 ## FAQ: Which PC folder does Setup need?
 

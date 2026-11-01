@@ -35,7 +35,8 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 - About 12 GB free disk space while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy).
 - Your own PC game, version 1.3: the installed game folder or a `.zip` of it. Any `speed.exe` that has the 1.3
   code is accepted. A PC disc image (`.iso`) isn't supported yet.
-- Optional: your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features.
+- Optional: your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features. The USA
+  and the European (PAL) retail discs are supported.
 
 ## What you get
 

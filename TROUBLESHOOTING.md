@@ -39,8 +39,10 @@ work folder (about 12 GB while Setup builds), then build again.
 
 **"Another Setup is using this work or cache folder"** — wait for the other Setup to finish, or quit it.
 
-**Xbox 360 copy rejected** — Setup says what is wrong with it. Choose your own complete Xbox 360 copy (a folder or an
-`.iso`), or leave it out to build the PC game alone. Xbox 360 features are then absent.
+**Xbox 360 copy rejected** — Setup says what is wrong with it. It supports the USA and the European (PAL) retail
+discs ("not a supported NFS:MW retail build" means another release, or a modified or damaged executable). Choose your
+own complete Xbox 360 copy (a folder or an `.iso`), or leave it out to build the PC game alone. Xbox 360 features are
+then absent.
 
 **"Your 3.x saves were not copied into 4.0"** — a 3.x save was damaged or incomplete, so Setup copied none of them
 and changed nothing. The message names the 3.x folder. With the game closed you can copy a career folder (it holds a
