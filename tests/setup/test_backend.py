@@ -1305,6 +1305,21 @@ class PCDiscTests(Fixture):
             b.pc_extras(self.disc1, None, None, [self.exe])
         self.assertEqual(b.pc_extras(self.disc1, self.update, self.exe, [elsewhere]), [self.update, self.exe, elsewhere])
 
+    def test_another_speed_exe_or_update_is_not_served_from_the_earlier_unpack(self):
+        self.extract()
+        reused = "Reusing the game unpacked earlier from the disc images"
+        self.extract()
+        self.assertEqual(self.stream.getvalue().count(reused), 1)
+        other = bytes(self.data[:-1]) + bytes([self.data[-1] ^ 1])  # the same 1.3 code, different bytes
+        write(self.exe, other)
+        root = self.extract()
+        self.assertEqual(self.stream.getvalue().count(reused), 1)
+        self.assertEqual((root / "speed.exe").read_bytes(), other)
+        rtp_update(self.update, dict(self.patched, **{"speed.exe": self.protected, "server.dll": b"server 1.3 again"}))
+        root = self.extract()
+        self.assertEqual(self.stream.getvalue().count(reused), 1)
+        self.assertEqual((root / "server.dll").read_bytes(), b"server 1.3 again")
+
     def test_discs_chosen_one_by_one_from_any_folder(self):
         elsewhere = self.home / "Other drive" / "my second disc.iso"
         elsewhere.parent.mkdir()
