@@ -1,9 +1,19 @@
 # Changelog
 
-## 4.3.0 (unreleased)
+## 4.4.0
 
+- **Video clips with sound:** F10 > Display > Video clip records the game picture and its sound (stereo AAC; HEVC or H.264; 1080p, 1440p or 4K; works with HDR on) to Movies/NFSMW.
+- **Physical car materials** (F10 > Picture, default Off): tinted glass and chrome from measured real-world values. **Particles: Physical** (F10 > World) adds soft edges and scene lighting to smoke and dust.
+- **Full screen: Auto:** Native on the Mac's own screen, Borderless on other displays.
+- **Gameplay:** Junkman parts after the career (Unlimited by default) and Add cash for a started career.
 - **Build from your PC game discs, no Windows needed:** Setup accepts the PC discs as `.iso` images (or mounted in Finder) with the game's official 1.3 update. It installs the game from the discs into its work folder and applies the update without running it, checking every file. The `speed.exe` on the discs and in the update is copy-protected, so a `speed.exe` with the 1.3 code is still needed. **Update now** remembers all three.
 - **European (PAL) Xbox 360 disc:** Setup now takes the PAL retail Xbox 360 copy as well as the USA one for the Xbox 360 features. Its executable is told apart by its hash and read with its own address tables; its differing shaders are pinned too. Also fixes reading an Xbox 360 executable whose compressed data ends right after its last code.
+- **Export all-in-one app** in Setup: a movable backup of the game and its files (saves and settings are not included). Reinstalls reuse the prepared Xbox 360 files.
+- **Reports** can be posted as a GitHub issue after you confirm the exact text; screenshot sharing starts Off.
+- **Changed:** the F10 Controls > Triggers selector is gone; bind Accelerate to R2 and Brake to L2 in the game's Options > Controls for pedals.
+- **Online free roam is not available in 4.4:** it moves to a shared server with room codes in a later update; 4.3's Host/Join is retired.
+
+## 4.3.0
 
 - **In-game Guide:** open **F10 > Help > Guide**, with keyboard or controller navigation.
 - **Look presets:** choose Port, PC retail, Xbox 360 retail or My picks. Picture edits are saved as My picks. The full Xbox 360 look needs your own Xbox 360 files. Both retail presets turn HDR, contact shadows and soft smoke Off.

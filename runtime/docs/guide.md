@@ -82,6 +82,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 - **Performance overlay** shows Compact numbers or Full details and a timing graph while you drive.
 - **Quit game** and **Restart game** need a second press within four seconds. Settings are saved; race progress since your last save is lost.
 - **Online** holds update actions and **Discord status**. Discord status is off by default and needs Discord running on this Mac.
+- **Video clip** starts recording the game picture and its sound; select it again to stop and wait for **Clip saved**. Clips go to Movies/NFSMW (**Show clips in Finder** opens it); **Clip resolution** picks 1080p, 1440p or 4K. Recording always starts Off and works with HDR on; the F10 panel is not recorded.
 
 ## Online (beta)
 
