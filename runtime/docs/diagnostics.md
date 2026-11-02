@@ -109,7 +109,6 @@ A failed write/flush/commit preserves the old destination. An interrupted proces
                                                     
 
 
-
                                                                                                                         
                                                                                                                      
                                                                                                                     
@@ -117,7 +116,6 @@ A failed write/flush/commit preserves the old destination. An interrupted proces
                                                                                                                       
                                                                                                                         
                                                              
-
 
                                                                                                                     
                                                                                                                      
@@ -167,3 +165,12 @@ BOOT_DIAG=/tmp/diag BOOT_DIAG_DRAWS=5600,6400 NFS_AUDIO=null ./boot "/path/to/ga
 
                 
                  
+
+`NFS_TEST_CONTACT_PUSH=1` with diagnostics places one patrol car six metres ahead after the 300C exceeds 10 m/s, waits for actual contact, then supplies a central 10 m/s approach against a stationary cop in private contact Moments. Native modifiers, solver, damage and velocity writeback run normally; `contact_push` events record both masses, impulses and resulting velocities. For guarded scratch checks only.
+
+With diagnostics on, each breaker Moment request logs `breaker:` scene, `PLAYED` (Load accepted, not a rendered
+frame) or the first failed guard, freshness, nearest eligible cop and its limit (m), marker score.
+Mac-only: Windows calls the original hook and logs nothing.
+
+`BOOT_DIAG` writes buffered save-stage splits to `save_NNNNNN.txt` after commit.
+See [save timings](save_timing.md) for stages, fields, overhead and offline proof.

@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+// GameAction IDs must match the guest evaluator and the Controls/Drag binding pages.
 enum { CT_GAS = 0, CT_BRAKE = 1, CT_STEERLEFT = 2, CT_STEERRIGHT = 3, CT_HANDBRAKE = 4, CT_GAMEBREAKER = 5, CT_NOS = 6,
        CT_SHIFTDOWN = 7, CT_SHIFTUP = 8, CT_RESET = 9, CT_CAMERA = 15, CT_LOOKBACK = 16 };
 enum { B_BUTTON = 2, B_POV, B_AXIS_LO, B_AXIS_HI, B_ROT_LO, B_ROT_HI };   // padbind.c's binding types
@@ -40,8 +41,8 @@ static const CtSource ct_sources[] = {
 typedef struct { int action; const char *src; float low; } CtMap;
 #define CT_NBUTTONS 10
 // Variants 2-5 (X360 drive2..drive5 / drive2_analog..drive5_analog, identical apart from steering).
-static const CtMap ct_buttons[4][CT_NBUTTONS] = {   // all-empty (every type keeps the player's buttons) with no X360 copy
-#include "gen/controltype_buttons.inc"                  // tools/gen_tables.py, from the player's X360 ATTRIBUTES.BIN
+static const CtMap ct_buttons[4][CT_NBUTTONS] = {
+#include "gen/controltype_buttons.inc"                  // port-authored action/control recipes, also in PC-only builds
 };
 // The X360 selector: Type 1-5 leftStick, 6-10 D-pad; variant = (type - 1) % 5 (8223BD78 shows variant + 1 / + 6).
 static int ct_left_stick(int type) { return type <= 5; }
@@ -93,9 +94,9 @@ static Setting s_type = {.id = "controls.control_type", .category = SET_CONTROLS
     .apply = ct_apply};
 __attribute__((constructor)) static void controltype_register(void) { settings_add(&s_type); }
 
-int controltype_passthrough(void) {             // user32.m: the driving buttons as the pad's own (variants 2-5)
+int controltype_passthrough(int idx) {          // Drag belongs to P1; variants 2-5 apply to both pads
     if (ct_type != s_type.value + 1) ct_apply(s_type.value);
-    return ct_type > 1 && ct_variant(ct_type) != 0;
+    return (idx == 0 && padbind_input_set() == PADBIND_DRAG) || (ct_type > 1 && ct_variant(ct_type) != 0);
 }
 
 // Split-screen producer, item 1: creation of the second logical device is separate.
@@ -152,15 +153,24 @@ static void ct_update(Cpu *c) {
 void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): every GameAction's value, each frame
     if (ct_type != s_type.value + 1) ct_apply(s_type.value);
     uint32_t dev = c->ecx;
+    padbind_race_update(c);
     int port = pad_count() == 2 && M32(dev + 0x24) == 1;
     int port_swapped = port ? padbind_port_begin(1) : 0;
-    if (pedals_selected() && !port) padbind_follow(c);
-    int pedal_layout = padbind_pedals(port);
-    if ((ct_type < 2 && !pedal_layout) || M8(dev + 0x183C)) { ct_update(c); padbind_port_end(port_swapped); return; }   // saved bindings, or a binding capture in progress
+    int input_swapped = 0;
+    int input_set = PADBIND_DEFAULT;
+    if (!port && !M8(dev + 0x183C)) {
+        if (ct_type >= 2 || padbind_input_set() == PADBIND_DRAG) padbind_follow(c);
+        input_set = padbind_input_set();
+        input_swapped = padbind_input_begin(input_set);
+    }
+    if (input_set == PADBIND_DRAG || ct_type < 2 || M8(dev + 0x183C)) {
+        if (input_swapped) padbind_swap(1);
+        ct_update(c);
+        if (input_swapped) padbind_swap(0);
+        padbind_input_end(input_swapped); padbind_port_end(port_swapped); return;
+    }   // saved bindings, or a binding capture in progress
     // FUN_00628940 reads each non-empty binding and the largest wins: the controller slots of the actions this type
     // changes hold the preset's control for the call (slot 3 empty), then the user's own come back.
-    if (!port && !pedals_selected())
-        padbind_follow(c);                      // only port 0 follows shared binding/identity changes
     uint32_t saved[12][6];
     int acts[12], ramp[12], n = 0;
     float lows[12];
@@ -168,17 +178,10 @@ void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): e
         float low;
         const char *src = ct_map(ct_type, a, &low);
         const CtSource *s = src ? ct_source(src) : NULL;
-        uint32_t pedal[6];
-        int override = pedal_layout && pedals_binding(a, pedal);
-        if (!s && !override) continue;
+        if (!s) continue;
         uint32_t r = GA + 0x34u * (uint32_t)a + 4 + 24u;
         for (int k = 0; k < 6; ++k) saved[n][k] = M32(r + 4 * (uint32_t)k);
-        if (override) {
-            for (int k = 0; k < 6; ++k) M32(r + 4 * (uint32_t)k) = pedal[k];
-            low = 0; // the game's pedal clamp already supplies its 5%/95% endpoints
-        } else {
-            M32(r) = s->type; M32(r + 4) = 0; M32(r + 8) = s->obj; M32(r + 12) = M32(r + 16) = M32(r + 20) = 0;
-        }
+        M32(r) = s->type; M32(r + 4) = 0; M32(r + 8) = s->obj; M32(r + 12) = M32(r + 16) = M32(r + 20) = 0;
         acts[n] = a; lows[n] = low; ramp[n] = low > 0; ++n;
     }
     padbind_swap(1);                            // the joystick reads inside it must not see the preset
@@ -199,6 +202,7 @@ void f_006349B0(Cpu *c) {                       // fastcall (IOModule device): e
             last[acts[i]] = v;
         }
     }
+    padbind_input_end(input_swapped);
     padbind_port_end(port_swapped);
 }
 #endif

@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 RT=Path(__file__).resolve().parent
-CF=['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-I',str(RT),'-I',str(RT.parent/'recomp')]
+CF=['clang','-std=c11', '-D_DEFAULT_SOURCE','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-I',str(RT),'-I',str(RT.parent/'recomp')]
 def main():
     mutants={'normal':None,
              'parts':('M16(custom + 2*i) = part ? (uint16_t)part_index : 0xffffu;', 'M16(custom + 2*i) = part ? 0xffffu : 0xffffu;'),
@@ -20,7 +20,7 @@ def main():
             (td/'roam_game.c').write_text(src)
             for file in ['roam_switch_test.c','roam_appearance_test.c']:(td/file).write_text((RT/file).read_text())
             exe=td/label
-            p=subprocess.run(CF+[str(td/'roam_appearance_test.c'),str(RT/'roam_core.c'),'-o',str(exe)],capture_output=True,text=True)
+            p=subprocess.run(CF+[str(RT/'roam_auth.c')]+(['-framework','Security','-framework','CoreFoundation'] if __import__('sys').platform=='darwin' else ['-lcrypto','-lm'])+[str(td/'roam_appearance_test.c'),str(RT/'roam_core.c'),'-o',str(exe)],capture_output=True,text=True)
             assert p.returncode==0,p.stderr[-2500:]
             p=subprocess.run([str(exe)],capture_output=True,text=True,timeout=15)
             print(label+': '+p.stdout.strip(),flush=True)

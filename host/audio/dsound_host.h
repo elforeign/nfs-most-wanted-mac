@@ -118,6 +118,35 @@ typedef void (*DsNotifyFn)(void *user, uint32_t event);
 /* Called with every block of mixed 6-ch float (after clamping, before the device's mode conversion). */
 typedef void (*DsTapFn)(void *user, const float *pcm51, size_t frames);
 
+#define DS_CAPTURE_DISCONTINUITY 1u
+/* Borrowed for the callback only. PCM is interleaved FL FR FC LFE BL BR, post-limiter/clamp, before mute or
+ * output conversion. sample_position counts mixed frames since this stream's creation (including earlier rates).
+ * first_sample_host_time is in mach_absolute_time() ticks; convert with mach_timebase_info, NOT nanoseconds or
+ * mach_continuous_time. It estimates playback at the software output queue, excluding downstream hardware latency.
+ * Device: sampled queue + pending encoder input. Null: t0 sample clock. Manual: explicit creation/rebase anchor.
+ * clock_generation changes when that sample timeline is abandoned/rebased; flags also mark subscription/stream
+ * changes or missing blocks. A new generation invalidates any extrapolation from earlier timestamps. */
+typedef struct DsTimedMixBlock {
+    const float *pcm51;
+    size_t frames;
+    uint32_t sample_rate;
+    uint32_t flags;
+    uint64_t stream_id;
+    uint64_t clock_generation;
+    uint64_t sample_position;
+    uint64_t first_sample_host_time;
+} DsTimedMixBlock;
+typedef void (*DsCaptureFn)(void *user, const DsTimedMixBlock *block);
+/* One process-wide subscription; attaches to the newest live device, including existing/recreated devices.
+ * start: DSERR_INVALIDPARAM for NULL fn, DSERR_ALLOCATED if subscribed; never replaces the current subscriber.
+ * stop is idempotent and quiesces the callback before returning (user storage may then be freed). Concurrent
+ * start/stop calls are serialized. Callback calls never overlap; delivery neither allocates nor waits for capture.
+ * Keep the callback bounded: copy to a preallocated queue, never encode/write/wait. Callback must not reenter
+ * start/stop, device rendering/reconfiguration/release, or wait for a thread calling these functions.
+ * Legacy DsConfig.tap and notifications remain independent. */
+DsResult ds_capture_start(DsCaptureFn fn, void *user);
+void ds_capture_stop(void);
+
 typedef struct DsConfig {
     DsSink sink;
     DsOutputMode mode;

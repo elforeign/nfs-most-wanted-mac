@@ -20,6 +20,7 @@
 #include "gpuclients.h"
 
 int app_native_fullscreen(void);
+int app_fullscreen_is_auto(void);
 int app_request_fullscreen_space(NSWindow *window, int full);
 void render_presentation_changed(void);
 void report_note(const char *fmt, ...);
@@ -297,6 +298,7 @@ void prompts_pad_seen(int connected);
 int portmenu_key(uint8_t vk, int down, int repeat);
 int portmenu_char(uint32_t ch);
 int portmenu_mouse(int kind, double x, double y, double dy);
+int portmenu_command_key(uint8_t vk, int repeat);
 void portmenu_update(void);
 uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, float lx, float ly, int home, int touchpad, int has_touchpad,
                       uint32_t *inject);
@@ -349,8 +351,11 @@ static void pump(int wait) {
             case NSEventTypeKeyDown:
             case NSEventTypeKeyUp: {
                 if (e.type == NSEventTypeKeyDown) prompts_input(0);
-                if ((e.modifierFlags & NSEventModifierFlagCommand) && e.type == NSEventTypeKeyDown) break;  // Cmd-Q etc.
                 KeyMap k = e.keyCode < 128 ? mac_keys[e.keyCode] : (KeyMap){0, 0};
+                if ((e.modifierFlags & NSEventModifierFlagCommand) && e.type == NSEventTypeKeyDown) {
+                    if (portmenu_command_key(k.vk, e.isARepeat)) continue;
+                    break;                                            // Cmd-Q etc.
+                }
                 key_event(hwnd, k.vk, k.scan, e.type == NSEventTypeKeyDown, e.isARepeat);
                 if (e.type == NSEventTypeKeyDown) {
                     NSString *s = e.characters;
@@ -495,7 +500,7 @@ static void ns_mode_changed(Win *w) {
     GPUClientsSample gpu; gpuclients_cached(&gpu);
     char line[256];
     snprintf(line, sizeof line, "fullscreen: mode=%s full=%d owns_space=%d gpu_mhz=%s (cached); adaptive requested/applicable=%d/%d",
-        app_native_fullscreen() ? "Native" : "Borderless", w->full, owns_space, gpu.mhz, ps.vrr_requested, ps.adaptive_scheduling);
+        app_native_fullscreen() ? (app_fullscreen_is_auto() ? "Native (auto)" : "Native") : (app_fullscreen_is_auto() ? "Borderless (auto)" : "Borderless"), w->full, owns_space, gpu.mhz, ps.vrr_requested, ps.adaptive_scheduling);
     fprintf(stderr, "boot: %s\n", line);
     report_note("%s", line);
 }
@@ -808,6 +813,17 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         sim_kind = kind_of_word(tok + 8);
         if (diag_on) diag_event("script: %s", tok);
         ++step; step_start = 0;
+    } else if (!strncmp(tok, "underglow:", 10)) {
+        int underglow_ui_step(const char *, uint64_t, const char *, const char **);
+        const char *key = NULL;
+        int result = underglow_ui_step(tok + 10, frame - step_start, fe_package_in_control(), &key);
+        if (result < 0) { sequence_failed = 1; return; }
+        if (result > 0) { ++step; step_start = 0; }
+        else if (key) {
+            press(key, 1, real_frame);
+            snprintf(held, sizeof held, "%s", key);
+            release_at = frame + 4;
+        }
     } else if (!strncmp(tok, "pkg:", 4)) {
         static uint64_t last_pkg_key;
         char want[32], *key;
@@ -1351,7 +1367,7 @@ static void pad_diag_bindings(void) {
     diag_event("%s", line);
 }
 static const char *pad_mode = "menus", *pad_ctl;   // the last mapping decision, for the diag pad: lines
-int controltype_passthrough(void);
+int controltype_passthrough(int idx);
 static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
     uint32_t sim = M32(SIM_INSTANCE);
     // Driving: racing (game-flow 6), the sim not paused, and no menu package in control (the race results come up
@@ -1405,7 +1421,9 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
             bit(phys, P_OPTIONS) << 7;
     st->buttons = v | shift_up << 8 | shift_down << 9 | camera << 10 | bit(phys, P_L3) << 11;   // L3: next song (padbind.c XBOX_L3)
     // Control Types 2-5 / 7-10 (controltype.c) bind the physical buttons (P_* order) while driving; L3 stays next song.
-    if (driving && !remap && controltype_passthrough()) st->buttons = (phys & 0x3FFu) | bit(phys, P_L3) << 11;
+    // Drag capture reads the edited page; live input selection intentionally stays Default while listening.
+    if (driving && (remap ? (idx == 0 && padbind_edited_set() == PADBIND_DRAG) : controltype_passthrough(idx)))
+        st->buttons = (phys & 0x3FFu) | bit(phys, P_L3) << 11;
     // Keep physical pressures for Z/Rz, including while capturing a binding.
 }
 
@@ -1540,6 +1558,17 @@ static GCController *pad_controller_n(int idx) {
     @synchronized (GCController.class) { return pad_slots[idx]; }
 }
 static uint64_t start_ns;                 // BOOT_PAD=sim:...@T: seconds since start-up
+static uint64_t pad_enum_ns;              // shared epoch for both simulated slots' @e timelines
+static int pad_enum_seen;
+// Called only by DirectInput gamepad enumeration, before its first presence read.
+// Physical controller polling has no additional work; only simulations need a clock sample.
+void pad_sim_enumerated(void) {
+    if (pad_enum_seen) return;
+    const char *a = getenv("BOOT_PAD"), *b = getenv("BOOT_PAD2");
+    if ((!a || strncmp(a, "sim:", 4)) && (!b || strncmp(b, "sim:", 4))) return;
+    pad_enum_ns = host_ticks();
+    pad_enum_seen = 1;
+}
 static uint32_t pad_activity(uint32_t buttons, const PadState *st, int has_touchpad) {
     int choice = settings_get("controls.menu_button");
     int shortcut = choice == 0 ? ((buttons & 8192u) || (!has_touchpad && (buttons & (4096u | 64u)))) :
@@ -1555,7 +1584,8 @@ __attribute__((constructor)) static void pad_clock(void) { start_ns = host_ticks
 // (BOOT_PAD2 for slot 1 with NFS_PADS=2; same parser and independent script state) (constant values for tests:
 // lx ly rx ry in -1..1 with y up positive, lt rt 0..1, buttons=<physical P_* mask>, dpad=<hundredths of a degree>; a
 // bare word is the pad's identity: dualsense, ds4, edge, or xbox, the default; a last @T1-T2-T3... connects it T1
-// seconds after start-up, disconnects it at T2, connects it again at T3, ...). 0: no controller (st centred).
+// seconds after start-up, disconnects it at T2, connects it again at T3, ...). @eT1-T2-T3... uses the first
+// gamepad enumeration instead; before that enumeration the timed pad is absent. 0: no controller (st centred).
 int pad_read_n(int idx, PadState *st) {
     if (!idx) pad0_down = 0;
     memset(st, 0, sizeof *st);
@@ -1569,9 +1599,11 @@ int pad_read_n(int idx, PadState *st) {
         const char *at = strchr(sim, '@'), *end = at ? at : sim + strlen(sim);
         int on = 1;
         if (at) {                           // connected while an odd number of the times have passed
-            double now = (double)(host_ticks() - start_ns) / 1e9;
+            int enumerated = at[1] == 'e';
+            double now = enumerated && !pad_enum_seen ? -1 :
+                         (double)(host_ticks() - (enumerated ? pad_enum_ns : start_ns)) / 1e9;
             on = 0;
-            for (const char *q = at + 1; *q;) {
+            for (const char *q = at + 1 + enumerated; *q && now >= 0;) {
                 char *e;
                 double t = strtod(q, &e);
                 if (e == q || now < t) break;

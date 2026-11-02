@@ -21,6 +21,8 @@
 #include "roots.h"
 
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static int within(size_t off, size_t len, size_t limit) { return off <= limit && len <= limit - off; }
+static int collect(const uint8_t *, const X360AbkSound *, uint8_t **, unsigned *, char *, size_t);
 static int fail(char *why, size_t n, const char *fmt, unsigned a, unsigned b) { snprintf(why, n, fmt, a, b); return 0; }
 
 int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
@@ -28,7 +30,7 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
     if (size < 0x60 || memcmp(f, "ABKC", 4)) return fail(why, n, "not ABKC", 0, 0);
     if (rd32(f + 0x14) != size) return fail(why, n, "ABKC size %u != file %u", rd32(f + 0x14), (unsigned)size);
     uint32_t bank = rd32(f + 0x20), ext = rd32(f + 0x24);
-    if (!bank || bank < 0x60 || ext < 12 || ext > size - bank || memcmp(f + bank, "S10A", 4))
+    if (!bank || bank < 0x60 || ext < 12 || !within(bank, ext, size) || memcmp(f + bank, "S10A", 4))
         return fail(why, n, "no S10A bank at %08X (extent %u)", bank, ext);
     unsigned cnt = rd32(f + bank + 8);
     if (rd32(f + bank + 4) || cnt > 512 || 12 + 4 * cnt > ext) return fail(why, n, "S10A count %u bad (extent %u)", cnt, ext);
@@ -38,19 +40,22 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
         X360AbkSound *s = &o->s[i];
         uint32_t rel = rd32(f + bank + 12 + 4 * i);
         if (rel == 0xffffffffu) continue;   // empty slot (ENV_COMMON_MB's last three)
-        if (rel < 12 + 4 * cnt || rel + 8 > ext) return fail(why, n, "sound %u header offset %08X outside bank", i, rel);
+        if (rel < 12 + 4 * cnt || !within(rel, 8, ext)) return fail(why, n, "sound %u header offset %08X outside bank", i, rel);
         const uint8_t *h = f + bank + rel;
         uint32_t a = rd32(h), b = rd32(h + 4);
         s->version = a >> 28; s->codec = a >> 24 & 15; s->channels = (a >> 18 & 63) + 1; s->rate = a & 0x3ffff;
         s->storage = b >> 30; s->loop = b >> 29 & 1; s->samples = b & 0x1fffffff;
         unsigned hs = 8;
-        if (s->loop) { if (rel + 12 > ext) return fail(why, n, "sound %u loop field outside bank", i, 0); s->loop_start = rd32(h + 8); hs = 12; }
+        if (s->loop) { if (!within(rel, 12, ext)) return fail(why, n, "sound %u loop field outside bank", i, 0); s->loop_start = rd32(h + 8); hs = 12; }
         s->hdr = bank + rel; s->data = s->hdr + hs;
-        if (last && s->hdr <= last->hdr) return fail(why, n, "sound %u header not after sound %u", i, (unsigned)(last - o->s));
+        if (last && s->hdr < last->data) return fail(why, n, "sound %u header not after sound %u", i, (unsigned)(last - o->s));
         if (last) last->end = s->hdr;
         last = s;
     }
     if (last) last->end = bank + ext;
+    for (unsigned i = 0; i < cnt; ++i)
+        if (o->s[i].hdr && o->s[i].codec == 3 && !o->s[i].storage &&
+            !collect(f, &o->s[i], NULL, NULL, why, n)) return 0;
     snprintf(why, n, "ok: S10A %u sounds", cnt);
     return 1;
 }
@@ -59,27 +64,36 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
 static int collect(const uint8_t *f, const X360AbkSound *s, uint8_t **out, unsigned *npk, char *why, size_t n) {
     uint32_t pos = s->data, total = 0;
     unsigned pk = 0, cap = 64, seq = 0;
-    uint8_t *buf = malloc(cap * 2048);
+    uint8_t *buf = out ? malloc((size_t)cap * 2048) : NULL;
+    if (out && !buf) return fail(why, n, "out of memory", 0, 0);
     while (total < s->samples) {
-        if (pos + 12 > s->end) { free(buf); return fail(why, n, "block at %08X outside sound (%u samples so far)", pos, total); }
+        if (!within(pos, 12, s->end)) { free(buf); return fail(why, n, "block at %08X outside sound (%u samples so far)", pos, total); }
         uint32_t bsize = rd32(f + pos), bsamp = rd32(f + pos + 4), inner = rd32(f + pos + 8) >> 2;
-        if (bsize < 12 + 4 || bsize > s->end - pos || !bsamp || bsamp > s->samples - total || inner + 8 != bsize)
+        if (bsize < 12 + 4 || bsize > s->end - pos || !bsamp || bsamp > s->samples - total || inner != bsize - 8)
             { free(buf); return fail(why, n, "bad block header at %08X (size %u)", pos, bsize); }
         // The last packet of a block may be cut short (half the X360 engine banks): zero-padded to 2048 bytes, the
         // padding lies after the block's last frame.
-        for (uint32_t p = pos + 12; p < pos + bsize; p += 2048) {
+        for (size_t p = (size_t)pos + 12; p < (size_t)pos + bsize; p += 2048) {
             if (p != pos + 12 && (unsigned)(f[p] >> 4) != ((seq + 1) & 15)) {   // a block may restart the sequence
-                free(buf); return fail(why, n, "packet %u sequence break at %08X", pk, p);
+                free(buf); return fail(why, n, "packet %u sequence break at %08X", pk, (unsigned)p);
             }
             seq = f[p] >> 4;
-            if (pk == cap) buf = realloc(buf, (cap *= 2) * 2048);
+            if (out && pk == cap) {
+                if (cap > UINT32_MAX / 2) { free(buf); return fail(why, n, "too many packets", 0, 0); }
+                uint8_t *grown = realloc(buf, (size_t)cap * 2 * 2048);
+                if (!grown) { free(buf); return fail(why, n, "out of memory", 0, 0); }
+                buf = grown; cap *= 2;
+            }
             uint32_t len = pos + bsize - p < 2048 ? pos + bsize - p : 2048;
-            memcpy(buf + pk * 2048, f + p, len);
-            memset(buf + pk++ * 2048 + len, 0, 2048 - len);
+            if (out) {
+                memcpy(buf + (size_t)pk * 2048, f + p, len);
+                memset(buf + (size_t)pk * 2048 + len, 0, 2048 - len);
+            }
+            ++pk;
         }
         total += bsamp; pos += bsize;
     }
-    *out = buf; *npk = pk;
+    if (out) { *out = buf; *npk = pk; }
     return 1;
 }
 
@@ -101,12 +115,13 @@ int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsig
     c->sample_rate = s->rate;
     c->pkt_timebase = (AVRational){1, (int)s->rate};
     c->extradata = av_mallocz(28 + AV_INPUT_BUFFER_PADDING_SIZE);   // XMAWAVEFORMAT: one stream of `ch` channels
+    if (!c->extradata) { fail(why, n, "out of memory", 0, 0); goto done; }
     c->extradata_size = 28; c->extradata[4] = 1; c->extradata[8 + 17] = ch;
     if (avcodec_open2(c, codec, NULL) < 0) { fail(why, n, "xma1 open failed", 0, 0); goto done; }
     for (unsigned i = 0; i <= npk; ++i) {
         if (i < npk) {
             if (av_new_packet(p, 2048) < 0) goto done;
-            memcpy(p->data, pk + i * 2048, 2048);
+            memcpy(p->data, pk + (size_t)i * 2048, 2048);
             p->pts = 0;   // a timestamp, so the decoder's start trim needs no log note
         }
         if (avcodec_send_packet(c, i < npk ? p : NULL) < 0) { fail(why, n, "packet %u rejected", i, 0); goto done; }
@@ -143,7 +158,7 @@ static void put(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 1
 int x360abk_pc_bank(const uint8_t *f, size_t size, X360AbkPcSlot *slots, unsigned max, unsigned *count, char *why, size_t n) {
     if (size < 0x60 || memcmp(f, "ABKC", 4) || le(f + 0x14) != size) return fail(why, n, "PC: not ABKC / size", 0, 0);
     uint32_t b = le(f + 0x20), ext = le(f + 0x24);
-    if (b < 0x60 || ext < 0x14 || ext > size - b || memcmp(f + b, "BNKl", 4)) return fail(why, n, "PC: no BNKl at %08X", b, 0);
+    if (b < 0x60 || ext < 0x14 || !within(b, ext, size) || memcmp(f + b, "BNKl", 4)) return fail(why, n, "PC: no BNKl at %08X", b, 0);
     unsigned cnt = f[b + 6] | f[b + 7] << 8;
     if (cnt > max || 0x14 + 4 * cnt > ext) return fail(why, n, "PC: BNKl slot count %u", cnt, 0);
     *count = cnt;
@@ -152,21 +167,28 @@ int x360abk_pc_bank(const uint8_t *f, size_t size, X360AbkPcSlot *slots, unsigne
         memset(s, 0, sizeof *s);
         uint32_t at = b + 0x14 + 4 * i, rel = le(f + at);
         if (!rel) continue;
+        if (!within(rel, 5, b + ext - at)) return fail(why, n, "PC: slot %u relative offset %08X", i, rel);
         uint32_t p = at + rel;
-        if (rel > ext || p + 5 > b + ext || memcmp(f + p, "PT\0\0", 4)) return fail(why, n, "PC: slot %u PT at %08X", i, p);
+        if (memcmp(f + p, "PT\0\0", 4)) return fail(why, n, "PC: slot %u PT at %08X", i, p);
         s->present = 1; s->channels = 1; s->rate = 22050; s->codec = 10; s->loop_start = s->loop_end = -1;
+        int terminated = 0;
         for (p += 4; p < b + ext;) {
             unsigned tag = f[p++];
-            if (tag == 0xff) break;
+            if (tag == 0xff) { terminated = 1; break; }
             if (tag == 0xfc || tag == 0xfd || tag == 0xfe) continue;
+            if (!within(p, 1, b + ext)) return fail(why, n, "PC: slot %u missing tag length", i, 0);
             unsigned len = f[p++];
-            if (len > 4 || p + len > b + ext) return fail(why, n, "PC: slot %u bad tag %02X", i, tag);
+            if (len > 4 || !within(p, len, b + ext)) return fail(why, n, "PC: slot %u bad tag %02X", i, tag);
             int32_t v = len && (f[p] & 0x80) ? -1 : 0;
             for (unsigned j = 0; j < len; ++j) v = (int32_t)((uint32_t)v << 8 | f[p++]);
             if (tag == 0x82) s->channels = v; else if (tag == 0x84) s->rate = v; else if (tag == 0x85) s->samples = v;
             else if (tag == 0x86) s->loop_start = v; else if (tag == 0x87) s->loop_end = v; else if (tag == 0x88) s->data = v;
             else if (tag == 0xa0) s->codec = v;
+            else if (tag == 0x89 && (uint32_t)v >= ext) return fail(why, n, "PC: slot %u second data offset outside bank", i, 0);
         }
+        if (!terminated) return fail(why, n, "PC: slot %u unterminated PT", i, 0);
+        if (s->codec == 8 && (s->samples < 0 || !within(s->data, (size_t)s->samples * 2, ext)))
+            return fail(why, n, "PC: slot %u PCM outside bank", i, 0);
         if (s->data >= ext) return fail(why, n, "PC: slot %u data offset outside bank", i, 0);
         s->data += b;
     }
@@ -175,9 +197,9 @@ int x360abk_pc_bank(const uint8_t *f, size_t size, X360AbkPcSlot *slots, unsigne
 
 // One X360 sample table (big-endian, at t) → is every row a used row with slot = idx + 1, or an empty row?
 static int x_sample_table(const uint8_t *x, uint32_t t, uint32_t lim, unsigned sounds) {
-    if (t + 4 > lim) return 0;
+    if (!within(t, 4, lim)) return 0;
     unsigned c = rd32(x + t);
-    if (!c || c > 256 || t + 4 + 12 * c > lim) return 0;
+    if (!c || c > 256 || c > (lim - t - 4) / 12) return 0;
     for (unsigned r = 0; r < c; ++r) {
         const uint8_t *row = x + t + 4 + 12 * r;
         uint32_t w = rd32(row), slot = rd32(row + 4), z = rd32(row + 8);
@@ -189,9 +211,9 @@ static int x_sample_table(const uint8_t *x, uint32_t t, uint32_t lim, unsigned s
     return 1;
 }
 static int pc_sample_table(const uint8_t *f, uint32_t t, uint32_t lim) {
-    if (t + 4 > lim) return 0;
+    if (!within(t, 4, lim)) return 0;
     unsigned c = le(f + t);
-    if (!c || c > 256 || t + 4 + 12 * c > lim) return 0;
+    if (!c || c > 256 || c > (lim - t - 4) / 12) return 0;
     for (unsigned r = 0; r < c; ++r) if (le(f + t + 4 + 12 * r) != 0xff00 || le(f + t + 12 + 12 * r)) return 0;
     return 1;
 }
@@ -203,23 +225,54 @@ static unsigned put_tag(uint8_t *p, unsigned tag, int32_t v) {   // signed minim
     return 2 + len;
 }
 
+// Validate the tail before either conversion path reads fixups or relocates names.
+static int pc_layout(const uint8_t *f, size_t size) {
+    if (size < 0x60 || le(f + 0x14) != size) return 0;
+    uint32_t b = le(f + 0x20), e = le(f + 0x24);
+    uint32_t f1 = le(f + 0x30), f2 = le(f + 0x34), f3 = le(f + 0x38);
+    if (b < 0x60 || !within(b, e, size) || e < 0x14 || le(f + 0x18) != b ||
+        b + e != f1 || f1 > f2 || !within(f2, 4, f3) || !within(f3, 4, size) ||
+        memcmp(f + b, "BNKl", 4)) return 0;
+    unsigned slots = f[b + 6] | f[b + 7] << 8;
+    if (slots > 513 || slots > (e - 0x14) / 4 || le(f + f2) > (f3 - f2 - 4) / 4) return 0;
+    uint32_t count = le(f + f3);
+    if (count > (size - f3 - 4) / 12) return 0;
+    for (unsigned i = 0; i < count; ++i) {
+        uint32_t v = le(f + f3 + 8 + (size_t)12 * i);
+        if (v < f3 || v >= size) return 0;
+    }
+    return 1;
+}
+static int x_fixups(const uint8_t *f, size_t size, uint32_t b, uint32_t t) {
+    if (size > UINT32_MAX || b > size || !within(t, 4, size)) return 0;
+    uint32_t count = rd32(f + t);
+    if (count > (size - t - 4) / 4) return 0;
+    for (unsigned i = 0; i < count; ++i)
+        if (!within(rd32(f + t + 4 + (size_t)4 * i), 4, b)) return 0;
+    return 1;
+}
+
 // The PC's fixup tail (F1 to the end) after a bank rebuilt at nb with `used` bytes (padded to 128 as the PC's): copied,
 // the CSIS name pointers (+0x38: count, then {uint32, name pointer, uint32}, file offsets into this tail) and the ABKC
 // header offsets moved. o must hold nb + 128-padded used + the tail.
 static int put_tail(uint8_t *o, const uint8_t *pc, size_t pcsize, uint32_t nb, size_t used, size_t *total, char *why, size_t n) {
+    if (!pc_layout(pc, pcsize) || used > UINT32_MAX - 0x7fu ||
+        nb > UINT32_MAX - ((used + 0x7f) & ~(size_t)0x7f) ||
+        pcsize - le(pc + 0x30) > UINT32_MAX - nb - ((used + 0x7f) & ~(size_t)0x7f))
+        return fail(why, n, "PC: invalid tail extent", 0, 0);
     uint32_t F1 = le(pc + 0x30), F2 = le(pc + 0x34), F3 = le(pc + 0x38);
-    uint32_t NE = (used + 0x7f) & ~0x7fu, NF1 = nb + NE, delta = NF1 - F1;
+    uint32_t NE = (used + 0x7f) & ~0x7fu, NF1 = nb + NE;
     memcpy(o + NF1, pc + F1, pcsize - F1);
     uint32_t c3 = le(pc + F3);
-    if (F3 + 4 + 12 * (size_t)c3 > pcsize) return fail(why, n, "PC: CSIS table outside file", 0, 0);
+    if (c3 > (pcsize - F3 - 4) / 12) return fail(why, n, "PC: CSIS table outside file", 0, 0);
     for (unsigned i = 0; i < c3; ++i) {
         uint32_t at = NF1 + (F3 - F1) + 8 + 12 * i, v = le(o + at);
         if (v < F3 || v >= pcsize) return fail(why, n, "PC: CSIS name pointer %08X outside the tail", v, 0);
-        put(o + at, v + delta);
+        put(o + at, NF1 + (v - F1));
     }
     *total = NF1 + (pcsize - F1);
     put(o + 0x14, *total); put(o + 0x18, nb); put(o + 0x20, nb); put(o + 0x24, NE);
-    put(o + 0x30, F1 + delta); put(o + 0x34, F2 + delta); put(o + 0x38, F3 + delta);
+    put(o + 0x30, NF1); put(o + 0x34, NF1 + (F2 - F1)); put(o + 0x38, NF1 + (F3 - F1));
     return 1;
 }
 
@@ -228,23 +281,36 @@ int x360abk_build_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t 
     *out = NULL; *outsize = 0;
     memset(info, 0, sizeof *info);
     if (pcsize < 0x60 || memcmp(pc, "ABKC", 4) || le(pc + 0x14) != pcsize) return fail(why, n, "PC: not ABKC / size", 0, 0);
-    uint32_t B = le(pc + 0x20), E = le(pc + 0x24), F1 = le(pc + 0x30), F2 = le(pc + 0x34), F3 = le(pc + 0x38);
-    if (le(pc + 0x18) != B || B + E != F1 || !(F1 <= F2 && F2 < F3 && F3 + 4 <= pcsize) || memcmp(pc + B, "BNKl", 4))
+    uint32_t B = le(pc + 0x20), F1 = le(pc + 0x30), F2 = le(pc + 0x34);
+    if (!pc_layout(pc, pcsize))
         return fail(why, n, "PC: unexpected ABKC layout (bank %08X, fixups %08X)", B, F1);
+    if (xsize < 0x60) return fail(why, n, "X360: truncated header", 0, 0);
     uint32_t xB = rd32(x + 0x20), xF2 = rd32(x + 0x34);
-    unsigned pn = le(pc + F2), xn = xF2 + 4 <= xsize ? rd32(x + xF2) : ~0u;
-    if (pn != xn || F2 + 4 + 4 * pn > F3 || xF2 + 4 + 4 * xn > xsize) return fail(why, n, "pointer fixups differ: PC %u, X360 %u", pn, xn);
+    if (!x_fixups(x, xsize, xB, xF2)) return fail(why, n, "X360: invalid fixups", 0, 0);
+    unsigned pn = le(pc + F2), xn = rd32(x + xF2);
+    if (pn != xn) return fail(why, n, "pointer fixups differ: PC %u, X360 %u", pn, xn);
     // The PC's first PT header up to its 0xFD: the bank's per-sound defaults (priority/volume tags) kept for every sound.
     uint8_t prefix[32];
     unsigned plen = 0;
     for (unsigned i = 0, cnt = pc[B + 6] | pc[B + 7] << 8; i < cnt && !plen; ++i) {
-        uint32_t at = B + 0x14 + 4 * i, rel = le(pc + at), p = at + rel;
-        if (!rel || p + 4 > F1 || memcmp(pc + p, "PT\0\0", 4)) continue;
-        for (uint32_t q = p + 4; q < F1 && q - p < sizeof prefix; q += 2 + pc[q + 1])
-            if (pc[q] == 0xfd) { plen = q + 1 - p; break; }
+        uint32_t at = B + 0x14 + 4 * i, rel = le(pc + at);
+        if (!rel) continue;
+        if (!within(rel, 4, F1 - at)) return fail(why, n, "PC: invalid PT offset", i, 0);
+        uint32_t p = at + rel;
+        if (memcmp(pc + p, "PT\0\0", 4)) continue;
+        for (uint32_t q = p + 4; q < F1 && q - p < sizeof prefix;) {
+            unsigned tag = pc[q++];
+            if (tag == 0xfd) { plen = q - p; break; }
+            if (tag == 0xff) break;
+            if (tag == 0xfc || tag == 0xfe) continue;
+            if (!within(q, 1, F1) || !within(q + 1, pc[q], F1))
+                return fail(why, n, "PC: truncated PT prefix", i, 0);
+            q += 1 + pc[q];
+        }
         if (plen) memcpy(prefix, pc + p, plen);
     }
     if (!plen) return fail(why, n, "PC: no PT header with a channel section", 0, 0);
+    if (k->count > 512) return fail(why, n, "too many sounds", 0, 0);
     for (unsigned i = 0; i < k->count; ++i)
         if (k->s[i].hdr && (k->s[i].channels != 1 || !pcm[i])) return fail(why, n, "sound %u: not decoded mono (stereo PC layout unverified)", i, 0);
 
@@ -256,8 +322,9 @@ int x360abk_build_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t 
     }
     for (unsigned i = 0; i < k->count; ++i) if (k->s[i].hdr) pcm_bytes += (size_t)k->s[i].samples * 2;
     unsigned slots = k->count + 1;
-    size_t NB = (B + tables + 0x7f) & ~(size_t)0x7f, hdr_cap = 0x14 + 4 * slots + slots * (plen + 48);
+    size_t NB = ((size_t)B + tables + 0x7f) & ~(size_t)0x7f, hdr_cap = 0x14 + 4 * slots + slots * (plen + 48);
     size_t cap = NB + hdr_cap + pcm_bytes + 0x80 + (pcsize - F1);
+    if (cap > UINT32_MAX) return fail(why, n, "rebuilt bank too large", 0, 0);
     uint8_t *o = calloc(1, cap);
     if (!o) return fail(why, n, "out of memory", 0, 0);
     memcpy(o, pc, B);
@@ -265,7 +332,7 @@ int x360abk_build_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t 
     uint32_t t = B;
     for (unsigned i = 0; i < pn; ++i) {
         uint32_t ps = le(pc + F2 + 4 + 4 * i), xs = rd32(x + xF2 + 4 + 4 * i);
-        if (ps + 4 > B || xs + 4 > xB) { free(o); return fail(why, n, "pointer site %u outside modules", i, 0); }
+        if (!within(ps, 4, B) || !within(xs, 4, xB)) { free(o); return fail(why, n, "pointer site %u outside modules", i, 0); }
         uint32_t pt = le(pc + ps), xt = rd32(x + xs);
         int xtab = x_sample_table(x, xt, xB, k->count), ptab = pc_sample_table(pc, pt, B);
         if (xtab != ptab) { free(o); return fail(why, n, "pointer %u: sample table on one platform only (PC %08X)", i, pt); }
@@ -300,7 +367,7 @@ int x360abk_build_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t 
                 d = (d + 3) & ~3u;
             }
             uint8_t *p = bk + h;
-            uint8_t tmp[64];
+            uint8_t tmp[128];
             if (!pass) p = tmp;
             unsigned l = plen;
             memcpy(p, prefix, plen);
@@ -387,7 +454,7 @@ static int pt_parts(const uint8_t *f, uint32_t p, uint32_t end, unsigned *pre, u
         if (tag == 0xff) { *len = q - p; return *pre != 0; }
         if (tag == 0xfd) { if (*pre) return 0; *pre = q - p; continue; }
         if (tag == 0xfc || tag == 0xfe) { if (*pre) return 0; continue; }
-        if (q >= end || f[q] > 4 || q + 1 + f[q] > end) return 0;
+        if (q >= end || f[q] > 4 || !within(q + 1, f[q], end)) return 0;
         unsigned l = f[q++];
         if (*pre && !((tag == 0x80 || (tag >= 0x84 && tag <= 0x89) || tag == 0x8a || tag == 0xa0) ||
                       (tag == 0x82 && l == 1 && (f[q] == 1 || f[q] == 2)))) return 0;
@@ -430,16 +497,23 @@ static const struct { uint32_t pc, x; unsigned kind; } a10_maps[] = {
 // The PC PT reader stores tags 88/89 in adjacent channel pointers (00823E83); 008262DA forms one pointer per
 // channel, and 00823691 creates one decoder per channel. Codec 8 (00822C41) therefore consumes planar PCM16LE.
 // Find the second stream without changing the public mono/G3 slot description.
-static uint32_t pc_data2(const uint8_t *f, unsigned slot) {
-    uint32_t b = le(f + 0x20), at = b + 0x14 + 4 * slot, p = at + le(f + at);
-    for (p += 4; f[p] != 0xff;) {
+static uint32_t pc_data2(const uint8_t *f, size_t size, unsigned slot) {
+    if (size < 0x60) return 0;
+    uint32_t b = le(f + 0x20), ext = le(f + 0x24);
+    if (!within(b, ext, size) || !within(0x14 + (size_t)4 * slot, 4, ext)) return 0;
+    uint32_t at = b + 0x14 + 4 * slot, rel = le(f + at), end = b + ext;
+    if (!rel || !within(rel, 4, end - at)) return 0;
+    for (uint32_t p = at + rel + 4; p < end;) {
         unsigned tag = f[p++];
+        if (tag == 0xff) break;
         if (tag >= 0xfc) continue;
+        if (!within(p, 1, end)) return 0;
         unsigned len = f[p++];
+        if (len > 4 || !within(p, len, end)) return 0;
         if (tag == 0x89) {
             uint32_t v = 0;
             for (unsigned i = 0; i < len; ++i) v = v << 8 | f[p + i];
-            return b + v;
+            return v < ext ? b + v : 0;
         }
         p += len;
     }
@@ -466,7 +540,7 @@ int x360abk_swap_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t x
     if (!x360abk_parse(x, xsize, k, tmp, sizeof tmp)) WHY("X360 parse: %s", tmp);
     if (!x360abk_pc_bank(pc, pcsize, sl, 513, &cnt, tmp, sizeof tmp)) WHY("PC parse: %s", tmp);
     uint32_t B = le(pc + 0x20), E = le(pc + 0x24), F1 = le(pc + 0x30), F2 = le(pc + 0x34), F3 = le(pc + 0x38);
-    if (le(pc + 0x18) != B || B + E != F1 || !(F1 <= F2 && F2 < F3 && F3 + 4 <= pcsize))
+    if (!pc_layout(pc, pcsize))
         WHY("layout: unexpected PC ABKC layout (bank %08X, fixups %08X)", B, F1);
 
     unsigned kind = 0;
@@ -498,12 +572,13 @@ int x360abk_swap_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t x
     }
     // Same sample tables row for row, except pinned SWTN/engine selector differences proven against decoded identities.
     uint32_t xB = rd32(x + 0x20), xF2 = rd32(x + 0x34);
-    unsigned pn = le(pc + F2), xn = xF2 + 4 <= xsize ? rd32(x + xF2) : ~0u;
-    if (pn != xn || F2 + 4 + 4 * (size_t)pn > F3 || xF2 + 4 + 4 * (size_t)xn > xsize)
+    if (!x_fixups(x, xsize, xB, xF2)) WHY("layout: invalid X360 fixups");
+    unsigned pn = le(pc + F2), xn = rd32(x + xF2);
+    if (pn != xn)
         WHY("sample tables: pointer fixups differ (PC %u, X360 %u)", pn, xn);
     for (unsigned i = 0; i < pn; ++i) {
         uint32_t ps = le(pc + F2 + 4 + 4 * i), xs = rd32(x + xF2 + 4 + 4 * i);
-        if (ps + 4 > B || xs + 4 > xB) WHY("layout: pointer site %u outside modules", i);
+        if (!within(ps, 4, B) || !within(xs, 4, xB)) WHY("layout: pointer site %u outside modules", i);
         uint32_t pt = le(pc + ps), xt = rd32(x + xs);
         int xtab = x_sample_table(x, xt, xB, k->count), ptab = pc_sample_table(pc, pt, B);
         if (xtab != ptab) WHY("sample tables: pointer %u is a sample table on one platform only", i);
@@ -550,7 +625,7 @@ int x360abk_swap_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t x
         if (sl[j].data >= e) WHY("PC parse: slot %u data %08X past the bank's used bytes", j, sl[j].data);
         extent[j] = e - sl[j].data;
         if (sl[j].channels == 2) {
-            uint32_t d2 = pc_data2(pc, j);
+            uint32_t d2 = pc_data2(pc, pcsize, j);
             if (d2 <= sl[j].data || d2 >= e) WHY("PC parse: slot %u second channel outside sample extent", j);
         }
     }
@@ -578,6 +653,7 @@ int x360abk_swap_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t x
         data_cap += (keep[j] ? extent[j] : (size_t)k->s[map[j]].samples * 2 * k->s[map[j]].channels) + 4;
     }
     size_t cap = B + hdr_cap + data_cap + 0x80 + (pcsize - F1);
+    if (cap > UINT32_MAX) WHY("layout: rebuilt bank too large");
     if (!(o = calloc(1, cap))) WHY("memory: out of memory");
     memcpy(o, pc, B);
     uint8_t *bk = o + B;
@@ -654,7 +730,7 @@ int x360abk_swap_pc(const uint8_t *pc, size_t pcsize, const uint8_t *x, size_t x
                   r->loop_start != (s->loop ? (int)s->loop_start : -1) || r->loop_end != (s->loop ? (int)s->samples - 1 : -1) ||
                   r->data + (size_t)s->samples * 2 > total;
             for (unsigned ch = 0; !bad && ch < s->channels; ++ch) {
-                uint32_t pos = ch ? pc_data2(o, j) : r->data;
+                uint32_t pos = ch ? pc_data2(o, total, j) : r->data;
                 if (!pos || pos + (size_t)s->samples * 2 > total) { bad = 1; break; }
                 for (unsigned fr = 0; fr < s->samples; ++fr)
                     if ((int16_t)(o[pos + fr * 2] | o[pos + fr * 2 + 1] << 8) != pcm[map[j]][fr * s->channels + ch]) { bad = 1; break; }

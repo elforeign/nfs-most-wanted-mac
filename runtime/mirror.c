@@ -261,7 +261,9 @@ void f_006BE8F0(Cpu *c) {               // eViewPlatInterface::GetVisibleStateSB
 }
 
 void f_00505380_orig(Cpu *c);
+void particles_physical_lamp(Cpu *c);
 void f_00505380(Cpu *c) {               // eRenderLightFlare (view, flare, matrix, intensity, reflexion, type, ...)
+    particles_physical_lamp(c);
     uint32_t view = arg(c, 0), flare = arg(c, 1);
     lampglow_begin(c);
     int st = -1;

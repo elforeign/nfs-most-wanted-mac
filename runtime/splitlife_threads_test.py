@@ -24,7 +24,7 @@ static int fake_create(pthread_t *t,const pthread_attr_t *a,void *(*fn)(void *),
 '''
 POST = r'''
 #undef pthread_create
-uint8_t *G;int diag_on,boot_trace;uint32_t last_error;
+uint8_t *G;int diag_on,boot_trace;__thread uint32_t last_error;
 uint64_t diag_idle_ns[IDLE_N];volatile uint64_t perf_nframes;
 uint64_t host_ticks(void){return 0;}
 uint64_t host_filetime(void){return 0;}
@@ -78,6 +78,7 @@ int main(void){
   CHECK(!memcmp(memory,G,16*1024*1024));CHECK(!memcmp(saved,kobj,sizeof saved));free(memory);
   // A broken guard may have retired the record; restore a fresh owned CPU for the next mode.
   if(!kobj[(original-KOBJ_BASE)/4].type){memcpy(kobj,saved,sizeof saved);kobj[(original-KOBJ_BASE)/4].cpu=calloc(1,sizeof(Cpu));}
+  handle_obj[(original-KOBJ_BASE)/4]=&kobj[(original-KOBJ_BASE)/4]; // a broken guard may have closed it
  }
  printf("splitlife threads: %u checks / %u failures; 1000 mixed-mode loads, 6 excluded-state snapshots, held watchdog snapshot\n",checks,failures);
  free(G);return failures?1:0;

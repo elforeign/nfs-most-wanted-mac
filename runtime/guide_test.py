@@ -77,7 +77,7 @@ def build_and_run(base, name, mutation=None):
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-fsanitize=address,undefined', '-fobjc-arc', '-I' + str(ROOT / 'recomp'),
                '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME), str(work / 'guide_test.m'),
-               str(RUNTIME / 'settings.c'), str(RUNTIME / 'offline_stubs.c'),
+               str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'QuartzCore',
                '-framework', 'Metal', '-Wl,-dead_strip', '-o', str(binary)]
     compiled = subprocess.run(command, capture_output=True, text=True)
@@ -99,10 +99,16 @@ def build_and_run(base, name, mutation=None):
 def check_online_guide(text):
     assert '## Online (beta)' in text
     for phrase in ('early beta', 'Online races are not included', 'different internet connections',
-                   'choose **Allow**', 'Keep the firewall enabled', 'Local Network', 'join code privately',
-                   'not passwords', 'UDP 47800', 'swapping hosts', 'does not open a port',
-                   'No internet relay fallback', 'Remove join codes'):
+                   'Create room', 'Access is free', 'R-XXXX-XXXXX', 'identify rooms rather than passwords',
+                   "contain no player's internet address", 'Keep the firewall enabled',
+                   'no shared relay configured', 'Relay unavailable', 'Reconnecting',
+                   'Old endpoint codes are unsupported', 'Remove join codes',
+                   '60 fps', 'six nearby remote cars', 'UDP is unencrypted'):
         assert phrase in text, phrase
+    for phrase in ('Public IPv4 (optional)', 'choose Host', 'forward **UDP 47800**',
+                   'Join codes contain the host', 'No internet relay fallback'):
+        assert phrase not in text, phrase
+
 
 
 def main():
@@ -112,7 +118,7 @@ def main():
     try:
         check_online_guide(old)
     except AssertionError:
-        print('Online guide: current 14 requirements pass; old section rejected', flush=True)
+        print('Online guide: current 22 requirements pass; old section rejected', flush=True)
     else:
         raise AssertionError('old guide escaped detection')
     with tempfile.TemporaryDirectory(prefix='guide-check-') as scratch:

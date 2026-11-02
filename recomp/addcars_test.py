@@ -261,7 +261,7 @@ def main(extra_addresses=(), variants=None):
                 changed=actual.replace('M32(extra + 0xCC) = a->paint_key;', 'M32(extra + 0xCC) = 0xB8BCBE09u;')
             if variant=="duplicate_id": changed=actual.replace('M32(extra + 0x90) = addition_id(j);', 'M32(extra + 0x90) = TYPES;')
             if variant=="missing_names":
-                changed=actual.replace('M32(owned + n * 8 + 4) = a->string;', 'M32(owned + n * 8 + 4) = 0;')
+                changed=actual.replace('M32(owned + n * 8 + 4) = a->display_string;', 'M32(owned + n * 8 + 4) = 0;')
                 assert changed!=actual
             if variant=="borrowed_name":
                 changed=actual.replace('M32(lay + 0x18) = a->string;', '/* deliberately retain donor NameId */')
@@ -311,7 +311,7 @@ def main(extra_addresses=(), variants=None):
                 assert code!=source
             (tmp/"test.c").write_text(code)
             binary=tmp/variant
-            build=subprocess.run(["clang","-O1","-I",str(tmp),"-I",str(base.ROOT/"runtime"),"-I",str(base.ROOT/"recomp"),"-I",str(base.ROOT/"recomp/out"),str(tmp/"test.c"),"-framework","CoreGraphics","-framework","CoreText","-framework","CoreFoundation","-o",str(binary)],text=True,capture_output=True)
+            build=subprocess.run(["clang",str(base.ROOT/"runtime/car_physics.c"),"-O1","-I",str(tmp),"-I",str(base.ROOT/"runtime"),"-I",str(base.ROOT/"recomp"),"-I",str(base.ROOT/"recomp/out"),str(tmp/"test.c"),"-framework","CoreGraphics","-framework","CoreText","-framework","CoreFoundation","-o",str(binary)],text=True,capture_output=True)
             assert build.returncode==0,build.stderr[-7000:]
             for n in ((0,1,2) if variant=="good" else (2,)):
                 manifest=tmp/"manifest.tsv"; manifest.write_text("".join(f"{name}\t{donor}\t{packs}\n" for name,donor in list(zip(("R8","CCX"),("997S","911TURBO")))[:n]))

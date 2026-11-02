@@ -4,10 +4,11 @@ LZDecompress when its header's unpacked size (1024) exceeds the destination (tab
 Compiles production load_x360 (runtime/vinyls.m) with stubs; call_guest emulates the game's decoder by writing the
 header size of 0xAA bytes at dst; the destination is followed by a canary. A valid blob must still decode natively.
 Fixed code: guest decoder never called for the oversized blob (calls=0), canary intact, valid blob ok. PASS.
-Old code (--old, vinyls.m from OLD_REF default main): calls=1, canary overwritten by 804 bytes. FAIL.
+Old code (--old, pinned pre-bounds-check load_x360): calls=1, canary overwritten by 804 bytes. FAIL.
 Run: $TOOLS_PY -I runtime/vinyls_lz_test.py [--old]
 """
 from pathlib import Path
+import hashlib
 import os
 import re
 import subprocess
@@ -82,10 +83,77 @@ int main(void) {
 '''
 
 
+
+# Baseline integrity proof: 1/1 authentic fragments accepted; 1/1 one-byte corruptions rejected.
+# Reviewed baseline fragment; its digest prevents accidental control drift.
+OLD_VINYLS = r'''typedef struct { double read, lz, lz_guest, swz; uint32_t magic; int native; } LoadTimes;
+static uint32_t lz_native(uint32_t magic, const uint8_t *in, uint32_t inlen, uint8_t *out, uint32_t cap) {
+    return magic == 0x5a4c444au ? jdlz_native(in, inlen, out, cap) : magic == 0x46465548u ? huff_native(in, inlen, out, cap) : 0;
+}
+static uint32_t load_x360(Cpu *c, const VEnt *v, uint32_t *w, uint32_t *h, LoadTimes *lt) {
+    if (vlz_mode < 0) {
+        const char *e = getenv("NFS_VINYL_LZ");
+        vlz_mode = e && !strcmp(e, "guest") ? 0 : e && !strcmp(e, "verify") ? 2 : 1;
+        if (e && !strcmp(e, "native")) vlz_verified[0] = vlz_verified[1] = 40;   // explicit: no diag-mode check either (timing runs)
+    }
+    memset(lt, 0, sizeof *lt);
+    uint64_t t0 = host_ticks();
+    FILE *f = fopen(vfiles[v->file], "rb");
+    if (!f) return 0;
+    uint32_t src = gmalloc(v->csize + 16), dst = gmalloc(v->usize + 64), ok = 0;
+    if (fseek(f, (long)v->off, SEEK_SET) == 0 && fread(G + src, 1, v->csize, f) == v->csize) {
+        uint64_t t1 = host_ticks();
+        lt->read = (t1 - t0) / 1e6;
+        memcpy(&lt->magic, G + src, 4);
+        int k = lt->magic == 0x5a4c444au ? 0 : lt->magic == 0x46465548u ? 1 : -1;
+        int verify = k >= 0 && (vlz_mode == 2 || (diag_on && vlz_mode == 1 && vlz_verified[k] < 40));
+        uint32_t n = 0;
+        if (k >= 0 && vlz_mode && !verify) {
+            n = lz_native(lt->magic, G + src, v->csize, G + dst, v->usize + 64);
+            lt->native = n != 0;
+            if (!n && diag_on) diag_event("vinyls: %08X: native %s decoder rejected the blob; using the game's", v->hash, k ? "HUFF" : "JDLZ");
+        }
+        if (!lt->native) {
+            uint32_t a[2] = {src, dst}, esp = c->esp, eax = c->eax, ecx = c->ecx, edx = c->edx;
+            n = call_guest(c, FN_LZDECOMPRESS, 2, a);       // __cdecl; ecx is still Init's TextureInfo
+            c->esp = esp; c->eax = eax; c->ecx = ecx; c->edx = edx;
+        }
+        uint64_t t2 = host_ticks();
+        lt->lz = (t2 - t1) / 1e6;
+        if (verify) {
+            uint8_t *mine = malloc(v->usize + 64);
+            uint32_t m = lz_native(lt->magic, G + src, v->csize, mine, v->usize + 64);
+            uint64_t t3 = host_ticks();
+            lt->lz_guest = lt->lz; lt->lz = (t3 - t2) / 1e6;
+            ++vlz_verified[k];
+            int same = m == n && !memcmp(mine, G + dst, n);
+            if (!same) ++vlz_mismatch[k];
+            if (diag_on) diag_event("vinyls: %s check %08X: native %u bytes in %.2f ms, game LZDecompress %u bytes in %.2f ms: %s (%u checked, %u differ)",
+                                    k ? "HUFF" : "JDLZ", v->hash, m, lt->lz, n, lt->lz_guest, same ? "identical" : "DIFFERENT", vlz_verified[k], vlz_mismatch[k]);
+            free(mine);
+            t2 = t3;
+        }
+        uint32_t tail = dst + v->usize - 156;
+        *w = M16(tail + 0x44); *h = M16(tail + 0x46);
+        uint32_t fmt = M32(tail + 124 + 0x14), pitch = (*w * 4 + 255) & ~255u;
+        if (n == v->usize && fmt == X360_LIN_ARGB && *w >= 64 && *h >= 64 && *w <= 2048 && *h <= 2048 && pitch * *h + 156 <= v->usize) {
+            uint32_t *p = (uint32_t *)(G + dst);            // A R G B -> B G R A (rows are tightly packed for w >= 64)
+            for (uint32_t i = 0; i < *w * *h; ++i) p[i] = __builtin_bswap32(p[i]);
+            ok = 1;
+        } else if (diag_on)
+            diag_event("vinyls: %08X: X360 blob unusable (LZDecompress %u of %u bytes, %ux%u, format %08X)", v->hash, n, v->usize, *w, *h, fmt);
+        lt->swz = (host_ticks() - t2) / 1e6;
+    }
+    fclose(f);
+    gfree(src);
+    if (!ok) { gfree(dst); return 0; }
+    return dst;
+}'''
+assert hashlib.sha256(OLD_VINYLS.encode()).hexdigest() == '04785857a5a76ef89c754dc92947f36fb198e8ed5e0aa74d39cacd276ebe6915', 'pinned baseline changed'
+
 def main():
-    ref = os.environ.get("OLD_REF", "main")
     if "--old" in sys.argv:
-        source = subprocess.run(["git", "show", ref + ":runtime/vinyls.m"], cwd=ROOT, text=True, capture_output=True, check=True).stdout
+        source = OLD_VINYLS
     else:
         source = (ROOT / "runtime/vinyls.m").read_text()
     lt = re.search(r"^typedef struct \{ double read[^\n]*\} LoadTimes;", source, re.M).group(0)

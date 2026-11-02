@@ -83,6 +83,10 @@
 0060E160    diag.c: Game_NotifyCountdownDone (timeline.log: the racers' release)
 00516230    padprompts.c: FEngHidePCObjects::Callback (console prompts: nothing hidden, the set chosen when drawn)
 00514CC0    padprompts.c: FEngSetVisible (also shows the console prompt set)
+007B1070    padprompts.c: CustomizeSub::RefreshHeader (mirror Max Performance visibility to console prompts)
+0073B470    materials.m: CompositeWheel8 (capture the rim paint mask)
+0073B640    materials.m: CompositeWheel32 (capture the rim paint mask)
+007535E0    materials.m: CompositeRim (track selected rim colour on the composite texture)
 005A45B0    padprompts.c: cFEngRender::RenderObject (keycaps or console glyphs by the active input; glyph art)
 00503400    padprompts.c: GetTextureInfo (private prompt art outside the fixed extra-texture list)
 00525520    padprompts.c: cFEngGameInterface::PackageWasLoaded (diagnostics: prompts.txt; the controller-diagram loading screen's image)
@@ -130,6 +134,8 @@
 005F3D90    attrib_x360.c: FindInstances (diagnostics: instances found per call)
 005F3F10    attrib_x360.c: FindInstances, second variant (diagnostics)
 00439A10    attrib_x360.c: AITrafficManager::SpawnTraffic (diagnostics: traffic cars spawned)
+00426230    attrib_x360.c: AITrafficManager::NextSpawn (quota-preserving sedan choice)
+004253C0    attrib_x360.c: TypeCounter (shared sedan quota inside NextSpawn only)
 00503C80    attrib_x360.c: EmitterSystem::AddEmitterGroup (diag: emitters per group)
 00503D00    attrib_x360.c: EmitterSystem::Render (diag: live emitter and particle counts)
 0050C7B0    attrib_x360.c: EmitterSystem::CreateEmitterGroup (diag: which collections are requested)
@@ -165,8 +171,8 @@
 006BE8F0    mirror.c: GetVisibleStateSB: mirror flares whose sprite overlaps a side plane are drawn (NFS_MIRROR_FLARE=pc: exact PC test) + BOOT_DIAG failing plane
 00750B10    mirror.c: thunk to the cars' queueing (FUN_00744DD0): the mirror's queued world is drawn before its flare pass (NFS_MIRROR_FLARE_ORDER=pc: PC order)
 005AB450    extratrax.c: UserProfile::Default (Extra EA Trax appended to Songs; the port's song list)
-005ACB70    extratrax.c: UserProfile::LoadFromBuffer (the song list from the career slots + extra_trax.ini)
-0058FD10    extratrax.c: UserProfile::SaveToBuffer (career slots keep MW's songs; extras to extra_trax.ini)
+005ACB70    extratrax.c / extratrax_public.c: UserProfile::LoadFromBuffer (car save admission; private extra song list)
+0058FD10    extratrax.c / extratrax_public.c: UserProfile::SaveToBuffer (car provenance; private extra song sidecar)
 004DF330    extratrax.c: InitializeEATrax (128-bit FE/IG sets with Extra EA Trax on)
 004F4CD0    extratrax.c: SFXObj_PFEATrax::GenNextMusicTrackID (128-bit shuffle with Extra EA Trax on)
 0055A370    extratrax.c: UIEATraxScreen constructor (undo copy from the port's song list)
@@ -253,7 +259,7 @@
 00590D40    car85.c: FEPlayerCarDB::Default (record-count diagnostic)
 007399F0    car85.c: GetTypesFromSlot (CAR85 reuses donor parts)
 00751540    car85.c: CarPart model hash (verified private solid namespace)
-00751860    car85.c: GetUsedCarTextureInfo (private image hashes for added cars)
+00751860    car85.c: GetUsedCarTextureInfo (private image hashes for added cars; lamp-state textures for materials.m)
 00752940    car85.c: LoadedWheel (RideInfo model namespace)
 00752B60    car85.c: LoadedCar model hashes (RideInfo model namespace)
 00755800    car85.c: CarRenderInfo parts (RideInfo model namespace)
@@ -266,7 +272,9 @@
 0045C090    car85.c: Vault deinitialize (retire source generation before .bin release)
 0056F090    car85.c: FEPlayerCarDB::LoadFromBuffer (hide unavailable CAR85 rows OFF)
 005816B0    car85.c: FECarRecord::GetType (reject unavailable/out-of-range type)
-00581790    car85.c: FECarRecord::GetManufacturerName (private manifest brands; retail pass-through)
+00581790    car85.c: FECarRecord::GetManufacturerName (verified local manufacturer; retail pass-through)
+00591160    car85.c: FECarRecord::GetNameHash (public local display resource; retail fallback)
+00591330    car85.c: FECarRecord::GetManuLogoHash (public local manufacturer artwork; retail fallback)
 00739920    car85.c: car type info (unsigned bounds before table pointer calculation)
 0057F1D0    onscreen_keyboard.c: text capture generation and physical pad ownership
 00586580    onscreen_keyboard.c: retire text target before destruction
@@ -276,3 +284,37 @@
 0075AAD0    roam_game.c: World_Service (online free roam: local car out, friends' poses in; NFS_ROAM)
 00663D30    roam_game.c: MainLoop (online session cleanup also runs without a simulation)
 0069B740    roam_game.c: RBVehicle::CanCollideWith (online free roam: ghosted friend cars collide with nothing)
+00687710    roam_game.c: PVehicle resource admission (online spawn failure reason)
+006ED260    roam_game.c: Sim::CanSpawnRigidBody (online spawn failure reason)
+
+007C3690    gameplay_opts.c: latch Junkman option for the customization visit
+00576E30    gameplay_opts.c: Junkman UtilizeMarker preserves stock after the career
+0058A680    gameplay_opts.c: Junkman performance availability after the career
+00576ED0    gameplay_opts.c: Junkman marker availability after the career
+00576F10    gameplay_opts.c: Junkman displayed stock has a floor of one after the career
+0058AE50    gameplay_opts.c: backroom entry includes virtual Junkman types after the career
+007A6160    gameplay_opts.c: cart marker preview keeps unspent Junkman stock
+007AED80    gameplay_opts.c: cart totals do not debit unlimited Junkman items
+007B13C0    gameplay_opts.c: selected Junkman part displays zero marker cost
+007B0620    gameplay_opts.c: performance header keeps virtual stock separate from cosmetic cart costs
+007BB870    maxperf_career.c: CustomizeSub::NotificationMessage (career Max Performance confirmation)
+
+0052AF20    controlpages.c: Controls Keyboard / Controller / Drag page cycle
+0052AB90    controlpages.c: Drag page heading in the retail controller package
+0052AC70    controlpages.c: snapshot the selected binding set before building capture widgets
+0051D4B0    controlpages.c: changed check for the selected Controls page
+0051D590    controlpages.c: cancel only the selected Controls page
+0051D6E0    controlpages.c: independent Drag defaults
+0052A780    controlpages.c: restore Default bindings when Controls exits
+00487160    contact_mass.c: owned source contact Moment, donor integration unchanged
+00698360    contact_mass.c: contact mass in penetration fallback
+0069ABF0    contact_mass.c: compose positive collision mass override with source ratio
+006A85B0    contact_mass.c: contact-consistent damage impulse
+00698650    contact_mass.c: diagnostic real object pair context
+00488F70    contact_mass.c: diagnostic central stationary cop contact fixture
+006978F0    contact_mass.c: guarded stationary patrol fixture setup; native integration
+006B7720    contact_mass.c: RigidBody destructor resets diagnostic pair before body retirement
+
+00640F00    breaker_diag.c: EPlayRaceNIS constructor (diagnostic decisions only)
+00590BD0    underglow.c: FEPlayerCarDB::CreateCar (clear reused cosmetic identity on success)
+00581370    underglow.c: FEPlayerCarDB::DeleteCar (clear cosmetic identity on success)

@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include "heap.c"
 #include "x360nisaudio.c"
-uint8_t *G; const char *game_dir; int diag_on=0; const char *diag_dir="/tmp"; uint32_t last_error;
+uint8_t *G; const char *game_dir; int diag_on=0; const char *diag_dir="/tmp"; __thread uint32_t last_error;
 const char *app_pref(const char *k) { (void)k; return NULL; }
 void app_pref_set(const char *k, const char *v) { (void)k; (void)v; }
 void report_note(const char *f, ...) { (void)f; }

@@ -8,9 +8,12 @@ This is the host side of `DSOUND.dll` for the native port. The boot runtime keep
 | `dsound_host.cpp` | Implementation (C++17) |
 | `dstest.cpp` | Headless tests: `build/dstest`, plus `build/dstest device` for the muted CoreAudio runs and `build/dstest fake` for the output-device logic on media's fake HDMI TV (no audio) |
 | `ctest.c` | Links the library from plain C, the way the runtime will |
+| `timedtap_test.cpp` | Timed capture, PCM identity, clock/queue and subscription lifetime proofs, with pinned baseline and mutants |
 | `build.sh` | Builds `build/libhostaudio.a`, `build/libmedia.a` (`media.cpp` compiled unchanged), `build/dstest` and `build/ctest` |
 
 ## Build and link
+
+The stream snapshot/startup ordering fixes and serialized audio test scheduling apply only to Mac tests and builds; Windows behavior is unchanged.
 
 ```bash
 port/host/audio/build.sh && port/host/audio/build/dstest device
@@ -74,6 +77,85 @@ All calls are thread-safe. Results are HRESULT values (`DS_OK`, `DSERR_*`). Stru
 `QueryInterface`: `IDirectSound8` and `IDirectSoundBuffer8` can reuse the same objects. `IDirectSoundNotify` maps to the call above. `IDirectSound3DBuffer`, `IDirectSound3DListener`, `IKsPropertySet` (EAX) and the FX interfaces should return `E_NOINTERFACE`; Snd mixes in software.
 
 `DsConfig`: `sink` (`DS_SINK_DEVICE` the default; `DS_SINK_NULL` is a real-time mixer thread paced by the wall clock, with no device; `DS_SINK_MANUAL` is the test clock), `mode` (PCM 5.1 / stereo / Dolby Digital / Dolby Digital Plus / TrueHD), `mix_rate` (0 = auto), `latency_frames` (default 1024; Dolby Digital (Plus) 3072, TrueHD 4096: its encoder holds up to ~1,600 frames), `block_frames` (256), `mute_device` (the device gets silence and the tap gets the real mix), `speaker_config`, `notify` and `tap` callbacks. Callbacks run on the mixer thread with no lock held. They must not call back into `SetFormat` or `ds_device_release`.
+
+## Timed game-mix capture
+
+The capture uses Mach time in host/audio C++; Windows builds need their own clock source.
+
+`ds_capture_start(DsCaptureFn, user)` installs one process-wide recorder; it returns `DS_OK`,
+`DSERR_ALLOCATED` if occupied, or `DSERR_INVALIDPARAM` for a null callback. It attaches immediately to an
+existing device and persists when there are no devices and through re-creation. Only the newest live device
+(in creation order, matching the runtime's current-device selection) is admitted. Releasing it selects the
+newest remaining live device. An already-admitted callback can finish during a device handover; callbacks
+never overlap. The legacy `DsConfig.tap`, its user pointer, notification order and PCM remain independent.
+
+`DsTimedMixBlock` supplies borrowed interleaved float PCM in **FL FR FC LFE BL BR** order, after the linked
+limiter and final clamp, before device muting, fold-down or encoding. The block and PCM expire when the callback
+returns. `frames` is the actual block length (including partial manual pulls); `sample_rate` is the rate that
+produced this PCM, snapshotted with its timing under the device mutex. `stream_id` identifies the device for
+its lifetime, and `sample_position` counts mixed frames since its creation, including frames mixed at prior
+rates. Do not interpret a frame count across a rate change using just the latest rate.
+
+`first_sample_host_time` uses **`mach_absolute_time()` ticks**, converted using `mach_timebase_info()`.
+It does not use wall/calendar time, nanoseconds, `mach_continuous_time()`, or callback arrival time. The estimate
+locates the first sample at the software output queue; additional HAL/device/receiver latency is unknown:
+
+- Device output: host time sampled beside the queue observation, plus `(queued_frames + pending_frames) / sample_rate`.
+  Pending encoder input is counted in input-rate frames even before a playable burst exists. The snapshot precedes
+  mixing/delivery and the device write. Queue consumption is discrete, so this is a software playback estimate,
+  not a hardware presentation timestamp. An underrun invalidates the former estimate.
+- Null output (also detached device output): `t0 + sample_position / sample_rate`, using the existing virtual
+  playback clock. A starvation that resets `t0` changes generation, even before the queue was primed.
+- Manual rendering: an explicit host/sample anchor established at creation and replaced at each rate rebase,
+  plus frames since that anchor divided by the rate. Time between calls does not advance this sample clock.
+  The manual anchor is stored directly in Mach ticks. Null-clock conversion samples a fresh midpoint bridge
+  beside the snapshot, without assuming equal clock epochs or suspend behavior.
+
+`clock_generation` changes on rate rebases, null starvation, device underruns, output detachment and attachment,
+including same-rate output changes and reopening the old rate after a failed rate change. `DS_CAPTURE_DISCONTINUITY`
+also marks the first callback of a subscription, stream switches, and gaps in delivered sample positions.
+A generation or stream change invalidates extrapolation from earlier blocks. The first callback can begin at a
+nonzero sample position. A recorder should retain each block's complete metadata and begin a new segment at a
+discontinuity; it must not infer playback time from when its queue consumer wakes up.
+
+Delivery uses one atomic admission attempt and never allocates, encodes, writes files, takes the subscription
+control mutex or waits for a recorder. A callback should only copy into a preallocated queue and return promptly.
+Concurrent manual renders that encounter an in-flight callback are skipped; the next admitted block marks the
+position gap. Normal threaded devices have one producer. The callback must not throw, reenter capture start/stop,
+render/reconfigure/release a device, or wait for a thread performing those operations.
+
+`ds_capture_stop()` is idempotent: it closes admission and waits for the admitted callback to finish before
+returning. User storage can be freed immediately afterward. Start/stop control calls serialize, and a successful
+start never silently replaces a subscription. A later successful concurrent start can of course begin a new
+subscription after stop. Callback PCM must be copied before return; retaining its pointer is invalid.
+
+`timedtap_test.cpp` is built and run by `build.sh`, hence by the offline suite's existing `host_audio` entry.
+It only uses manual, null and `AudioOutput::open_offline` fixtures. The PCM-only behavioral baseline is pinned
+in the test, forwarding legacy PCM with zero metadata: rejection is numerical, with no git history dependency.
+Generated baseline/mutant sources, binaries and bounded proof logs stay under `build/timedtap_*`.
+
+Measured offline proof (the broken binaries must exit nonzero):
+
+| Build | Checks / failures | Numeric result |
+|---|---:|---|
+| Fixed | 457 / 0 | 3,510/3,510 source samples exact; metadata 3/3 blocks; legacy/render mismatches 0 |
+| Pinned baseline adapter | 8 / 1 | Same 3,510 exact PCM samples, metadata 0/3 blocks |
+| Delivery-arrival clock mutant | 457 / 2 | Manual timestamp error 5.326042 ms; fixed 0 ms |
+| Queue-lead removed | 457 / 4 | Lead 0 ms, error 85.333333 ms; fixed lead 85.333333 ms, error 0 ms |
+| Pending input removed | 457 / 1 | 256 pending frames predict 0.000125 ms; fixed 5.333375 ms |
+| Quiescence wait removed | 54 / 1 | Stop returns with 1 callback in flight; fixed early returns 0 |
+| Rate read at delivery | 457 / 1 | Reports 44,100 Hz for PCM mixed at 48,000 Hz; fixed retains 48,000 Hz |
+
+The 48 kHz timestamp tolerance is one input sample, **0.020833333 ms**. The fixed limiter witness peaks at
+0.891250908 (-1 dBFS) with zero legacy/render differences. Fixed lifetime stress completed 200 subscribe-stop
+cycles and four simultaneous start/stop callers (one start winner), with zero callbacks after stop returned.
+Null starvation advanced generation 2 → 3; same-rate output replacement also changed generation. Callback counts
+and sub-microsecond clock sampling overhead vary with scheduling; pass/fail uses sample tolerances and quiescence,
+not elapsed throughput. The lifetime mutant stops after its held-callback numerical failure rather than exercising
+unsafe subsequent pointer races.
+
+Full offline suite: `OFFLINE PASS` (210 tests, 560 s; five unavailable input/host fixture skips).
+The integrated `host_audio` build/tests passed in 49 s and `host_shaders` in 15 s.
 
 ## Behavior
 

@@ -115,5 +115,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 plutil -lint -s "$APP/Contents/Info.plist"
+# Sign only after all resources exist. Setup's all-in-one exporter embeds its
+# asset snapshot in a fresh copy, then repeats this final signing/verification.
 codesign --force --sign - --timestamp=none "$APP"
 echo "bundle.sh: $APP (build $BUILD, $COMMIT, macOS $MINOS+)"

@@ -31,6 +31,7 @@
 #include "roots.h"
 #include "settings.h"
 #include "hd_file_cache.h"
+#include "sign_diag.h"
 
 // state: what the first look at this texture decided, for good (streamed textures load again and again)
 enum { HD_NEW, HD_SWAP, HD_KEEP };                         // not looked at yet / swap it / keep the PC texture
@@ -123,7 +124,7 @@ static void hd_scan(void) {
     if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) return;
     char dir[1024];
     struct stat st;
-    if (e && strcmp(e, "on") && strcmp(e, "1")) snprintf(dir, sizeof dir, "%s", e);
+    if (!roots_exported() && e && strcmp(e, "on") && strcmp(e, "1")) snprintf(dir, sizeof dir, "%s", e);
     else {                                                  // the set with the PC alpha masks, else the earlier one
         roots_asset_dir("hd_textures_mips_alpha", dir, sizeof dir);
         if (stat(dir, &st)) roots_asset_dir("hd_textures_mips", dir, sizeof dir);
@@ -748,6 +749,7 @@ static int smooth_art_init(Cpu *c, uint32_t ti, uint32_t pi) {
 // the same rows gpu_tex uploads; draw dumps identify the sampler that reads them.
 static int ui_diag_wanted(uint32_t hash) {
     if (!diag_on) return 0;
+    if (sign_diag_on && sign_diag_selected(hash, NULL)) return 1;
     const char *e = getenv("BOOT_DIAG_UI_TEXTURES");
     if (!e || !*e || !strcmp(e, "0")) return 0;
     return !strcmp(e, "1") ? hash == 0xE0463AFA || hash == 0x20865C0A || hash == 0xA87927BE : hash == (uint32_t)strtoul(e, NULL, 16);
@@ -776,6 +778,7 @@ static void ui_diag_source(uint32_t ti, uint32_t pi) {
     if (M32(ti + 0x74)) ui_diag_bytes(hash, "palette.bin", G + M32(ti + 0x74), 1024);
 }
 static void ui_diag_upload(uint32_t ti, uint32_t pi, uint32_t raw, uint32_t size) {
+    if (diag_on && sign_diag_on) sign_diag_texture(ti, pi);
     uint32_t hash = M32(ti + 0x24);
     if (!ui_diag_wanted(hash)) return;
     Obj *t = obj(M32(pi + 0x18));
@@ -795,6 +798,58 @@ static void ui_diag_upload(uint32_t ti, uint32_t pi, uint32_t raw, uint32_t size
         if (t->mem[l]) ui_diag_bytes(hash, kind, G + t->mem[l], (size_t)t->pitch[l] * level_rows(t->fmt, mipdim(t->h, l)));
     }
 }
+// HD_MIP_TAIL_BEGIN: shared verbatim with the native upload replay.
+// Retail Init quarters sizes, so only its safe prefix may pass through it.
+// Validate every advertised compressed level before either Init or a tail copy.
+static int hd_compressed_layout(const uint8_t *dds, size_t size, uint32_t ww, uint32_t hh,
+                                uint32_t mips, uint32_t fmt, uint32_t *payload) {
+    uint32_t d[32];
+    if (size < sizeof d) return 0;
+    memcpy(d, dds, sizeof d);
+    if (memcmp(dds, "DDS ", 4) || d[1] != 124 || d[19] != 32 || !(d[20] & 4) ||
+        d[3] != hh || d[4] != ww || (d[7] ? d[7] : 1) != mips || d[21] != fmt ||
+        !ww || !hh || ww > 4096 || hh > 4096 ||
+        !mips || mips > 16 || (fmt != 0x31545844 && fmt != 0x33545844 && fmt != 0x35545844)) return 0;
+    size_t total = 0;
+    uint32_t w = ww, h = hh, block = fmt == 0x31545844 ? 8 : 16;
+    for (uint32_t l = 0; l < mips; ++l) {
+        total += (size_t)((w + 3) / 4) * ((h + 3) / 4) * block;
+        if (l + 1 < mips && w == 1 && h == 1) return 0;
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
+    if (128 + total > size) return 0;
+    *payload = (uint32_t)total;
+    return 1;
+}
+// Obj owns each appended allocation just like CreateTexture's original levels;
+// normal object release frees all mem[] slots. No GPU object exists at this point.
+static void hd_append_tail(uint32_t pi, const uint8_t *dds, uint32_t ww, uint32_t hh,
+                           uint32_t mips, uint32_t fmt) {
+    Obj *t = obj(M32(pi + 0x18));
+    if (!t || t->kind != K_TEXTURE || t->gpu || t->fmt != fmt || !t->levels || t->levels > 16) return;
+    uint32_t drop = 0;
+    while (drop < mips && (mipdim(ww, drop) != t->w || mipdim(hh, drop) != t->h)) ++drop;
+    if (drop == mips || mips - drop <= t->levels) return;
+    uint32_t added[16] = {0}, pitch[16] = {0}, old = t->levels, count = mips - drop;
+    size_t off = 128;
+    for (uint32_t l = 0; l < mips; ++l) {
+        uint32_t w = mipdim(ww, l), h = mipdim(hh, l);
+        uint32_t row = ((w + 3) / 4) * (fmt == 0x31545844 ? 8 : 16), bytes = row * ((h + 3) / 4);
+        if (l >= drop + old) {
+            uint32_t i = l - drop;
+            if (t->mem[i] || !(added[i] = gmalloc(bytes))) {
+                for (uint32_t j = old; j < count; ++j) if (added[j]) gfree(added[j]);
+                return;
+            }
+            pitch[i] = row;
+            memcpy(G + added[i], dds + off, bytes);
+        }
+        off += bytes;
+    }
+    for (uint32_t i = old; i < count; ++i) { t->mem[i] = added[i]; t->pitch[i] = pitch[i]; }
+    t->levels = count; t->dirty = 1;
+}
+// HD_MIP_TAIL_END
 void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInterface::Init (thiscall, TextureInfo* in ecx)
     if (!extra_done) {                                     // the X360-only textures, once, at the first pack load
         void prompts_textures(Cpu *c);
@@ -841,16 +896,20 @@ hd_lookup: ;
             }
             hx->ww = got.ww; hx->hh = got.hh; hx->mips = got.mips; hx->fmt = got.fmt;
             hx->state = got.verdict > 0 ? HD_SWAP : HD_KEEP;
-            if (got.verdict <= 0) { if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
+            if (got.verdict <= 0) { if (is_later) goto hd_lookup; f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return; }
         } else {
             raw = hd_read(hx->path, &size);
             const uint8_t *head = G + raw;
-            if (!raw || size < 128 || memcmp(head, "DDS ", 4) || (is_later && !later_header(head, size))) { if (raw) gfree(raw); hx->state = HD_KEEP; if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
+            if (!raw || size < 128 || memcmp(head, "DDS ", 4) || (is_later && !later_header(head, size))) { if (raw) gfree(raw); hx->state = HD_KEEP; if (is_later) goto hd_lookup; f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return; }
             uint32_t fourcc;
             memcpy(&hx->hh, head + 12, 4); memcpy(&hx->ww, head + 16, 4); memcpy(&hx->mips, head + 28, 4); memcpy(&fourcc, head + 84, 4);
             if (!hx->mips) hx->mips = 1;
             hx->fmt = fourcc == 0x31545844 || fourcc == 0x33545844 || fourcc == 0x35545844 ? fourcc : (head[80] & 0x40) ? 21 : 0;
             if (is_later && !later_pin(hx, head, size)) { gfree(raw); hx->state = HD_KEEP; goto hd_lookup; }
+            uint32_t checked_payload;
+            if (hx->fmt != 21 && !hd_compressed_layout(head, size, hx->ww, hx->hh, hx->mips, hx->fmt, &checked_payload)) {
+                gfree(raw); hx->state = HD_KEEP; if (is_later) goto hd_lookup; f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return;
+            }
             float drgb, da;
             int verdict = hd_verify(ti, pi, head, size, hx->ww, hx->hh, hx->mips, hx->fmt, &drgb, &da);
             if (is_later) {
@@ -862,7 +921,7 @@ hd_lookup: ;
                 hv_add(&key);
             }
             hx->state = verdict > 0 ? HD_SWAP : HD_KEEP;
-            if (verdict <= 0) { gfree(raw); if (is_later) goto hd_lookup; f_006DDD90_orig(c); return; }
+            if (verdict <= 0) { gfree(raw); if (is_later) goto hd_lookup; f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return; }
         }
     }
     uint32_t ww = hx->ww, hh = hx->hh, mips = hx->mips, fmt = hx->fmt;
@@ -875,30 +934,35 @@ hd_lookup: ;
     int bpb = fmt == 0x31545844 ? 8 : fmt == 21 ? 0 : 16;
     uint32_t pcfmt = M32(pi + 0x14);
     int pc_alpha = pcfmt == 0x33545844 || pcfmt == 0x35545844 || pcfmt == 21 || pcfmt == 0x29;
-    if (!fmt || ww > 4096 || hh > 4096 || !strncmp((const char *)G + ti + 0x0c, "DUMMY_SKIN", 10) || (pc_alpha && fmt == 0x31545844)) {
+    if (!fmt || !ww || !hh || !mips || mips > 16 || ww > 4096 || hh > 4096 || !strncmp((const char *)G + ti + 0x0c, "DUMMY_SKIN", 10) || (pc_alpha && fmt == 0x31545844)) {
         if (raw) gfree(raw);
         if (is_later) { hx->state = HD_KEEP; goto hd_lookup; }
-        f_006DDD90_orig(c); return;
+        f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return;
     }
-    // Init sizes level i as base >> 2i, which ignores the 4x4 block minimum: keep only levels with both sides >= 4
+    // Keep Init's byte-exact prefix; append the block-rounded tail afterwards.
+    uint32_t base = fmt == 21 ? ww * hh * 4 : ((ww + 3) / 4) * ((hh + 3) / 4) * (uint32_t)bpb;
     uint32_t levels = 0, w = ww, h = hh;
     while (levels < mips && (fmt == 21 || (w >= 4 && h >= 4))) {
+        if (fmt != 21 && (base >> (2 * levels)) != ((w + 3) / 4) * ((h + 3) / 4) * (uint32_t)bpb) break;
         // Init quarters byte sizes: stop a private rectangular RGBA chain before
         // one side clamps to 1 and that arithmetic would truncate a texel.
         if (is_later && fmt == 21 && (ww * hh * 4 >> (2 * levels)) != w * h * 4) break;
         ++levels; w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
     }
-    uint32_t base = fmt == 21 ? ww * hh * 4 : (ww / 4) * (hh / 4) * (uint32_t)bpb, total = 0;
+    uint32_t total = 0;
     for (uint32_t l = 0; l < levels; ++l) total += base >> (2 * l);
     if (!raw) raw = hd_read(hx->path, &size);               // a texture decided on an earlier load
-    if (!raw || 128 + (size_t)total > size || (is_later && (!later_header(G + raw, size) || !later_pin(hx, G + raw, size)))) { if (raw) gfree(raw); if (is_later) { hx->state = HD_KEEP; goto hd_lookup; } f_006DDD90_orig(c); return; }
+    uint32_t full_payload = total;
+    if (!raw || !levels || 128 + (size_t)total > size ||
+        (fmt != 21 && !hd_compressed_layout(G + raw, size, ww, hh, hx->mips, fmt, &full_payload)) || (is_later && (!later_header(G + raw, size) || !later_pin(hx, G + raw, size)))) { if (raw) gfree(raw); if (is_later) { hx->state = HD_KEEP; goto hd_lookup; } f_006DDD90_orig(c); ui_diag_upload(ti, pi, 0, 0); return; }
     // NFS_X360_TEXTURES_TONE=x360: a texture the converter regraded to the PC's tones was validated above in those
     // tones (same content); the X360's own grading of it is loaded instead
     for (int i = 0; !is_later && i < nhd_tone; ++i) {
         if (hd_tone[i].hash != hx->hash) continue;
         uint32_t tsize, traw = hd_read(hd_tone[i].path, &tsize);
         const uint8_t *gh = G + traw, *head = G + raw;      // same height, width, pitch, mip count and format
-        if (traw && !memcmp(gh + 12, head + 12, 20) && !memcmp(gh + 80, head + 80, 8) && 128 + (size_t)total <= tsize) {
+        uint32_t tone_payload = 0;
+        if (traw && tsize >= 128 && (fmt == 21 || hd_compressed_layout(gh, tsize, ww, hh, hx->mips, fmt, &tone_payload)) && !memcmp(gh + 12, head + 12, 20) && !memcmp(gh + 80, head + 80, 8) && 128 + (size_t)total <= tsize) {
             gfree(raw); raw = traw; ++hd_tone_loaded;
         } else if (traw) gfree(traw);
         break;
@@ -912,6 +976,15 @@ hd_lookup: ;
     x360_hd_creating = 1;                                  // the texture Init creates is tagged (the probe's hdtex)
     f_006DDD90_orig(c);
     x360_hd_creating = 0;
+    if (fmt != 21) {
+        hd_append_tail(pi, G + raw, ww, hh, mips, fmt);
+        Obj *uploaded = obj(M32(pi + 0x18));
+        if (uploaded) {
+            levels = uploaded->levels; total = 0;
+            for (uint32_t l = 0; l < levels; ++l)
+                total += uploaded->pitch[l] * ((mipdim(uploaded->h, l) + 3) / 4);
+        }
+    }
     ui_diag_upload(ti, pi, raw, size);
     M32(ti + 0x70) = s70; M32(ti + 0x40) = s40; M32(ti + 0x44) = s44; M32(ti + 0x4c) = s4c; M32(pi + 0x14) = sfmt;
     gfree(raw);

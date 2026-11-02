@@ -2,6 +2,20 @@
 
 ## Setup
 
+**An all-in-one export says "Re-export from Setup to update"** — automatic updates are disabled for exports.
+Run the latest Setup to build the normal install, then use **Export all-in-one app…** with a new name.
+Keep the previous export to roll back. Setup also refuses to install over an exported app; choose a separate
+location for the normal install. Saves and settings remain in Application Support and are backed up separately.
+
+**Export destination already exists** — choose a new `.app` name. Existing exports are never replaced.
+If the export reports missing, linked or damaged assets, repair the normal install with Setup and export again.
+Changing the saved game folder or holding Option does not redirect an exported app to external files.
+
+**An export uses more space on the backup drive** — APFS clones share blocks only on the same volume.
+Copies to another volume need the full data size and are checked with SHA-256. The export result distinguishes
+allocated file blocks (which include shared blocks) from the observed volume free-space change. Other disk
+activity can affect that change. **Show Log** includes the file counts and byte measurements.
+
 **"Apple could not verify" when opening the Setup app** — it is not notarized by Apple. Click **Done**, then
 **System Settings > Privacy & Security > Open Anyway**. You only need to do this once. The game app it builds is made
 on your Mac.
@@ -22,13 +36,27 @@ Update**, or run `xcode-select --install`, then build again. The macOS SDK must 
 
 **"The PC folder has no ... directory" / "is missing ..."** — choose the installed game folder that holds `speed.exe`
 together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` that contains that folder. A PC
-installer or PC disc image is not enough (an Xbox 360 `.iso` is fine for the Xbox 360 copy).
+installer is not enough. For your game discs, choose **PC disc images** instead (below).
 
 **"The .zip contains an unsafe path" / "a link" / "is far larger than the game" / "can't be read"** — Setup only
 unpacks a `.zip` that holds plain game files. Download it again, or unzip it yourself and choose the folder.
 
-**"Not available yet; choose an installed PC game folder"** — building from a PC disc image is not available yet.
-Install the game first and choose its folder, or choose a `.zip` of that folder. (Your Xbox 360 `.iso` works.)
+**"Disc N of the set ... was not found"** — Setup looks for the other discs beside the one you chose. It shows a
+**Disc N** row for each disc it couldn't find: choose that disc there, from any folder and under any name (Setup reads
+each disc's number from the disc itself). Or keep the `.iso` images of all your discs in one folder.
+
+**"Your discs have an earlier version of the PC game than 1.3"** — also choose the game's official 1.3 update
+(`nfsmwpatch1.3.exe`). Setup applies it to its own copy of the game; it only reads the update and never runs it.
+
+**"The speed.exe on your discs and in the 1.3 update is copy-protected"** — Setup can't translate copy-protected
+code. Also choose a `speed.exe` that has the 1.3 code; Setup checks it the same way as for a game folder.
+
+**"Setup can't read this update" / "does not match its checksum"** — the chosen file is not the official 1.3 update,
+or it is damaged. Download the update again.
+
+**"The disc image is truncated" / "not a disc image Setup can read"** — the image is incomplete (for example an
+interrupted download) or in a format Setup doesn't read. Make the image again, or mount it in Finder and choose the
+mounted disc.
 
 **The `speed.exe` can't be used** — the port is a translation of the PC game's version 1.3 code. Other versions contain
 different code and would not work. Any `speed.exe` that has the 1.3 code is accepted; the log shows the code region
@@ -39,8 +67,10 @@ work folder (about 12 GB while Setup builds), then build again.
 
 **"Another Setup is using this work or cache folder"** — wait for the other Setup to finish, or quit it.
 
-**Xbox 360 copy rejected** — Setup says what is wrong with it. Choose your own complete Xbox 360 copy (a folder or an
-`.iso`), or leave it out to build the PC game alone. Xbox 360 features are then absent.
+**Xbox 360 copy rejected** — Setup says what is wrong with it. It supports the USA and the European (PAL) retail
+discs ("not a supported NFS:MW retail build" means another release, or a modified or damaged executable). Choose your
+own complete Xbox 360 copy (a folder or an `.iso`), or leave it out to build the PC game alone. Xbox 360 features are
+then absent.
 
 **"Your 3.x saves were not copied into 4.0"** — a 3.x save was damaged or incomplete, so Setup copied none of them
 and changed nothing. The message names the 3.x folder. With the game closed you can copy a career folder (it holds a

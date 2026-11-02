@@ -35,6 +35,9 @@
 #include "roots.h"
 #include "materials.h"
 #include "roadfilm.h"
+#include "realworld_materials.h"
+#include "particles_physical.h"
+#include "traffic_detail.h"
 #include "trees.h"
 
 #define TIME_OF_DAY_PTR   0x009B392Cu    // TimeOfDayPointer: +0x60 the specular/hotspot time-of-day gain
@@ -47,13 +50,10 @@ MatCarPaint mat_car;
 
 // The converter switch selects only its explicit material identities.
 // Native headlamp covers use the separate X360 glass selection below.
-                                                                             
+// Default Off; only explicit on selects the imported-car treatment.
 static int carbon_lampglass_on(void) {
-#ifdef NFS_PUBLIC
-    return 0;   // public build: no converted cars
-#endif
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NFS_CARBON_LAMPGLASS"); on = !(e && !strcmp(e, "off")); }
+    if (on < 0) { const char *e = getenv("NFS_CARBON_LAMPGLASS"); on = e && !strcmp(e, "on"); }
     return on;
 }
 // Live Picture choice; Retail preserves the existing platform equations.
@@ -110,7 +110,8 @@ void materials_set_car_glass(int x360) {   // the F10 menu: live (read at every 
     car_glass = x360 != 0;
     if (diag_on) diag_event("materials: car glass now %s", car_glass ? "x360" : "pc");
 }
-static const GlassX360 *glass_find(uint32_t hash) {
+static const GlassX360 *glass_find(uint32_t hash, uint32_t flags) {
+    hash = traffic_detail_glass(hash, flags);
     for (size_t i = 0; i < GLASS_X360_COUNT; ++i) if (glass_x360[i].hash == hash) return &glass_x360[i];
     return NULL;
 }
@@ -215,20 +216,54 @@ static void carnm_find(Cpu *c) {
 }
 // BOOT_DIAG only: car-model draws by blend state (tail of this section, mat_cardraw_note).
 static uint32_t cd_flags, cd_mat;        // the last car setter call's render flags (bit 0x80000 = traffic body, CarRenderInfo::Render 0074E160) and material
+// The low-level compositors receive the exact mask selected by CompositeRim.
+static uint32_t rim_composite_mask;
+static int rim_composite_paletted;
+void f_0073B470_orig(Cpu *c);
+void f_0073B470(Cpu *c) {                // CompositeWheel8
+    uint32_t mask = arg(c, 2);
+    f_0073B470_orig(c);
+    if (c->eax) { rim_composite_mask = ti_d3d(mask); rim_composite_paletted = 1; }
+}
+void f_0073B640_orig(Cpu *c);
+void f_0073B640(Cpu *c) {                // CompositeWheel32
+    uint32_t mask = arg(c, 2);
+    f_0073B640_orig(c);
+    if (c->eax) { rim_composite_mask = ti_d3d(mask); rim_composite_paletted = 0; }
+}
+void f_007535E0_orig(Cpu *c);
+void f_007535E0(Cpu *c) {                // CompositeRim(RideInfo *): RGB is baked into DUMMY_WHEELn, including white
+    uint32_t ride = arg(c, 0), texture = M32(ride + 0x40);
+    int painted = M32(ride + 0x180) != 0; // CAR_SLOT_ID 0x4e, RideInfo parts +0x48
+    rim_composite_mask = 0; rim_composite_paletted = 0;
+    f_007535E0_orig(c);
+    if (c->eax) realworld_materials_rim_texture(texture, painted, rim_composite_mask, rim_composite_paletted);
+}
+// After GetUsedCarTextureInfo (00751860, hooked in car85.c, which may first remap added-car hashes): record the
+// lamp-state textures. +0x340/+0x344/+0x348: headlight base + _OFF/_ON/_DAMAGE0; +0x358/+0x35C/+0x360: brakelight.
+void mat_used_car_textures(uint32_t used) {
+    if (used) for (int i = 0; i < 3; ++i) {
+        realworld_materials_lamp_texture(M32(used + 0x340 + 4 * i));
+        realworld_materials_lamp_texture(M32(used + 0x358 + 4 * i));
+    }
+}
 void f_006C76E0_orig(Cpu *c);
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), called just before each draw that uses it
     uint32_t m = arg(c, 0), fx = M32(CUR_EFFECT), tod = M32(TIME_OF_DAY_PTR);
+    realworld_materials_capture(m ? M32(m + 0xC) : 0, m && fx && M32(fx + 4) == 4, arg(c, 1));
+    uint32_t diffuse = M32(0x00982CB4u);
+    realworld_materials_texture(diffuse ? M32(diffuse + 0x24) : 0);
     carbon_lamp = m && fx && M32(fx + 4) == 4 && carbon_lampglass_on() && carbon_lamp_hash(M32(m + 0xC));
     clear_headlamp = headlamp_glass_on() && m && fx && M32(fx + 4) == 4 ?
         clear_headlamp_kind(M32(m + 0xC), M32(m + 0xC) == 0xA6348EE3u && car_glass_on() &&
-                            glass_ab_held() != 1 && glass_find(0xA6348EE3u) != NULL, carbon_lamp) : 0;
+                            glass_ab_held() != 1 && glass_find(0xA6348EE3u, arg(c, 1)) != NULL, carbon_lamp) : 0;
     lamp_cover = lamp_ab_on() && (ab_state == 6 || ab_state == 8) && clear_headlamp != 0;
     if (lamp_ab_on() && ab_state == 4 && clear_headlamp) clear_headlamp = -1;
     if (lamp_ab_held()) clear_headlamp = 0;
     carbon_lamp |= clear_headlamp != 0;
     if (diag_on && m && fx && M32(fx + 4) == 4) { cd_flags = arg(c, 1); cd_mat = m; }
-    const GlassX360 *gx = !carbon_lamp && m && fx && M32(fx + 4) == 4 && car_glass_on() && glass_ab_held() != 1 ? glass_find(M32(m + 0xC)) : NULL;
+    const GlassX360 *gx = !carbon_lamp && m && fx && M32(fx + 4) == 4 && car_glass_on() && glass_ab_held() != 1 ? glass_find(M32(m + 0xC), arg(c, 1)) : NULL;
     float keep[4] = {0};
     if (gx) {
         keep[0] = MF32(m + 0x50); keep[1] = MF32(m + 0x54); keep[2] = MF32(m + 0x80); keep[3] = MF32(m + 0x90);
@@ -1133,6 +1168,20 @@ static unsigned particles_draws, particles_clamped, particles_quads, particles_r
 static int particles_rain;   // inside Rain::Render 0074ACC0
 static float particles_maxd = 0.0f, particles_maxd_after = 0.0f;
 static int particles_always(void) { return 1; }   // the mode is a per-draw constant: PC output when off
+// t0 has no shadow texture or projected shadow coordinates. Keep the t1/t2
+// source unchanged, but make both platform branches fully lit for this shader.
+static char *particle_t0_patch(const char *unused) {
+    (void)unused;
+    char *s = strdup(particles_msl);
+    if (!s) return NULL;
+    if (!edit(&s, NULL, "return t.sample_compare(s, uv, z);", "return 1.0f;", 0) ||
+        !edit(&s, NULL, "return z - t.sample(s, uv).x >= 0.0f ? 0.0f : 1.0f;", "return 1.0f;", 0) ||
+        !edit(&s, NULL, "float2 uv = pi.texcoord1.xy / pi.texcoord1.w; float z = pi.texcoord1.z / pi.texcoord1.w;", "float2 uv = float2(0.0f); float z = 0.0f;", 0) ||
+        !edit(&s, NULL, "float2 tx = 1.0f / float2(tex1.get_width(), tex1.get_height());", "float2 tx = float2(0.0f);", 0)) {
+        free(s); return NULL;
+    }
+    return s;
+}
 static int particles_on(void) {
     if (particles_x360 < 0) { const char *e = getenv("NFS_PARTICLES"); particles_x360 = !(e && !strcmp(e, "pc")); }
     return particles_x360;
@@ -1227,6 +1276,8 @@ typedef struct MatShader {
 #define PARALLAX_PS(name, hash) {name, hash, SM_PIXEL, 0, WR_SAMPLERS, 1u << 3, NULL, parallax_ps_patch, parallax_on, parallax_constants, 0}
 #define PARTICLE_PS(name, hash) {name, hash, SM_PIXEL, 0, {SM_TEX_2D, SM_TEX_2D, 0, 0}, 1u << 1, particles_msl, NULL, particles_always, particle_constants, 0}
 static const MatShader table[] = {
+    {"particles t0 ps_1_1 (no shadows)", 0xE30981E7D1BD50E9ULL, SM_PIXEL, 0,
+        {SM_TEX_2D, 0, 0, 0}, 0, particles_msl, particle_t0_patch, particles_always, particle_constants, 0},
     PARTICLE_PS("particles t1 ps_2_0 (hardware shadow)", 0x97086D94D4253C51ULL),
     PARTICLE_PS("particles t2 ps_2_0 (shadow compare)", 0x847C8B08F59A807EULL),
     PARALLAX_PS("worldnormalmap t0 ps_2_x", 0x8CBD8764E8812945ULL),
@@ -1323,8 +1374,43 @@ char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult 
     return s ? s : strdup(refl->msl);
 }
 
+char *mat_realworld_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id, int chrome) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i=0;i<4*(size_t)n;++i) h=(h^((const uint8_t *)tokens)[i])*1099511628211ull;
+    *id=0;
+    if (refl->shader_type == SM_VERTEX) {
+        if (h!=0x1BEA38904139377AULL && h!=0xB1CE127C28045F2CULL) return NULL;
+        return realworld_materials_vertex(refl->msl,h==0x1BEA38904139377AULL,chrome);
+    }
+    if (refl->shader_type != SM_PIXEL) return NULL;
+    for (size_t i=0;i<sizeof table/sizeof *table;++i) {
+        const MatShader *e=&table[i];
+        if (e->hash!=h || (e->msl!=car_paint_msl && e->patch!=car_t0_ps_patch)) continue;
+        // Decoded car fixtures: t0 has cube s0 / diffuse s1; t1-t5
+        // have diffuse s0 / cube s1 / shadow s2 / lookup s3.
+        int count=e->variant ? 4 : 2;
+        const uint8_t types[4]={e->variant ? SM_TEX_2D : SM_TEX_CUBE,
+                               e->variant ? SM_TEX_CUBE : SM_TEX_2D,
+                               SM_TEX_2D,SM_TEX_2D};
+        if(refl->n_samplers!=count) return NULL;
+        int shadow=0; unsigned seen=0;
+        for(int j=0;j<refl->n_samplers;++j) {
+            const SmSampler *sm=&refl->samplers[j];
+            if(sm->reg>=count || (seen & (1u<<sm->reg)) || sm->type!=types[sm->reg]) return NULL;
+            if(sm->shadow && sm->reg!=2) return NULL;
+            seen |= 1u<<sm->reg;
+            shadow |= sm->shadow;
+        }
+        char *s=realworld_materials_pixel(car_paint_msl,e->variant,shadow,chrome);
+        if(s) *id=e->variant ? MAT_REAL_SHADOWED : MAT_REAL_T0;
+        return s;
+    }
+    return NULL;
+}
+
 void mat_constants(int id, const float (*vsc)[4], MatConsts *out) {
     memset(out, 0, sizeof *out);
+    if (id == MAT_REAL_T0 || id == MAT_REAL_SHADOWED) { realworld_materials_constants(id, vsc, out); return; }
     if (id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].constants) table[id - 1].constants(vsc, out);
 }
 int mat_extra_texture(int id) { return id > 0 && id <= (int)(sizeof table / sizeof *table) ? table[id - 1].extra_tex : 0; }
@@ -1334,7 +1420,18 @@ int mat_extra_texture(int id) { return id > 0 && id <= (int)(sizeof table / size
 int mat_is_particle(int id) {
     return id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].msl == particles_msl;
 }
-int mat_soft_particle_view(void) { return !particles_rain && particle_vid == 1; }
+unsigned mat_particle_view(const uint32_t viewport[4]) {
+    // Trails can precede PlatStartParticleRender and still carry the previous
+    // emitter's ID. Main-target split draws belong to their active rectangle.
+    if (particle_vid == 1 || particle_vid == 2) {
+        for (unsigned id = 1; id <= 2; ++id) {
+            uint32_t rect[4];
+            if (split_view_rect(0x009195E0u + id * 0x70u, rect) && !memcmp(rect, viewport, sizeof rect)) return id;
+        }
+    }
+    return particle_vid;
+}
+int mat_soft_particle_view(void) { return !particles_rain && (particle_vid == 1 || particle_vid == 2); }
 static const char soft_smoke_math[] =
 "inline float smoke_view_z(float d, float zn, float zf) { return zn*zf/(zf-d*(zf-zn)); }\n"
 "inline float smoke_fade(float scene, float particle, float zn, float zf, float range) {\n"
@@ -1352,6 +1449,8 @@ char *mat_soft_smoke_shader(const uint32_t *tokens, uint32_t n, const SmResult *
         !edit(&s, NULL, "    return o;\n", "    if (m.k[1].w < 0.5f) o.c0.a *= smoke_fade(smoke_depth.read(uint2(pi.pos.xy)).r, pi.pos.z, m.k[1].x, m.k[1].y, m.k[1].z);\n    return o;\n", 0)) {
         free(s); *id = 0; return NULL;
     }
+    s = particles_physical_shader(s);
+    if (!s) *id = 0;
     return s;
 }
 char *mat_soft_smoke_resolved_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
@@ -2747,7 +2846,9 @@ char *mat_trees_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
 // env cube is the last car draw's stage-1 cube [I: ENVIROMAP for worldbone assumed the car's env map].
 static float bone_ldm[4][4];              // LocalDirectionMatrix as stored at the last 006C7420: light i = column i (D3DX uploads
                                           // the transpose: c71 = column 0, c72 = column 1, checked per draw; FF path, same order)
-static uint32_t bone_cube;                 // guest cube texture of the last car draw's sampler 1
+static uint32_t bone_cube;                 // owned guest reference to the last car draw's sampler-1 cube
+void d3d9_addref_guest(uint32_t g);
+void d3d9_release_guest(uint32_t g);
 static unsigned bone_seen, bone_nmap, bone_replaced, bone_skips[BONE_SKIP_COUNT], bone_shader_fail, bone_pipeline_fail, bone_ldm_bad;
 void f_006C7420_orig(Cpu *c);
 void f_006C7420(Cpu *c) {                 // (light context *p, matrix): p+0x10 LocalColourMatrix, p+0x50 LocalDirectionMatrix
@@ -2757,7 +2858,17 @@ void f_006C7420(Cpu *c) {                 // (light context *p, matrix): p+0x10 
 }
 void mat_bone_car_cube(uint32_t tex) {
     uint32_t fx = M32(CUR_EFFECT);
-    if (fx && M32(fx + 4) == 4) bone_cube = tex;
+    if (fx && M32(fx + 4) == 4 && bone_cube != tex) {
+        if (tex) d3d9_addref_guest(tex);
+        uint32_t old = bone_cube;
+        bone_cube = tex;
+        if (old) d3d9_release_guest(old);
+    }
+}
+void mat_bone_reset(void) {
+    uint32_t old = bone_cube;
+    bone_cube = 0;
+    if (old) d3d9_release_guest(old);
 }
 int mat_bone_draw(uint32_t tex[3], int *skip) {
     int x360_arrest_enabled(void);

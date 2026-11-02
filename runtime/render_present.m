@@ -1,10 +1,13 @@
 // render_present.m - Present, frame timing and diag capture encoding (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
+#include "sign_diag.h"
+#include "shadow_near.h"
 #include "brightness.h"
 #include "hdr_output.h"
 #import <Cocoa/Cocoa.h>
 #include "settings.h"
 #include "framecap.h"
+#include "cliprec.h"
 #include "roam_online.h"
 #include <errno.h>
 #include <time.h>
@@ -124,7 +127,11 @@ static void png_after(id<MTLCommandBuffer> cb, id<MTLBuffer> buf, const char *pa
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
         (void)b;
         dispatch_async(png_q, ^{
-            diag_png(p, buf.contents, w, h, w * 4, 0);
+            size_t plen=strlen(p);
+            if(plen>4 && !strcmp(p+plen-4,".bmp"))shadow_near_ab_write_bmp(p,buf.contents,w,h);
+            else diag_png(p, buf.contents, w, h, w * 4, 0);
+            void report_shot_ready(const char *path);
+            report_shot_ready(p);
             free(p);
             if (bounded) dispatch_semaphore_signal(png_slots);
         });
@@ -445,6 +452,7 @@ static int present_copy(void) {
     return 1;
 }
 static void present_show(void) {
+    float clip_headroom = render_hdr_headroom();
     id<MTLTexture> src = hdr_output_on ? hdr_present_tex : present_tex;
     CAMetalLayer *l = layer;
     RenderPresentation policy;
@@ -466,6 +474,7 @@ static void present_show(void) {
                     id<MTLCommandBuffer> cb = [queue commandBuffer];
                     quad_into(cb, src, MTLRegionMake2D(0, 0, src.width, src.height), d.texture, 0, 0,
                               MTLRegionMake2D(0, 0, d.texture.width, d.texture.height), 1);
+                    cliprec_present(cb, src, d, clip_headroom);
                     overlay_present(cb);         // the performance overlay, on its own layer above (overlay.m)
                     if (diag_on && hdr_output_requested) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
                         if (b.error) hdr_output_error("present-command-buffer", b.error);
@@ -490,26 +499,35 @@ static void present_show(void) {
 void render_present(void) {
     if (!mtl) return;
     // Also bound submitted frames when a background/occluded window has no drawable.
-    // Anchor to the actual previous frame, so a slow frame never creates a catch-up burst.
-    static uint64_t online_previous;
+    // Keep the scheduled slot through ordinary wake/GIL delays; a full-period
+    // overrun (including a pause) rebases so a real stall cannot cause a burst.
+    static uint64_t online_deadline;
+    static int online_limit;
     if (atomic_load_explicit(&roam_online_active, memory_order_relaxed)) {
         RenderPresentation policy; render_presentation_stats(&policy);
         uint64_t now = host_ticks();
-        uint64_t deadline = online_previous + 1000000000ull / (unsigned)policy.limit;
-        if (online_previous && deadline > now) {
+        uint64_t period = 1000000000ull / (unsigned)policy.limit;
+        if (!online_deadline || online_limit != policy.limit) online_deadline = now;
+        else {
+            online_deadline += period;
+            if (now >= online_deadline && now - online_deadline >= period) online_deadline = now;
+        }
+        online_limit = policy.limit;
+        if (online_deadline > now) {
             uint64_t wait_started = now;
             gil_release();
-            while ((now = host_ticks()) < deadline) {
-                uint64_t remaining = deadline - now;
+            while ((now = host_ticks()) < online_deadline) {
+                uint64_t remaining = online_deadline - now;
                 struct timespec t = {.tv_sec=(time_t)(remaining / 1000000000), .tv_nsec=(long)(remaining % 1000000000)};
                 if (nanosleep(&t, NULL) && errno != EINTR) break;
             }
             uint64_t woke = host_ticks(); gil_acquire();
+            now = host_ticks();
             diag_idle_ns[IDLE_SLEEP] += woke - wait_started;
-            diag_idle_ns[IDLE_GIL] += host_ticks() - woke;
+            diag_idle_ns[IDLE_GIL] += now - woke;
+            if (now >= online_deadline && now - online_deadline >= period) online_deadline = now;
         }
-        online_previous = host_ticks();
-    } else online_previous = 0;
+    } else { online_deadline = 0; online_limit = 0; }
     frame_pool_cycle();
     if (bb_rt.ms && (probe_sig & PROBE_MSAA)) bb_rt.stale = resolve_magenta = 1;   // BOOT_DIAG_PROBE msaa (probe.m)
     msaa_resolve(&bb_rt);                 // AA on: backbuffer_tex from the multisampled back buffer (see MSAA)
@@ -537,6 +555,8 @@ void render_present(void) {
     postfx_ab_shot(shot_path, sizeof shot_path);
     int carpaint_ab_shot(char *path, size_t n);                               // materials.m: same-frame X360 / PC car paint
     carpaint_ab_shot(shot_path, sizeof shot_path);
+    int traffic_detail_ab_shot(char *path, size_t n);
+    if (diag_on) traffic_detail_ab_shot(shot_path, sizeof shot_path);
     int detail_ab_shot(char *path, size_t n);                                 // detail.c: same-frame detail distances
     detail_ab_shot(shot_path, sizeof shot_path);
     int envcube_ab_shot(char *path, size_t n);
@@ -546,6 +566,7 @@ void render_present(void) {
     int due = shot_path[0] ? 0 : diag_shot_due(dev.frames);
     if (due) snprintf(shot_path, sizeof shot_path, "%s/frame_%05llu.%s", diag_dir, (unsigned long long)dev.frames, due == 2 ? "png" : "jpg");
     if (due == 2) { postfx_ab_shot(shot_path, sizeof shot_path); carpaint_ab_shot(shot_path, sizeof shot_path); } // full-size front-end A/B sets
+    if (diag_on) shadow_near_ab_shot(shot_path, sizeof shot_path);
     if (shot_path[0]) {
         id<MTLTexture> shot_src = hdr_shot_source(cmd, show); // SDR bytes for BOOT_DIAG and F10 reports
         shot = [mtl newBufferWithLength:backbuffer_tex.width * backbuffer_tex.height * 4 options:MTLResourceStorageModeShared];
@@ -566,7 +587,7 @@ void render_present(void) {
         seq_n = 0;
         const char *e = getenv("BOOT_DIAG_SEQ");
         const char *colon = e ? strchr(e, ':') : NULL;
-        if (colon && diag_on) { seq_n = atoi(colon + 1); if (seq_n > 64) seq_n = 64; }
+        if (colon && diag_on && !shadow_near_ab_enabled()) { seq_n = atoi(colon + 1); if (seq_n > 64) seq_n = 64; }
     }
     if (seq_n > 0 && seq_have < seq_n) {
         if (!seq_start && diag_frame_wanted(dev.frames, "BOOT_DIAG_SEQ")) seq_start = dev.frames;
@@ -580,15 +601,19 @@ void render_present(void) {
             [b endEncoding];
             seq_frame[seq_have] = dev.frames;
             seq_buf[seq_have++] = sb;
-            if (seq_have == seq_n)
+            if (seq_have == seq_n) {
                 for (int i = 0; i < seq_n; ++i) {
                     char path[1024];
                     snprintf(path, sizeof path, "%s/seq_%05llu.png", diag_dir, (unsigned long long)seq_frame[i]);
                     png_after(cmd, seq_buf[i], path, (uint32_t)w, (uint32_t)h, 0);
                     seq_buf[i] = nil;
                 }
+                // Multiple sim+ times request independent bounded bursts.
+                seq_have = 0; seq_start = 0;
+            }
         }
     }
+    if (diag_on && sign_diag_on && sign_diag_active()) sign_diag_present(cmd, hdr_shot_source(cmd, show));
     if (shot) png_after(cmd, shot, shot_path, (uint32_t)backbuffer_tex.width, (uint32_t)backbuffer_tex.height, 1);
     uint64_t serial = frame_serial;
     gpt_frame(cmd, serial);
@@ -615,6 +640,7 @@ void render_present(void) {
         pthread_mutex_unlock(&done_mu);
     }];
     [cmd commit];
+    if (diag_on && sign_diag_on && sign_diag_active()) sign_diag_finish_present(cmd);
     if (show) present_show();
     cmd = nil;
     render_float_scene_present_end();

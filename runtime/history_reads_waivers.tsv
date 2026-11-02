@@ -1,0 +1,13 @@
+# File	SHA-256 of sorted detected commands (duplicates retained)	Review reason
+# A changed or added command invalidates the entire file waiver.
+recomp/car85_test.py	9cc9f8c1cfed89df1464fb4207e066bb242fc9a0c5fc74f6cbd71b7b3cccd9c0	fix pending: replace revision-based baseline/control with a pinned fragment and SHA-256 check.
+recomp/difftest.py	5e007042679c4895ab520e02e86c0b57a1c0a56415741448d7cebd9cee419179	fix pending: replace revision-based baseline/control with a pinned fragment and SHA-256 check.
+recomp/lighting_options_test.py	d2aabea51c646da59012d8ad228022798b95431188212b5576a4b5ad5f0a8529	fix pending: replace revision-based baseline/control with a pinned fragment and SHA-256 check.
+runtime/doc_budget.py	ab935a36d12c31c06f2bd30f58162847af0aad20b983cacb2b10fe41e9dede5e	Git index subject: reads staged documents with :path, without a historical revision.
+runtime/gilhold_test.py	edc2f4533af1320bdff93627dbd0f1a4737b6b0c75da594efcd9a361ebbdf3c4	Git guard subject: the missing:baseline lookup is appended to source text and parsed by AST to prove rejection; never executed.
+runtime/history_reads_test.py	477ef6ac2e2a7978df440ad3b1c245c5e9b3b0f6841147c75f960c7295d5ca2e	Git guard subject: forbidden command fixtures are scanned as data; never executed.
+runtime/pedals_test.py	abcc87e8f761fe2cb65b374df0a5ce96a4c5733bfebfbf67bb2165b897a62a8f	fix pending: replace the merged trigger regression test control (three source files read through one Git helper) with pinned fragments and SHA-256 checks.
+tools/installer/build_installer.sh	f7c6a72ff3f22b35b13b10131558d47a28e3e857db5f4724ba80be892a1ba3e6	Git packaging subject: archives and inspects the committed HEAD source payload; no historical test baseline.
+tools/publish/test_release.py	811da1470c42f0897c1cd7208d008e6ad38e122915704cf5a9cbd396bbd8fa0d	Git workflow subject: reads commit author and committer metadata from a disposable fixture repository to verify release identity; no historical test baseline.
+tools_snapshot/test_carbon_repairs.py	842dd360f06d262372407d03ac55d00dbb36d5bb80296f64961eeecea62690af	fix pending: replace revision-based baseline/control with a pinned fragment and SHA-256 check.
+tools_snapshot/test_failure_audit.py	ea47ed620b104a1532754c5a25d9aa4dff7fcac44390d43226b679929f07e4d2	Git workflow subject: checks the disposable fixture repository commit marker.

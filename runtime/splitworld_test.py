@@ -22,6 +22,8 @@ PRE = r'''
 #include "funcs.h"
 #include "host.h"
 #include <stdarg.h>
+int sign_diag_on;
+void sign_diag_world(Cpu *c) { (void)c; __builtin_trap(); }
 #include <stdlib.h>
 uint8_t *G;
 int diag_on = 1;

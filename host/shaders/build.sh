@@ -2,10 +2,21 @@
 # Builds the shader translator (build/libsmtranslate.a) and its tests, then runs them:
 #   ./build.sh          build + all checks
 #   ./build.sh lib      library only
+#   ./build.sh lib --release   arm64/macOS 14.5 archive, checked before publication
 # Test data: testdata/ (the game's 108 shaders, extracted from the player's speed.exe; optional) and testdata_synth/
 # (16 committed synthetic shaders). Full results are described in README.md.
 set -e
 cd "$(dirname "$0")"
+mode=tests
+release=0
+for arg in "$@"; do
+    case "$arg" in
+        lib) mode=lib ;;
+        --release) release=1 ;;
+        *) echo 'usage: build.sh [lib] [--release]' >&2; exit 2 ;;
+    esac
+done
+[ "$release" = 0 ] || [ "$mode" = lib ] || { echo '--release requires lib' >&2; exit 2; }
 mkdir -p build
 # Every run works in its own private dir and only publishes build/libsmtranslate.a (atomically, by rename).
 # Two runs in one checkout (or runtime/build.sh linking the library) used to share build/*.o, build/msl and the
@@ -16,13 +27,17 @@ W=build/work.$$
 mkdir -p "$W"
 trap 'rc=$?; if [ $rc = 0 ]; then rm -rf "$W"; else echo "build.sh FAILED (exit $rc); work dir kept: host/shaders/$W" >&2; fi' EXIT
 CXX="clang++ -std=c++17 -O2 -Wall -Wextra"
+[ "$release" = 0 ] || CXX="$CXX -arch arm64 -mmacosx-version-min=14.5"
 $CXX -c sm_parse.cpp -o $W/sm_parse.o
 $CXX -c sm_msl.cpp -o $W/sm_msl.o
 rm -f $W/libsmtranslate.a
 ar rcs $W/libsmtranslate.a $W/sm_parse.o $W/sm_msl.o
+if [ "$release" = 1 ]; then
+    "${TOOLS_PY:-$(cd ../../.. && pwd)/tools/.venv/bin/python}" -I ../../media/check_libraries.py --group shaders --shader-archive "$W/libsmtranslate.a"
+fi
 cp $W/libsmtranslate.a build/.libsmtranslate.a.$$
 mv -f build/.libsmtranslate.a.$$ build/libsmtranslate.a
-[ "$1" = "lib" ] && exit 0
+[ "$mode" = lib ] && exit 0
 
 L=$W/libsmtranslate.a
 clang -std=c99 -Wall -Wextra -pedantic -c tests/c_api_test.c -o $W/c_api_test.o

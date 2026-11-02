@@ -10,10 +10,14 @@
 
 
 
+
+
+
 """
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +72,45 @@ def run(args):
     return p.stdout
 
 
+def traffic_model_check(tmp):
+    # Equivalence evidence: retail Default's final eligibility predicate,
+    # unchanged by the pilot wrapper, before FECarRecord::Default
+    # allocates a row. PlayerUsable can be bypassed by SkipCareerIntro, MODEL
+    # cannot. Execute the original instructions against null/empty/live models.
+    source=(ROOT/'recomp/out/speed_22.c').read_text()
+    start=source.index('    /* 00590FA1:'); end=source.index('    /* 00590FC7:',start)
+    body=source[start:end]
+    code=r"""
+#include "host.h"
+#include <stdlib.h>
+uint8_t *G;
+static int eligible(Cpu *c) {
+    uint8_t cf=0,pf=0,af=0,zf=0,sf=0,of=0;
+BODY
+    return 1;
+L_00591015: return 0;
+}
+int main(void) {
+    G=calloc(1,0xA00000);unsigned checks=0,failed=0;M8(0)='X';
+    for(unsigned usable=0;usable<2;++usable)for(unsigned skip=0;skip<2;++skip)
+    for(unsigned flags=0;flags<2;++flags)for(unsigned model=0;model<3;++model) {
+        Cpu c={.esp=0x10000,.eax=0x20000,.esi=model?0x30000:0};
+        M8(c.eax)=usable;M8(0x926127)=skip;M8(c.esp+0x24)=flags;M8(0x30000)=model==2?'T':0;
+        int expected=(usable||skip)&&!flags&&model==2;
+        ++checks;if(eligible(&c)!=expected)++failed;
+    }
+    printf("traffic MODEL predicate: %u checks, %u failures\n",checks,failed);return !!failed;
+}
+""".replace('BODY',body)
+    mutant=code.replace('if (zf) goto L_00591015;\n    /* 00590FB3:', '/* null MODEL guard removed */\n    /* 00590FB3:')
+    assert mutant!=code
+    for label,unit in [('actual',code),('null-model-guard-removed',mutant)]:
+        path=tmp/'model.c';exe=tmp/'model';path.write_text(unit)
+        run(['clang','-O1','-fsanitize=address,undefined','-I',str(ROOT/'runtime'),'-I',str(ROOT/'recomp'),str(path),'-o',str(exe)])
+        p=subprocess.run([str(exe)],capture_output=True,text=True)
+        print(label,p.stdout.strip());assert p.returncode==(0 if label=='actual' else 1),p.stderr[-2000:]
+
+
 def main():
     source = (ROOT / 'recomp/out/speed_52.c').read_text()
     body = re.search(r'void f_007C1770(?:_orig)?\(Cpu \*restrict c\) \{.*?\n\}', source, re.S).group()
@@ -86,6 +129,12 @@ def main():
     }
     with tempfile.TemporaryDirectory(prefix='carselection-') as directory:
         tmp = Path(directory)
+        traffic_model_check(tmp)
+        sys.path.insert(0, str(ROOT / 'runtime'))
+        import traffic_registration_test as registration
+        status = registration.main(selection_only=True)
+        if status:
+            raise SystemExit(status)
         for name, variant in variants.items():
             path, exe = tmp / f'{name}.c', tmp / name
             path.write_text(PRE + stubs + '\n' + variant + '\n' + MAIN)

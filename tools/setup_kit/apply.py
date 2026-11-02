@@ -29,8 +29,10 @@ import uuid
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from setup_kit import install as ins
+    from setup_kit.export import refuse_update
 else:
     from . import install as ins
+    from .export import refuse_update
 
 KIND = "launch-update-v1"
 ACK_SECONDS = 60
@@ -121,6 +123,7 @@ def _check_ready_location(ready, profile, job=None):
 
 def read_ready(ready, profile, destination):
     ready, profile, destination = map(Path, (ready, profile, destination))
+    refuse_update(destination)
     _check_ready_location(ready, profile)
     if ready.name != "ready.json" or ready.is_symlink() or not ins.real_dir(ready.parent):
         raise ins.InstallError("Invalid ready descriptor location.")
@@ -277,6 +280,7 @@ def _finish(profile, record):
         _step("finish-" + path.name)
     _retire_ready(record)
     ack_path(profile, record["token"]).unlink(missing_ok=True)
+    ins._prune_generations(profile, record, log=print)
     _clear(profile)
     return "finished"
 
@@ -301,9 +305,11 @@ def recover_locked(profile, record):
     return _rollback(profile, record)
 
 
-def apply_ready(ready, profile, destination, verify=verify_app, running=ins.assert_not_running, held=None):
+def apply_ready(ready, profile, destination, verify=verify_app, running=ins.assert_not_running, held=None,
+                environment=None):
     """Return health token; caller must supervise launch or recover on next launch."""
     ready, profile, destination = map(Path, (ready, profile, destination))
+    refuse_update(destination)
     if not profile.is_absolute() or not ins.real_dir(profile):
         raise ins.InstallError("The update profile must be an existing plain absolute directory.")
     with ins.profile_guard(profile), ins.dest_lock(destination.parent, held):
@@ -316,7 +322,9 @@ def apply_ready(ready, profile, destination, verify=verify_app, running=ins.asse
         if ready.parent.name == "staged":
             record["job"] = str(ready.parent.parent)
         record["profile"] = str(profile)
+        record["launch_roots"] = ins.root_environment(os.environ if environment is None else environment)
         record["tools"] = _indexed_tools(profile, ready, Path(record["job"]))
+        record["previous"] = ins.previous_generations(profile)
         names, generation, temporary = _names(profile, record)
         generation.parent.mkdir(exist_ok=True)
         if not ins.real_dir(generation.parent):
@@ -326,6 +334,7 @@ def apply_ready(ready, profile, destination, verify=verify_app, running=ins.asse
             shutil.copytree(data, temporary)
             if ins.digest_tree(temporary) != descriptor["hashes"]["data"]:
                 raise ins.InstallError("The copied update data failed verification.")
+            ins.mark_owned(temporary, profile)
             _sync_tree(temporary)
             ins.rename_new(temporary, generation)
             ins.sync_dir(generation.parent)
@@ -364,7 +373,15 @@ def apply_ready(ready, profile, destination, verify=verify_app, running=ins.asse
                 ins.sync_dir(path.parent)
                 _step("exchange-" + path.name)
             verify(destination)
+            # The child caches roots on startup. Preserve that launch snapshot
+            # even if an alternate manifest or preferences change before ACK.
+            launch = ins.previous_generations(profile)
+            overrides = ins.environment_generations(record["launch_roots"], profile)
+            record["launch_generations"] = None
+            if launch is not None and overrides is not None:
+                record["launch_generations"] = sorted(set(launch) | overrides)
             _journal(profile, record, "awaiting_ack")
+            ins._prune_generations(profile, record, log=print)
         except BaseException:
             with ins.defer_interrupts():
                 if ins.journal_path(profile).exists():
@@ -380,7 +397,12 @@ def acknowledge(profile, token, held=None):
     record = json.loads(ins.journal_path(profile).read_bytes())
     if record.get("kind") != KIND or record["token"] != token or record["state"] != "awaiting_ack":
         raise ins.InstallError("Unexpected startup acknowledgment.")
-    with ins.dest_lock(Path(record["dest"]), held):
+    destination = Path(record["dest"])
+    with ins.dest_lock(destination, held):
+        record = json.loads(ins.journal_path(profile).read_bytes())
+        if (record.get("kind") != KIND or record["token"] != token or record["state"] != "awaiting_ack"
+                or Path(record["dest"]) != destination):
+            raise ins.InstallError("Unexpected startup acknowledgment.")
         receipt = json.loads(ack_path(profile, token).read_bytes())
         app = Path(record["dest"]) / ins.APP_BUNDLE
         if receipt != dict(token=token, identity=ins.ident(app)):
@@ -392,6 +414,7 @@ def acknowledge(profile, token, held=None):
 
 def supervise(profile, destination, ready=None, parent=None, timeout=ACK_SECONDS):
     """Run outside the initiating app, then supervise only the child we start."""
+    refuse_update(destination)
     # A competing helper must fail before inspecting/recovering a live journal.
     # The profile guard is released for the child, but the destination remains
     # serialized until acknowledgment/rollback and cleanup have completed.
@@ -428,7 +451,7 @@ def _supervise_locked(profile, destination, ready, parent, timeout):
                 child.wait()
 
     try:
-        token = apply_ready(ready, profile, destination, held=held) if ready else None
+        token = apply_ready(ready, profile, destination, held=held, environment=environment) if ready else None
         if token:
             command += ["--port-update-ack", token]
         child = subprocess.Popen(command, close_fds=True, start_new_session=True, env=environment)

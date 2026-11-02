@@ -56,14 +56,16 @@ import zipfile
 
 from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, digest_tree, mark_owned, owned, real_dir,
                       recover_interrupted, remove, transactional_install, write_synced)
+from . import pc_disc, rtpatch
 from . import stage as staging
+from .x360_cache import PreparedCache, preparation_key
 
 ROOT = Path(__file__).resolve().parents[2]
 FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.3.0"
+PUBLIC_VERSION = "4.4.0"
 LLVM_FLAGS = ["-mllvm", "-capture-tracking-max-uses-to-explore=100000"]
 STAGES = [
     ("preflight", "Checking developer tools"), ("pc", "Checking the installed PC game"),
@@ -152,7 +154,7 @@ def safe_cache_dir():
 # (pc_src.tmp and check-x360.tmp are the stamps' temporary files: an interrupted run leaves them.)
 SETUP_WORK_NAMES = {"run-log.txt", "tmp", "tool-home", "toolchain", "logs", "stage", "check-x360", "check-x360.json",
                     "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", ".setup.lock", OWNER_MARK}
-SETUP_CACHE_NAMES = {"builds", "build.lock", OWNER_MARK}
+SETUP_CACHE_NAMES = {"builds", "build.lock", "x360", OWNER_MARK}
 
 
 def claim(folder, default, known, what, registry):
@@ -457,7 +459,7 @@ def preflight(runner, work):
     if int(sdk_version.split(".")[0]) < 14:
         raise SetupError("The macOS SDK is too old.", "Install or update Apple developer tools (macOS 14 SDK or newer).")
     packages = runner.run([sys.executable, "-I", "-c",
-        "import capstone,numpy,PIL,json; print(json.dumps({k:v for k,v in [('capstone',capstone.__version__),('numpy',numpy.__version__),('Pillow',PIL.__version__)]}))"], capture=True).strip()
+        "import capstone,numpy,PIL,json; from importlib.metadata import version; print(json.dumps({k:v for k,v in [('capstone',version('capstone')),('numpy',numpy.__version__),('Pillow',PIL.__version__)]}))"], capture=True).strip()
     try:
         package_versions = json.loads(packages)
     except ValueError:
@@ -494,9 +496,21 @@ def case_child(root, name):
     return matches[0]
 
 
+def exe_fingerprint(data, path, source_root=ROOT):
+    """The code fingerprint of a speed.exe (recomp/exe_fingerprint.py), or SetupError naming the regions that differ."""
+    spec = importlib.util.spec_from_file_location("_setup_exe_fingerprint", source_root / "recomp/exe_fingerprint.py")
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    try:
+        return fp.check(data, str(path))
+    except SystemExit as e:
+        raise SetupError(str(e), "Choose the supported PC v1.3 executable; see the differing code region in the log.") from None
+
+
 def validate_pc(root, source_root=ROOT):
     if not root.is_dir():
-        msg = "Not available yet; choose an installed PC game folder" if root.suffix.lower() in (".iso", ".dmg") else "Choose the installed folder containing speed.exe."
+        msg = ("Setup doesn't read .dmg images: open it in Finder and choose the game folder or disc inside it."
+               if root.suffix.lower() == ".dmg" else "Choose the installed folder containing speed.exe.")
         raise SetupError(msg, "Choose the installed PC v1.3 game folder.")
     exe = case_child(root, "speed.exe")
     if not exe.is_file():
@@ -504,14 +518,7 @@ def validate_pc(root, source_root=ROOT):
     for name in ("GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND"):
         if not case_child(root, name).is_dir():
             raise SetupError(f"The PC folder has no {name} directory.", "Install the complete PC game, then select its folder.")
-    spec = importlib.util.spec_from_file_location("_setup_exe_fingerprint", source_root / "recomp/exe_fingerprint.py")
-    fp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fp)
-    try:
-        fingerprint = fp.check(exe.read_bytes(), str(exe))
-    except SystemExit as e:
-        raise SetupError(str(e), "Choose the supported PC v1.3 executable; see the differing code region in the log.") from None
-    return exe, fingerprint
+    return exe, exe_fingerprint(exe.read_bytes(), exe, source_root)
 
 
 ZIP_MAX_BYTES = 8 * 1024**3   # a full game folder unpacks to about 2.8 GB
@@ -519,25 +526,25 @@ ZIP_MAX_FILES = 20000         # it has about 1,500 entries
 PC_DIRS = ("GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND")
 
 
-def zip_members(archive):
+def zip_members(archive, label="The .zip", fix=None):
     """Checked entries of a PC game .zip; refuses anything that could write outside the extraction folder."""
     members, total = [], 0
     for info in archive.infolist():
         name = info.filename
-        if name.startswith("__MACOSX/") or Path(name).name.startswith("._"):
+        if name.replace("\\", "/").startswith("__MACOSX/") or Path(name.replace("\\", "/")).name.startswith("._"):
             continue  # Finder's resource-fork copies, not game files
         parts = name.replace("\\", "/").split("/")
         if (name.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", name) or ".." in parts or "\0" in name
                 or any(c in name for c in "\r\n")):
-            raise SetupError(f"The .zip contains an unsafe path: {name!r}", "Use the original game download, or unzip it and choose the folder.")
+            raise SetupError(f"{label} contains an unsafe path: {name!r}", fix or "Use the original game download, or unzip it and choose the folder.")
         mode = info.external_attr >> 16
         if (mode & 0o170000) not in (0, 0o100000, 0o040000):
-            raise SetupError(f"The .zip contains a link or special file: {name!r}", "Use the original game download, or unzip it and choose the folder.")
+            raise SetupError(f"{label} contains a link or special file: {name!r}", fix or "Use the original game download, or unzip it and choose the folder.")
         total += info.file_size
         members.append(info)
         if len(members) > ZIP_MAX_FILES or total > ZIP_MAX_BYTES:
-            raise SetupError("The .zip is far larger than the game (more than 8 GB or 20,000 files).",
-                             "Choose the Need for Speed Most Wanted game .zip or its unzipped folder.")
+            raise SetupError(f"{label} is far larger than the game (more than 8 GB or 20,000 files).",
+                             fix or "Choose the Need for Speed Most Wanted game .zip or its unzipped folder.")
     return members, total
 
 
@@ -554,70 +561,182 @@ def find_pc_root(top):
     return candidates[0]
 
 
-def extract_pc_zip(source, work, events):
-    """Unpack a PC game .zip (read only) into <work>/pc_src and return the game folder inside it."""
+def unpacked(work, key, events, what, unpack):
+    """<work>/pc_src made by unpack(out), which returns the game folder in it. Reused while the inputs' key (paths,
+    sizes, modification times) and the unpacked files' digest are unchanged; never left half made."""
     out = work / "pc_src"
     stamp = work / "pc_src.json"
-    st = source.stat()
-    key = dict(path=str(source), size=st.st_size, mtime=st.st_mtime_ns)
     try:
         recorded = json.loads(stamp.read_text())
         if recorded["key"] == key:
             root = Path(recorded["root"])
             if root.is_relative_to(out) and digest_tree(root) == recorded["digest"]:
-                events.emit("warn", id="pc", msg="Reusing the game unpacked earlier from the .zip.")
+                events.emit("warn", id="pc", msg=f"Reusing the game unpacked earlier from {what}.")
                 return root
     except (OSError, ValueError, KeyError, TypeError, InstallError):
         pass
     stamp.unlink(missing_ok=True)
     remove(out)
     try:
-        archive = zipfile.ZipFile(source)
-    except (zipfile.BadZipFile, OSError) as e:
-        raise SetupError(f"The .zip can't be read: {e}", "Download the game .zip again, or unzip it and choose the folder.") from None
-    try:
-        return _extract(archive, out, stamp, key, work, events)
+        root = unpack(out)
+        tmp = stamp.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dict(key=key, root=str(root), digest=digest_tree(root))))
+        os.replace(tmp, stamp)  # the stamp appears only for a complete, verified unpack
+        return root
     except BaseException:
         with ignored_cancellation():
             remove(out)  # never leave half a game behind: a later run must not see a partial pc_src
         raise
 
 
-def _extract(archive, out, stamp, key, work, events):
-    with archive:
-        members, total = zip_members(archive)
+def extract_pc_zip(source, work, events):
+    """Unpack a PC game .zip (read only) into <work>/pc_src and return the game folder inside it."""
+    st = source.stat()
+    def unpack(out):
+        try:
+            archive = zipfile.ZipFile(source)
+        except (zipfile.BadZipFile, OSError) as e:
+            raise SetupError(f"The .zip can't be read: {e}", "Download the game .zip again, or unzip it and choose the folder.") from None
+        with archive:
+            members, total = zip_members(archive)
+            if shutil.disk_usage(work).free < total + 512 * 1024**2:
+                raise SetupError("There is not enough free disk space to unpack the .zip.", "Free space on the work volume, then try again.")
+            out.mkdir(parents=True)
+            unpack_zip(archive, members, total, out, lambda i, written: i % 50 == 0 and events.progress(i, len(members)))
+        return find_pc_root(out)
+    return unpacked(work, dict(path=str(source), size=st.st_size, mtime=st.st_mtime_ns), events, "the .zip", unpack)
+
+
+def unpack_zip(archive, members, total, out, after, label="The .zip", fix=None):
+    """Write the checked members (zip_members) below out; Windows paths (as on the PC discs) become folders.
+    after(index, bytes written) follows each member."""
+    base = out.resolve()
+    written = 0
+    for i, info in enumerate(members):
+        name = info.filename.replace("\\", "/")
+        target = (out / name).resolve()
+        if target != base and base not in target.parents:
+            raise SetupError(f"{label} contains an unsafe path: {info.filename!r}", fix or "Use the original game download.")
+        if name.endswith("/"):
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with archive.open(info) as src, open(target, "xb") as dst:
+                for block in iter(lambda: src.read(1024 * 1024), b""):
+                    written += len(block)
+                    if written > total or written > ZIP_MAX_BYTES:  # sizes in the directory were false
+                        raise SetupError(f"{label} unpacks to more than it declares.", fix or "Download the game .zip again.")
+                    dst.write(block)
+        except (zipfile.BadZipFile, zlib_error(), EOFError, NotImplementedError) as e:
+            raise SetupError(f"{label} is damaged or uses an unsupported format: {e}",
+                             fix or "Download the game .zip again, or unzip it and choose the folder.") from None
+        except FileExistsError:
+            raise SetupError(f"{label} contains the same file twice: {info.filename!r}", fix or "Use the original game download.") from None
+        after(i, written)
+
+
+DISC_FIX = "Make the disc image again from the original disc (or download it again if the download was interrupted)."
+UPDATE_NEEDED = ("Choose the PC game's official 1.3 update (nfsmwpatch1.3.exe) as well. Setup applies it to its own copy of "
+                 "the game; the update is only read, never run.")
+
+
+def extract_pc_disc(source, update, exe, work, events, source_root=ROOT, extra=()):
+    """Install the game from PC disc images (read only) into <work>/pc_src as EA's installer does: every disc's
+    archives and disc 1's loose files, then the 1.3 update's files and, when chosen, a speed.exe that has the 1.3 code
+    (the discs' and the update's are copy-protected). extra are discs chosen one by one; the rest are found beside
+    source. Returns the game folder."""
+    try:
+        discs = pc_disc.disc_set(source, extra)
+    except (pc_disc.DiscError, OSError) as e:
+        raise SetupError(str(e), getattr(e, "fix", pc_disc.FIX)) from None
+    def stat(p):
+        st = p.stat()
+        return [str(p), st.st_size, st.st_mtime_ns]
+    def disc_stamp(d):  # a disc folder's own time stays put when a file in it is overwritten: stamp every file
+        return stat(d.path) if d.handle else [str(d.path)] + [stat(d.path / name) for name, _, _ in sorted(d.files.values())]
+    try:
+        key = dict(discs=[disc_stamp(d) for d in discs.values()], update=stat(update) if update else None,
+                   exe=stat(exe) if exe else None)
+        return unpacked(work, key, events, "the disc images",
+                        lambda out: _install_discs(discs, update, exe, out, work, events, source_root))
+    except (pc_disc.DiscError, rtpatch.PatchError) as e:
+        raise SetupError(str(e), e.fix) from None
+    finally:
+        for disc in discs.values():
+            disc.close()
+
+
+def _install_discs(discs, update, exe, out, work, events, source_root):
+    first = discs[1]
+    _, loose = pc_disc.install_list(first)
+    if "speed.exe" not in first:
+        raise SetupError("Disc 1 has no speed.exe.", pc_disc.FIX)
+    def current(data):
+        try:
+            return bool(exe_fingerprint(data, "speed.exe", source_root))
+        except SetupError:
+            return False
+    # Which speed.exe the game ends up with is settled first, before gigabytes are unpacked.
+    patch = rtpatch.Update(update) if update else None
+    if patch is None and not current(first.read("speed.exe", rtpatch.MAX_FILE)):
+        raise SetupError("Your discs have an earlier version of the PC game than 1.3.", UPDATE_NEEDED)
+    new_exe = None
+    if exe:
+        if not exe.is_file() or not 0 < exe.stat().st_size <= rtpatch.MAX_FILE:
+            raise SetupError(f"The chosen speed.exe is not a file of the expected size: {exe}", "Choose the speed.exe again.")
+        new_exe = exe.read_bytes()
+        exe_fingerprint(new_exe, exe, source_root)
+    elif patch and patch.record("speed.exe"):
+        record = patch.record("speed.exe")
+        new_exe = patch.decode(record, lambda n: events.progress(n, record.size))
+        if not current(new_exe):
+            raise SetupError("The speed.exe on your discs and in the 1.3 update is copy-protected, so Setup can't translate its code.",
+                             "Choose a speed.exe that has the version 1.3 code as well. Setup checks it and only reads it.")
+    opened, archives = [], []
+    try:
+        for number, disc in discs.items():
+            for name in disc.archives:
+                label = f"{name} on disc {number}"
+                opened.append(disc.open(name))
+                try:
+                    archive = zipfile.ZipFile(opened[-1])
+                except (zipfile.BadZipFile, OSError) as e:
+                    raise SetupError(f"{label} can't be read: {e}", DISC_FIX) from None
+                opened.append(archive)
+                archives.append((label, archive) + zip_members(archive, label, DISC_FIX))
+        total = sum(size for *_, size in archives) + sum(first.size(name) for name in loose)
+        if total > ZIP_MAX_BYTES or sum(len(members) for _, _, members, _ in archives) > ZIP_MAX_FILES:
+            raise SetupError("The discs hold far more than the game (more than 8 GB or 20,000 files).", pc_disc.FIX)
         if shutil.disk_usage(work).free < total + 512 * 1024**2:
-            raise SetupError("There is not enough free disk space to unpack the .zip.", "Free space on the work volume, then try again.")
+            raise SetupError("There is not enough free disk space to unpack the discs.", "Free space on the work volume, then try again.")
         out.mkdir(parents=True)
-        base = out.resolve()
-        written = 0
-        for i, info in enumerate(members):
-            target = (out / info.filename).resolve()
-            if target != base and base not in target.parents:
-                raise SetupError(f"The .zip contains an unsafe path: {info.filename!r}", "Use the original game download.")
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with archive.open(info) as src, open(target, "xb") as dst:
-                    for block in iter(lambda: src.read(1024 * 1024), b""):
-                        written += len(block)
-                        if written > total or written > ZIP_MAX_BYTES:  # sizes in the directory were false
-                            raise SetupError("The .zip unpacks to more than it declares.", "Download the game .zip again.")
-                        dst.write(block)
-            except (zipfile.BadZipFile, zlib_error(), EOFError, NotImplementedError) as e:
-                raise SetupError(f"The .zip is damaged or uses an unsupported format: {e}",
-                                 "Download the game .zip again, or unzip it and choose the folder.") from None
-            except FileExistsError:
-                raise SetupError(f"The .zip contains the same file twice: {info.filename!r}", "Use the original game download.") from None
-            if i % 50 == 0:
-                events.progress(i, len(members))
-    root = find_pc_root(out)
-    tmp = stamp.with_suffix(".tmp")
-    tmp.write_text(json.dumps(dict(key=key, root=str(root), digest=digest_tree(root))))
-    os.replace(tmp, stamp)  # the stamp appears only for a complete, verified unpack
-    return root
+        done = 0
+        for label, archive, members, size in archives:
+            unpack_zip(archive, members, size, out, lambda i, written, base=done: events.progress(base + written, total), label, DISC_FIX)
+            done += size
+    finally:
+        for f in reversed(opened):
+            f.close()
+    for name in loose:
+        if name.casefold() in {p.name.casefold() for p in out.iterdir()}:
+            raise SetupError(f"The discs hold {name} twice.", DISC_FIX)
+        with first.open(name) as src, open(out / name, "xb") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+        if (out / name).stat().st_size != first.size(name):
+            raise SetupError(f"{name} on disc 1 changed or was cut short while Setup copied it.", DISC_FIX)
+    if patch:
+        patch.apply(out, skip=["speed.exe"] if new_exe is not None else [], progress=events.progress)
+    if new_exe is not None:
+        existing = [p for p in out.iterdir() if p.name.casefold() == "speed.exe"]
+        target = existing[0] if len(existing) == 1 else out / "speed.exe"
+        temporary = out / (".setup-speed-" + uuid.uuid4().hex)
+        temporary.write_bytes(new_exe)
+        os.replace(temporary, target)
+    names = {p.name.casefold() for p in out.iterdir()}
+    if "speed.exe" not in names or not all(n.casefold() in names for n in PC_DIRS):
+        raise SetupError("The discs don't hold the whole game (speed.exe, GLOBAL, TRACKS, CARS, FRONTEND and SOUND).", pc_disc.FIX)
+    return out
 
 
 def zlib_error():
@@ -627,6 +746,21 @@ def zlib_error():
 
 def is_pc_zip(path):
     return path.is_file() and path.suffix.lower() == ".zip"
+
+
+def pc_extras(pc, update, exe, discs=()):
+    """The 1.3 update, speed.exe and further discs that go with PC disc images: checked to exist, refused with
+    anything else."""
+    if (update or exe or discs) and not pc_disc.is_disc(pc):
+        raise SetupError("The 1.3 update, a separate speed.exe and further discs are only used with PC disc images.",
+                         "Choose your game's disc images, or leave the update, speed.exe and discs out.")
+    for path, what in ((update, "1.3 update"), (exe, "speed.exe")):
+        if path and not path.is_file():
+            raise SetupError(f"The chosen {what} is missing or not a file: {path}", f"Choose the {what} again.")
+    for path in discs:
+        if not pc_disc.is_disc(path):
+            raise SetupError(f"The chosen disc is missing or not a disc image: {path}", "Choose the disc again.")
+    return [p for p in (update, exe) if p] + list(discs)
 
 
 SOURCE_DIRS = ("recomp", "runtime", "host", "media", "tools", "tools_snapshot")
@@ -787,6 +921,11 @@ def prepare_x360(source, out, pc, events, env, record=None):
 CHECK_X360 = "check-x360"
 
 
+def x360_content_digest(source):
+    # A disc image's filename/location is not part of its content identity.
+    return sha_file(source) if source.is_file() else digest_tree(source)
+
+
 def x360_stat(source):
     """Path, size, modification and change time (ctime cannot be set back) and inode of every file of the X360 copy (a cheap change detector)."""
     def stat(p):
@@ -797,12 +936,13 @@ def x360_stat(source):
     return {"": stat(source)}
 
 
-def x360_identity(source, pc_hash, inventory, content):
+def x360_identity(source, pc_hash, inventory, content, toolchain):
     """What a converted X360 copy depends on: the player's copy (its content digest, the one --build computes for
     its cache key, plus every file's path, size, modification time and inode), the PC game's content and this
-    Setup's source."""
+    Setup's source and toolchain."""
     files = x360_stat(source)
-    return identity(dict(schema=2, x360=str(source), files=files, content=content, pc=pc_hash, source=identity(inventory)))
+    return identity(dict(schema=3, x360=str(source), files=files, content=content, pc=pc_hash,
+                         source=identity(inventory), toolchain=toolchain))
 
 
 def record_check_x360(work, key, roots, record):
@@ -816,7 +956,7 @@ def record_check_x360(work, key, roots, record):
     os.replace(tmp, stamp)
 
 
-def reuse_check_x360(work, key, target, events):
+def reuse_check_x360(work, key, target, events, record=None):
     """Move the check's converted copy to target when it was made from this exact X360 copy, PC game and Setup
     source and is unchanged since (content digest); returns its roots, or None (then the caller converts)."""
     out, stamp = work / CHECK_X360, work / (CHECK_X360 + ".json")
@@ -841,6 +981,16 @@ def reuse_check_x360(work, key, target, events):
         roots[k] = p
     events.emit("warn", id="x360", msg="Reusing the Xbox 360 files converted by the check.")
     events.emit("features", x360=features, missing=missing)
+    if record is not None:
+        record.update(features=features, missing=missing)
+    return roots
+
+
+def restore_prepared_x360(cache, target, events, record):
+    roots = cache.restore(target, record)
+    if roots is not None:
+        events.emit("warn", id="x360", msg="Reusing verified Xbox 360 preparation from the persistent cache.")
+        events.emit("features", x360=record["features"], missing=record["missing"])
     return roots
 
 
@@ -933,7 +1083,7 @@ def overlaps(a, b):
     return within(a, b) or within(b, a)
 
 
-def check_locations(paths, pc, x360, dest, source):
+def check_locations(paths, pc, x360, dest, source, extras=()):
     """Refuse any location choice that could make Setup write into, or delete, something it must only read.
 
     work and cache are recursively removed and populated (stage, pc_src extraction, build copies): they may not
@@ -941,9 +1091,10 @@ def check_locations(paths, pc, x360, dest, source):
     logs may not lie inside any of those. The destination may not lie inside an input (or a .zip's folder), the
     profiles, the source, work or cache, nor be the
     folder holding a .zip; it may contain them (installing into a home folder is fine: only the app's
-    own names directly in it are written). All comparisons are by filesystem identity (within()).
+    own names directly in it are written). All comparisons are by filesystem identity (within()). extras are further
+    inputs (a disc image's 1.3 update and speed.exe).
     """
-    inputs = [pc] + ([x360] if x360 else [])
+    inputs = [pc] + ([x360] if x360 else []) + list(extras)
     apps = [dest / "NFSMW.app", dest / f"{PUBLIC_NAME}.app"]
     profiles = [paths.data, paths.legacy]
     protected = inputs + [source] + apps + profiles
@@ -1098,9 +1249,13 @@ def build(args, paths, events, runner, source_root=ROOT):
     if stage_only:
         dest = destination.parent
     x360 = clean_path(args.x360) if args.x360 else None
-    check_locations(paths, pc, x360, dest, source_root)
+    pc_update = clean_path(args.pc_update) if getattr(args, "pc_update", None) else None
+    pc_exe = clean_path(args.pc_exe) if getattr(args, "pc_exe", None) else None
+    pc_discs = [clean_path(p) for p in getattr(args, "pc_disc", None) or []]
+    extras = pc_extras(pc, pc_update, pc_exe, pc_discs)
+    check_locations(paths, pc, x360, dest, source_root, extras)
     if stage_only:
-        check_stage_locations(args.stage, paths, pc, x360, destination, source_root)
+        check_stage_locations(args.stage, paths, pc, x360, destination, source_root, extras)
         if x360 and not x360.exists():
             raise SetupError(f"X360_SOURCE_MISSING: The remembered Xbox 360 source is unavailable: {x360}",
                              "Reconnect the Xbox 360 source or select its new location with --x360.")
@@ -1125,6 +1280,8 @@ def build(args, paths, events, runner, source_root=ROOT):
     events.stage("pc")
     if is_pc_zip(pc):  # a .zip of the game folder: only read
         pc = extract_pc_zip(pc, paths.work, events)
+    elif pc_disc.is_disc(pc):  # PC disc images, the 1.3 update and speed.exe: only read, installed into work
+        pc = extract_pc_disc(pc, pc_update, pc_exe, paths.work, events, source_root, pc_discs)
     exe, fingerprint = validate_pc(pc, source_root)
     pc_hash = digest_tree(pc)
     events.progress()
@@ -1140,23 +1297,30 @@ def build(args, paths, events, runner, source_root=ROOT):
         remove(check_out)
         record = {}
         before = x360_stat(x360)
-        content = digest_tree(x360)
-        roots = prepare_x360(x360, check_out, pc, events, runner.env, record)
-        if roots and x360_stat(x360) == before and digest_tree(x360) == content:  # changed while it was converted: not reused by the build
-            record_check_x360(paths.work, x360_identity(x360, pc_hash, source_inventory(source_root), content), roots, record)
+        content = x360_content_digest(x360)
+        inventory = source_inventory(source_root)
+        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(content, pc_hash, inventory, toolchain))
+        roots = restore_prepared_x360(prepared_cache, check_out, events, record) if owned(paths.cache, paths.state) else None
+        if roots is None:
+            roots = prepare_x360(x360, check_out, pc, events, runner.env, record)
+        if roots and x360_stat(x360) == before and x360_content_digest(x360) == content:  # changed while it was converted: not reused by the build
+            record_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, content, toolchain), roots, record)
         events.progress()
         return None
-    if stage_only:
-        check_space(paths, pc, clean_path(args.stage), stage_only=True)
-    else:
-        check_space(paths, pc, dest)
     x360_before = x360_stat(x360) if x360 else None
-    x360_hash = digest_tree(x360) if x360 else None
+    x360_hash = x360_content_digest(x360) if x360 else None
     inventory = source_inventory(source_root)
     key = cache_key(inventory, dependencies, toolchain, pc_hash, x360_hash)
     cache_home = paths.cache / "builds" / key
     claim(paths.cache, paths.cache == paths.default_cache, SETUP_CACHE_NAMES, "cache", paths.state)
     with exclusive(paths.cache / "build.lock"):
+        # Publishers hold this same lock: every pending copy is now abandoned.
+        # Reclaim it before disk-space checks, including builds with cache hits.
+        PreparedCache.clean_pending(paths.cache / "x360")
+        if stage_only:
+            check_space(paths, pc, clean_path(args.stage), stage_only=True)
+        else:
+            check_space(paths, pc, dest)
         source = cache_home / "source"
         source.parent.mkdir(parents=True, exist_ok=True)
         copy_source(source_root, source, inventory)
@@ -1182,15 +1346,25 @@ def build(args, paths, events, runner, source_root=ROOT):
                 actual.rename(temporary)
                 temporary.rename(pc_copy / canonical)
         roots = {"pc_root": pc_copy}
-        reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash), staged_data / "x360",
-                                  events) if x360 else None
-        roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env))
+        record = {}
+        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(x360_hash, pc_hash, inventory, toolchain))
+        reused = restore_prepared_x360(prepared_cache, staged_data / "x360", events, record) if x360 else None
+        cached_preparation = reused is not None
+        if x360 and reused is None:
+            reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash, toolchain),
+                                      staged_data / "x360", events, record)
+        roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env, record))
         if stage_only and x360 and not (set(roots) - {"pc_root"}):
             raise SetupError("X360_PREPARATION_MISSING: The selected Xbox 360 source produced no extras.",
                              "Use a complete Setup build with Xbox 360 support and reconnect your source.")
-        if x360 and reused is None and (x360_stat(x360) != x360_before or digest_tree(x360) != x360_hash):
+        if x360 and (x360_stat(x360) != x360_before or x360_content_digest(x360) != x360_hash):
             # The cache key names the bytes digested before the conversion: those must be the bytes converted.
             raise SetupError("Your Xbox 360 copy changed while Setup was converting it.", "Leave it unchanged and run Setup again.")
+        if x360 and not cached_preparation and set(roots) - {"pc_root"}:
+            saved = prepared_cache.publish(staged_data / "x360", {k: v for k, v in roots.items() if k != "pc_root"}, record)
+            if saved:
+                events.emit("warn", id="x360", msg=f"Verified preparation saved in {prepared_cache.directory}. "
+                            "To clear it, quit Setup and delete that cache folder.")
         manifest = stage / "roots.txt"
         write_roots(manifest, roots)
         events.progress()
@@ -1246,6 +1420,8 @@ def build(args, paths, events, runner, source_root=ROOT):
             events.stage("stage")
             ready = staging.publish(clean_path(args.stage), app, staged_data, roots, destination, paths.data,
                                     PUBLIC_VERSION, dict(pc=str(selected_pc), x360=str(x360) if x360 else None,
+                                    pc_update=str(pc_update) if pc_update else None, pc_exe=str(pc_exe) if pc_exe else None,
+                                    pc_discs=[str(p) for p in pc_discs],
                                     pc_sha256=pc_hash, x360_sha256=x360_hash, source_id=identity(inventory),
                                     executable_fingerprint=fingerprint, dependencies=dependencies, toolchain=toolchain),
                                     on_commit=lambda path: setattr(events, "ready", path))
@@ -1256,7 +1432,7 @@ def build(args, paths, events, runner, source_root=ROOT):
             # Only a committed normal installation changes remembered source choices.
             with ignored_cancellation():
                 try:
-                    staging.save_choices(paths.state, selected_pc, x360, path)
+                    staging.save_choices(paths.state, selected_pc, x360, path, pc_update, pc_exe, pc_discs)
                 except (OSError, InstallError) as e:
                     events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
         installed = transactional_install(app, staged_data, roots, paths.data, dest, lambda p: verify_app(p, runner), log=setup_log,
@@ -1267,18 +1443,18 @@ def build(args, paths, events, runner, source_root=ROOT):
         return installed
 
 
-def check_stage_locations(target, paths, pc, x360, destination, source):
+def check_stage_locations(target, paths, pc, x360, destination, source, extras=()):
     target = clean_path(target)
     if destination.name != f"{PUBLIC_NAME}.app":
         raise SetupError("The staging destination must name NFS Most Wanted Native.app.", "Pass --dest with the installed app path.")
     protected = [pc, source, destination, destination.parent / "NFSMW.app", paths.data, paths.legacy,
-                 paths.work, paths.cache, paths.logs, paths.state / "source-choices.json"] + ([x360] if x360 else [])
+                 paths.work, paths.cache, paths.logs, paths.state / "source-choices.json"] + ([x360] if x360 else []) + list(extras)
     for keep in protected:
         if overlaps(target, keep):
             raise SetupError(f"The update stage overlaps a protected location: {keep}", "Choose a separate new staging directory.")
     # Ownership records and logs are also writes, even though staging never calls the installer.
     for writable in (paths.logs, paths.state / OWN_DIR):
-        for keep in [pc, source, destination, paths.data, paths.legacy] + ([x360] if x360 else []):
+        for keep in [pc, source, destination, paths.data, paths.legacy] + ([x360] if x360 else []) + list(extras):
             if overlaps(writable, keep):
                 raise SetupError(f"Setup staging logs/state overlaps a protected location: {keep}",
                                  "Choose separate Setup logs, state, source and profile locations.")
@@ -1292,17 +1468,58 @@ def main(argv=None):
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--build", action="store_true")
     mode.add_argument("--stage-only", action="store_true", help="prepare a verified update without installing it")
+    mode.add_argument("--export-all-in-one", action="store_true", help="export a signed app containing the current install's assets")
+    ap.add_argument("--app", help="installed .app to export (required with --export-all-in-one)")
     ap.add_argument("--stage", help="new directory for the prepared update and ready.json (required with --stage-only)")
-    ap.add_argument("--pc", help="installed PC game folder, or a .zip of it (unpacked into --work; disc images are not supported)")
+    ap.add_argument("--pc", help="installed PC game folder, a .zip of it (unpacked into --work), or a PC disc image (.iso, or "
+                    "a disc mounted in Finder; the set's other discs are found beside it and installed into --work)")
+    ap.add_argument("--pc-update", help="with disc images: the PC game's official 1.3 update (nfsmwpatch1.3.exe), "
+                    "applied to Setup's copy without running it")
+    ap.add_argument("--pc-exe", help="with disc images: a speed.exe with the 1.3 code, used instead of the copy-protected one")
+    ap.add_argument("--pc-disc", action="append", help="with disc images: another disc of the set, from any folder "
+                    "(repeat for each disc not beside --pc; discs are identified by their content, not their names)")
     ap.add_argument("--x360", help="your Xbox 360 game folder or ISO")
-    ap.add_argument("--dest", help="installation directory; with --stage-only, the installed .app path (default: remembered destination)")
-    ap.add_argument("--work", help="disposable build directory (required except with --stage-only)")
+    ap.add_argument("--dest", help="installation directory; --stage-only: installed .app; --export-all-in-one: new .app path")
+    ap.add_argument("--work", help="disposable build directory (required with --check or --build)")
     ap.add_argument("--events", action="store_true", help="JSON-line events on stdout; full output in the run log")
     args = ap.parse_args(argv)
     paths = None
     events = None
     log_path = None
     try:
+        if args.export_all_in_one:
+            if not args.app or not args.dest or args.pc or args.x360 or args.stage:
+                raise SetupError("--export-all-in-one requires --app and --dest (a new .app path).")
+            from .export import export_app, UPDATE_MESSAGE
+            paths = Paths(args.work or tempfile.gettempdir())
+            paths.logs.mkdir(parents=True, exist_ok=True)
+            log_path = paths.logs / ("export-" + uuid.uuid4().hex + ".log")
+            with log_path.open("xb", buffering=0) as log, cancellation():
+                events = Events(args.events, log)
+                events.stage("bundle")
+                try:
+                    metrics = export_app(clean_path(args.app), paths.data, clean_path(args.dest),
+                                         on_publish=lambda path: setattr(events, "installed", str(path)))
+                    log.write(("Export measurements: " + json.dumps(metrics, sort_keys=True) + "\n").encode())
+                    events.emit("warn", id="bundle", msg=f"Exported in {metrics['seconds']:.1f} seconds. " +
+                                f"App data: {metrics['logical_bytes'] / 1e9:.3f} GB; allocated file blocks: {metrics['allocated_bytes'] / 1e9:.3f} GB " +
+                                "(includes blocks shared with the install). " +
+                                f"Volume space used during export: {metrics['volume_used_delta_bytes'] / 1e9:+.3f} GB " +
+                                "(includes metadata and other disk activity). " + UPDATE_MESSAGE)
+                    events.emit("done", app=events.installed)
+                except (Exception, KeyboardInterrupt):
+                    if events.installed is not None and not events.completed:
+                        with ignored_cancellation():
+                            try:
+                                events.emit("warn", id="bundle", msg="The export was published at " + str(events.installed) +
+                                            ". Final synchronization or cleanup was interrupted; keep this app and check it before removing other copies.")
+                            except OSError:
+                                pass  # A full log must not prevent reporting the published app.
+                    if events.report_committed():
+                        return 0
+                    log.write(traceback.format_exc().encode())
+                    raise
+            return 0
         if args.stage_only:
             if not args.stage:
                 raise SetupError("--stage-only requires --stage.")
@@ -1314,6 +1531,10 @@ def main(argv=None):
         if args.stage_only:
             choices = None if args.pc and args.x360 and args.dest else staging.load_choices(paths.state, required=not args.pc)
             remembered_destination = not args.dest
+            if not args.pc and choices:  # the disc images' update and speed.exe go with the remembered images
+                args.pc_update = args.pc_update or choices.get("pc_update")
+                args.pc_exe = args.pc_exe or choices.get("pc_exe")
+                args.pc_disc = args.pc_disc or choices.get("pc_discs")
             args.pc = args.pc or (choices and choices["pc"])
             args.x360 = args.x360 or (choices and choices["x360"])
             args.dest = args.dest or (choices and choices["destination"])
@@ -1321,11 +1542,13 @@ def main(argv=None):
                 raise SetupError("--stage-only requires --dest or a remembered destination.")
             if remembered_destination:
                 staging.validate_destination(clean_path(args.dest), required=True)
+        extras = [clean_path(p) for p in [args.pc_update, args.pc_exe] + (args.pc_disc or []) if p]
+        if args.stage_only:
             check_stage_locations(args.stage, paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
-                                  clean_path(args.dest), ROOT)
+                                  clean_path(args.dest), ROOT, extras)
         # Validate before creating anything at a user-selected path.
         check_locations(paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
-                        clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT)
+                        clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT, extras)
         # Setup's own work folder (new, empty or marked), before anything is written into it.
         recovered = []
         if args.build:  # an interrupted install is resolved before the work folder is judged (build() finds nothing left)

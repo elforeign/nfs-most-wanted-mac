@@ -832,9 +832,32 @@ static uint32_t make_vtable(const char *iface, const char *const *names, int n, 
     return vt;
 }
 
+// A texture set on an effect parameter is held by the effect (D3DX: AddRef on set, Release of the previous one, and all
+// held ones when the effect dies), so the game releasing its own reference does not free a texture a parameter still names.
+void d3d9_addref_guest(uint32_t g);
+void d3d9_release_guest(uint32_t g);
+static int is_texture_param(const Param *p) { return p->cls == PC_OBJECT && p->type >= PT_TEXTURE && p->type <= PT_TEXTURECUBE; }
+static void set_object(Param *p, uint32_t g) {
+    uint32_t old = 0;
+    if (!p->data) return;
+    memcpy(&old, p->data, 4);
+    if (is_texture_param(p)) { if (g) d3d9_addref_guest(g); if (old) d3d9_release_guest(old); }
+    memcpy(p->data, &g, 4);
+    touch(p);
+}
+static void release_held(Param *p, int n) {
+    for (int i = 0; i < n; ++i) {
+        if (is_texture_param(&p[i]) && p[i].data) { uint32_t old; memcpy(&old, p[i].data, 4); if (old) d3d9_release_guest(old); memset(p[i].data, 0, 4); }
+        if (p[i].members) release_held(p[i].members, p[i].nmembers);
+    }
+}
 static int e_QueryInterface(Cpu *c) { if (arg(c, 2)) M32(arg(c, 2)) = 0; RET(0x80004002u, 3); }
 static int e_AddRef(Cpu *c) { Effect *fx = FX; RET(fx ? ++fx->refs : 1, 1); }
-static int e_Release(Cpu *c) { Effect *fx = FX; RET(fx && fx->refs > 0 ? --fx->refs : 0, 1); }
+static int e_Release(Cpu *c) {
+    Effect *fx = FX;
+    if (fx && fx->refs > 0 && --fx->refs == 0) release_held(fx->params, fx->nparams);
+    RET(fx ? fx->refs : 0, 1);
+}
 static int e_GetDesc(Cpu *c) {
     Effect *fx = FX;
     uint32_t p = arg(c, 1);
@@ -938,7 +961,7 @@ static int e_GetAnnotationByName(Cpu *c) {
 static int e_SetValue(Cpu *c) {                // (this, h, data*, bytes)
     Param *p = param_of(FX, arg(c, 1));
     if (!p) RET(D3DERR_INVALIDCALL, 4);
-    if (p->cls == PC_OBJECT) { if (p->data) { memcpy(p->data, G + arg(c, 2), 4); touch(p); } RET(D3D_OK, 4); }
+    if (p->cls == PC_OBJECT) { if (p->data) set_object(p, M32(arg(c, 2))); RET(D3D_OK, 4); }
     uint32_t n = arg(c, 3) < p->bytes ? arg(c, 3) : p->bytes;
     if (p->elements) { uint32_t o = 0; for (int i = 0; i < p->nmembers && o < n; ++i) { uint32_t k = p->members[i].bytes; memcpy(p->members[i].data, G + arg(c, 2) + o, k < n - o ? k : n - o); o += k; } }
     else memcpy(p->data, G + arg(c, 2), n);
@@ -1076,14 +1099,14 @@ static int e_GetString(Cpu *c) {
 static int e_SetTexture(Cpu *c) {              // (this, h, texture)
     Param *p = param_of(FX, arg(c, 1));
     if (!p || p->cls != PC_OBJECT) RET(D3DERR_INVALIDCALL, 3);
-    memcpy(p->data, &(uint32_t){arg(c, 2)}, 4);
-    touch(p);
+    set_object(p, arg(c, 2));
     RET(D3D_OK, 3);
 }
 static int e_GetTexture(Cpu *c) {
     Param *p = param_of(FX, arg(c, 1));
     if (!p || p->cls != PC_OBJECT) RET(D3DERR_INVALIDCALL, 3);
     memcpy(G + arg(c, 2), p->data, 4);
+    d3d9_addref_guest(M32(arg(c, 2)));
     RET(D3D_OK, 3);
 }
 static int e_SetArrayRange(Cpu *c) { RET(D3D_OK, 4); }

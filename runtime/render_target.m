@@ -1,5 +1,6 @@
 // render_target.m - render targets: MSAA textures and resolves, pass attachments (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
+#include "render_upscale_route.h"
 
 // ---------------- MSAA ----------------
 // The game's Antialiasing option (g_FSAALevel, D3DMULTISAMPLE_NONMASKABLE with the level as quality) makes the back
@@ -41,6 +42,8 @@ id<MTLTexture> new_ms_texture(MTLPixelFormat pf, NSUInteger w, NSUInteger h, uin
     // Soft smoke resolves the nearest covered depth sample in a separate pass.
     // The Off path never reads it and keeps the existing resolve policy.
     if (is_depth_pf(pf)) d.usage |= MTLTextureUsageShaderRead;
+    if(nfs_upscale_requested() && pf==MTLPixelFormatDepth32Float_Stencil8)
+        d.usage|=MTLTextureUsageShaderRead|MTLTextureUsagePixelFormatView;
     const char *hc=diag_on?getenv("BOOT_DIAG_HDR_CLIP"):NULL;
     if (diag_on && (getenv("BOOT_DIAG_SOFT_SMOKE") || (hc && !strcmp(hc,"1")))) d.usage |= MTLTextureUsageShaderRead;
     d.storageMode = MTLStorageModePrivate;

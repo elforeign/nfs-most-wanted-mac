@@ -14,7 +14,7 @@ uint8_t *G;
 const char *game_dir;
 int diag_on=1;
 const char *diag_dir="/tmp";
-uint32_t last_error;
+__thread uint32_t last_error;
 static unsigned checks, failures;
 #define NIS_SIDE nis_side
 #define CHECK(x) do { checks++; if (!(x)) { if (failures<12) fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x); failures++; } } while (0)

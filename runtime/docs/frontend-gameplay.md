@@ -98,7 +98,7 @@ Diagnostic lines begin `fe_console: Brightness row added`, `Brightness value`,
 ## Gameplay options (`gameplay_opts.c`)
 
 The F10 menu's Gameplay category (registered with `settings_add`, `settings.h`) provides options in the spirit of the community "Extra Options" mod, built from the decomp.
-Each option is saved per user (`app.txt`, only when changed), with an environment switch that overrides and
+Persistent options are saved per user (`app.txt`, only when changed), with an environment switch that overrides and
 locks it (tests). Changes apply live (Black Edition Content and Unlock All on the next unlock check or screen):
 
 | Setting (`app.txt` id) | Switch | Default | What it does |
@@ -109,8 +109,22 @@ locks it (tests). Changes apply live (Black Edition Content and Unlock All on th
 | Starting Bonus (`gameplay.starting_bonus`) | `NFS_STARTING_BONUS=0/1` | on | the game's one-time $10,000 for an NFS Underground 2 save, with its own message, once per career |
 | Unlock All (`gameplay.unlock_all`) | `BOOT_UNLOCKALL=1` | off | the game's `UnlockAllThings` (00926124) |
 | Open Map (`gameplay.open_map`) | `NFS_OPEN_MAP=1` | off | no career region barriers (affects career progression) |
+| Add cash (`gameplay.cash_20000`, `cash_50000`, `cash_100000`, `cash_amount`) | none | one-shot actions | +20,000, +50,000, +100,000, or Add amount: type digits only, 1..9,999,999, then Enter. Enabled only with a named, started career profile in Career. Other modes show a disabled hint. Uses the normal profile save cycle; no `app.txt` entry or extra profile write. |
 | Skip Intro Movies (`gameplay.skip_movies`) | `NFS_SKIP_MOVIES=1` | off | the game's `SkipMovies` (00926144) until the title screen: no EA / PSA / attract movies; story movies still play |
 | Skip Career Prologue (`gameplay.skip_prologue`) | `BOOT_SKIPINTRO=1` | off | the game's `SkipCareerIntro` (00926125/6): a new career starts in the safe house with the career cars |
+
+Cash actions (`cash_cheat.c`, one frame hook in Present) call the game's
+`CareerSettings::AwardCash` (00566010) on `UserProfile+0xA8`; cash is at +0x0C
+(profile+0xB4), also read by the shop and `GetCash` (0050E300). The original award
+is an unchecked integer add: additions saturate at the signed balance limit,
+2,147,483,647, rather than wrapping negative; the decoded award has no smaller
+wallet cap. This is separate from the 9,999,999 per-entry limit. Loaded shop
+headers refresh through their existing `RefreshHeader` virtual, including cart
+balance; the safehouse's `CASH_DATA` string is reprinted through `FEPrintf`.
+Newly opened screens read the same balance. Pending awards are discarded if the
+profile or career mode changes. `cash_cheat_test.py` uses synthetic guest memory
+and translated award/getter functions, with absent-feature and missing-call
+controls; no real profile, preferences, game or graphics device is accessed.
 
 - `NFS_X360_DATA=on|off` (user-facing; default on; restart): overlays X360 asphalt tyre-smoke emitter arrays and 32 extra vault collections; the 15 X360-only drag triggers are unreferenced on both platforms, so they add no traffic.
 - `NFS_LIGHT_DATA=pc|x360` (F10 Graphics > Lighting data; default **PC**; restart required because attributes load at startup): independent of gameplay X360 Game Data. X360 overlays the active X360 TOD quartet's 11 changed colour vectors (176 B) and 32 billboard-flare fields (296 B), and skips PC's extra flare alpha doubling at `00505B4C`; the table retains raw X360 alpha. No extra shader x2. Quartet selection still follows `g_VisualTreatment` (nonzero selects `3DCFA673/B902CFAD/59C373C3/D835D0C8`); the alternate quartet is untouched. World lighting Neutral/Original remains separate. `BOOT_DIAG` emits one `lighting_data:` line per relevant vault load with option, records/fields patched per class and selected quartet. Generate/check with `"$TOOLS_PY" -I recomp/lighting_data.py [--check]` from the checkout root; offline runtime/instruction checks: `recomp/lighting_data_test.py`.                                                                                                          shader equations and PC flare artwork still limit retail X360 equivalence.
@@ -161,3 +175,8 @@ pursuit's heat range before and after, the Black Edition check, and once at the 
 for the CE presets and events under each combination of the two flags. Test only: `NFS_TEST_MARKERS=1` deals 6 reward
 cards and starts the post-rival flow at its marker step once the safe-house menu (`MainMenu_Sub.fng`) has had control
 for 2 s (`uiRepSheetRivalFlow::StartFlow(1)` 005485F0), so the pick limit can be checked without winning a rival race.
+
+Shown in a guarded run (scratch career, safe house): `menu: run gameplay.cash_20000` at f12665, the safe-house
+Cash header 10,000 -> 30,000 35 frames later (run_shots/cashcheat_safehouse_10000_to_30000.jpg). Keys after
+the free-roam sequence's safe-house step: `F10,wait:60`, `TAB,wait:20` x7 (Gameplay), `DOWN,wait:15` x14,
+`RETURN`. The F10 panel is not in frame captures; the `menu: run` line proves the row.

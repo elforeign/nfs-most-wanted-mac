@@ -91,13 +91,15 @@ int main(void) {
     # remain ignored, while the look's own keys export Off before renderer startup.
     smoke_source = (RT / 'render.m').read_text()
     smoke = re.search(r'static int soft_smoke_on\(void\) \{.*?\n\}', smoke_source, re.S)[0]
+    physical = re.search(r'int particles_physical_enabled\(void\) \{.*?\n\}',
+                         (RT / 'particles_physical.c').read_text(), re.S)[0]
     hidden = '\n'.join(re.search(r'static Setting ' + name + r' = \{.*?\};', port, re.S)[0]
                        for name in ('s_look_contact', 's_look_smoke'))
     c = tmp / 'retail_hidden.c'
     c.write_text(stubs + '\n' + hidden + '\n' +
                  'static int look_var_is(const char *v) { (void)v; return 0; }\n'
                  'static int postfx_look_variant(const char *v) { (void)v; return 0; }\n'
-                 'static int soft_smoke = -1;\n' + selector + '\n' + smoke + r'''
+                 'static int physical = -1;\n' + physical + '\n' + selector + '\n' + smoke + r'''
 int main(int argc, char **argv) {
     (void)argv;
     app_pref_set("graphics.contact_shadows", "off");
@@ -110,7 +112,8 @@ int main(int argc, char **argv) {
     Setting *rows[8];
     int failures = settings_rows(SET_PICTURE, rows, 8) != 0;
     failures += x360_post_ssao_enabled() != (argc == 1);
-    failures += soft_smoke_on() != (argc == 1);
+    const char *mode=getenv("NFS_PARTICLES");
+    failures += soft_smoke_on() != (mode && !strcmp(mode,"physical") && argc == 1);
     printf("retail hidden: %d failures; contact=%d smoke=%d rows=%d\n", failures,
            x360_post_ssao_enabled(), soft_smoke_on(), settings_rows(SET_PICTURE, rows, 8));
     return failures;
@@ -119,9 +122,11 @@ int main(int argc, char **argv) {
     exe = tmp / 'retail_hidden'
     subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-I', str(RT), '-I', str(RT.parent / 'recomp'),
                     str(c), str(RT / 'settings.c'), '-o', str(exe)], check=True)
-    env = {k: v for k, v in os.environ.items() if k not in ('NFS_SSAO', 'NFS_SOFT_SMOKE')}
-    for args in ([], ['retail']):
-        result = subprocess.run([exe, *args], env=env, text=True, capture_output=True)
+    env = {k: v for k, v in os.environ.items() if k not in ('NFS_SSAO', 'NFS_SOFT_SMOKE', 'NFS_PARTICLES')}
+    for mode, args in ((None, []), (None, ['retail']), ('physical', []), ('physical', ['retail'])):
+        case_env = dict(env)
+        if mode: case_env['NFS_PARTICLES'] = mode
+        result = subprocess.run([exe, *args], env=case_env, text=True, capture_output=True)
         assert result.returncode == 0, result.stdout + result.stderr
         print(result.stdout.strip(), flush=True)
 

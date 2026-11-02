@@ -128,6 +128,7 @@ typedef struct SmConstant {   /* from the CTAB comment, if any (D3DX names) */
 } SmConstant;
 
 typedef struct SmResult {
+    uint64_t program_key;     /* exact bytecode identity for receiver eligibility */
     int      shader_type;     /* SM_VERTEX / SM_PIXEL */
     int      major, minor;    /* 2.1 = vs_2_x / ps_2_x */
     char    *msl;             /* NUL-terminated MSL source (malloc'd) */
@@ -156,6 +157,10 @@ typedef struct SmResult {
     char       error[256];
 } SmResult;
 
+/* Full world filter replacement; NULL means unsupported, including software
+ * depth programs. Returned source is malloc-owned; original source is unchanged. */
+char *sm_shadow_near_patch(const char *source, const uint32_t *tokens, size_t n, const SmResult *reflection);
+int sm_shadow_near_taps(uint64_t program_key);
 void sm_default_options(SmOptions *opt);
 
 /* Translates one shader. tokens: the bytecode as passed to CreateVertexShader /

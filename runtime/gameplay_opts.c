@@ -69,6 +69,7 @@
 #define SKIP_CAREER_INTRO   0x00926125u    // SkipCareerIntro (2 bytes)
 
 static const char *const k_markers[] = {"1", "2", "3", "4", "5", "6"};
+static const char *const k_junkman[] = {"Unlimited", "Retail"};
 static const char *const k_heat[] = {"Game", "1", "2", "3", "4", "5", "6"};
 
 static volatile int heat_apply_pending, barriers_pending = -1;
@@ -87,6 +88,9 @@ static Setting opts[] = {
     {.id = "gameplay.markers", .category = SET_GAMEPLAY, .order = 10, .label = "Markers per Rival",
      .help = "Reward cards you turn after beating a Blacklist rival (the original game: 2 of 6).", .type = SET_CHOICE,
      .choices = k_markers, .nchoices = 6, .def = 5, .env = "NFS_MARKERS"},
+    {.id = "gameplay.junkman", .category = SET_GAMEPLAY, .order = 15, .label = "Junkman parts after the career",
+     .help = "After the final pursuit, use every compatible Junkman part without spending reward markers. Changes apply on the next shop visit.",
+     .type = SET_CHOICE, .choices = k_junkman, .nchoices = 2, .def = 0, .env = "NFS_JUNKMAN"},
     {.id = "gameplay.heat", .category = SET_GAMEPLAY, .order = 20, .label = "Heat Level",
      .help = "Sets your heat and keeps it there in free roam, above the career's cap too (Game: the game decides).",
      .type = SET_CHOICE, .choices = k_heat, .nchoices = 7, .def = 0, .env = "NFS_HEAT", .apply = apply_heat},
@@ -112,7 +116,7 @@ static Setting opts[] = {
      .help = "On makes rivals race at their own pace, in career races too, while Off keeps the original catch-up that speeds them up when behind.",
      .type = SET_TOGGLE, .def = 1, .env = "NFS_NO_CATCHUP"},
 };
-enum { O_MARKERS, O_HEAT_LEVEL, O_BLACK_EDITION, O_STARTING_BONUS, O_UNLOCK_ALL, O_OPEN_MAP, O_SKIP_MOVIES,
+enum { O_MARKERS, O_JUNKMAN, O_HEAT_LEVEL, O_BLACK_EDITION, O_STARTING_BONUS, O_UNLOCK_ALL, O_OPEN_MAP, O_SKIP_MOVIES,
        O_SKIP_PROLOGUE, O_NO_CATCHUP };
 static int markers_limit(void) { return opts[O_MARKERS].value + 1; }
 static int heat_level(void) { return opts[O_HEAT_LEVEL].value; }          // 0 = the game's, else 1..6
@@ -413,4 +417,126 @@ void f_004D5A10(Cpu *c) {
     static int forced = -2;
     if (forced == -2) { const char *e = getenv("NFS_TEST_UPGRADE_INTERVAL"); forced = e && *e ? atoi(e) : -1; }
     if (forced >= 0) c->eax = (uint32_t)forced;
+}
+
+// Junkman stock is virtual only after HasBeatenCareer (0050E400). Never grant markers: the 63 records are saved.
+// Keep all car/installed-part compatibility checks in their original callers, including the BMW backroom guard.
+#define CUSTOMIZE_HAS_CONTROL 0x009B9E8Cu
+static int junkman_shop_option;
+// TakeControl ignores repeated calls while it has control; RelinquishControl clears the game's flag.
+// Latch before the original builds the shop, keeping availability, cart prices and checkout on one policy.
+void f_007C3690_orig(Cpu *c);
+void f_007C3690(Cpu *c) {
+    if (!M8(CUSTOMIZE_HAS_CONTROL)) junkman_shop_option = opts[O_JUNKMAN].value;
+    f_007C3690_orig(c);
+}
+static int junkman_active(void) {
+    uint32_t db = M32(FE_DATABASE), profile = db ? M32(db + 0x10) : 0;
+    int option = M8(CUSTOMIZE_HAS_CONTROL) ? junkman_shop_option : opts[O_JUNKMAN].value;
+    return option == 0 && profile && (M32(profile + 0xAC) & 0x4000u);
+}
+static int junkman_marker(uint32_t type, uint32_t payload) { return type >= 1 && type <= 7 && payload == 0; }
+static uint32_t junkman_stock(uint32_t manager, uint32_t type) {
+    uint32_t n = 0;
+    for (unsigned i = 0; i < 63; ++i) {
+        uint32_t record = manager + 12 * i;
+        if (M32(record) == type && !M32(record + 4) && M32(record + 8) == 1) ++n;
+    }
+    return n;
+}
+void f_00576E30_orig(Cpu *c);
+void f_00576E30(Cpu *c) {
+    if (!junkman_active() || arg(c, 0) > 6) { f_00576E30_orig(c); return; }
+    c->esp += 8;                                           // thiscall ret 4
+}
+void f_0058A680_orig(Cpu *c);
+void f_0058A680(Cpu *c) {
+    uint32_t entity = arg(c, 1);
+    if (!junkman_active() || !(entity == 2 || (entity >= 4 && entity <= 10))) {
+        f_0058A680_orig(c); return;
+    }
+    c->eax = 1;
+    c->esp += 4;                                           // cdecl: caller pops three arguments
+}
+void f_00576ED0_orig(Cpu *c);
+void f_00576ED0(Cpu *c) {
+    if (!junkman_active() || !junkman_marker(arg(c, 0), arg(c, 1))) { f_00576ED0_orig(c); return; }
+    c->eax = 1;
+    c->esp += 12;                                          // thiscall ret 8
+}
+void f_00576F10_orig(Cpu *c);
+void f_00576F10(Cpu *c) {
+    int active = junkman_active() && junkman_marker(arg(c, 0), arg(c, 1));
+    f_00576F10_orig(c);
+    if (active && !c->eax) c->eax = 1;
+}
+// Both the entry zero check and the turbo/nitrous warning's acknowledgement compare this total (007BFD30).
+void f_0058AE50_orig(Cpu *c);
+void f_0058AE50(Cpu *c) {
+    uint32_t manager = c->ecx;
+    int active = junkman_active();
+    f_0058AE50_orig(c);
+    if (active) for (uint32_t type = 1; type <= 7; ++type)
+        if (!junkman_stock(manager, type)) ++c->eax;
+}
+// 007B01F0 subtracts a checked item before SetMarkerData. Show real stock, floored at one, without that debit.
+// This also keeps the marker group's zero-count script from hiding an available type. Cosmetic markers stay finite.
+void f_007A6160_orig(Cpu *c);
+void f_007A6160(Cpu *c) {
+    uint32_t index = arg(c, 0);
+    Cpu probe = *c;
+    if (junkman_active() && index >= 1 && index <= 7 && (call_guest(&probe, 0x00575B20u, 0, NULL) & 0xFF)) {
+        uint32_t stock = junkman_stock(FE_MARKER_MANAGER, M32(0x00906194u + 4 * (index - 1)));
+        M32(c->esp + 12) = stock ? stock : 1;
+    }
+    f_007A6160_orig(c);
+}
+// GetCartTotal counts checked backroom items as one marker each (007B0620 prints cost and stock minus cost).
+// Remove only valid performance items from that debit, preserving cosmetic costs even in a mixed cart.
+void f_007AED80_orig(Cpu *c);
+void f_007AED80(Cpu *c) {
+    uint32_t manager = c->ecx, mode = arg(c, 0), free_items = 0;
+    Cpu probe = *c;
+    if (junkman_active() && (mode == 0 || mode == 2) && (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF)) {
+        for (uint32_t link = M32(manager + 0x1B4); link && link != manager + 0x1B4; link = M32(link)) {
+            uint32_t item = link - 4, part = M32(item + 0xC);
+            if (M8(item + 0x14) && M8(part + 0x1C) && M32(part + 0x18) <= 6) ++free_items;
+        }
+    }
+    f_007AED80_orig(c);
+    c->eax -= free_items;
+}
+// The performance header shows seven Junkman balances, but its retail subtraction uses the entire mixed cart.
+// Cosmetic costs must not reduce these virtual balances; leave their actual cart cost and consumption intact.
+void f_007B0620_orig(Cpu *c);
+void f_007B0620(Cpu *c) {
+    uint32_t screen = c->ecx;
+    Cpu probe = *c;
+    int active = junkman_active() && (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF) &&
+                 (call_guest(&probe, 0x00575B20u, 0, NULL) & 0xFF);
+    f_007B0620_orig(c);
+    if (active) {
+        uint32_t total = 0;
+        for (uint32_t type = 1; type <= 7; ++type) {
+            uint32_t stock = junkman_stock(FE_MARKER_MANAGER, type);
+            total += stock ? stock : 1;
+        }
+        Cpu print = *c;
+        uint32_t args[] = {M32(screen + 0x10), 0x18661565u, 0x0089C2D0u, total};
+        call_guest(&print, 0x005252D0u, 4, args);
+    }
+}
+// Match the cart's zero cost in the selected performance part's header; keep its original heat/widgets.
+void f_007B13C0_orig(Cpu *c);
+void f_007B13C0(Cpu *c) {
+    uint32_t helper = c->ecx, category = arg(c, 1);
+    Cpu probe = *c;
+    int active = junkman_active() && category >= 0x201 && category <= 0x207 &&
+                 (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF);
+    f_007B13C0_orig(c);
+    if (active) {
+        Cpu print = *c;
+        uint32_t args[] = {M32(helper + 4), 0x23D918FEu, 0x0089C2D0u, 0}; // FEPrintf("%$d", 0), cdecl
+        call_guest(&print, 0x005252D0u, 4, args);
+    }
 }

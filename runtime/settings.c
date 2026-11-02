@@ -31,7 +31,7 @@ static const struct { const char *id, *feature; } kNeedsX360[] = {
     {"graphics.curve_glow", "shaders"},
     {"graphics.postfx", "engine"}, {"graphics.tone_curve", "engine"}, {"graphics.speed_blur", "engine"},
     {"graphics.curve_glow", "engine"},
-    {"graphics.particles", "shaders"}, {"graphics.building_glass", "engine"}, {"graphics.x360_arrest", "engine"},
+    {"graphics.building_glass", "engine"}, {"graphics.x360_arrest", "engine"},
     {"graphics.rain_ripples", "engine"}, {"graphics.raindrops", "shaders"}, {"graphics.raindrops", "engine"},
     {"graphics.shadow_fit", "engine"},
     // The half-screen road reflection is listed as an X360 choice: without X360 files the PC's 320x240 is in effect and
@@ -59,7 +59,7 @@ static void x360_gate(Setting *s) {
 const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Online (beta)", "Help"};
 static const char *const kOffOn[] = {"Off", "On"};
 
-#define MAX_SETTINGS 160
+#define MAX_SETTINGS 256
 static Setting *all[MAX_SETTINGS];
 static int nall, inited;
 
@@ -263,6 +263,8 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.car_paint", "pc", "x360"},
     {"graphics.car_glass", "pc", "x360"},
     {"graphics.headlamp_glass", "retail", "retail"},
+    {"graphics.realworld_materials", "off", "off"},
+    {"graphics.traffic_detail", "off", "off"},
     {"graphics.car_normals", "pc", "x360"},
     {"graphics.car_flake", "pc", "x360"},
     {"graphics.x360_arrest", "pc", "x360"},      // restart
@@ -309,6 +311,7 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.world_streaming", "pc", "ahead"},
     {"graphics.tunnel_shadows", "pc", "keep"},
     {"cars.later_games", "off", "off"},
+    {"cars.traffic_pilot", "off", "off"},
     {"graphics.look_later_textures", "off", "off"},
 };
 #define NLOOK (int)(sizeof kLook / sizeof *kLook)

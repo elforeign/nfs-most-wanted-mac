@@ -139,6 +139,25 @@ static int neutral_sun(uint32_t tod, float out[3]) {
     return 1;
 }
 
+// Same live ambient/direct inputs and Neutral adjustment as the world setters.
+void lighting_particle_scene(float ambient[3], float sun[3], float direction[3]) {
+    uint32_t tod=M32(TIME_OF_DAY_PTR);
+    memset(ambient,0,3*sizeof(float));memset(sun,0,3*sizeof(float));
+    direction[0]=direction[1]=0;direction[2]=1;
+    if(!tod)return;
+    ambient_rgb(tod,ambient);
+    float scale=rf(tod+0x3C), k=rf(SUN_SCALE);
+    int adjusted=wl_mode() && M32(GAMEFLOW_STATE)==6 && neutral_sun(tod,sun);
+    float length=0;
+    for(int i=0;i<3;++i){
+        ambient[i]=fmaxf(0,ambient[i]*scale);
+        sun[i]=fmaxf(0,fminf(1,k*(adjusted?sun[i]:rf(tod+0x20+4*i))));
+        direction[i]=rf(tod+0x180+4*i);length+=direction[i]*direction[i];
+    }
+    if(length>1e-12f)for(int i=0;i<3;++i)direction[i]/=sqrtf(length);
+    else {direction[0]=direction[1]=0;direction[2]=1;}
+}
+
 static void wl_log(uint32_t tod, const float *ns) {
     static uint64_t last;
     uint64_t now = host_ticks();

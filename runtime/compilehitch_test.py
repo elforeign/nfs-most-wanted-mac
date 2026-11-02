@@ -2,8 +2,12 @@
 """Shader frame-path regression, without Metal or a game launch.
 
 Production lookup/scheduling: normal frame-thread compile_entry calls 0; broken 1.
-Cache round-trip: normal 8 records; broken AUX whitelist 1 record;
-broken Clear-lamp whitelist 6 records; broken film whitelist 7 records.
+Cache round-trip: normal 10 records; broken AUX whitelist 1 record;
+broken Clear-lamp whitelist 6 records; broken film whitelist 7 records;
+broken material whitelist Glass/Chrome 8/9 records.
+Near-cache review P3, original/fixed: warmed records 1 -> 6 of 6; duplicate bytes on
+successive launches 2710/0 and 5420/0; failures 4/0. Unknown bits/bases rejected.
+Unknown-flag control: overly broad mask/production failures 1/0.
 Readiness after publication: normal pending 0; broken 1.
 Concurrent identical-source requests: normal 1 compile; broken cache 4.
 Cold profile (2026-10-28): source compiles before/after 13/0, hangs 0/0,
@@ -16,6 +20,7 @@ Optional --diag DIR checks real frame_sync counters and hang/stall reports.
 The translator check compares exact MSL before/after option canonicalization.
 """
 from pathlib import Path
+import hashlib
 import re
 import subprocess
 import sys
@@ -57,7 +62,8 @@ PRELUDE = r'''
 #include "host/shaders/sm_translate.h"
 enum { MAT_VARIANT_WATER=0x100, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
-       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_AUX=0x200 };
+       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_REAL_GLASS, MAT_VARIANT_REAL_CHROME, MAT_VARIANT_AUX=0x200 };
+enum { SHADOW_NEAR_VARIANT=0x40000000u };
 typedef struct {
  uint64_t key; SmResult refl; volatile int pending; int ok; dispatch_semaphore_t ready;
  uint32_t *tokens, ntokens; SmOptions opt; uint32_t variant;
@@ -142,9 +148,9 @@ int main(int argc, char **argv) { @autoreleasepool {
  if (check(get_shader_variant(&s,&irrelevant,0)==e && get_shader_variant(&s,&irrelevant,0)==e,
            "unread texture options share the pending shader")) return 1;
  uint32_t variants[]={MAT_VARIANT_AUX,MAT_VARIANT_SOFT_SMOKE,
-    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP,MAT_VARIANT_HEADLAMP_CLEAR,MAT_VARIANT_ROAD_FILM};
- for (int i=0;i<7;i++) get_shader_variant(&s,&o,variants[i]);
- for (int i=0;i<8;i++) dispatch_semaphore_signal(allow_compile);
+    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP,MAT_VARIANT_HEADLAMP_CLEAR,MAT_VARIANT_ROAD_FILM,MAT_VARIANT_REAL_GLASS,MAT_VARIANT_REAL_CHROME};
+ for (int i=0;i<9;i++) get_shader_variant(&s,&o,variants[i]);
+ for (int i=0;i<10;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
  mtl=[CompileHitchDevice new];diag_on=1;
  id results[4];
@@ -165,15 +171,15 @@ int main(int argc, char **argv) { @autoreleasepool {
    if(one||two||a.code!=7||b.code!=7)abort();
  }});
  if(check(library_requests==2,"failed compile publishes error and wakes followers"))return 1;
- if (check(!e->pending && e->ok && compiled==8,"release/acquire publication")) return 1;
+ if (check(!e->pending && e->ok && compiled==10,"release/acquire publication")) return 1;
  if (check(!shader_pending(e),"ready shader no longer pending")) return 1;
  if (check(get_shader_variant(&s,&o,0)==e,"ready lookup reused")) return 1;
  // Keep shape metadata, but rebuild the shader/cache index exactly as a new launch does.
  nshaders=capshaders=0; shaders=NULL; memset(vcache,0,sizeof vcache);
  shader_cache_warm();
  printf("cache records=%d frame_sync=%d\n",nshaders,frame_sync);
- if (check(nshaders==8,"cache accepts AUX, soft smoke, lamp and film profiles")) return 1;
- for (int i=0;i<8;i++) dispatch_semaphore_signal(allow_compile);
+ if (check(nshaders==10,"cache accepts AUX, soft smoke, lamp, film and material profiles")) return 1;
+ for (int i=0;i<10;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
  int comparisons=0;
  for (int a=2;a<argc;a++) {
@@ -196,6 +202,37 @@ int main(int argc, char **argv) { @autoreleasepool {
    free(t);
  }
  printf("PASS: frame_sync=%d; exact MSL comparisons=%d\n",frame_sync,comparisons);
+ // A separate profile models repeated launches with near records interleaved
+ // before a normal record. Warm lookups must neither lose later entries nor
+ // append another copy of the same near shader on every launch.
+ char cache[1024];cache_path(cache,sizeof cache);if(unlink(cache))return 2;
+ uint32_t near_variants[]={0,SHADOW_NEAR_VARIANT,SHADOW_NEAR_VARIANT|10,
+    SHADOW_NEAR_VARIANT|MAT_VARIANT_ROAD_FILM,SHADOW_NEAR_VARIANT|MAT_VARIANT_REAL_GLASS,MAT_VARIANT_AUX};
+ nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
+ Obj near_s={0};near_s.tokens=tokens;near_s.ntokens=token_bytes/4;
+ for(unsigned i=0;i<6;++i)get_shader_variant(&near_s,&o,near_variants[i]);
+ for(unsigned i=0;i<6;++i)dispatch_semaphore_signal(allow_compile);
+ for(int i=0;i<4;++i)dispatch_sync(shader_workers[i], ^{});
+ FILE *near_file=fopen(cache,"rb");if(!near_file)return 2;
+ fseek(near_file,0,SEEK_END);long original_bytes=ftell(near_file);fclose(near_file);
+ int near_failures=0;
+ for(int launch=0;launch<2;++launch) {
+   nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
+   shader_cache_warm();int warmed=nshaders;
+   near_failures+=check(warmed==6,"warm accepts near variants and later base record");
+   near_s=(Obj){0};near_s.tokens=tokens;near_s.ntokens=token_bytes/4;
+   for(unsigned i=0;i<6;++i)get_shader_variant(&near_s,&o,near_variants[i]);
+   near_file=fopen(cache,"rb");if(!near_file)return 2;
+   fseek(near_file,0,SEEK_END);long bytes=ftell(near_file);fclose(near_file);
+   near_failures+=check(bytes==original_bytes,"warm near lookup does not append duplicates");
+   printf("near cache launch %d: warm=%d/6 duplicate_bytes=%ld\n",launch+1,warmed,bytes-original_bytes);
+   for(int i=0;i<nshaders;++i)dispatch_semaphore_signal(allow_compile);
+   for(int i=0;i<4;++i)dispatch_sync(shader_workers[i], ^{});
+ }
+ if(near_failures)return 1;
+ if(check(!shader_cache_variant_valid(SHADOW_NEAR_VARIANT|11) &&
+          !shader_cache_variant_valid(SHADOW_NEAR_VARIANT|0x80000000u) &&
+          !shader_cache_variant_valid(0x80000000u),"unknown cache flags and base variants rejected"))return 1;
  return 0;
 }}
 '''
@@ -207,15 +244,143 @@ def contact_sync_compiles(post):
     return len(re.findall(r"newLibraryWithSource:[^\]]*error:", body))
 
 
+
+# Baseline integrity proof: 1/1 authentic fragments accepted; 1/1 one-byte corruptions rejected.
+# Reviewed baseline fragment; its digest prevents accidental control drift.
+OLD_CONTACT = r'''static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> depth,
+                                    const X360PostParams *p, const X360PostView *view) {
+    xr->ao_ready=0;
+    if (!x360_post_ssao_enabled() || !depth) return scene;
+    id<MTLTexture> mask=render_ssao_coverage(depth);
+    if (!mask) {
+        static int warned;
+        if (diag_on && !warned) { warned=1;diag_event("ssao: On requested, skipped without current transparency coverage"); }
+        return scene;
+    }
+    uint32_t platform=view ? M32(view->source_view) : 0x009842D0u;
+    float px=MF32(platform+0x40), py=MF32(platform+0x54);
+    if (!isfinite(px)||!isfinite(py)||fabsf(px)<0.01f||fabsf(py)<0.01f) return scene;
+    static id<MTLRenderPipelineState> kernel,blur,apply,multiply_rgba,multiply_bgra,multiply_float,legacy_kernel,legacy_blur,legacy_apply;
+    if (!kernel) {
+        NSError *err=nil;
+        NSString *src=[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]];
+        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:&err];
+        if (!lib) { fprintf(stderr,"boot: SSAO shader: %s\n",err.localizedDescription.UTF8String); return scene; }
+        kernel=x_pso(lib,@"fs_ao",MTLPixelFormatRG16Float,0);
+        blur=x_pso(lib,@"fs_ao_blur",MTLPixelFormatRG16Float,0);
+        apply=x_pso(lib,@"fs_ao_apply",MTLPixelFormatRGBA8Unorm,0);
+        multiply_rgba=x_contact_multiply(lib,MTLPixelFormatRGBA8Unorm);multiply_bgra=x_contact_multiply(lib,MTLPixelFormatBGRA8Unorm);
+    }
+    if(scene.pixelFormat==MTLPixelFormatRGBA16Float && !multiply_float) {
+        NSString *src=[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]];
+        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:nil];
+        multiply_float=x_contact_multiply(lib,MTLPixelFormatRGBA16Float);
+    }
+    id<MTLRenderPipelineState> multiply=scene.pixelFormat==MTLPixelFormatRGBA16Float?multiply_float:scene.pixelFormat==MTLPixelFormatBGRA8Unorm?multiply_bgra:multiply_rgba;
+    if (!kernel||!blur||!apply||!multiply) return scene;
+    NSUInteger hw=(scene.width+1)/2, hh=(scene.height+1)/2;
+    int pair=x_contact_pair();
+    if (!xr->ao[0]||xr->ao[0].width!=hw||xr->ao[0].height!=hh) {
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float width:hw height:hh mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead; d.storageMode=MTLStorageModePrivate;
+        xr->ao[0]=[mtl newTextureWithDescriptor:d];xr->ao[1]=[mtl newTextureWithDescriptor:d];
+    }
+    if (pair && (!xr->ao_scene||xr->ao_scene.width!=scene.width||xr->ao_scene.height!=scene.height))
+    {
+        xr->ao_scene=x_rt_format((uint32_t)scene.width,(uint32_t)scene.height,0,MTLPixelFormatRGBA8Unorm);
+        if (pair) xr->ao_reference_scene=x_rt_format((uint32_t)scene.width,(uint32_t)scene.height,0,MTLPixelFormatRGBA8Unorm);
+    }
+    if (pair&&(!xr->ao_reference_scene||xr->ao_reference_scene.width!=scene.width||xr->ao_reference_scene.height!=scene.height))
+        xr->ao_reference_scene=x_rt_format((uint32_t)scene.width,(uint32_t)scene.height,0,MTLPixelFormatRGBA8Unorm);
+    id<MTLTexture> applied=scene;
+    if (!xr->ao[0]||!xr->ao[1]||!applied||(pair&&(!xr->ao_scene||!xr->ao_reference_scene))) return scene;
+    AOParams k={.proj={1/px,1/py,p->znear,p->zfar},.size={1.0f/scene.width,1.0f/scene.height,0,0},
+        .rect={0,0,1,1},.bounds={0.5f/depth.width,0.5f/depth.height,1-0.5f/depth.width,1-0.5f/depth.height},.tune={0.75f,0.08f,0,0}};
+    // Keep the original two-pixel bilateral sigma despite the coarser AO grid.
+    k.size[2]=0.25f*(scene.width/(float)hw)*(scene.width/(float)hw);
+    k.size[3]=0.25f*(scene.height/(float)hh)*(scene.height/(float)hh);
+    if (view) for (int j=0;j<2;++j) {
+        float sz=j?depth.height:depth.width;
+        k.rect[j]=view->depth[j]/sz;k.rect[j+2]=view->depth[j+2]/sz;
+        k.bounds[j]=(view->depth[j]+0.5f)/sz;k.bounds[j+2]=(view->depth[j]+view->depth[j+2]-0.5f)/sz;
+    }
+    const char *labels[]={"ssao kernel","ssao bilateral H","ssao bilateral V","ssao apply"};
+    // Negative control and normal AO consume exactly the same held scene/depth.
+    // Finish with normal AO so diagnostics cannot change the displayed look.
+    id<MTLTexture> __strong *reference=xr->ao_reference;
+    if (pair) {
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:(scene.width+1)/2 height:(scene.height+1)/2 mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModePrivate;
+        reference[0]=[mtl newTextureWithDescriptor:d];reference[1]=[mtl newTextureWithDescriptor:d];
+        if (!reference[0]||!reference[1]) return scene;
+        if(!xr->ao_original||xr->ao_original.width!=scene.width||xr->ao_original.height!=scene.height||xr->ao_original.pixelFormat!=scene.pixelFormat){
+            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat width:scene.width height:scene.height mipmapped:NO];d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModePrivate;xr->ao_original=[mtl newTextureWithDescriptor:d];
+        }
+        id<MTLBlitCommandEncoder> original=gpt_blit(cmd,"ssao diagnostic original");
+        [original copyFromTexture:scene sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(scene.width,scene.height,1) toTexture:xr->ao_original destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];[original endEncoding];
+        x_contact_shot(scene,"skipped","on"); // deliberately broken: the apply is absent
+    }
+    if (pair&&!legacy_kernel) {
+        NSError *error=nil;id<MTLLibrary> lib=[mtl newLibraryWithSource:[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_legacy_src]] options:nil error:&error];
+        legacy_kernel=x_pso(lib,@"fs_ao",reference[0].pixelFormat,0);legacy_blur=x_pso(lib,@"fs_ao_blur",reference[0].pixelFormat,0);legacy_apply=x_pso(lib,@"fs_ao_apply",MTLPixelFormatRGBA8Unorm,0);
+        if (!legacy_kernel||!legacy_blur||!legacy_apply) return scene;
+    }
+    id<MTLTexture> reference_mask=pair?render_ssao_reference_coverage():nil;
+    id<MTLTexture> cpu_mask=pair?render_ssao_cpu_reference_coverage():nil;
+    if(pair&&(!reference_mask||!cpu_mask))return scene;
+    static id<MTLTexture> uncovered;
+    if(pair){
+        if(!uncovered){MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:1 height:1 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;uncovered=[mtl newTextureWithDescriptor:d];uint8_t white=255;[uncovered replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&white bytesPerRow:1];}
+        if(!xr->ao_cpu_scene||xr->ao_cpu_scene.width!=scene.width||xr->ao_cpu_scene.height!=scene.height||xr->ao_cpu_scene.pixelFormat!=scene.pixelFormat){MTLTextureDescriptor*d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat width:scene.width height:scene.height mipmapped:NO];d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModePrivate;xr->ao_cpu_scene=[mtl newTextureWithDescriptor:d];}
+    }
+    if (pair&&!view) {x_contact_shot(mask,"normal","coverage");x_contact_shot(cpu_mask,"cpu_reference","coverage");x_contact_shot(reference_mask,"legacy","coverage");}
+    for (int variant=pair?4:0;variant>=0;--variant) {
+        k.tune[0]=0.75f*(variant==1?8.0f:1.0f);
+        const char *name=variant==4?"uncovered":variant==3?"cpu_reference":variant==2?"legacy":variant?"broken":"normal";
+        int multiplied=variant==0||variant>=3;
+        if(variant>=3){id<MTLBlitCommandEncoder>b=gpt_blit(cmd,"ssao proof original copy");[b copyFromTexture:scene toTexture:xr->ao_cpu_scene];[b endEncoding];}
+        if (pair) x_contact_shot(scene,name,"off");
+        for (int pass=0;pass<4;++pass) {
+            id<MTLTexture> __strong *chain=variant==2?reference:xr->ao;
+            id<MTLTexture> target=pass==3?(variant>=3?xr->ao_cpu_scene:variant==2?xr->ao_reference_scene:variant==1?xr->ao_scene:applied):chain[pass==1];
+            id<MTLTexture> input=pass==1?chain[0]:pass==2?chain[1]:scene;
+            k.tune[2]=pass==1?1.0f/chain[0].width:0;k.tune[3]=pass==2?1.0f/chain[0].height:0;
+            MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture=target;rp.colorAttachments[0].loadAction=pass==3&&multiplied?MTLLoadActionLoad:MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+            id<MTLTexture> smoke=pass==3 && variant==0 && !view?render_soft_smoke_layer():nil;
+            id<MTLRenderPipelineState> smoke_pso=smoke?x_contact_smoke_multiply(target.pixelFormat):nil;
+            if (gpt_on) gpt_render(rp,"%s",smoke_pso?"ssao multiply + soft smoke":pass==3&&variant==0?"ssao multiply":labels[pass]);
+            id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];
+            if (gpt_on) gpt_name(e);
+            [e setRenderPipelineState:smoke_pso?:variant==2?(pass==0?legacy_kernel:pass==3?legacy_apply:legacy_blur):(pass==0?kernel:pass==3?(multiplied?multiply:apply):blur)];
+            if(smoke_pso){[e setFragmentTexture:smoke atIndex:4];render_soft_smoke_layer_applied();}
+            if(pass!=3||!multiplied)[e setFragmentTexture:input atIndex:0];[e setFragmentTexture:depth atIndex:1];
+            if (pass==0||pass==3) [e setFragmentTexture:variant==4?uncovered:variant==3?cpu_mask:variant==2?reference_mask:mask atIndex:3];
+            if (pass==3) [e setFragmentTexture:chain[0] atIndex:2];
+            [e setFragmentBytes:&k length:sizeof k atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
+        }
+        if (pair) x_contact_shot(variant>=3?xr->ao_cpu_scene:variant==2?xr->ao_reference_scene:variant==1?xr->ao_scene:applied,name,"on");
+    }
+    xr->ao_ready=1;
+    return applied;
+}
+'''
+assert hashlib.sha256(OLD_CONTACT.encode()).hexdigest() == '416372ce18268fe2ee157b0a60f01f28f126e453f3186926a627d5413a25c886', 'pinned baseline changed'
+
 def contact_off_frame():
     post = (ROOT / "runtime/render_post.m").read_text()
     normal = contact_sync_compiles(post)
-    old = subprocess.run(["git", "-C", str(ROOT), "show", "0f5b708c:runtime/render_post.m"], capture_output=True, text=True)
     assert normal == 0, f"contact shadows compile on the frame: {normal}"
-    if old.returncode == 0:
-        broken = contact_sync_compiles(old.stdout)
-        assert broken > 0, "previous source should show the frame-path compile"
-        print(f"contact shadows: frame-path compiles normal {normal}, previous source {broken}")
+    # Literal frame-path call sites retained from the original initializer.
+    # The checker needs only these expressions, independent of repository history.
+    original = '''static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene) {
+        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:&err];
+        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:nil];
+}\n'''
+    broken = contact_sync_compiles(original)
+    assert broken == 2, "literal original should show two frame-path compiles"
+    print(f"contact shadows: frame-path compiles normal {normal}, pinned original {broken}")
 
 
 def offline():
@@ -246,6 +411,12 @@ def offline():
             profile = tmp / (name + "-profile"); profile.mkdir()
             return [str(exe), str(profile), str(synthetic)]
         print(run(build("normal", code) + [str(p) for p in fixtures]).strip())
+        broken_near = code.replace("    variant &= ~SHADOW_NEAR_VARIANT;", "    (void)variant;")
+        assert broken_near != code
+        print("broken near cache: " + run(build("broken-near-cache", broken_near), 1).strip())
+        broken_flags = code.replace("    variant &= ~SHADOW_NEAR_VARIANT;", "    variant &= 0x3FFFFFFFu;")
+        assert broken_flags != code
+        print("broken cache flags: " + run(build("broken-cache-flags", broken_flags), 1).strip())
         broken = code.replace("    shader_submit(e);\n    cache_append(e);", "    compile_entry(e);\n    cache_append(e);")
         assert broken != code
         print("broken scheduling: " + run(build("broken", broken), 1).strip())
@@ -258,6 +429,10 @@ def offline():
         broken_film = code.replace(" && variant != MAT_VARIANT_ROAD_FILM", "")
         assert broken_film != code
         print("broken film cache: " + run(build("broken-film-cache", broken_film), 1).strip())
+        for material in ('GLASS', 'CHROME'):
+            broken_material = code.replace(' && variant != MAT_VARIANT_REAL_' + material, '')
+            assert broken_material != code
+            print('broken material cache ' + material + ': ' + run(build('broken-material-' + material, broken_material), 1).strip())
         broken_ready = code.replace("if (!__atomic_load_n(&e->pending, __ATOMIC_ACQUIRE)) return 0;",
                                     "if (!__atomic_load_n(&e->pending, __ATOMIC_ACQUIRE)) return 1;")
         assert broken_ready != code

@@ -7,9 +7,9 @@ typedef struct {
     uint32_t target, type, limit, length;
     int active, note, owner, player, connected;
     uint8_t allowed[256];
-    char text[512];                    // UTF-8; hidden fields contain only masking characters
+    char text[640];                    // UTF-8; hidden fields contain only masking characters
 } OskCapture;
-enum { OSK_TYPE, OSK_DELETE, OSK_ACCEPT, OSK_CANCEL };
+enum { OSK_TYPE, OSK_DELETE, OSK_ACCEPT, OSK_CANCEL, OSK_CLEAR };
 #define OSK_MENU_SHORTCUT 0x80000000u
 const OskCapture *osk_capture(void);
 int osk_visible(void);

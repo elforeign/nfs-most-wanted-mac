@@ -3,8 +3,8 @@
 All copies and signature checks finish before replacement. Catchable interruption
 rolls back every rename, including app.txt (only game_dir is changed). The old app
 waits under a uniquely named backup until the commit and is removed after it (a
-3.x app is kept under its visible 3.x name). After a commit only this generation
-and the one it replaced are kept in <data>/installs. Saves are never rewritten.
+3.x app is kept under its visible 3.x name). After a commit unused owned
+generations are collected; live and rollback references are kept. Saves are never rewritten.
 
 Crash safety: a journal (<data>/.install-journal.json) records the
 intent before anything is created and the identity (device, inode) of every file
@@ -428,7 +428,7 @@ def owned(folder, registry):
             return False
         st = os.lstat(folder)
         record = _own_record(registry, token)
-        if os.path.islink(record) or not os.path.isfile(record):
+        if not real_dir(record.parent) or os.path.islink(record) or not os.path.isfile(record):
             return False
         with open(record, "rb") as f:
             kept = json.loads(f.read(4096))
@@ -451,6 +451,9 @@ def mark_owned(folder, registry):
     if exists(marker):
         marker.unlink()  # an old, copied or empty marker never counted: replaced by one bound to this folder
     write_synced(marker, body)
+    sync_dir(record.parent)
+    sync_dir(Path(registry))
+    sync_dir(folder)
 
 
 def remove_owned(folder, registry):
@@ -466,35 +469,112 @@ def remove_owned(folder, registry):
     for child in os.listdir(folder):
         if child != OWNER_MARK:
             remove(folder / child)
+    sync_dir(folder)
     _step("prune-contents")
     (folder / OWNER_MARK).unlink()
     os.rmdir(folder)
+    sync_dir(folder.parent)
+    _step("prune-directory")
     if re.fullmatch(r"[0-9a-f]{32}", token):
         _own_record(registry, token).unlink(missing_ok=True)
+        sync_dir(_own_record(registry, token).parent)
 
 
 def referenced_generations(roots_text, data_home):
-    """The install generations a roots.txt uses (every key, symbolic links and '..' resolved), or None when that is
-    uncertain: a value that names the installs folder but resolves elsewhere or to no generation."""
-    installs = os.path.realpath(Path(data_home) / "installs")
-    found = set()
+    """Resolve every root by its generation directory's device/inode, never its spelling.
+
+    realpath resolves links and '..', but does not canonicalize case on APFS.
+    Walk ancestors by identity instead. Missing descendants still pin a resolved
+    generation; any other unresolved reference disables collection.
+    """
+    values = []
     for line in roots_text.splitlines():
         key, eq, value = line.partition("=")
         value = value.strip()
         if not eq or not value or key.strip().startswith("#"):
             continue
-        real = os.path.realpath(value)
-        lexical = os.path.abspath(value)
-        inside = real.startswith(installs + os.sep)
-        if not inside:
-            if (lexical + os.sep).startswith(installs + os.sep) or "/installs/" in lexical:
-                return None  # spelled into installs but not really there: uncertain
-            continue
-        name = real[len(installs) + 1:].split(os.sep)[0]
-        if not GENERATION.fullmatch(name):
+        values.append(value)
+    try:
+        installs = Path(data_home) / "installs"
+        def directory_id(path):
+            st = os.stat(path)
+            return (st.st_dev, st.st_ino) if stat.S_ISDIR(st.st_mode) else None
+        installs_id = directory_id(installs) if exists(installs) else None
+        generations = {directory_id(p): p.name for p in installs.iterdir()
+                       if GENERATION.fullmatch(p.name) and not p.is_symlink() and p.is_dir()} if installs_id else {}
+        found = set()
+        for value in values:
+            path = Path(os.path.realpath(value))
+            resolved = path.exists()
+            for ancestor in (path, *path.parents):
+                try:
+                    identity = directory_id(ancestor)
+                except FileNotFoundError:
+                    continue
+                if identity is not None and identity in generations:
+                    found.add(generations[identity])
+                    break
+                if installs_id is not None and identity == installs_id:
+                    return None  # the whole installs folder, or an unknown generation
+            else:
+                if not resolved:
+                    return None
+                # A link below installs that escapes to external data remains
+                # uncertain. Test the original ancestors by identity too; case
+                # aliases must not bypass this conservative retention rule.
+                if installs_id is not None:
+                    for ancestor in Path(os.path.abspath(value)).parents:
+                        try:
+                            if directory_id(ancestor) == installs_id:
+                                return None
+                        except FileNotFoundError:
+                            continue
+        return found
+    except (OSError, ValueError):
+        return None
+
+
+def manifest_generations(path, data_home, preferences=False):
+    """Read a manifest afresh; app.txt contributes game_dir, not unrelated settings."""
+    try:
+        if path.is_symlink():
             return None
-        found.add(name)
-    return found
+        text = path.read_text(errors="surrogateescape")
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    if preferences:
+        text = "\n".join(line for line in text.splitlines() if line.partition("=")[0].strip() == "game_dir")
+    return referenced_generations(text, data_home)
+
+
+def root_environment(environment):
+    """Persist only potential NFS root overrides, with the child's inherited cwd resolved.
+
+    Include path-shaped values of unknown switches too, so new root overrides
+    default to retention. Bare directory names used by existing switches count.
+    """
+    roots = {}
+    for key, value in environment.items():
+        if not key.startswith("NFS_") or not value:
+            continue
+        path_key = re.search(r"(?:ROOTS?|DIR|FILES|PATH)$", key) or key == "NFS_X360_MOVIES"
+        optional_path = key.endswith(("TEXTURES", "VINYLS", "MOVIES")) and value not in ("0", "1", "on", "off")
+        if path_key or optional_path or os.sep in value or os.path.exists(value):
+            roots[key] = os.path.abspath(value)
+    return roots
+
+
+def environment_generations(environment, data_home):
+    references = referenced_generations("\n".join(f"{k}={v}" for k, v in environment.items()), data_home)
+    if references is not None and environment.get("NFS_ROOTS"):
+        manifest = manifest_generations(Path(environment["NFS_ROOTS"]), data_home)
+        # An explicit manifest which cannot be read must not silently release roots.
+        if manifest is None or not Path(environment["NFS_ROOTS"]).is_file():
+            return None
+        references.update(manifest)
+    return references
 
 
 def generation_of(roots_text, data_home):
@@ -507,43 +587,94 @@ def generation_of(roots_text, data_home):
     return None
 
 
-def _prune_generations(data_home, record, log=None):
-    """After a committed, verified install: keep this generation and the one(s) the replaced roots.txt used
-    (rollback), remove older ones. Each rebuild used to add 2.8-7.9 GB there for good (M4 F4).
+def previous_generations(data_home):
+    """Capture all resolved roots before swapping manifests; uncertainty disables collection."""
+    found = set()
+    for name in ("roots.txt", "app.txt"):
+        references = manifest_generations(Path(data_home) / name, data_home, preferences=name == "app.txt")
+        if references is None:
+            return None
+        found.update(references)
+    return sorted(found)
 
-    Nothing is removed unless every check holds: <data>/installs is a real folder reached without symbolic links,
-    the journal says which generations the previous roots.txt used, and the current roots.txt (resolved) uses only
-    this install's generation. Only plain children named like a token that Setup itself made and recorded (their
-    marker matches Setup's state) are removed: generations of an earlier Setup stay."""
+
+def _prune_generations(data_home, record, log=None):
+    """Shared locked collector for verified Setup commits and launch updates.
+
+    Retain every resolved live root, child startup snapshot and pending rollback reference.
+    Only a durable launch acknowledgment releases the previous-generation pin.
+    Unmarked directories (including empty ones) are counted, never claimed or removed.
+    The transaction journal stays present until collection finishes, so recovery
+    can retry an interrupted deletion with the same references protected.
+    """
     log = log or (lambda msg: None)
     installs = Path(data_home) / "installs"
+    def skip(reason):
+        try:
+            count = sum(bool(GENERATION.fullmatch(p.name)) for p in installs.iterdir())
+        except OSError:
+            count = "all"
+        log(f"prune skipped: {reason}; kept {count} install folders")
     if record.get("previous") is None:
-        log("prune skipped: the journal does not say which install generations the previous version used")
+        skip("the journal does not say which install generations the previous version used")
         return
     if not real_dir(installs):
-        log(f"prune skipped: {installs} is not a plain folder (a link, or reached through one)")
+        skip(f"{installs} is not a plain folder (a link, or reached through one)")
+        return
+    if record.get("kind") == "launch-update-v1" and (
+            "launch_roots" not in record or record.get("launch_generations") is None):
+        skip("the journal has no resolved launch root snapshot")
         return
     try:
         current = referenced_generations((Path(data_home) / "roots.txt").read_text(), data_home)
     except (OSError, UnicodeDecodeError):
         current = None
-    if current != {record["token"]}:
-        log("prune skipped: roots.txt does not use exactly this install's generation")
+    if current is None or record["token"] not in current:
+        skip("roots.txt does not resolve to this install's generation")
         return
-    keep = {record["token"]} | set(record["previous"])
+    acknowledged = record.get("kind") == "launch-update-v1" and record.get("state") == "acknowledged"
+    keep = current | set(record.get("launch_generations", [])) | (set() if acknowledged else set(record["previous"]))
+    # Even after acknowledgment, a manifest backup that could not be removed
+    # still pins its data. Do not infer retention from pc_root alone.
+    names, _, _ = _plan(Path(data_home), record)
+    def refresh():
+        for path, candidate, backup in names[1:]:
+            for manifest in (path, candidate, backup):
+                references = manifest_generations(manifest, data_home, preferences=path.name == "app.txt")
+                if references is None:
+                    return False
+                keep.update(references)
+        # Recovery may inherit a different environment from the supervised child.
+        for environment in (record.get("launch_roots", {}), root_environment(os.environ)):
+            references = environment_generations(environment, data_home)
+            if references is None:
+                return False
+            keep.update(references)
+        return True
+    if not refresh():
+        skip("a manifest or launch override has uncertain install references")
+        return
+    unmarked = 0
     for child in sorted(os.listdir(installs)):
         path = installs / child
-        if child in keep or not GENERATION.fullmatch(child) or os.path.islink(path) or not os.path.isdir(path):
+        if not GENERATION.fullmatch(child) or not real_dir(path):
             continue
         if not owned(path, data_home):
-            try:
-                os.rmdir(path)  # what an interrupted removal left of a generation: empty and nothing else
-            except OSError:
-                pass  # not empty: not made and recorded by this Setup, never ours to remove
-            continue  # not made and recorded by this Setup: never ours to remove
+            unmarked += 1
+            continue
+        if child in keep:
+            continue
+        # app.txt remains mutable during startup: reread under the caller's
+        # destination lock immediately before each deletion, retaining new pins.
+        if not refresh():
+            skip("a manifest or launch override has uncertain install references")
+            return
+        if child in keep:
+            continue
         remove_owned(path, data_home)
         log(f"removed old install generation {child}")
         _step("prune-generation")
+    log(f"kept {unmarked} unmarked install folders; automatic cleanup does not remove them")
 
 
 @contextmanager
@@ -613,6 +744,8 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
     dest.mkdir(parents=True, exist_ok=True)
     with profile_guard(data_home), dest_lock(dest):
         _recover(data_home, held=dest, log=log)  # an earlier interrupted install is resolved before anything new starts
+        from .export import refuse_update
+        refuse_update(target)
         running()
         try:
             dest.mkdir(parents=True, exist_ok=True)
@@ -668,12 +801,7 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
             record["ids"] = {str(path): [ident(path), ident(new)] for path, new, backup in names}
             # The generations the current roots.txt uses: kept by the prune after commit (one step of rollback).
             # None (uncertain: unreadable, or a root that only seems to be in installs) means nothing is pruned.
-            roots_file = data_home / "roots.txt"
-            try:
-                previous = referenced_generations(roots_file.read_text(), data_home) if exists(roots_file) else set()
-            except (OSError, UnicodeDecodeError):
-                previous = None
-            record["previous"] = sorted(previous) if previous is not None else None
+            record["previous"] = previous_generations(data_home)
             record["state"] = "replacing"
             running()  # The old copy may have been launched while we copied data.
             write_journal(data_home, record)

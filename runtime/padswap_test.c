@@ -7,8 +7,6 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#define PEDALS_NO_TRACE 1
-#include "pedals.c"
 void pedals_trace_sample(unsigned step,float lt,float rt) { (void)step;(void)lt;(void)rt; }
 #include "controltype.c"
 #include "padbind.c"
@@ -21,6 +19,7 @@ void settings_add(Setting *s) { (void)s; }
 static char udir[64];
 const char *userdata_dir(void) { return udir; }
 int user32_pad_layout_xbox(void) { return 0; }
+int portmenu_is_open(void) { return 0; }
 int pad_identity(char *name, size_t n) { snprintf(name, n, "Controller (DualSense)"); return PAD_KIND_DUALSENSE; }
 int pad_identity_n(int idx, char *name, size_t n) { (void)idx; return pad_identity(name,n); }
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {   // 0063CD80: the new pad's default bindings
@@ -33,11 +32,12 @@ int pad_count(void) { return 1; }                   // one host pad: the split-s
 void f_00628940(Cpu *c) { (void)c; }
 void f_00634B50_orig(Cpu *c) { (void)c; }
 void f_004F6EA0_orig(Cpu *c) { (void)c; }
-uint32_t f_0056E180_orig(Cpu *c) { (void)c; return 0; }
+void f_0056E180_orig(Cpu *c) { (void)c; }
 void f_0056E200_orig(Cpu *c) { (void)c; }
 void f_006280C0_orig(Cpu *c) { (void)c; }
 void f_00634900_orig(Cpu *c) { (void)c; }
 void f_0063CD80_orig(Cpu *c) { (void)c; }
+void f_004D6150(Cpu *c) { c->eax=0; c->esp+=4; }
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); ++fails; } } while (0)
@@ -47,6 +47,7 @@ int main(void) {
     mkdir(udir, 0700);
     const uint32_t dev = 0x00A00000u, iomod = 0x00B00000u;
     M32(JOY) = dev;
+    active_layout = L_NONPS_PS2;
     snprintf(joy_name(dev), 64, "%s", XBOX_NAME);
     set_rec(rec(CT_GAS, 2), T_ROT_HI, 0, 5);          // the user's own binding (Type 5 would put ARY_U there)
     s_type.value = 4;                                  // Control type 5

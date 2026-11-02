@@ -1130,7 +1130,7 @@ void f_006F51F0(Cpu *c) {               // NISActivity::Load(kind, scene name, .
     nis_playing = 0;
     uint32_t name = arg(c, 1);
     snprintf(nis_name, sizeof nis_name, "%.63s", name ? gptr(name) : "(null)");
-    f_006F51F0_orig(c);
+    breaker_diag_load(c);
     nis_hash = M32(nis_activity + 0x394); // Load's this+34C: game's own hash
     if (nis_meta < 64) {
         ++nis_meta;
@@ -1582,15 +1582,20 @@ void f_00611570(Cpu *c) {
     if (diag_on) diag_event("racestart: Game_WarpPlayerToTrigger done in %.1f ms, %llu frames", (host_ticks() - t0) / 1e6,
                             (unsigned long long)(perf_nframes - f0));
 }
-// BOOT_DIAG_WARP=<race sim s>:<x>,<y>,<z>[:block] (hitch work): warp the player once the race's sim time passes s, as a
-// career event entry does (Game_WarpPlayerToTrigger with a trigger at UMath x,y,z), at the end of a main-loop pass.
+// BOOT_DIAG_WARP=<race sim s>:<x>,<y>,<z>[:dir=<x>,<y>,<z>][:block] (hitch work): warp the player once the race's sim
+// time passes s, as a career event entry does (Game_WarpPlayerToTrigger with a trigger at UMath x,y,z; 00611570 hands
+// trigger+0x34 to the vehicle as its facing, default UMath +x), at the end of a main-loop pass. Free roam only: in a
+// race 00611570 takes the grid-placement branch.
+static int diag_warp_parse(const char *e, float *at, float p[3], float d[3]) {
+    if (!e || sscanf(e, "%f:%f,%f,%f", at, &p[0], &p[1], &p[2]) != 4) return 0;
+    d[0] = 1.0f; d[1] = d[2] = 0.0f;
+    const char *h = strstr(e, ":dir=");
+    return !h || sscanf(h + 5, "%f,%f,%f", &d[0], &d[1], &d[2]) == 3;
+}
 void diag_warp_pass(Cpu *c) {
     static int state = -1;
-    static float at, p[3], race0 = -1;
-    if (state < 0) {
-        const char *e = getenv("BOOT_DIAG_WARP");
-        state = e && sscanf(e, "%f:%f,%f,%f", &at, &p[0], &p[1], &p[2]) == 4 ? 1 : 0;
-    }
+    static float at, p[3], dir[3], race0 = -1;
+    if (state < 0) state = diag_warp_parse(getenv("BOOT_DIAG_WARP"), &at, p, dir);
     if (state != 1 || M32(0x00925E90u) != 6) return;
     float now = MF32(0x009885D8u);
     if (race0 < 0) race0 = now;
@@ -1600,8 +1605,9 @@ void diag_warp_pass(Cpu *c) {
     if (!trig) trig = galloc(0x40);
     memset(G + trig, 0, 0x40);
     MF32(trig + 0x28) = p[0]; MF32(trig + 0x2C) = p[1]; MF32(trig + 0x30) = p[2];
-    MF32(trig + 0x34) = 1.0f;
-    diag_event("warp: at race sim %.2f to %.1f %.1f %.1f", now - race0, p[0], p[1], p[2]);
+    MF32(trig + 0x34) = dir[0]; MF32(trig + 0x38) = dir[1]; MF32(trig + 0x3C) = dir[2];
+    diag_event("warp: at race sim %.2f to %.1f %.1f %.1f facing %.2f %.2f %.2f", now - race0, p[0], p[1], p[2],
+               dir[0], dir[1], dir[2]);
     uint32_t esp = c->esp, ecx = c->ecx;
     const char *e = getenv("BOOT_DIAG_WARP");
     if (strstr(e, ":block")) {             // the user's freeze shape: a retail load wait in one frame right after a warp

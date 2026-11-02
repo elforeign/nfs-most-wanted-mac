@@ -15,10 +15,12 @@
 
 #include "x360_internal.h"
 #include "settings.h"
+#include "sign_diag.h"
 // The renderer supplies strong definitions; isolated CPU post fixtures retain
 // these no-op definitions (weak imports alone do not link their C snapshots).
 __attribute__((weak,noinline)) void render_float_scene_final(int preserve) { (void)preserve; }
 __attribute__((weak,noinline)) void render_float_scene_begin(void) {}
+__attribute__((weak,noinline)) void shadow_near_ab_post(float *adaptation,float *exposure) { (void)adaptation;(void)exposure; }
 __attribute__((weak,noinline)) void render_float_scene_post_target(uint32_t surface) { (void)surface; }
 #include "gen/x360_shader_lits.inc"   // X360_SHADER_LITS: 0 without the X360 shaders' constants (render_post.m fs_vt): PC chain
 #include "gen/x360_engine.inc"       // X360E_*: the X360 engine's post constants from the player's default.xex (0: PC chain)
@@ -616,6 +618,7 @@ static void post_apply(Cpu *c, const X360PostView *view) {    // parameter build
     uint32_t vig = 0, p1 = M32(vt + 0x1F0);
     if (p1 && M32(p1)) vig = M32(M32(p1) + 0x18);
 
+    if (diag_on && sign_diag_on && !view) sign_diag_freeze("post-state", post_states, sizeof post_states);
     X360PostParams p;
     memset(&p, 0, sizeof p);
     // adaptation (82223220), per X360 frame (30 fps): steps scaled by the frame time, the game's real time of this
@@ -665,6 +668,7 @@ static void post_apply(Cpu *c, const X360PostView *view) {    // parameter build
     p.bloom_scale = X360E_BLOOM_SCALE * bloom_gain() * bloom_amount();    // g_fBloomScale 82908AB4, x View > Bloom
     p.bloom_mask_pc = old ? 0 : bloom_mask_pc();
     p.exposure = 2.0f * p.middle_gray / (adapted + X360E_EXPOSURE_EPS) * (1.0f + pulse);
+    if(diag_on && !view) { shadow_near_ab_post(&p.adapted_lum,&p.exposure);adapted=p.adapted_lum; }
     p.desaturation = look[4];
     { static int lb = -1, lc = -1, lt = -1; int bl = (int)(bloom_amount() * 100.0f + 0.5f), cl = (int)(colour_amount() * 100.0f + 0.5f), tc = tone_curve_x360();
       if (diag_on && look_state != 2 && (bl != lb || cl != lc || tc != lt)) {

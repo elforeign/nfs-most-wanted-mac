@@ -1,11 +1,16 @@
 """Headless staging proofs using synthetic PC/Xbox sources and stub compilers.
 
-Verification: 16/16 tests pass. Good/broken controls: 3/3 good pipeline oracles (failed build has no readiness,
+Verification: 17/17 tests pass (remembered disc update and speed.exe round-trip; earlier choices still load). Good/broken controls: 3/3 good pipeline oracles (failed build has no readiness,
 stage preserves active files, remembered Xbox extras survive); 3/3 deliberately
 broken pipelines must fail those same oracles (publish after failure, install
 early, forget Xbox). All paths are temporary; no game, network or real installs.
 The real CLI, validation, copy/hash/fsync and profile lock are exercised; build
 tools, signing and Xbox conversion are fixtures, as in test_backend.py.
+
+Persistent-preparation integration: the Xbox fixture returns feature metadata
+through its record argument, matching the real importer; the missing-output
+probe clears retained preparation to exercise its broken importer. Before these
+fixture updates 11/16 pass (1 failure, 4 errors); afterwards 16/16 pass.
 
 Review regressions: good 10/10 case oracles pass; broken base 2c887bc3
 passes 0/10 (10 failures): log symlink/hardlink (2), late cancellation
@@ -93,6 +98,8 @@ class StageTests(Fixture):
         self.assertEqual(source, self.xbox)
         write(out / "files/extras.bin", b"Xbox extras")
         events.emit("features", x360=True, missing=[])
+        if record is not None:
+            record.update(features=True, missing=[])
         return dict(x360_root=out / "files")
 
     def remember_xbox(self):
@@ -177,6 +184,7 @@ class StageTests(Fixture):
 
     def test_importer_cannot_silently_drop_xbox(self):
         self.remember_xbox()
+        ins.remove(self.paths.cache / "x360")  # exercise the importer rather than a verified retained copy
         with mock.patch.object(b, "prepare_x360", return_value={}):
             result = self.run_stage(remembered=True)
         self.assert_failed(self.home / "update", result)
@@ -203,6 +211,23 @@ class StageTests(Fixture):
                 result = self.run_stage(remembered=True)
                 self.assert_failed(self.home / "update", result)
                 self.assertIn("SOURCE_CHOICES_INVALID", result[1][-1]["msg"])
+
+    def test_disc_update_and_exe_choices_round_trip_and_earlier_choices_still_load(self):
+        update, exe = self.home / "nfsmwpatch1.3.exe", self.home / "speed.exe"
+        s.save_choices(self.paths.state, self.pc, None, self.dest, update, exe)
+        saved = s.load_choices(self.paths.state, required=True)
+        self.assertEqual((saved["pc_update"], saved["pc_exe"]), (str(update), str(exe)))
+        earlier = dict(format_version=1, pc=str(self.pc), x360=None, destination=str(self.dest))  # before disc images
+        write(self.paths.state / "source-choices.json", json.dumps(earlier))
+        self.assertEqual(s.load_choices(self.paths.state, required=True), earlier)
+        s.save_choices(self.paths.state, self.pc, None, self.dest, update, exe, [self.home / "disc 2.iso"])
+        self.assertEqual(s.load_choices(self.paths.state, required=True)["pc_discs"], [str(self.home / "disc 2.iso")])
+        for key, value in (("pc_update", "relative/speed.exe"), ("pc_exe", "relative/speed.exe"),
+                           ("pc_discs", ["relative.iso"]), ("pc_discs", "/not/a/list.iso"), ("pc_discs", [None])):
+            with self.subTest(key=key, value=value):
+                write(self.paths.state / "source-choices.json", json.dumps(dict(earlier, **{key: value})))
+                with self.assertRaisesRegex(ins.InstallError, "SOURCE_CHOICES_INVALID"):
+                    s.load_choices(self.paths.state, required=True)
 
     def test_explicit_inputs_ignore_corrupt_choices(self):
         write(self.paths.state / "source-choices.json", "{broken")

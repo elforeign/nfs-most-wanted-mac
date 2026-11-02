@@ -91,6 +91,8 @@ static Setting extras[] = {
     EXTRA("graphics.hdr_output", .type=SET_TOGGLE, .restart=1),
     EXTRA("graphics.lamp_glow", .type=SET_TOGGLE),
     EXTRA("graphics.headlamp_glass", CH2("retail","clear")),
+    EXTRA("graphics.realworld_materials", .type=SET_CHOICE, .choices=(const char *const[]){"Off","Glass","Chrome","All"}, .values=(const char *const[]){"off","glass","chrome","all"}, .nchoices=4),
+    EXTRA("graphics.traffic_detail", CH2("off","on")),
     EXTRA("graphics.road_film", CH2("0","1")),
     EXTRA("graphics.car_reflection", CH2("pc","sharp"), .def=1, .restart=1),
     EXTRA("graphics.look_reflections", CH2("pc","sharp"), .def=1, .restart=1, .hidden=1),
@@ -109,6 +111,7 @@ static Setting extras[] = {
     EXTRA("graphics.world_streaming", CH2("ahead","pc")),
     EXTRA("graphics.tunnel_shadows", CH2("pc","keep"), .def=1),
     EXTRA("cars.later_games", .type=SET_TOGGLE, .def=1, .restart=1),
+    EXTRA("cars.traffic_pilot", CH2("off","on"), .restart=1),
     EXTRA("graphics.look_later_textures", .type=SET_TOGGLE, .def=1, .restart=1, .hidden=1),
 };
 #define NEXTRAS (int)(sizeof extras / sizeof *extras)
@@ -202,12 +205,16 @@ int main(int argc, char **argv) {
     // 2: PC retail
     static const char *const pc[] = {"pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc", "pc_before", "off", "pc", "off", "off", "1", "pc", "pc", "pc"};
     static const char *const x3[] = {"x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "x360", "on", "on", "1.4", "x360", "x360", "x360"};
+    CHECK(settings_set(settings_find("cars.traffic_pilot"), 1));
     CHECK(settings_set(&r_look, PRESET_PC));
+    CHECK(settings_get("cars.traffic_pilot") == 0);
     CHECK(batch_ends >= 1 && batch_depth == 0);       // audit4 #7: fails (0 ends) with settings.c without the batch calls
     CHECK(all_are(pc) && settings_get("graphics.look_preset") == PRESET_PC);
     CHECK(settings_get("graphics.bloom_surfaces") == 0 && settings_get("graphics.colour_filter") == 100);
     // 3: Xbox 360, and the restart rows it changed are reported
+    CHECK(settings_set(settings_find("cars.traffic_pilot"), 1));
     CHECK(settings_set(&r_look, PRESET_X360));
+    CHECK(settings_get("cars.traffic_pilot") == 0);
     CHECK(all_are(x3) && settings_get("graphics.look_preset") == PRESET_X360);
     r_ldata.boot_value = 0; r_hd.boot_value = 0; r_ui.boot_value = 0; r_arrest.boot_value = 0;   // lighting/arrest booted PC; texture rows booted X360
     CHECK(settings_look_apply(PRESET_PC) >= 2);                                  // back to PC: hd/ui differ from their boot value (X360), lighting data is back at its boot value
@@ -297,6 +304,21 @@ int main(int argc, char **argv) {
     r_grass.locked = 0;
     CHECK(settings_get("graphics.colour_filter") == 30);
     CHECK(settings_get("graphics.bloom_surfaces") == 2);
+    Setting *physical = NULL;
+    for (int i=0;i<NEXTRAS;++i)
+        if (!strcmp(extras[i].id, "graphics.realworld_materials")) physical = &extras[i];
+    CHECK(physical != NULL);
+    if (physical) {
+        settings_look_apply(PRESET_PORT);
+        CHECK(settings_get(physical->id) == 0);
+        CHECK(settings_set(physical, 3));
+        settings_look_apply(PRESET_PC);
+        CHECK(settings_get(physical->id) == 0);
+        settings_look_apply(PRESET_MINE);
+        CHECK(settings_get(physical->id) == 3);
+        settings_look_apply(PRESET_X360);
+        CHECK(settings_get(physical->id) == 0);
+    }
     printf("settings_look_test: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures != 0;
 }

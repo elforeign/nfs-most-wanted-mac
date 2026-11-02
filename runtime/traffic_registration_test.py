@@ -1,0 +1,2039 @@
+"""Production registration with relocated retail donor descriptors and lookups.
+
+Controls compile the pinned pre-registration implementation and remove the FE
+exclusion, namespace, lifetime and save barriers independently. No game runs.
+Zero-player 361/361, full76 969/969; pinned original fails 83/86.
+FE / namespace / lifetime / save mutants fail 10 / 6 / 4 / 3 of 361.
+FE block 36,040 bytes, complete save 63,560 bytes and 12 mask bytes match;
+all 76+14 mask positions stay frozen.
+All broken controls must fail.
+Converted candidate registration: 557/557 checks; pinned 351e5fdd converter
+fails 1/1 startup admissions (exit 2) at SOLIDMAP and, with only that map
+repaired, fails 1/1 at WHEELFIT identity (exit 2).
+Production FE wrapper: 361/361; pinned b0403ed7 wrapper fails 10/361 (exit 1).
+"""
+import contextlib
+import io
+from pathlib import Path
+import hashlib
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'recomp'))
+import car85_test as base
+
+
+# Baseline integrity proof: 1/1 authentic fragments accepted; 1/1 one-byte corruptions rejected.
+# Reviewed baseline fragment; its digest prevents accidental control drift.
+ORIGINAL_SOURCE = r'''#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <limits.h>
+#include <math.h>
+#include <pwd.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreText/CoreText.h>
+#include <CommonCrypto/CommonDigest.h>
+#include "funcs.h"
+#include "host.h"
+#include "private_cars.h"
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+#include "car_physics.h"
+#endif
+
+#define TYPES 84u
+#define STRIDE 0xD0u
+#define TABLE 0x009B09D8u
+#define PVEHICLE 0x4A97EC8Fu
+#define FRONTEND 0x85885722u
+#define ECAR 0xA5B543B7u
+#define NEWKEY 0xCC78C3D3u  // StringToLowerCaseKey("car85"), lookup2/ABCDEF00
+#define REFSPEC 0x2B936EB7u
+
+static int configured, enabled;
+static uint32_t owned_table;
+#define MAX_ADDITIONS 76u
+// The order in the manifest is the numeric identity. Never sort this array.
+typedef struct {
+    char name[16], donor_folder[16], directory[PATH_MAX];
+    unsigned catalog_id;
+    uint32_t key, model_key, record, type, hash, pv, fe, menu_fe, donor_model, string, logo, brand_string;
+    int wheel_fit;
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    CarPhysics physics;
+    uint32_t contact_vault;
+    uint64_t contact_generation;
+#endif
+    uint32_t wheel_key, wheel_donor;
+    float wheel_offsets[16], wheel_compressions[2], wheel_widths[4];
+    uint8_t wheel_front[6], wheel_rear[6];
+    int render_fit;
+    float render_values[11], chassis_values[8], tire_values[6], camera_values[5][8];
+    uint32_t spoke_count;
+    uint8_t *collision_bytes;
+    uint32_t collision_size, collision;
+    uint32_t *solid_map;
+    unsigned solid_count;
+    uint32_t paint_source, paint_key;
+} Addition;
+static Addition additions[MAX_ADDITIONS];
+static unsigned nadditions;
+static _Thread_local Addition *model_namespace;
+static uint32_t parts_hash(const char *s);
+void f_00751540_orig(Cpu *c);
+void f_00752940_orig(Cpu *c);
+void f_00752B60_orig(Cpu *c);
+void f_00755800_orig(Cpu *c);
+void f_0075F5D0_orig(Cpu *c);
+void f_00750B20_orig(Cpu *c);
+void f_00739B40_orig(Cpu *c);
+static int manifest_mode, catalog_mode;
+static unsigned addition_id(unsigned j) { return additions[j].catalog_id ? additions[j].catalog_id : TYPES + j; }
+static Addition *addition_for_type(unsigned type) {
+    for (unsigned j=0;j<nadditions;++j) if (addition_id(j)==type) return &additions[j];
+    return NULL;
+}
+static int inserting;
+typedef struct { uint32_t ld, vault, original; uint64_t generation; } Source;
+static Source sources[2048];
+static unsigned nsources;
+typedef struct { uint32_t address; uint64_t generation; int ready; } VaultLife;
+static VaultLife vaults[256];
+static uint64_t next_generation;
+
+static VaultLife *life(uint32_t address) {
+    for (unsigned i = 0; i < sizeof vaults / sizeof vaults[0]; ++i)
+        if (vaults[i].generation && vaults[i].address == address) return &vaults[i];
+    return NULL;
+}
+
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+const CarPhysics *car85_contact_physics(uint32_t key) {
+    if (!car_physics_enabled()) return NULL;
+    for (unsigned i=0;i<nadditions;++i) {
+        Addition *a=additions+i;
+        if (a->key!=key || !a->physics.present) continue;
+        VaultLife *v=life(a->contact_vault);
+        if (v && v->ready && v->generation==a->contact_generation) return &a->physics;
+    }
+    return NULL;
+}
+#endif
+
+void car85_vault_unloaded(uint32_t vault) {
+    VaultLife *v = life(vault);
+    if (!v) return;
+    uint64_t generation = v->generation;
+    unsigned before = nsources;
+    memset(v, 0, sizeof *v);
+    for (unsigned i = 0; i < nsources; ) {
+        if (sources[i].generation != generation) { ++i; continue; }
+        gfree(sources[i].ld);
+        memmove(sources + i, sources + i + 1, (--nsources - i) * sizeof *sources);
+    }
+    if (diag_on && before != nsources)
+        diag_event("car85: retired vault=%08X generation=%llu sources=%u", vault,
+                   (unsigned long long)generation, before - nsources);
+}
+
+static void fail(const char *why) {
+    fprintf(stderr, "car85: %s\n", why);
+    if (diag_on) diag_event("car85: ERROR %s", why);
+    exit(2);
+}
+
+static int scratch_profile(void) {
+    const char *profile = getenv("BOOT_USERDATA"), *diag = getenv("BOOT_DIAG");
+    char p[PATH_MAX], d[PATH_MAX], expected[PATH_MAX], owner[PATH_MAX], home[PATH_MAX];
+    if (!profile || !*profile || !diag || !*diag || !realpath(profile, p) || !realpath(diag, d)) return 0;
+    struct stat ps, ds;
+    if (stat(p, &ps) || stat(d, &ds) || !S_ISDIR(ps.st_mode) || !S_ISDIR(ds.st_mode)) return 0;
+    struct passwd *pw = getpwuid(getuid());
+    if (!pw || !realpath(pw->pw_dir, home)) return 0;
+    snprintf(owner, sizeof owner, "%s/Library/Application Support/NFSMW-port", home);
+    char canonical_owner[PATH_MAX];
+    if (realpath(owner, canonical_owner)) strcpy(owner, canonical_owner);
+    size_t n = strlen(owner);
+    if (!strncmp(p, owner, n) && (!p[n] || p[n] == '/')) return 0;
+    if (snprintf(expected, sizeof expected, "%s.user", d) >= (int)sizeof expected) return 0;
+    // run_guarded/game_run supplies this pair; canonical comparison rejects
+    // a .user symlink aimed at another profile, including the owner's saves.
+    return !strcmp(p, expected);
+}
+
+int car85_profile_scratch(void) { return scratch_profile(); }
+
+// game_run deliberately gives every launch a fresh scratch. Import exactly one
+// explicitly staged scratch TEST save for restart proofs; never overwrite a
+// destination or copy settings/caches/other profiles. The source is read-only.
+static void seed_scratch_profile(void) {
+    const char *seed = getenv("NFS_TEST_ADDCARS_SEED");
+    if (!seed || !*seed) return;
+    if (!scratch_profile()) fail("save seeding requires guarded scratch userdata");
+    struct stat st;
+    if (stat(seed, &st) || !S_ISREG(st.st_mode) || st.st_size < 36 || st.st_size > 1024 * 1024)
+        fail("invalid staged scratch save");
+    char path[PATH_MAX];
+    const char *suffixes[] = {"NFS Most Wanted", "NFS Most Wanted/TEST"};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (snprintf(path, sizeof path, "%s/%s", getenv("BOOT_USERDATA"), suffixes[i]) >= (int)sizeof path)
+            fail("scratch save path too long");
+        if (mkdir(path, 0700) && errno != EEXIST) fail("cannot create scratch save directory");
+        if (lstat(path, &st) || !S_ISDIR(st.st_mode)) fail("scratch save directory is not a directory");
+    }
+    if (snprintf(path, sizeof path, "%s/NFS Most Wanted/TEST/TEST", getenv("BOOT_USERDATA")) >= (int)sizeof path)
+        fail("scratch save path too long");
+    FILE *input = fopen(seed, "rb"), *output = fopen(path, "wx");
+    if (!input || !output) fail("cannot seed scratch TEST save (destination must be absent)");
+    uint8_t bytes[4096]; size_t n;
+    while ((n = fread(bytes, 1, sizeof bytes, input)))
+        if (fwrite(bytes, 1, n, output) != n) fail("scratch save seed write failed");
+    if (ferror(input)) fail("scratch save seed read failed");
+    fclose(input);
+    if (fclose(output)) fail("scratch save seed close failed");
+    const char *metadata = getenv("NFS_TEST_ADDCARS_SEED_META");
+    if (metadata && *metadata) {
+        // Fresh-process WO3 proof: import only the explicitly staged record for
+        // this payload. Normal admission still verifies all provenance/hashes.
+        // The source save/record are read-only; both destinations must be new.
+        uint8_t record[245], digest[CC_SHA256_DIGEST_LENGTH];
+        FILE *meta = fopen(metadata, "rb");
+        if (!meta || fread(record, 1, sizeof record, meta) != sizeof record ||
+            fgetc(meta) != EOF || ferror(meta)) fail("invalid staged scratch metadata");
+        fclose(meta);
+        input = fopen(seed, "rb");
+        if (!input || fseek(input, 36, SEEK_SET)) fail("cannot hash staged scratch payload");
+        CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
+        while ((n = fread(bytes, 1, sizeof bytes, input))) CC_SHA256_Update(&hash, bytes, (CC_LONG)n);
+        if (ferror(input)) fail("staged scratch payload read failed");
+        fclose(input); CC_SHA256_Final(digest, &hash);
+        char hex[65];
+        for (unsigned i = 0; i < sizeof digest; ++i) snprintf(hex + 2 * i, 3, "%02x", digest[i]);
+        if (snprintf(path, sizeof path, "%s/.car-catalog", getenv("BOOT_USERDATA")) >= (int)sizeof path)
+            fail("scratch metadata path too long");
+        if (mkdir(path, 0700) && errno != EEXIST) fail("cannot create scratch metadata directory");
+        if (lstat(path, &st) || !S_ISDIR(st.st_mode)) fail("scratch metadata directory is not a directory");
+        size_t used = strlen(path);
+        if (snprintf(path + used, sizeof path - used, "/%s.meta", hex) >= (int)(sizeof path - used))
+            fail("scratch metadata record path too long");
+        output = fopen(path, "wx");
+        if (!output || fwrite(record, 1, sizeof record, output) != sizeof record || fclose(output))
+            fail("cannot seed scratch metadata (destination must be absent)");
+        if (diag_on) diag_event("addcars: seeded scratch metadata payload=%s", hex);
+    }
+    if (diag_on) diag_event("addcars: seeded scratch TEST save from %s", seed);
+}
+
+static void folder(char out[16], const char *s) {
+    size_t n = strlen(s);
+    if (!n || n >= 16) fail("folder must contain 1..15 ASCII letters, digits or underscores");
+    for (size_t i = 0; i <= n; ++i) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch && !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                    (ch >= '0' && ch <= '9') || ch == '_')) fail("invalid folder");
+        out[i] = (char)toupper(ch);
+    }
+}
+
+// WFT1 is emitted by tools_snapshot/wheel_attrib.py from the source ecar.
+// Optional for existing manifests; legacy CAR85 never reads a sidecar.
+static void load_collision(Addition *a);
+static void load_wheel_fit(Addition *a) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/WHEELFIT.BIN", a->directory) >= (int)sizeof path)
+        fail("wheel geometry path too long");
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        if (errno != ENOENT) fail("cannot open wheel geometry");
+        if (diag_on) diag_event("addcars: wheel geometry absent name=%s (donor values retained)", a->name);
+        return;
+    }
+    uint32_t header[4];
+    int good = fread(header, 1, 16, f) == 16 &&
+        fread(a->wheel_offsets, 1, 64, f) == 64 &&
+        fread(a->wheel_compressions, 1, 8, f) == 8 &&
+        fread(a->wheel_widths, 1, 16, f) == 16 &&
+        fread(a->wheel_front, 1, 6, f) == 6 && fread(a->wheel_rear, 1, 6, f) == 6;
+    if (good && header[1] == 2) {
+        good = fread(a->render_values, 4, 11, f) == 11 &&
+            fread(&a->spoke_count, 4, 1, f) == 1 &&
+            fread(a->chassis_values, 4, 8, f) == 8 &&
+            fread(a->tire_values, 4, 6, f) == 6 &&
+            fread(a->camera_values, 4, 40, f) == 40;
+        a->render_fit = 1;
+        const float *groups[] = {a->render_values, a->chassis_values, a->tire_values, &a->camera_values[0][0]};
+        const unsigned counts[] = {11, 8, 6, 40};
+        for (unsigned g = 0; g < 4; ++g)
+            for (unsigned i = 0; i < counts[g]; ++i)
+                if (!isfinite(groups[g][i]) || fabsf(groups[g][i]) > 10000) good = 0;
+        if (a->spoke_count > 255) good = 0;
+    }
+    good = good && fgetc(f) == EOF && !ferror(f);
+    fclose(f);
+    if (!good || header[0] != 0x31544657u || (header[1] != 1 && header[1] != 2)) fail("invalid WHEELFIT.BIN");
+    // Validate identities with the game's StringToLowerCaseKey at vault load.
+    a->wheel_fit = 1;
+    a->wheel_key = header[2]; a->wheel_donor = header[3];
+    for (unsigned i = 0; i < 16; ++i)
+        if (!isfinite(a->wheel_offsets[i]) || fabsf(a->wheel_offsets[i]) > 20 ||
+            ((i & 3) == 3 && (a->wheel_offsets[i] < .1f || a->wheel_offsets[i] > 1)))
+            fail("invalid wheel centre/radius");
+    for (unsigned i = 0; i < 2; ++i)
+        if (!isfinite(a->wheel_compressions[i]) || fabsf(a->wheel_compressions[i]) > 20)
+            fail("invalid frontend wheel compression");
+    for (unsigned i = 0; i < 4; ++i)
+        if (!isfinite(a->wheel_widths[i]) || a->wheel_widths[i] < .1f || a->wheel_widths[i] > 1)
+            fail("invalid render wheel width");
+    if (a->render_fit) load_collision(a);
+}
+
+static void load_collision(Addition *a) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/COLLISION.BIN", a->directory) >= (int)sizeof path)
+        fail("collision path too long");
+    FILE *f = fopen(path, "rb");
+    if (!f) { if (errno != ENOENT) fail("cannot open collision sidecar"); return; }
+    uint32_t h[5];
+    if (fread(h, 4, 5, f) != 5 || h[0] != 0x31544C43u || h[1] != 1 ||
+        h[2] != a->wheel_key || h[3] != a->wheel_donor || h[4] < 80 || h[4] > 1048576)
+        fail("invalid collision sidecar header");
+    uint8_t *b = malloc(h[4]);
+    if (!b || fread(b, 1, h[4], f) != h[4] || fgetc(f) != EOF || ferror(f))
+        fail("invalid collision sidecar extent");
+    fclose(f);
+    uint32_t n; memcpy(&n, b + 4, 4);
+    uint32_t at = 16 + n * 48, clouds;
+    if (!n || n > 128 || at + 16 > h[4]) fail("invalid collision bound count");
+    memcpy(&clouds, b + at, 4);
+    if (clouds > 128) fail("invalid collision cloud count");
+    for (unsigned i = 0; i < n; ++i) {
+        uint8_t *bound = b + 16 + i * 48; int16_t dims[3], first;
+        memcpy(dims, bound + 16, 6); memcpy(&first, bound + 30, 2);
+        if (dims[0] < 0 || dims[1] < 0 || dims[2] < 0 ||
+            (dims[0] == 0 && dims[1] == 0 && dims[2] == 0) ||
+            (first == -1 ? bound[22] != 0 : first < 0 || first + bound[22] > n) ||
+            (int8_t)bound[23] < -1 || (int8_t)bound[23] >= (int)clouds)
+            fail("invalid collision bound topology");
+    }
+    at += 16;
+    for (unsigned i = 0; i < clouds; ++i) {
+        uint32_t points;
+        if (at + 16 > h[4]) fail("truncated collision cloud");
+        memcpy(&points, b + at, 4);
+        if (points < 4 || points > 4096 || points * 16 + 16 > h[4] - at)
+            fail("invalid collision points");
+        for (unsigned j = 0; j < points * 4; ++j) {
+            float value; memcpy(&value, b + at + 16 + j * 4, 4);
+            if (!isfinite(value) || fabsf(value) >= 1000) fail("invalid collision point value");
+        }
+        at += 16 + points * 16;
+    }
+    if (at != h[4]) fail("unexpected collision trailing bytes");
+    a->collision_bytes = b; a->collision_size = h[4];
+}
+
+static void load_solid_map(Addition *a, const char *path) {
+    FILE *f=fopen(path,"rb");
+    if (!f) fail("cannot open verified solid map");
+    uint32_t h[4];
+    // Version 2 adds private image rows to the same sorted donor -> private table.
+    if (fread(h,1,16,f)!=16 || h[0]!=0x31504D53u || (h[1]!=1 && h[1]!=2) ||
+        h[2]!=parts_hash(a->name) || !h[3] || h[3]>8192) fail("invalid solid map header");
+    a->solid_count=h[3]; a->solid_map=malloc(8u*h[3]);
+    if (!a->solid_map || fread(a->solid_map,8,h[3],f)!=h[3] || fgetc(f)!=EOF || ferror(f))
+        fail("invalid solid map size");
+    fclose(f);
+    for (unsigned i=1;i<a->solid_count;++i)
+        if (a->solid_map[2*i]<=a->solid_map[2*i-2]) fail("unordered solid map");
+}
+
+// Validate optional body values before any addition writes guest memory.
+static void load_physics(Addition *a, const char *verified) {
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    char path[PATH_MAX];
+    memset(&a->physics,0,sizeof a->physics);
+    if (!car_physics_enabled()) return;
+    if (!verified) {
+        if (snprintf(path,sizeof path,"%s/PHYSICS.BIN",a->directory)>=(int)sizeof path)
+            fail("physics path too long");
+        verified=path;
+    }
+    if (car_physics_load(verified,a->name,a->donor_folder,&a->physics)) fail("invalid PHYSICS.BIN");
+#else
+    (void)a; (void)verified;
+#endif
+}
+
+// DPT1 selections are resolved against the local MW base-paint table during
+// conversion. Catalog mode reads only a hash-verified, listed output path.
+// Version 2 checks the full record; obsolete base-key selections and absent or
+// invalid metadata preserve the donor's stock paint.
+static void load_default_paint(Addition *a, const char *path) {
+    a->paint_source = a->paint_key = 0;
+    uint32_t h[8];
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    int valid = fread(h, 1, sizeof h, f) == sizeof h && fgetc(f) == EOF && !ferror(f);
+    fclose(f);
+    uint32_t checksum = UINT32_MAX;
+    if (valid) for (unsigned i=0; i<7; ++i) checksum = (checksum ^ h[i]) * 16777619u;
+    if (!valid || h[0] != 0x31545044u || h[1] != 2 ||
+        h[2] != parts_hash(a->name) || h[3] != parts_hash(a->donor_folder) ||
+        !h[4] || h[4] == UINT32_MAX || !h[5] || h[5] == UINT32_MAX || h[7] != checksum ||
+        (h[6] != 1 && h[6] != 2) || (h[6] == 1 && h[4] != h[5])) return;
+    a->paint_source = h[4]; a->paint_key = h[5];
+}
+
+static int on(void) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    return 0;
+#endif
+    if (configured) return enabled;
+    configured = 1;
+    seed_scratch_profile();
+    const char *legacy = getenv("NFS_TEST_CAR85"), *manifest = getenv("NFS_TEST_ADDCARS");
+    if ((!legacy || !*legacy) && (!manifest || !*manifest)) {
+        catalog_mode = manifest_mode = 1;
+        for (size_t i=0;i<private_cars_count();++i) {
+            const PrivateCar *car=private_cars_get(i);
+            if (car->swap) continue;
+            Addition *a=&additions[nadditions++];
+            folder(a->name,car->name); folder(a->donor_folder,car->donor);
+            a->catalog_id=car->id;
+            snprintf(a->directory,sizeof a->directory,"%s",car->geometry);
+            char *slash=strrchr(a->directory,'/');
+            if (!slash) fail("verified addition has no pack directory");
+            *slash=0;
+            if (car->wheel_fit[0]) load_wheel_fit(a);
+            if (car->physics[0]) load_physics(a,car->physics);
+            if (car->solid_map[0]) load_solid_map(a,car->solid_map);
+            if (car->paint[0]) load_default_paint(a,car->paint);
+        }
+        return enabled=nadditions!=0;
+    }
+    if (!scratch_profile()) fail("additions require guarded scratch BOOT_USERDATA=<BOOT_DIAG>.user");
+    if (legacy && *legacy && manifest && *manifest) fail("use either NFS_TEST_ADDCARS or NFS_TEST_CAR85");
+    if (manifest && *manifest) {
+        manifest_mode = 1;
+        FILE *f = fopen(manifest, "r");
+        if (!f) fail("cannot open additions manifest");
+        char line[PATH_MAX + 128];
+        while (fgets(line, sizeof line, f)) {
+            if (!strchr(line, '\n') && !feof(f)) fail("manifest line too long");
+            char *r = line; while (isspace((unsigned char)*r)) ++r;
+            if (!*r || *r == '#') continue;
+            // Exactly three tab-separated fields; paths can contain spaces.
+            char *d = strchr(r, '\t');
+            if (!d) fail("manifest requires NAME<TAB>DONOR<TAB>absolute converted directory");
+            *d++ = 0;
+            char *path = strchr(d, '\t');
+            if (!path) fail("manifest requires three fields");
+            *path++ = 0; path[strcspn(path, "\r\n")] = 0;
+            if (strchr(path, '\t') || nadditions == MAX_ADDITIONS) fail("invalid manifest or more than 76 additions");
+            Addition *a = &additions[nadditions];
+            folder(a->name, r); folder(a->donor_folder, d);
+            if (path[0] != '/' || !realpath(path, a->directory)) fail("converted directory must exist and be absolute");
+            const char *files[] = {"GEOMETRY.BIN", "TEXTURES.BIN"};
+            for (unsigned i = 0; i < 2; ++i) {
+                char file[PATH_MAX]; struct stat st;
+                if (snprintf(file, sizeof file, "%s/%s", a->directory, files[i]) >= (int)sizeof file ||
+                    stat(file, &st) || !S_ISREG(st.st_mode) || !st.st_size) fail("converted geometry/textures missing or empty");
+            }
+            for (unsigned i = 0; i < nadditions; ++i)
+                if (!strcmp(a->name, additions[i].name)) fail("duplicate manifest folder");
+            load_wheel_fit(a);
+            load_physics(a,NULL);
+            char paint_path[PATH_MAX];
+            if (snprintf(paint_path, sizeof paint_path, "%s/PAINT.BIN", a->directory) >= (int)sizeof paint_path)
+                fail("paint path too long");
+            load_default_paint(a, paint_path);
+            char solid_map[PATH_MAX]; struct stat map_stat;
+            if (snprintf(solid_map, sizeof solid_map, "%s/SOLIDMAP.BIN", a->directory) >= (int)sizeof solid_map)
+                fail("solid map path too long");
+            if (!stat(solid_map, &map_stat)) load_solid_map(a, solid_map);
+            else if (errno != ENOENT) fail("cannot stat solid map");
+            ++nadditions;
+        }
+        if (ferror(f)) fail("manifest read failed");
+        fclose(f);
+    } else {
+        Addition *a = &additions[nadditions++];
+        strcpy(a->name, "CAR85"); folder(a->donor_folder, legacy);
+    }
+    return enabled = nadditions != 0;
+}
+
+uint32_t car85_count(void) {
+    on(); unsigned count=nadditions?addition_id(nadditions-1)+1:TYPES;
+    return count;
+}
+
+void car85_vault_begin(uint32_t address) {
+    if (!on()) return;
+    car85_vault_unloaded(address); // address reuse is a new lifetime, never a cache hit
+    for (unsigned i = 0; i < sizeof vaults / sizeof vaults[0]; ++i)
+        if (!vaults[i].generation) {
+            vaults[i] = (VaultLife){address, ++next_generation, 0};
+            return;
+        }
+    fail("live vault capacity exhausted");
+}
+
+void f_0045C380(Cpu *c) {
+    car85_vault_unloaded(c->ecx); // before Deinitialize can release layouts/exports
+    f_0045C380_orig(c);
+}
+
+void f_0045C090(Cpu *c) {
+    car85_vault_unloaded(c->ecx); // Deinitialize releases .bin layouts before the destructor
+    f_0045C090_orig(c);
+}
+
+uint32_t car85_asset_name(uint32_t address) {
+    uint32_t table = M32(TABLE), count = car85_count();
+    if (!table || address - table >= count * STRIDE) {
+        static uint32_t empty;
+        if (!empty) empty = gstr("");
+        return empty;
+    }
+    if (on() && owned_table) {
+        for (unsigned i = 0; i < nadditions; ++i) {
+            uint32_t off = address - (owned_table + addition_id(i) * STRIDE);
+            if (off == 0 || off == 0x10) return additions[i].record + off;
+        }
+    }
+    return address;
+}
+
+static uint32_t parts_hash(const char *s) {
+    uint32_t h = 0xFFFFFFFFu;
+    while (*s) h = h * 33u + (unsigned char)*s++;
+    return h;
+}
+
+static Source *source(uint32_t cls, uint32_t key);
+
+// PC SearchForString 0056BB80: unsigned sorted {hash, packed-string pointer}
+// records at 0091CF80, count at 0091CF78. LoaderLanguage 0057E960 replaces
+// both; UnloaderLanguage 0056BD10 clears both and frees only its resource.
+// ASCII (<128) passes WideCharHistogram::UnpackString 0056BFC0 unchanged.
+static const char *manufacturer(unsigned id) {
+    static const char *names[] = {"", "BMW", "FORD", "SUBARU", "PORSCHE", "AUDI",
+        "MAZDA", "GENERAL_MOTORS", "DODGE", "TOYOTA", "MITSUBISHI", "MCLAREN", "MERCEDES",
+        "NISSAN", "LOTUS", "LAMBORGHINI", "RENAULT", "LEXUS", "PONTIAC", "CHEVROLET",
+        "VAUXHALL", "ASTONMARTIN", "VOLKSWAGEN", "FIAT", "CADILLAC", "CORVETTE",
+        "CHRYSLER", "ALFAROMEO", "KOENIGSEGG", "PLYMOUTH", "INFINITI", "JAGUAR",
+        "SHELBY", "PAGANI", "HONDA", "ACURA", "SEAT", "BUGATTI", "BUICK"};
+    return id < sizeof names / sizeof *names ? names[id] : "";
+}
+
+static unsigned menu_manufacturer(Addition *a, uint32_t donor_layout) {
+    // Frozen WO1 manifest folders, independent of handling/price donors. Retail
+    // IDs 1..25 retain their meaning; new private brands follow them.
+#ifndef NFS_PUBLIC
+#include "car85_brands_private.h"
+#else
+    static const struct { const char *folders; unsigned id; } brands[] = {{" ", 0}};   // the public build has no additions
+#endif
+    char token[20]; snprintf(token, sizeof token, " %s ", a->name);
+    for (unsigned i = 0; i < sizeof brands / sizeof *brands; ++i)
+        if (strstr(brands[i].folders, token)) return brands[i].id;
+    return M8(donor_layout + 0x40); // arbitrary legacy TEST manifest folder
+}
+
+void f_00581790_orig(Cpu *c);
+void f_00581790(Cpu *c) {
+    if (on() && manifest_mode) {
+        for (unsigned j = 0; j < nadditions; ++j) {
+            Addition *a = &additions[j];
+            if (M32(c->ecx + 4) != a->key) continue;
+            Source *fe = source(FRONTEND, a->fe);
+            if (!fe) break;
+            if (!a->brand_string)
+                a->brand_string = gstr(manufacturer(menu_manufacturer(a, M32(fe->ld + 0x1C))));
+            c->eax = a->brand_string;
+            c->esp += 4;
+            return;
+        }
+    }
+    f_00581790_orig(c);
+}
+
+static int language_compare(const void *x, const void *y) {
+    uint32_t a, b; memcpy(&a, x, 4); memcpy(&b, y, 4);
+    return (a > b) - (a < b);
+}
+
+static void register_names(void) {
+    static uint32_t owned, capacity;
+    if (!on() || !manifest_mode) return;
+    uint32_t table = M32(0x0091CF80u), n = M32(0x0091CF78u);
+    if (!table || !n || table == owned) return;
+    // Wait until every donor frontend exists; partial registration must not
+    // make the owned-table idempotence check suppress a later addition.
+    for (unsigned j = 0; j < nadditions; ++j)
+        if (!source(FRONTEND, additions[j].fe)) return;
+    if (n > 100000) fail("invalid language record count");
+    uint32_t bytes = (n + 2 * nadditions) * 8;
+    if (capacity < bytes) {
+        if (owned) gfree(owned);
+        owned = gmalloc(bytes); capacity = bytes;
+    }
+    memcpy(G + owned, G + table, n * 8);
+    for (unsigned j = 0; j < nadditions; ++j) {
+        Addition *a = &additions[j];
+        Source *fe = source(FRONTEND, a->fe);
+        const char *brand = manufacturer(menu_manufacturer(a, M32(fe->ld + 0x1C)));
+        if (!*brand) fail("donor has no stock manufacturer name");
+        char labels[2][96];
+        snprintf(labels[0], sizeof labels[0], "CARNAME_%s_%s", brand, a->name);
+        snprintf(labels[1], sizeof labels[1], "CAR_NAME_%s", a->name);
+        for (unsigned k = 0; k < 2; ++k) {
+            uint32_t hash = parts_hash(labels[k]);
+            for (uint32_t i = 0; i < n; ++i)
+                if (M32(owned + i * 8) == hash) fail("added name collides with language record");
+            M32(owned + n * 8) = hash;
+            M32(owned + n * 8 + 4) = a->string;
+            ++n;
+        }
+        if (diag_on) diag_event("addcars: names %s %s text=%s manufacturer=%s",
+            labels[0], labels[1], a->name, brand);
+    }
+    qsort(G + owned, n, 8, language_compare);
+    M32(0x0091CF80u) = owned; M32(0x0091CF78u) = n;
+}
+
+uint32_t extra_texture_add(Cpu *c, const uint8_t rec[124], const uint8_t pl[32],
+                           uint32_t fmt, uint32_t data, uint32_t size, int add);
+
+static void publish_logo(uint32_t texture, uint32_t hash) {
+    // InternalLoadTexturePackHeaderChunks 005078E0 / GetLoadedTexture 00502E80:
+    // a process-lifetime pack, with one sorted {hash, TextureInfo*} index row.
+    // Keep the port's already-full OtherEcstacyTextures array untouched.
+    uint32_t pack = gmalloc(0x20), header = gmalloc(0x80), index = gmalloc(8);
+    uint32_t name = gstr("ADDCARS_LOGOS");
+    M32(pack + 8) = name; M32(pack + 0xC) = name;
+    M32(pack + 0x10) = parts_hash("ADDCARS_LOGOS");
+    M32(pack + 0x14) = header; M32(pack + 0x18) = 1;
+    strcpy((char *)G + header + 4, "ADDCARS_LOGOS");
+    strcpy((char *)G + header + 0x20, "ADDCARS_LOGOS");
+    M32(header + 0x60) = M32(pack + 0x10); M32(header + 0x6C) = 1;
+    M32(header + 0x70) = pack; M32(header + 0x74) = index;
+    M32(index) = hash; M32(index + 4) = texture;
+    M32(texture + 0x68) = pack; M32(texture + 0x6C) = texture;
+    uint32_t loaded = 0x0091A0DCu + (hash & 0x1FFF);
+    if (M8(loaded) == 255) fail("logo loaded-texture bucket saturated");
+    ++M8(loaded); ++M32(0x0091A0D8u);
+    uint32_t head = 0x009173F8u, tail = M32(head + 4);
+    M32(pack) = head; M32(pack + 4) = tail;
+    M32(tail) = pack; M32(head + 4) = pack;
+}
+
+// UIQRCarSelect::RefreshHeader 007ADA50 displays GetLogoHash, not a text
+// label. Register a simple white nameplate under its ordinary secondary hash.
+// Same TextureInfo template/upload contract as padprompts.c; pixels stay in memory.
+static void register_logos(Cpu *c) {
+    static uint32_t brand_logos[39];
+    if (!on() || !manifest_mode) return;
+    Cpu saved = *c;
+    for (unsigned k = 0; k < 2 * nadditions; ++k) {
+        unsigned j = k / 2;
+        Addition *a = &additions[j];
+        Source *fe = source(FRONTEND, a->fe);
+        if (!fe) continue;
+        unsigned brand = menu_manufacturer(a, M32(fe->ld + 0x1C));
+        if ((k & 1) && (brand <= 25 || brand >= 39)) continue; // retail artwork
+        uint32_t *texture = (k & 1) ? &brand_logos[brand] : &a->logo;
+        if (*texture) continue;
+        const char *label = (k & 1) ? manufacturer(brand) : a->name;
+        enum { W = 512, H = 128, SIZE = W * H * 4 };
+        uint32_t data = gmalloc(SIZE);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef g = CGBitmapContextCreate(G + data, W, H, 8, W * 4, cs,
+            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        CGColorSpaceRelease(cs);
+        if (!g) { gfree(data); continue; }
+        CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontEmphasizedSystem, 96, NULL);
+        CFStringRef s = CFStringCreateWithCString(NULL, label, kCFStringEncodingASCII);
+        CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
+        const void *keys[] = {kCTFontAttributeName, kCTForegroundColorAttributeName}, *values[] = {font, white};
+        CFDictionaryRef attr = CFDictionaryCreate(NULL, keys, values, 2,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFAttributedStringRef text = CFAttributedStringCreate(NULL, s, attr);
+        CTLineRef line = CTLineCreateWithAttributedString(text);
+        CGRect b = CTLineGetImageBounds(line, g);
+        double scale = b.size.width > W - 16 ? (W - 16) / b.size.width : 1;
+        CGContextTranslateCTM(g, W / 2.0, H / 2.0);
+        CGContextScaleCTM(g, scale, scale);
+        CGContextSetTextPosition(g, -b.origin.x - b.size.width / 2, -b.origin.y - b.size.height / 2);
+        CTLineDraw(line, g); CGContextFlush(g);
+        CFRelease(line); CFRelease(text); CFRelease(attr); CGColorRelease(white); CFRelease(s); CFRelease(font);
+        CGContextRelease(g);
+        // White straight-alpha pixels (the draw was premultiplied).
+        for (unsigned i = 0; i < W * H; ++i)
+            if (M8(data + i * 4 + 3)) memset(G + data + i * 4, 255, 3);
+#include "gen/padprompts_l1.inc"
+        uint8_t rec[124], pl[32] = {[8] = 1};
+        memcpy(rec, l1, sizeof rec);
+        char name[64]; snprintf(name, sizeof name, "%s_%s",
+            (k & 1) ? "CARSELECT_MANUFACTURER" : "SECONDARY_LOGO", label);
+        uint32_t hash = parts_hash(name); memcpy(rec + 0x24, &hash, 4);
+        snprintf((char *)rec + 0x0C, 24, "%s", name);
+        rec[0x44] = 0; rec[0x45] = 2; rec[0x46] = H; rec[0x47] = 0;
+        rec[0x48] = 9; rec[0x49] = 7; rec[0x4A] = 0x20;
+        *texture = extra_texture_add(c, rec, pl, 21, data, SIZE, 0);
+        if (*texture) publish_logo(*texture, hash);
+        if (diag_on) diag_event("addcars: logo %s texture=%08X private pack (extra slots unchanged=%u)",
+            name, *texture, M32(0x00915FA8u));
+    }
+    *c = saved;
+}
+
+// Integration-test navigation only: once the scratch career reaches free roam,
+// queue the retail Lua-bound JumpToCarLot transition (00605250 -> EQuitToFE,
+// context 5, Car_Select.fng). The ordinary lot builds its own stock filter.
+static void car_lot_probe(Cpu *c, uint32_t row) {
+    static int queued;
+    if (queued || !diag_on || !on() || !manifest_mode ||
+        !getenv("NFS_TEST_ADDCARS_CARLOT")) return;
+    uint32_t db = M32(0x0091CF90u);
+    if (!db || M32(0x00925E90u) != 6 || !(M32(db + 0x12C) & 1)) return;
+    if (!row) {
+        uint32_t profile = M32(db + 0x10);
+        if (!profile) return;
+        for (unsigned i = 0; i < 200; ++i) {
+            uint32_t candidate = profile + 0x414 + i * 20;
+            if (M32(candidate) != 0xFFFFFFFFu && (M32(candidate + 0xC) & 2)) { row = candidate; break; }
+        }
+    }
+    if (!row || !(M32(row + 0xC) & 2)) return;
+    // Purchase proof fixture only: the ordinary lot still checks affordability
+    // and spends its actual price. Never used without the guarded lot driver.
+    if (getenv("NFS_TEST_ADDCARS_PURCHASE")) {
+        uint32_t profile = M32(db + 0x10);
+        if (!profile) return;
+        M32(profile + 0xB4) = 200000; // GetCash 0050E300: CareerSettings+0xC
+        diag_event("addcars: purchase fixture cash=200000 profile=%08X", profile);
+    }
+    queued = 1;
+    Cpu saved = *c;
+    call_guest(c, 0x00605250u, 0, NULL);
+    *c = saved;
+    diag_event("addcars: test queued stock Game_JumpToCarLot from running scratch career");
+}
+
+void f_00756A90(Cpu *c) {
+    uint32_t chunk = M32(c->esp + 4);
+    f_00756A90_orig(c);
+    if (M32(chunk) != 0x34600u) return;
+    uint32_t src = M32(TABLE);
+    if (!on()) {
+        if (diag_on) diag_event("car85: types=84 switch=off table=%08X", src);
+        return;
+    }
+    // Preflight the whole manifest before publishing the new table.
+    for (unsigned j = 0; j < nadditions; ++j) {
+        Addition *a = &additions[j]; uint32_t found = TYPES;
+        for (uint32_t i = 0; i < TYPES; ++i) {
+            const char *name = (char *)G + src + i * STRIDE;
+            if (!strncasecmp(name, a->name, 16)) fail("addition collides with original folder");
+            if (!strncasecmp(name, a->donor_folder, 16)) found = i;
+        }
+        if (found == TYPES) fail("donor absent from original 84 types");
+        a->type = M32(src + found * STRIDE + 0x90);
+        a->hash = M32(src + found * STRIDE + 0x50);
+        a->record = found; // index until the owned table exists
+        for (unsigned i = 0; i < j; ++i)
+            if (parts_hash(a->name) == parts_hash(additions[i].name)) fail("addition part hash collision");
+        for (unsigned i = 0; i < TYPES; ++i)
+            if (parts_hash(a->name) == M32(src + i * STRIDE + 0x50)) fail("addition part hash collides with original");
+    }
+    if (!owned_table) owned_table = gmalloc(car85_count() * STRIDE);
+    memset(G + owned_table, 0, car85_count() * STRIDE);
+    for (unsigned i=TYPES;i<car85_count();++i) M32(owned_table+i*STRIDE+0x90)=0xFFFFFFFFu;
+    memcpy(G + owned_table, G + src, TYPES * STRIDE);
+    for (unsigned j = 0; j < nadditions; ++j) {
+        Addition *a = &additions[j];
+        a->record = owned_table + a->record * STRIDE;
+        uint32_t extra = owned_table + addition_id(j) * STRIDE;
+        memcpy(G + extra, G + a->record, STRIDE);
+        if (a->paint_key) M32(extra + 0xCC) = a->paint_key;
+        if (diag_on) diag_event("addcars: paint name=%s source=%08X selected=%08X donor=%08X",
+            a->name, a->paint_source, M32(extra + 0xCC), M32(a->record + 0xCC));
+        memset(G + extra, 0, 32);
+        strcpy((char *)G + extra, a->name); strcpy((char *)G + extra + 0x10, a->name);
+        if (manifest_mode) {
+            memset(G + extra + 0x20, 0, 0x30);
+            snprintf((char *)G + extra + 0x20, 0x30, "CARS\\%s\\GEOMETRY.BIN", a->name);
+        }
+        M32(extra + 0x50) = parts_hash(a->name);
+        M32(extra + 0x90) = addition_id(j);
+    }
+    M32(TABLE) = owned_table;
+    Cpu saved = *c;
+    for (unsigned j = 0; j < nadditions; ++j) {
+        uint32_t hash = parts_hash(additions[j].name);
+        uint32_t type = call_guest(c, 0x007398D0, 1, &hash);
+        if (type != addition_id(j)) fail("GetCarType did not return manifest type");
+        if (diag_on) diag_event("addcars: name=%s type=%u donor=%s donor_type=%u types=%u originals_preserved=84",
+            additions[j].name, type, additions[j].donor_folder, additions[j].type, car85_count());
+    }
+    *c = saved;
+
+}
+
+// The part namespace is separate from car type IDs. Keep every donor part and
+// flattened index intact; each addition uses its donor's slot overrides.
+void f_007399F0(Cpu *c) {
+    uint32_t at = c->esp + 8, type = M32(at);
+    if (!M32(TABLE) || type >= car85_count() || (type >= TYPES && !addition_for_type(type))) {
+        static uint32_t empty_slots;
+        if (!empty_slots) empty_slots = gmalloc(8);
+        c->eax = empty_slots; c->esp += 4; return;
+    }
+    if (on() && type >= TYPES) M32(at) = addition_for_type(type)->type;
+    f_007399F0_orig(c);
+    M32(at) = type;
+    car_lot_probe(c, 0);
+}
+void f_00739870(Cpu *c) {
+    uint32_t at = c->esp + 4, hash = M32(at);
+    if (on()) for (unsigned i = 0; i < nadditions; ++i)
+        if (hash == parts_hash(additions[i].name)) { M32(at) = additions[i].hash; break; }
+    f_00739870_orig(c);
+    M32(at) = hash;
+    car_lot_probe(c, 0);
+}
+
+// PVehicle factory 00689820 looks up collision bounds by MODEL's StringKey
+// hash (+18 in pvehicle layout), independently of rendering and part hashes.
+void f_00681340(Cpu *c) {
+    uint32_t at = c->esp + 4, key = M32(at);
+    if (on()) for (unsigned i = 0; i < nadditions; ++i) {
+        Addition *a = additions + i;
+        if (!a->model_key || key != a->model_key) continue;
+        if (a->collision_bytes) {
+            if (!a->collision) {
+                uint32_t p = a->collision = gmalloc(a->collision_size);
+                memcpy(G + p, a->collision_bytes, a->collision_size);
+                if (M32(p) != a->model_key) fail("collision model identity mismatch");
+                // Collection relocation contract, FUN_0066A7D0: own cloud
+                // point pointers and each bound's collection back-pointer.
+                uint32_t n = M32(p + 4), clouds = p + 16 + n * 48, row = clouds + 16;
+                for (unsigned k = 0; k < M32(clouds); ++k) {
+                    M32(row + 12) = row + 16; row += 16 + M32(row) * 16;
+                }
+                for (unsigned k = 0; k < n; ++k) {
+                    uint32_t bound = p + 16 + k * 48;
+                    // Imported bounds can leave this cache empty. OnLoaded
+                    // copies the root radius into CarRenderInfo (+17A8), so
+                    // initialize a conservative box sphere before publishing.
+                    if (MF32(bound + 32) == 0.0f) {
+                        float x = (int16_t)M16(bound + 16) * 0.001f;
+                        float y = (int16_t)M16(bound + 18) * 0.001f;
+                        float z = (int16_t)M16(bound + 20) * 0.001f;
+                        MF32(bound + 32) = sqrtf(x*x + y*y + z*z);
+                    }
+                    M32(bound + 44) = p;
+                }
+                M32(p + 8) = 1;
+            }
+            c->eax = a->collision; c->esp += 8; return;
+        }
+        M32(at) = a->donor_model; break;
+    }
+    f_00681340_orig(c);
+    M32(at) = key;
+}
+
+// A donor CarPart is shared, while its solid belongs to a specific RideInfo.
+// Scope only model resolution; part IDs, serialization and physics stay retail.
+// Boot registration sets nadditions before model loading. With no additions,
+// each wrapper tail-delegates before configuration, guest reads or TLS access.
+// Keep the optional bodies out of line so call merging cannot impose their
+// register-save frame on the all-MW path.
+static Addition *solid_context(uint32_t ride) {
+    return on() && ride ? addition_for_type(M32(ride)) : NULL;
+}
+static uint32_t private_solid_hash(Addition *a, uint32_t hash) {
+    if (!a || !a->solid_count || !hash) return hash;
+    unsigned lo=0,hi=a->solid_count;
+    while (lo<hi) {
+        unsigned m=lo+(hi-lo)/2; uint32_t key=a->solid_map[2*m];
+        if (key<hash) lo=m+1; else hi=m;
+    }
+    return lo<a->solid_count && a->solid_map[2*lo]==hash ? a->solid_map[2*lo+1] : hash;
+}
+static __attribute__((noinline)) void model_00751540(Cpu *c) {
+    f_00751540_orig(c);
+    c->eax=private_solid_hash(model_namespace,c->eax);
+}
+void f_00751540(Cpu *c) {
+    if (!nadditions) { f_00751540_orig(c); return; }
+    model_00751540(c);
+}
+// A diagnostic query outside model loading needs the same RideInfo namespace.
+uint32_t car85_diag_model_hash(Cpu *c, uint32_t ride, uint32_t part, int lod) {
+    Addition *saved = model_namespace;
+    model_namespace = nadditions ? solid_context(ride) : NULL;
+    const uint32_t args[] = {0, (uint32_t)lod};
+    c->ecx = part;
+    uint32_t hash = call_guest(c, 0x00751540u, 2, args);
+    model_namespace = saved;
+    return hash;
+}
+// GetUsedCarTextureInfo builds lamp/skin image names from the donor record
+// and donor CarParts. The texture cache is keyed by global hash alone, so a
+// resident donor image would win; map each built hash to the pack's own image.
+static __attribute__((noinline)) void model_00751860(Cpu *c) {
+    uint32_t info=M32(c->esp+4); Addition *a=solid_context(M32(c->esp+8));
+    f_00751860_orig(c);
+    if (a) for (uint32_t at=info;at<info+0xE0*4;at+=4) M32(at)=private_solid_hash(a,M32(at));
+}
+void f_00751860(Cpu *c) {
+    if (!nadditions) { f_00751860_orig(c); return; }
+    model_00751860(c);
+}
+static __attribute__((noinline)) void model_00752940(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->esp+4));
+    f_00752940_orig(c); model_namespace=saved;
+}
+void f_00752940(Cpu *c) {
+    if (!nadditions) { f_00752940_orig(c); return; }
+    model_00752940(c);
+}
+static __attribute__((noinline)) void model_00752B60(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->ecx+0xC));
+    f_00752B60_orig(c); model_namespace=saved;
+}
+void f_00752B60(Cpu *c) {
+    if (!nadditions) { f_00752B60_orig(c); return; }
+    model_00752B60(c);
+}
+static __attribute__((noinline)) void model_00755800(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->ecx+0x84));
+    f_00755800_orig(c); model_namespace=saved;
+}
+void f_00755800(Cpu *c) {
+    if (!nadditions) { f_00755800_orig(c); return; }
+    model_00755800(c);
+}
+static __attribute__((noinline)) void model_0075F5D0(Cpu *c) {
+    Addition *saved=model_namespace;
+    model_namespace=solid_context(M32(c->esp+4));
+    f_0075F5D0_orig(c); model_namespace=saved;
+}
+void f_0075F5D0(Cpu *c) {
+    if (!nadditions) { f_0075F5D0_orig(c); return; }
+    model_0075F5D0(c);
+}
+
+void car85_collection_seen(uint32_t ld, uint32_t vault) {
+    if (!on() || inserting) return;
+    uint32_t cls = M32(ld + 4);
+    if (cls != PVEHICLE && cls != FRONTEND && cls != ECAR &&
+        cls != 0xAFA210F0u && cls != 0xBD38D1CAu && cls != 0x93C171E4u) return;
+    VaultLife *v = life(vault);
+    if (!v || v->ready) return; // dynamic/non-vault collections are not load descriptors
+    if (nsources == sizeof sources / sizeof sources[0]) fail("source collection capacity exhausted");
+    // Vault::Initialize releases dependency zero (.vlt) after constructing its
+    // exports. The descriptor/types/entries are temporary; their relocated data
+    // pointers refer to the vault's persistent .bin dependency. Own metadata now.
+    uint32_t bytes = 0x20 + 4 * M32(ld + 0x18) + 12 * M32(ld + 0x14);
+    uint32_t copy = gmalloc(bytes);
+    memcpy(G + copy, G + ld, bytes);
+    for (unsigned i = 0; i < nsources; ++i)
+        if (sources[i].vault == vault && M32(sources[i].ld) == M32(ld) && M32(sources[i].ld + 4) == cls) {
+            gfree(sources[i].ld);
+            sources[i] = (Source){copy, vault, ld, v->generation};
+            return;
+        }
+    sources[nsources++] = (Source){copy, vault, ld, v->generation};
+}
+
+static Source *source(uint32_t cls, uint32_t key) {
+    for (unsigned i = nsources; i-- > 0; ) {
+        VaultLife *v = life(sources[i].vault);
+        if (v && v->generation == sources[i].generation && v->ready &&
+            M32(sources[i].ld) == key && M32(sources[i].ld + 4) == cls) return &sources[i];
+    }
+    return NULL;
+}
+
+// Find an explicit attribute, following the donor's existing parent chain.
+static uint32_t entry(uint32_t ld, uint32_t key) {
+    for (unsigned depth = 0; ld && depth < 32; ++depth) {
+        uint32_t e = ld + 0x20 + M32(ld + 0x18) * 4;
+        for (uint32_t i = 0; i < M32(ld + 0x14); ++i, e += 12)
+            if (M32(e) == key) return e;
+        Source *p = source(M32(ld + 4), M32(ld + 8));
+        ld = p ? p->ld : 0;
+    }
+    return 0;
+}
+
+static uint32_t attrib_alloc(Cpu *c, uint32_t bytes) {
+    uint32_t obj = M32(0x008F7EA8u), args[2] = {bytes, 0};
+    c->ecx = obj;
+    uint32_t p = call_guest(c, M32(M32(obj)), 2, args);
+    if (!p) fail("Attrib allocation failed");
+    return p;
+}
+
+static int has_addition(uint32_t vault, uint32_t cls, uint32_t key) {
+    VaultLife *v = life(vault);
+    if (!v || !v->ready) return 0;
+    uint32_t n = M32(vault + 0x34), exp = M32(vault + 0x2C), keys = M32(vault + 0x30);
+    for (uint32_t i = 0; i < n; ++i) if (M32(keys + 4 * i) == key) {
+        uint32_t col = M32(exp + 16 * i), cclass = M32(col + 0x14);
+        if (M32(cclass) == cls) return 1;
+    }
+    return 0;
+}
+
+static void apply_wheel_fit(uint32_t src, uint32_t ld, uint32_t lay, Addition *a) {
+    if (!a->wheel_fit) return;
+    // MW ecar layout, metres: FL/FR/RR/RL {longitudinal,lateral,up,radius}.
+    // Linked physical dimensions are owned separately by WFT2 below.
+    memcpy(G + lay + 0x10, a->wheel_offsets, 64);
+    memcpy(G + lay + 0xDC, a->wheel_widths, 16);
+    memcpy(G + lay + 0x116, a->wheel_front, 6);
+    memcpy(G + lay + 0x108, a->wheel_rear, 6);
+    // FECompressions is an inherited, non-layout float[2]. Own both its entry
+    // and its array; writing the pointed-to donor array would alter stock cars.
+    uint32_t old = entry(src, 0x8D5BEB72u);
+    if (!old || !(M8(old + 10) & 2) || (M8(old + 10) & 0x20))
+        fail("unexpected donor FECompressions encoding");
+    uint32_t nt = M32(ld + 0x18), ne = M32(ld + 0x14);
+    uint32_t own = ld + 0x20 + nt * 4, match = 0;
+    for (uint32_t i = 0; i < ne; ++i)
+        if (M32(own + i * 12) == 0x8D5BEB72u) match = own + i * 12;
+    if (!match) {
+        memmove(G + own + 4, G + own, ne * 12);
+        M32(own) = 0x3C16EC5Eu; // EA::Reflection::Float
+        M32(ld + 0x18) = nt + 1;
+        match = own + 4 + ne * 12;
+        memcpy(G + match, G + old, 12);
+        M16(match + 8) = (uint16_t)nt;
+        M32(ld + 0x14) = ne + 1; M32(ld + 0xC) += 4;
+    }
+    uint32_t array = gmalloc(16);
+    M16(array) = 2; M16(array + 2) = 2; M16(array + 4) = 4; M16(array + 6) = 0;
+    memcpy(G + array + 8, a->wheel_compressions, 8);
+    M32(match + 4) = array;
+    if (diag_on) diag_event("addcars: wheel geometry name=%s front=(%.4f,%.4f,%.4f,r=%.4f) rear=(%.4f,%.4f,%.4f,r=%.4f) FE=(%.4f,%.4f)",
+        a->name, a->wheel_offsets[0], a->wheel_offsets[1], a->wheel_offsets[2], a->wheel_offsets[3],
+        a->wheel_offsets[8], a->wheel_offsets[9], a->wheel_offsets[10], a->wheel_offsets[11],
+        a->wheel_compressions[0], a->wheel_compressions[1]);
+}
+
+// Add explicit metadata using the clone's spare descriptor capacity. Values
+// and RefSpec arrays always get new storage; retail data remains immutable.
+static uint32_t own_fit_entry(uint32_t src, uint32_t ld, uint32_t key) {
+    uint32_t old = entry(src, key);
+    if (!old) fail("fit donor attribute missing");
+    uint32_t nt = M32(ld + 0x18), ne = M32(ld + 0x14);
+    uint32_t begin = ld + 0x20 + 4 * nt;
+    for (uint32_t i = 0; i < ne; ++i)
+        if (M32(begin + 12 * i) == key) return begin + 12 * i;
+    memmove(G + begin + 4, G + begin, 12 * ne);
+    M32(begin) = REFSPEC;
+    uint32_t match = begin + 4 + 12 * ne;
+    memcpy(G + match, G + old, 12);
+    M16(match + 8) = (uint16_t)nt;
+    M32(ld + 0x18) = nt + 1; M32(ld + 0x14) = ne + 1;
+    M32(ld + 0xC) += 4;
+    return match;
+}
+
+static void append_collection_as(Cpu *, Source *, uint32_t, int, Addition *, uint32_t, unsigned);
+
+static void apply_linked_fit(Cpu *c, uint32_t src, uint32_t ld, Addition *a) {
+    if (!a->render_fit) return;
+    static const uint32_t links[] = {0xAFA210F0u, 0xBD38D1CAu, 0x0C2DA793u,
+        0xCCF03CB3u, 0xD74C1435u, 0x585517F3u, 0x4B675DC8u};
+    uint32_t cls = M32(src + 4);
+    unsigned first = cls == PVEHICLE ? 0 : 2, end = cls == PVEHICLE ? 2 : 7;
+    for (unsigned i = first; i < end; ++i) {
+        uint32_t old = entry(src, links[i]);
+        if (!old || (M8(old + 10) & 0x20)) fail("fit donor reference encoding");
+        int array = (M8(old + 10) & 2) != 0;
+        uint32_t data = M32(old + 4), count = array ? M16(data + 2) : 1;
+        if (!count || count > 3 || (array && (M16(data) < count || M16(data + 4) != 12)))
+            fail("fit donor reference count");
+        uint32_t copy = gmalloc((array ? 8 : 0) + count * 12);
+        memcpy(G + copy, G + data, (array ? 8 : 0) + count * 12);
+        uint32_t refs = copy + (array ? 8 : 0);
+        for (unsigned tier = 0; tier < count; ++tier) {
+            uint32_t ref = refs + tier * 12;
+            Source *donor = source(M32(ref), M32(ref + 4));
+            if (!donor) fail("fit linked donor collection missing");
+            char name[96];
+            snprintf(name, sizeof name, "nfsad_%s_fit_%u_%u", a->name, i, tier);
+            uint32_t text = gstr(name), key = call_guest(c, 0x004549B0, 1, &text);
+            if (!key || source(M32(ref), key)) fail("fit linked identity collision");
+            append_collection_as(c, donor, i == 0 ? 0x74 : i == 1 ? 0x50 : 0x6F, 0, a, key, i + 1);
+            M32(ref + 4) = key; M32(ref + 8) = 0;
+        }
+        uint32_t match = own_fit_entry(src, ld, links[i]);
+        M32(match + 4) = copy;
+    }
+}
+
+static void apply_render_fit(uint32_t lay, Addition *a, unsigned kind) {
+    if (!a->render_fit) return;
+    if (kind == 0) {
+        memcpy(G + lay + 0xFC, a->render_values, 4);
+        memcpy(G + lay + 0xA0, a->render_values + 1, 12);
+        memcpy(G + lay + 0xB8, a->render_values + 4, 12);
+        memcpy(G + lay + 0xAC, a->render_values + 7, 12);
+        memcpy(G + lay + 0xF4, a->render_values + 10, 4);
+        M8(lay + 0x11C) = (uint8_t)a->spoke_count;
+    } else if (kind == 1) {
+        memcpy(G + lay + 0x18, a->chassis_values, 8);
+        memcpy(G + lay + 0x10, a->chassis_values + 2, 8);
+        memcpy(G + lay + 0x20, a->chassis_values + 4, 8);
+        memcpy(G + lay + 0x54, a->chassis_values + 6, 4);
+        memcpy(G + lay + 0x64, a->chassis_values + 7, 4);
+    } else if (kind == 2) {
+        memcpy(G + lay + 0x30, a->tire_values, 8);
+        memcpy(G + lay + 0x40, a->tire_values + 2, 8);
+        memcpy(G + lay + 0x28, a->tire_values + 4, 8);
+    } else {
+        static const unsigned offsets[] = {0x40, 0x30, 0x50, 0x20};
+        for (unsigned f = 0; f < 4; ++f) {
+            uint32_t array = lay + offsets[f];
+            if (M16(array) < 2 || M16(array + 2) != 2 || M16(array + 4) != 4)
+                fail("fit camera layout array shape");
+            memcpy(G + array + 8, a->camera_values[kind - 3] + 2 * f, 8);
+        }
+    }
+}
+
+static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a, uint32_t key, unsigned fit_kind) {
+    VaultLife *v = life(s->vault);
+    if (!v || !v->ready || v->generation != s->generation) return;
+    uint32_t src = s->ld, vault = s->vault, cls = M32(src + 4);
+    if (has_addition(vault, cls, key)) return;
+    // Own the descriptor and layout; shared pointed-to attributes stay in the
+    // same long-lived vault as the donor; body values can be overridden below.
+    uint32_t nt = M32(src + 0x18), ne = M32(src + 0x14);
+    uint32_t bytes = 0x20 + 4 * nt + 12 * ne;
+    uint32_t ld = gmalloc(bytes + 128), lay = gmalloc(layout_size);
+    memcpy(G + ld, G + src, bytes);
+    memcpy(G + lay, G + M32(src + 0x1C), layout_size);
+    M32(ld) = key; M32(ld + 0x1C) = lay;
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    if (vehicle && cls == PVEHICLE) {
+        car_physics_apply(G + lay,layout_size,&a->physics);
+        a->contact_vault=vault; a->contact_generation=v->generation;
+    }
+#endif
+    if (cls == ECAR) apply_wheel_fit(src, ld, lay, a);
+    if (fit_kind || cls == ECAR) apply_render_fit(lay, a, fit_kind);
+    if (manifest_mode && cls == FRONTEND) {
+        Source *menu = source(FRONTEND, a->menu_fe);
+        if (!menu) fail("price/unlock donor frontend missing");
+        uint32_t policy = M32(menu->ld + 0x1C);
+        M32(lay + 0x38) = M32(policy + 0x38);
+        M32(lay + 0x4C) = M32(policy + 0x4C);
+        M8(lay + 0x58) = M8(policy + 0x58);
+        M8(lay + 0x59) = M8(policy + 0x59);
+        if (!a->string) a->string = gstr(a->name);
+        M32(lay + 0x18) = a->string; // frontend NameId, GetNameHash 00591160
+        M8(lay + 0x40) = menu_manufacturer(a, lay);
+        // Menu policy follows the explicit price donor, independent of handling.
+        if (diag_on) diag_event("addcars: menu name=%s category=%u available=%u price=%u bin=%u manufacturer=%s",
+            a->name, M32(lay + 0x38), M8(lay + 0x58), M32(lay + 0x4C), M8(lay + 0x59),
+            manufacturer(M8(lay + 0x40)));
+    }
+    if (vehicle) {
+        // Preserve all StringKey hashes, generated by the game's constructor.
+        if (!a->string) a->string = gstr(a->name);
+        c->ecx = lay + 0x10;
+        call_guest(c, 0x00453760, 1, &a->string);
+        a->model_key = M32(lay + 0x18);
+        uint32_t old = entry(src, FRONTEND);
+        if (!old || (M8(old + 10) & 0x22)) fail("unexpected donor frontend RefSpec encoding");
+        uint32_t ref = gmalloc(12);
+        memcpy(G + ref, G + M32(old + 4), 12);
+        M32(ref + 4) = a->key; M32(ref + 8) = 0; // RefSpec {class,key,cached collection}
+        uint32_t own = ld + 0x20 + 4 * nt, match = 0;
+        for (uint32_t i = 0; i < ne; ++i) if (M32(own + 12 * i) == FRONTEND) match = own + 12 * i;
+        if (!match) {
+            // Add a RefSpec type and an explicit override if it was inherited.
+            memmove(G + own + 4, G + own, 12 * ne);
+            M32(own) = REFSPEC;
+            M32(ld + 0x18) = nt + 1;
+            match = own + 4 + 12 * ne;
+            memcpy(G + match, G + old, 12);
+            M16(match + 8) = (uint16_t)nt;
+            M32(ld + 0x14) = ne + 1;
+            M32(ld + 0xC) += 4;
+        }
+        M32(match + 4) = ref;
+    }
+    if (cls == PVEHICLE || cls == ECAR) apply_linked_fit(c, src, ld, a);
+    uint32_t tt = M32(vault + 4), tidx = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < M32(tt + 8); ++i)
+        if (M32(M32(tt) + 8 * i) == 0x8E112EB7u) tidx = i;
+    if (tidx == 0xFFFFFFFFu) fail("vault has no CollectionLoadData type");
+    uint32_t n = M32(vault + 0x34), nd = M32(vault + 0x14);
+    uint32_t oldblk = M32(vault + 0xC), oldkeys = M32(vault + 0x10);
+    uint32_t blk = attrib_alloc(c, (nd + n + 1) * 16), keys = attrib_alloc(c, (nd + n + 1) * 4);
+    memcpy(G + blk, G + oldblk, (nd + n) * 16);
+    memcpy(G + keys, G + oldkeys, (nd + n) * 4);
+    M32(vault + 0xC) = blk; M32(vault + 0x2C) = blk + nd * 16;
+    M32(vault + 0x10) = keys; M32(vault + 0x30) = keys + nd * 4;
+    uint32_t coll = attrib_alloc(c, 0x2C), args[2] = {ld, vault};
+    c->ecx = coll;
+    inserting = 1;
+    call_guest(c, 0x00457F90, 2, args);
+    inserting = 0;
+    uint32_t e = blk + (nd + n) * 16;
+    M32(e) = coll; M32(e + 4) = 0; M32(e + 8) = tidx; M32(e + 12) = 0;
+    M32(keys + (nd + n) * 4) = key;
+    M32(vault + 0x34) = n + 1;
+    if (diag_on) diag_event("car85: collection class=%08X donor=%08X new=%08X vault=%08X generation=%llu exports=%u->%u",
+                            cls, M32(src), key, vault, (unsigned long long)v->generation, n, n + 1);
+}
+
+static void append_collection(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a) {
+    append_collection_as(c, s, layout_size, vehicle, a, a->key, 0);
+}
+
+void f_00739B40(Cpu *c) {
+    unsigned slot = M32(c->esp + 4);
+    Addition *a = nadditions ? addition_for_type(M32(c->ecx)) : NULL;
+    if (a && a->render_fit && (slot == 0x1C || slot == 0x2B)) {
+        // The ordinary race policy forces C for the cabin/driver when the
+        // body starts at B. Imported C interiors are opaque distant shells.
+        // Allow the authored cabin matching the body LOD, in FE and race.
+        M32(M32(c->esp + 8)) = 0;
+        M32(M32(c->esp + 12)) = slot == 0x2B ? 2 : 3;
+        c->eax = 1; c->esp += 20;
+        return;
+    }
+    f_00739B40_orig(c);
+}
+
+void f_00750B20(Cpu *c) {
+    uint32_t self = c->ecx, render = M32(c->esp + 4);
+    Addition *a = render && nadditions ? addition_for_type(M32(M32(render + 0x84))) : NULL;
+    f_00750B20_orig(c);
+    // The retail rim CarPart carries the donor's spoke count and wins over
+    // ecar in OnLoaded. The imported stock rim needs its own blur period.
+    if (a && a->render_fit) {
+        int spokes = (int8_t)a->spoke_count;
+        if (spokes < 0) spokes = -spokes;
+        if (spokes) {
+            float period = (360.0f / (2.0f * spokes) - 1.0f) * 0.017453f;
+            memcpy(G + self + 0x3B8, &period, 4);
+        }
+    }
+}
+
+void car85_vault_loaded(Cpu *c, uint32_t vault) {
+    if (!on() || !vault) return;
+    VaultLife *v = life(vault);
+    if (!v) return; // retired generation: do not read even the vault header
+    int relevant = 0;
+    for (unsigned i = 0; i < nsources; ++i) relevant |= sources[i].generation == v->generation;
+    if (!relevant) { car85_vault_unloaded(vault); return; }
+    v->ready = 1;
+    Cpu saved = *c;
+    // MODEL is a StringKey at layout+10, string pointer at +1C. Do not
+    // assume the pvehicle key equals the lowercase folder's Attrib hash.
+    for (unsigned j = 0; j < nadditions; ++j) {
+        Addition *a = &additions[j];
+        if (!a->string) a->string = gstr(a->name);
+        uint32_t identity = call_guest(c, 0x004549B0, 1, &a->string);
+        if (a->wheel_fit == 1) {
+            uint32_t donor = gstr(a->donor_folder);
+            if (a->wheel_key != identity || a->wheel_donor != call_guest(c, 0x004549B0, 1, &donor))
+                fail("wheel geometry name/donor mismatch");
+            a->wheel_fit = 2;
+        }
+        a->key = identity;
+        if (!a->key) fail("zero addition Attrib key");
+        for (unsigned i = 0; i < j; ++i) if (a->key == additions[i].key) fail("addition Attrib key collision");
+        if (source(PVEHICLE, a->key) || source(FRONTEND, a->key) || source(ECAR, a->key))
+            fail("addition Attrib key collides with original collection");
+        Source *pv = NULL, *price = NULL;
+        // WO1 freezes MUSTANGGT's ordinary lot policy for bonus CAMARO clones.
+        const char *price_folder = !strcmp(a->donor_folder, "CAMARO") ? "MUSTANGGT" : a->donor_folder;
+        uint32_t donor_name = gstr(a->donor_folder), price_name = gstr(price_folder);
+        uint32_t donor_key = call_guest(c, 0x004549B0, 1, &donor_name);
+        uint32_t price_key = call_guest(c, 0x004549B0, 1, &price_name);
+        unsigned donor_matches = 0, price_matches = 0;
+        for (unsigned i = 0; i < nsources; ++i) {
+            VaultLife *owner = life(sources[i].vault);
+            if (!owner || !owner->ready || owner->generation != sources[i].generation) continue;
+            uint32_t ld = sources[i].ld, lay = M32(ld + 0x1C);
+            if (M32(ld + 4) != PVEHICLE || !lay || !M32(lay + 0x1C)) continue;
+            const char *model = (char *)G + M32(lay + 0x1C);
+            if (!strcasecmp(model, price_folder)) {
+                ++price_matches;
+                if (!price || M32(ld) == price_key) price = &sources[i];
+            }
+            if (!strcasecmp(model, a->donor_folder)) {
+                ++donor_matches;
+                if (!pv || M32(ld) == donor_key) pv = &sources[i];
+            }
+        }
+        // Retail also has scripted/upgraded pvehicles with the same MODEL
+        // (MUSTANGGT: 9B93FD4D stock, F9DC5F64 scripted). Prefer the canonical
+        // folder key; a noncanonical fallback must still be unambiguous.
+        if (donor_matches > 1 && M32(pv->ld) != donor_key) fail("ambiguous donor pvehicle MODEL");
+        if (price_matches > 1 && M32(price->ld) != price_key) fail("ambiguous price donor pvehicle MODEL");
+        if (price) {
+            uint32_t e = entry(price->ld, FRONTEND);
+            if (!e) fail("price donor has no frontend RefSpec");
+            a->menu_fe = M32(M32(e + 4) + 4);
+        }
+        if (pv) {
+            a->pv = M32(pv->ld);
+            a->donor_model = M32(M32(pv->ld + 0x1C) + 0x18);
+            uint32_t e = entry(pv->ld, FRONTEND);
+            if (!e) fail("donor has no frontend RefSpec");
+            a->fe = M32(M32(e + 4) + 4);
+            if (pv->vault == vault) append_collection(c, pv, 0x4E, 1, a);
+        }
+        Source *fe = source(FRONTEND, a->fe);
+        if (fe && fe->vault == vault && source(FRONTEND, a->menu_fe)) append_collection(c, fe, 0x5B, 0, a);
+        Source *ec = source(ECAR, donor_key);
+        if (ec && ec->vault == vault) append_collection(c, ec, 0x11D, 0, a);
+    }
+    *c = saved;
+}
+
+static const char *reconcile_stock(uint32_t db, unsigned *inserted);
+
+static void proof_menu(uint32_t db) {
+    const char *requested = getenv("NFS_TEST_ADDCARS_PROOF");
+    if (!requested || strcmp(requested, "1")) return;
+    if (!manifest_mode || catalog_mode || !diag_on || !scratch_profile())
+        fail("proof menu requires a guarded TEST manifest");
+    // Hide ordinary native stock rows during a scratch capture sequence.
+    // Keep handles, links, ownership and every non-stock row intact.
+    for (unsigned i = 0; i < 200; ++i) {
+        uint32_t row = db + i * 20, flags = M32(row + 12);
+        if (M32(row) == UINT32_MAX || M16(row + 16) != 0xFFFF ||
+            ((flags & 0xFFFF) != 1 && (flags & 0xFFFF) != 0x20) || !(flags & 0x10000)) continue;
+        int added = 0;
+        for (unsigned j = 0; j < nadditions; ++j) added |= M32(row + 8) == additions[j].key;
+        if (!added) M32(row + 12) &= ~0x10000u;
+    }
+}
+
+void f_00590D40(Cpu *c) {
+    uint32_t db = c->ecx;
+    if (on()) {
+        // Also handles FE_ATTRIB arriving before the donor's pvehicle vault.
+        for (unsigned i = 0; i < sizeof vaults / sizeof vaults[0]; ++i)
+            if (vaults[i].generation && vaults[i].ready) car85_vault_loaded(c, vaults[i].address);
+        for (unsigned j = 0; j < nadditions; ++j) {
+            Addition *a = &additions[j];
+            Source *pv = source(PVEHICLE, a->pv), *fe = source(FRONTEND, a->fe);
+            if (!pv || !fe || !has_addition(pv->vault, PVEHICLE, a->key) || !has_addition(fe->vault, FRONTEND, a->key))
+                fail("clone registration incomplete before FEPlayerCarDB::Default");
+        }
+    }
+    f_00590D40_orig(c);
+    // Bonus handling donors (e.g. CAMARO) are not PlayerUsable in Default's
+    // enumeration. Insert their ordinary stock rows through the same atomic
+    // reconciliation used on profile load; never clone donor presets/ownership.
+    if (on() && manifest_mode) {
+        unsigned inserted;
+        const char *reason = reconcile_stock(db, &inserted);
+        if (reason) fail(reason);
+    }
+    proof_menu(db);
+    register_names();
+    register_logos(c);
+    if (!diag_on) return;
+    unsigned stock = 0, presets = 0, owned = 0, free_rows = 0, added = 0;
+    for (unsigned i = 0; i < 200; ++i) {
+        uint32_t r = db + i * 0x14;
+        if (M32(r) == 0xFFFFFFFFu) { ++free_rows; continue; }
+        uint32_t f = M32(r + 0xC);
+        if (f & 2) ++owned;
+        else if (M8(r + 0x10) != 0xFF || (f & 8)) ++presets;
+        else ++stock;
+        for (unsigned j = 0; j < nadditions; ++j) added += M32(r + 8) == additions[j].key;
+    }
+    // Default only creates fresh stock/preset rows. Subtract our identified stock
+    // additions to report the baseline in this same profile configuration.
+    diag_event("addcars: census before stock=%u presets=%u owned=%u free=%u used=%u (baseline excludes additions)",
+        stock - added, presets, owned, free_rows + added, 200 - free_rows - added);
+    diag_event("addcars: census after stock=%u presets=%u owned=%u free=%u used=%u additions=%u types=%u",
+        stock, presets, owned, free_rows, 200 - free_rows, added, car85_count());
+}
+
+void f_0056F090(Cpu *c) {
+    // This copy is also used outside profile admission. Never delete unavailable
+    // rows here: UserProfile::LoadFromBuffer bypasses this function entirely.
+    f_0056F090_orig(c);
+}
+
+static int stock_row(uint32_t row) {
+    uint32_t flags = M32(row + 12) & 0xFFFFu;
+    return (flags == 1 || flags == 0x20) && M16(row + 16) == 0xFFFFu;
+}
+
+// All failure paths precede all writes. The profile layout/serializer and both
+// linked-record pools stay unchanged. Return a reason instead of killing the
+// offline harness; admission stages this block before the retail loader runs.
+static const char *reconcile_stock(uint32_t db, unsigned *inserted) {
+    unsigned slots[200], free_count = 0, missing[MAX_ADDITIONS], count = 0;
+    uint32_t flags[MAX_ADDITIONS];
+    *inserted = 0;
+    if (!on()) return NULL;
+    for (unsigned i = 0; i < 200; ++i)
+        if (M32(db + i * 20) == 0xFFFFFFFFu) slots[free_count++] = i;
+    for (unsigned j = 0; j < nadditions; ++j) {
+        Addition *a = &additions[j];
+        unsigned found = 0;
+        for (unsigned i = 0; i < 200; ++i) {
+            uint32_t row = db + i * 20;
+            if (M32(row) == 0xFFFFFFFFu || !stock_row(row)) continue;
+            if (M32(row + 8) == a->key || M32(row + 4) == a->key) {
+                if (M32(row + 8) != a->key || M32(row + 4) != a->key)
+                    return "added stock car identity mismatch; restore the original manifest";
+                ++found;
+            }
+        }
+        if (found > 1) return "duplicate added stock cars in profile";
+        if (found) continue;
+        Source *pv = source(PVEHICLE, a->pv), *fe = source(FRONTEND, a->fe);
+        if (!pv || !fe || !has_addition(pv->vault, PVEHICLE, a->key) ||
+            !has_addition(fe->vault, FRONTEND, a->key))
+            return "missing car pack; reinstall the original additions manifest and packs";
+        Source *menu = source(FRONTEND, a->menu_fe);
+        if (!menu) return "missing price/unlock donor frontend";
+        uint32_t layout = M32(menu->ld + 0x1C), category = M32(layout + 0x38);
+        // FECarRecord::Default 005815B0: category bits plus availability.
+        flags[count] = category < 4 ? (0x10000u << category) : 0;
+        flags[count] |= category == 3 || !M8(layout + 0x58) ? 0x20 : 1;
+        missing[count++] = j;
+    }
+    if (free_count < count) {
+        if (!catalog_mode) return "not enough free FE car rows; no additions inserted";
+        fprintf(stderr,"carsaves: capacity free=%u required=%u approved=%u; existing rows retained, inserted=0\n",free_count,count,nadditions);
+        if (diag_on) diag_event("carsaves: capacity free=%u required=%u approved=%u; existing rows retained, inserted=0",free_count,count,nadditions);
+        return NULL;
+    }
+    for (unsigned j = 0; j < count; ++j)
+        for (unsigned i = 0; i < 200; ++i)
+            if (M32(db + i * 20) == slots[j])
+                return "FE car handle collision; no additions inserted";
+    for (unsigned j = 0; j < count; ++j) {
+        Addition *a = &additions[missing[j]];
+        uint32_t row = db + slots[j] * 20;
+        memset(G + row, 0, 20);
+        M32(row) = slots[j]; M32(row + 4) = a->key; M32(row + 8) = a->key;
+        M32(row + 12) = flags[j]; M16(row + 16) = 0xFFFFu;
+    }
+    *inserted = count;
+    return NULL;
+}
+
+static int catalog_matches(const PrivateCar *car, const Addition *addition) {
+    if (!car || !addition || strcmp(car->name, addition->name) || strcmp(car->donor, addition->donor_folder)) return 0;
+    size_t n = strlen(addition->directory);
+    return n && !strncmp(car->geometry, addition->directory, n) &&
+        !strcmp(car->geometry + n, "/GEOMETRY.BIN") &&
+        !strncmp(car->textures, addition->directory, n) &&
+        !strcmp(car->textures + n, "/TEXTURES.BIN");
+}
+
+/* Derive dependencies from serialized identities, before reconciliation adds
+ * stock rows. Include all saved rows (owned, customized, stock and presets).
+ * Master Off must refuse these profiles, never delete/convert their rows. */
+const char *car85_profile_dependencies(Cpu *c, uint32_t db, const PrivateCar *inventory, size_t count, unsigned char used[PRIVATE_CARS_MASK_SIZE]) {
+    Cpu saved=*c;
+    memset(used,0,PRIVATE_CARS_MASK_SIZE);
+    const char *reason=NULL;
+    for(unsigned i=0;i<200;++i) {
+        uint32_t row=db+i*20;
+        if(M32(row)==0xFFFFFFFFu) continue;
+        uint32_t args[2]={PVEHICLE,M32(row+8)};
+        if(!call_guest(c,0x00455FD0,2,args)) { reason="A required car pack is missing."; break; }
+        // FE_ATTRIB is deliberately unloaded before free-roam autosaves. Save
+        // dependencies need only pvehicle/GetType (and the frozen type table).
+        // Admission's staged preflight still validates both class identities
+        // while frontend data is loaded, before any retail profile writes.
+        c->ecx=row; c->esp-=4; M32(c->esp)=0; f_005816B0_orig(c);
+        uint32_t type=c->eax;
+        if(type>=TYPES+MAX_ADDITIONS) { reason="Unrecognized saved car identity."; break; }
+        if(type>=TYPES) { unsigned k=type-TYPES; used[k/8]|=1u<<(k%8); continue; }
+        uint32_t table=M32(TABLE); if(!table) continue;
+        const char *name=NULL;
+        for(unsigned j=0;j<TYPES;++j) if(M32(table+j*STRIDE+0x90)==type) {
+            name=(const char *)G+table+j*STRIDE; break;
+        }
+        if(!name) continue;
+        for(size_t k=76;k<count;++k) {
+            const PrivateCar *car=&inventory[k];
+            if(car->swap && car->selected && !strncmp(name,car->name,16)) used[k/8]|=1u<<(k%8);
+        }
+    }
+    *c=saved; return reason;
+}
+
+// Pure preflight on a staged FE block. No profile/global state is published.
+// Catalog entries have already passed WO1 output hashes; legacy TEST manifests
+// cannot satisfy shipping admission merely by claiming the same numeric type.
+const char *car85_profile_preflight(Cpu *c, uint32_t db, const PrivateCar *inventory, size_t count) {
+    Cpu saved = *c;
+    const char *reason = NULL;
+    for (unsigned i = 0; i < 200 && !reason; ++i) {
+        uint32_t row = db + i * 20;
+        if (M32(row) == 0xFFFFFFFFu) continue;
+        uint32_t args[2] = {PVEHICLE, M32(row + 8)};
+        if (!call_guest(c, 0x00455FD0, 2, args)) { reason = "A required car pack is missing."; break; }
+        args[0] = FRONTEND; args[1] = M32(row + 4);
+        if (!call_guest(c, 0x00455FD0, 2, args)) { reason = "A required car pack is missing."; break; }
+        c->ecx = row;
+        c->esp -= 4; M32(c->esp) = 0;
+        f_005816B0_orig(c);
+        uint32_t type = c->eax;
+        if (type >= car85_count()) { reason = "Missing car or part data."; break; }
+        if (type >= TYPES) {
+            const PrivateCar *found = NULL;
+            for (size_t k = 0; k < count; ++k)
+                if (!inventory[k].swap && inventory[k].selected && inventory[k].id == type) found = &inventory[k];
+            if (!catalog_matches(found, addition_for_type(type))) {
+                reason = "Required added car is absent from the verified catalog. Reinstall its catalog and packs."; break;
+            }
+        }
+        // 0056EFD0/0056EFF0 iterate 75 customization and 25 career records.
+        unsigned custom = M8(row + 16), career = M8(row + 17);
+        if (career != 0xFF && career >= 25) { reason = "Invalid career car link."; break; }
+        if (custom == 0xFF) continue;
+        if (custom >= 75) { reason = "Invalid customization link."; break; }
+        uint32_t record = db + 4000 + custom * 0x198;
+        for (unsigned slot = 0; slot < 139; ++slot) {
+            uint32_t index = (uint32_t)(int32_t)(int16_t)M16(record + slot * 2);
+            if (index == 0xFFFFFFFFu) continue;
+            c->ecx = 0x009B26A8u;
+            if (!call_guest(c, 0x00747C00, 1, &index)) { reason = "Missing installed part data."; break; }
+        }
+    }
+    // Reconciliation must not introduce an unverified TEST-manifest identity.
+    for (unsigned j = 0; !reason && j < nadditions; ++j) {
+        const PrivateCar *found = NULL;
+        for (size_t k = 0; k < count; ++k)
+            if (!inventory[k].swap && inventory[k].selected && inventory[k].id == addition_id(j)) found = &inventory[k];
+        if (!catalog_matches(found, &additions[j]))
+            reason = "Active additions do not match the verified catalog. Restore its manifest and packs.";
+    }
+    unsigned inserted = 0;
+    if (!reason) reason = reconcile_stock(db, &inserted);
+    *c = saved;
+    return reason;
+}
+
+void f_005816B0(Cpu *c) {
+    uint32_t row = c->ecx;
+    register_names(); // also refresh after language resource replacement
+    register_logos(c);
+    if (!on() && M32(c->ecx + 8) == NEWKEY) {
+        c->eax = 0xFFFFFFFFu; c->esp += 4; return;
+    }
+    f_005816B0_orig(c);
+    if (c->eax >= car85_count()) c->eax = 0xFFFFFFFFu;
+    car_lot_probe(c, row);
+}
+
+void f_00739920(Cpu *c) {
+    if (!M32(TABLE) || M32(c->esp + 4) >= car85_count() ||
+        (M32(c->esp + 4) >= TYPES && !addition_for_type(M32(c->esp + 4)))) {
+        c->eax = 0; c->esp += 4; return;
+    }
+    f_00739920_orig(c);
+}
+
+int car85_path(const char *guest, char *host, size_t n) {
+    if (!on()) return 0;
+    char rel[1024];
+    if (strlen(guest) >= sizeof rel) return 0;
+    strcpy(rel, guest);
+    for (char *p = rel; *p; ++p) if (*p == '\\') *p = '/';
+    char *r = rel;
+    if (strlen(r) > 2 && r[1] == ':') r += 2;
+    while (*r == '/') ++r;
+    if (!strncasecmp(r, "NFSMW/", 6)) r += 6;
+    if (strncasecmp(r, "CARS/", 5)) return 0;
+    Addition *a = NULL; const char *tail = NULL;
+    for (unsigned i = 0; i < nadditions; ++i) {
+        size_t len = strlen(additions[i].name);
+        if (!strncasecmp(r + 5, additions[i].name, len) && r[5 + len] == '/') {
+            a = &additions[i]; tail = r + 6 + len; break;
+        }
+    }
+    if (!a) return 0;
+    if (!*tail) return 0;
+    // Converted files are limited to the two validated, donor-prefixed packs.
+    // Other resources keep the donor's original namespace and order.
+    if (a->directory[0] && (!strcasecmp(tail, "GEOMETRY.BIN") || !strcasecmp(tail, "TEXTURES.BIN"))) {
+        const char *file = !strcasecmp(tail, "GEOMETRY.BIN") ? "GEOMETRY.BIN" : "TEXTURES.BIN";
+        int len = snprintf(host, n, "%s/%s", a->directory, file);
+        if (len < 0 || (size_t)len >= n) return 0;
+        if (diag_on) diag_event("addcars: redirect %s -> %s", guest, host);
+        return 1;
+    }
+    // Resolve the donor path case-insensitively, matching boot.c's resolver.
+    char path[1200];
+    snprintf(path, sizeof path, "CARS/%s/%s", a->donor_folder, tail);
+    char result[4096];
+    snprintf(result, sizeof result, "%s", game_dir);
+    char *save = NULL;
+    for (char *tok = strtok_r(path, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (!strcmp(tok, ".") || !strcmp(tok, "..")) return 0;
+        DIR *d = opendir(result);
+        char component[1024];
+        snprintf(component, sizeof component, "%s", tok);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d))) if (!strcasecmp(e->d_name, tok)) {
+                snprintf(component, sizeof component, "%s", e->d_name); break;
+            }
+            closedir(d);
+        }
+        size_t used = strlen(result);
+        int wrote = snprintf(result + used, sizeof result - used, "/%s", component);
+        if (wrote < 0 || (size_t)wrote >= sizeof result - used) return 0;
+    }
+    if (strlen(result) >= n) return 0;
+    strcpy(host, result);
+    if (diag_on) diag_event("car85: redirect %s -> %s", guest, result);
+    return 1;
+}
+'''
+assert hashlib.sha256(ORIGINAL_SOURCE.encode()).hexdigest() == '377dd7d8c8aaf1efeee45c6860b6bf59883990b585912cee100ceeaf1a388fc7', 'pinned baseline changed'
+
+
+
+MAIN = r'''
+#define SAVE_SIZE 0xF848u
+static uint32_t clone_ld[2];
+static unsigned pvault, evault, fvault;
+static uint32_t layout(uint32_t vault, uint32_t cls, uint32_t key) {
+    for (unsigned i=0;i<M32(vault+0x34);++i) {
+        uint32_t col=M32(M32(vault+0x2C)+16*i);
+        if (M32(M32(vault+0x30)+4*i)==key && M32(M32(col+0x14))==cls) return M32(col+0x18);
+    }
+    return 0;
+}
+static void defaults(Cpu *c, uint32_t db) {
+    c->ecx=db; f_00590D40(c); c->esp=0x800000;
+}
+int main(int argc, char **argv) {
+    assert(argc==5); unsigned players=atoi(argv[1]), policy=atoi(argv[2]), order=atoi(argv[3]);
+    unsigned scenario=atoi(argv[4]);
+    G=calloc(1,0x10000000); assert(G); Cpu c={.esp=0x800000};
+    CHECK(traffic_pilot_boot(policy)==0);
+    uint32_t chunk=0x200000; M32(chunk)=0x34600;
+    load("TABLE_PATH",chunk+16,84*208);
+    uint8_t original[84*208]; memcpy(original,G+chunk+16,sizeof original);
+    if (scenario==5) { // Selected catalog holes retain their frozen identities.
+        CHECK(on()); CHECK(nadditions==3);
+        additions[0].catalog_id=84; additions[1].catalog_id=100; additions[2].catalog_id=159;
+    }
+    M32(c.esp+4)=chunk; if(scenario==7)f_00756A90_orig(&c);else f_00756A90(&c); c.esp=0x800000;
+    CHECK(nadditions==players); CHECK(!memcmp(original,G+M32(TABLE),sizeof original));
+    uint32_t hash=bstr("TRAFFICSEDAN"), type=call_guest(&c,0x7398D0,1,&hash);
+    int active=policy && scenario!=6;
+    CHECK(car85_count()==(active?161:84+players));
+    CHECK(traffic_pilot_available()==active);
+    CHECK(type==(active && scenario!=7?160:car85_count()));
+    CHECK(call_guest(&c,0x739940,1,&hash)==(active && scenario!=7?M32(TABLE)+160*208:0));
+    CHECK(!car85_traffic_ready() && !car85_traffic_key() && !car85_traffic_donor_key());
+    CHECK(car85_traffic_scratch_eligible()==(active && !getenv("TEST_CATALOG")));
+    for(unsigned j=0;j<players;++j) {
+        unsigned id=scenario==5?(j==0?84:j==1?100:159):84+j;
+        CHECK(addition_id(j)==id); CHECK(M32(M32(TABLE)+id*208+0x90)==id);
+    }
+    if(active && scenario!=7) for(unsigned i=84;i<160;++i) {
+        int present=scenario==5?(i==84||i==100||i==159):i<84+players;
+        CHECK(present || M32(M32(TABLE)+i*208+0x90)==UINT32_MAX);
+    }
+    if(active && !addition_for_type(160)) {
+        CHECK(addition_for_type(160)!=NULL);
+        printf("registration checks=%u failures=%u original-missing-type160\n",checks,failures);
+        return failures?1:0;
+    }
+    LOAD_FIXTURES
+    uint32_t obj=gmalloc(4),vt=gmalloc(4); M32(0x8F7EA8)=obj;M32(obj)=vt;M32(vt)=0x1001000;
+    pvault=setup_vault();evault=setup_vault();fvault=setup_vault();
+    REGISTER_SOURCES
+    // Source descriptors and layouts remain byte-for-byte immutable.
+    SNAPSHOTS
+    Cpu before=c;
+    if(order) car85_vault_loaded(&c,fvault);
+    car85_vault_loaded(&c,order?evault:pvault);
+    CHECK(!car85_traffic_ready());
+    car85_vault_loaded(&c,order?pvault:evault);
+    car85_vault_loaded(&c,fvault);
+    CHECK(!memcmp(&before,&c,sizeof c));
+    int ready=active && scenario!=1 && scenario!=2 && scenario!=3 && scenario!=7;
+    CHECK(car85_traffic_ready()==ready);
+    CHECK((car85_traffic_key()!=0)==ready); CHECK((car85_traffic_donor_key()!=0)==ready);
+    CHECK_SNAPSHOTS
+    if(scenario==7) {
+        M32(c.esp+4)=chunk;f_00756A90(&c);c.esp=0x800000;
+        CHECK(car85_traffic_ready());CHECK(call_guest(&c,0x7398D0,1,&hash)==160);ready=1;
+    }
+    if(!ready) {
+        printf("registration checks=%u failures=%u ready=0 players=%u\n",checks,failures,players);
+        return failures?1:0;
+    }
+    Addition *a=addition_for_type(160); uint32_t key=car85_traffic_key(),donor=car85_traffic_donor_key();
+    CHECK(key==0xPILOTKEYu && donor==0xDONORKEYu && key!=donor);
+    CHECK(a->type==25 && a->wheel_fit==2 && !a->render_fit);
+    CHECK(has_addition(pvault,PVEHICLE,key)); CHECK(has_addition(evault,ECAR,key));
+    CHECK(!has_addition(fvault,FRONTEND,key)); CHECK(a->fe==0 && a->menu_fe==0 && !a->logo && !a->brand_string);
+    uint32_t pv=layout(pvault,PVEHICLE,key),ec=layout(evault,ECAR,key);
+    CHECK(pv && ec && !strcmp((char *)G+M32(pv+0x1C),"TRAFFICSEDAN"));
+    CHECK(!memcmp(G+ec+0x10,a->wheel_offsets,64)); CHECK(!memcmp(G+ec+0xDC,a->wheel_widths,16));
+    uint32_t ref=entry(clone_ld[0],FRONTEND),native_ref=entry(source(PVEHICLE,donor)->ld,FRONTEND);
+    CHECK(ref && native_ref && M32(ref+4)!=M32(native_ref+4));
+    CHECK(M32(M32(ref+4)+4)==M32(M32(native_ref+4)+4)); CHECK(M32(M32(ref+4)+8)==0);
+    // Separate packs, and symmetric resource lookups with both packs resident.
+    char host[4096],expected[4096];
+    const char *files[]={"GEOMETRY.BIN","TEXTURES.BIN"};
+    for(unsigned i=0;i<2;++i) {
+        char guest[128]; snprintf(guest,sizeof guest,"CARS/TRAFFICSEDAN/%s",files[i]);
+        snprintf(expected,sizeof expected,"%s/%s",a->directory,files[i]);
+        CHECK(car85_path(guest,host,sizeof host) && !strcmp(host,expected));
+        snprintf(guest,sizeof guest,"CARS/TRAF4DSEDA/%s",files[i]); CHECK(!car85_path(guest,host,sizeof host));
+    }
+    uint32_t ride=gmalloc(0x100),native=gmalloc(0x100);M32(ride)=160;M32(native)=25;
+    for(unsigned i=0;i<a->solid_count;++i) {
+        uint32_t old=a->solid_map[2*i],own=a->solid_map[2*i+1];
+        CHECK(private_solid_hash(solid_context(ride),old)==own);
+        CHECK(private_solid_hash(solid_context(native),old)==old);
+        CHECK(private_solid_hash(solid_context(native),own)==own);
+        CHECK(private_solid_hash(solid_context(ride),own)==own);
+        model_namespace=solid_context(ride);M32(c.esp+4)=old;f_00751540(&c);c.esp=0x800000;CHECK(c.eax==own);
+        model_namespace=solid_context(native);M32(c.esp+4)=old;f_00751540(&c);c.esp=0x800000;CHECK(c.eax==old);
+        model_namespace=NULL;
+        M32(c.esp+4)=gmalloc(0xE0*4);M32(c.esp+8)=ride;
+        M32(M32(c.esp+4))=old; f_00751860(&c); c.esp=0x800000;
+        CHECK(M32(M32(c.esp+4))==own);
+    }
+    // Player FE rows and serialized source bytes match the pinned traffic-Off
+    // path, including default, purchase and linked customization/career pools.
+    uint32_t language=gmalloc(8);M32(language)=0;M32(language+4)=gstr("stock");
+    M32(0x91CF80)=language;M32(0x91CF78)=1;M32(0x9173F8)=0x9173F8;M32(0x9173FC)=0x9173F8;
+    uint32_t db=gmalloc(0x8CC8); defaults(&c,db);
+    uint8_t pinned[0x8CC8]={0};
+    // Pinned pre-traffic FE contract: 200 handles, then untouched linked pools.
+    for(unsigned i=0;i<200;++i) {uint32_t empty=UINT32_MAX;memcpy(pinned+i*20,&empty,4);}
+    for(unsigned j=0;j<players;++j) {
+        uint32_t row[]={j,0xA1000000u+j,0xA1000000u+j,0x10001,0xFFFF};
+        memcpy(pinned+j*20,row,20);
+    }
+    CHECK(!memcmp(pinned,G+db,sizeof pinned));
+    // Execute the translated retail serializer against the independent pinned
+    // FE fixture and the registered pilot's live FE data. Career/online sections
+    // use fixed contract fixtures; the complete 63,560 bytes and MD5 must match.
+    uint32_t reference_profile=gmalloc(0xA000),actual_profile=gmalloc(0xA000);
+    uint32_t reference_save=gmalloc(SAVE_SIZE),actual_save=gmalloc(SAVE_SIZE);
+    memcpy(G+reference_profile+0x414,pinned,sizeof pinned);
+    memcpy(G+actual_profile+0x414,G+db,sizeof pinned);
+    uint32_t profiles[]={reference_profile,actual_profile},buffers[]={reference_save,actual_save};
+    for(unsigned i=0;i<2;++i) {
+        uint32_t sp=c.esp;c.esp-=4;M32(c.esp)=SAVE_SIZE;c.esp-=4;M32(c.esp)=buffers[i];
+        c.esp-=4;M32(c.esp)=0;c.ecx=profiles[i];f_0058FD10_orig(&c);CHECK(c.esp==sp);
+    }
+    CHECK(!memcmp(G+reference_save,G+actual_save,SAVE_SIZE));
+    unsigned names=M32(0x91CF78),logos=logo_count; CHECK(fe_count==players);
+    defaults(&c,db); CHECK(!memcmp(pinned,G+db,sizeof pinned));
+    CHECK(M32(0x91CF78)==names && logo_count==logos);
+    CHECK(M32(pv+0x1C)!=0 && !strcmp((char *)G+M32(pv+0x1C),"TRAFFICSEDAN"));
+    unsigned inserted=999;CHECK(!reconcile_stock(db,&inserted) && inserted==0);
+    for(unsigned i=0;i<200;++i) CHECK(M32(db+i*20+8)!=key || M32(db+i*20)==UINT32_MAX);
+    // Frozen save masks: all 76 player bits, then the 14 own-slot swaps.
+    unsigned char used[PRIVATE_CARS_MASK_SIZE],expected_mask[PRIVATE_CARS_MASK_SIZE]={0};
+    for(unsigned j=0;j<players;++j) {unsigned t=addition_id(j)-84;expected_mask[t/8]|=1u<<(t%8);}
+    CHECK(!car85_profile_dependencies(&c,db,NULL,0,used)); CHECK(!memcmp(used,expected_mask,sizeof used));
+    CHECK(!memcmp(pinned,G+db,sizeof pinned));
+    M32(db+199*20)=199;M32(db+199*20+8)=key;
+    CHECK(car85_profile_dependencies(&c,db,NULL,0,used)!=NULL);
+    CHECK(!memcmp(used,expected_mask,sizeof used));
+    // Swap mask positions remain exactly 76..89, independently of type160.
+    const char *const swaps[]={PRIVATE_CARS_SWAP_NAMES}; PrivateCar inventory[90]={0};
+    for(unsigned j=0;j<14;++j) {
+        PrivateCar *swap=&inventory[76+j];swap->swap=1;swap->selected=1;strcpy(swap->name,swaps[j]);
+        unsigned type=84;
+        for(unsigned k=0;k<84;++k) if(!strcmp((char *)G+M32(TABLE)+k*208,swaps[j]))type=M32(M32(TABLE)+k*208+0x90);
+        CHECK(type<84);uint32_t row=db+(100+j)*20;M32(row)=100+j;M32(row+8)=0xB0000000u+type;
+        expected_mask[(76+j)/8]|=1u<<((76+j)%8);
+    }
+    M32(db+199*20)=UINT32_MAX;
+    CHECK(!car85_profile_dependencies(&c,db,inventory,90,used));CHECK(!memcmp(used,expected_mask,sizeof used));
+    M32(db+199*20)=199;M32(db+199*20+8)=key;
+    CHECK(car85_profile_dependencies(&c,db,inventory,90,used)!=NULL);CHECK(!memcmp(used,expected_mask,sizeof used));
+    // Retirement and reuse must clear readiness before any poisoned read.
+    uint32_t templates[2048];unsigned nt=0;
+    for(unsigned i=0;i<nsources;++i) if(sources[i].vault==pvault) {
+        uint32_t ld=sources[i].ld,n=0x20+4*M32(ld+0x18)+12*M32(ld+0x14);
+        templates[nt]=gmalloc(n);memcpy(G+templates[nt++],G+ld,n);
+    }
+    car85_vault_unloaded(pvault); CHECK(!car85_traffic_ready() && !car85_traffic_key());
+    memset(G+pvault,0xDD,0x40);CHECK(!car85_traffic_ready());
+    pvault=setup_vault();for(unsigned i=0;i<nt;++i)car85_collection_seen(templates[i],pvault);
+    car85_vault_loaded(&c,pvault); CHECK(car85_traffic_ready());
+    nt=0;
+    for(unsigned i=0;i<nsources;++i) if(sources[i].vault==evault) {
+        uint32_t ld=sources[i].ld,n=0x20+4*M32(ld+0x18)+12*M32(ld+0x14);
+        templates[nt]=gmalloc(n);memcpy(G+templates[nt++],G+ld,n);
+    }
+    car85_vault_begin(evault); CHECK(!car85_traffic_ready() && !car85_traffic_donor_key());
+    uint32_t fresh=setup_vault();car85_vault_unloaded(fresh);memcpy(G+evault,G+fresh,0x40);
+    for(unsigned i=0;i<nt;++i)car85_collection_seen(templates[i],evault);
+    car85_vault_loaded(&c,evault);CHECK(car85_traffic_ready());
+    printf("registration checks=%u failures=%u ready=1 redirects=%u players=%u fe-bytes=%zu save-bytes=%u masks=%u\n",
+           checks,failures,redirects,players,sizeof pinned,SAVE_SIZE,PRIVATE_CARS_MASK_SIZE);
+    return failures?1:0;
+}
+'''
+
+
+def build_source(tmp, bases, rows, generated):
+    harness = '#include "traffic_pilot.h"\n' + base.HARNESS.split('int main(int argc, char **argv)', 1)[0]
+    harness = harness.replace('int traffic_pilot_enabled(void) { return 0; }', '')
+    harness = harness.replace('const PrivateCar *private_cars_traffic_get(void) { return NULL; }', r'''
+const PrivateCar *private_cars_traffic_get(void) {
+    static PrivateCar car;
+    const char *state=getenv("TEST_CATALOG"); if(!state || strcmp(state,"approved")) return NULL;
+    car.id=160;car.selected=1;strcpy(car.name,"TRAFFICSEDAN");strcpy(car.donor,"TRAF4DSEDA");
+    snprintf(car.geometry,sizeof car.geometry,"%s/GEOMETRY.BIN",getenv("TEST_PACKS"));
+    snprintf(car.solid_map,sizeof car.solid_map,"%s/SOLIDMAP.BIN",getenv("TEST_PACKS"));
+    return &car;
+}''')
+    harness = harness.replace('assert(cursor<0x4000000)', 'assert(cursor<0x10000000)')
+    a = harness.index('void f_00590D40_orig(')
+    b = harness.index('void f_0045C380_orig', a)
+    harness = harness[:a] + r'''
+void f_00590D40_orig(Cpu *c) {
+    uint32_t db=c->ecx;memset(G+db,0,0x8CC8);
+    for(unsigned i=0;i<200;++i)M32(db+i*20)=UINT32_MAX;
+    // The translated retail MODEL predicate is proved by carselection_test.
+    // This contract records every eligible collection, including a leaked pilot.
+    fe_count=0;
+    for(unsigned v=0;v<256;++v) if(vaults[v].generation && vaults[v].ready) {
+        uint32_t vault=vaults[v].address;
+        for(unsigned i=0;i<M32(vault+0x34);++i) {
+            uint32_t col=M32(M32(vault+0x2C)+16*i),lay=M32(col+0x18);
+            if(M32(M32(col+0x14))!=PVEHICLE || !M32(lay+0x1C) || !M8(M32(lay+0x1C))) continue;
+            uint32_t row=db+fe_count*20,key=M32(col+0x20);
+            M32(row)=fe_count++;M32(row+4)=key;M32(row+8)=key;M32(row+12)=0x10001;M16(row+16)=0xFFFF;
+        }
+    }
+    c->esp+=4;
+}
+''' + harness[b:]
+    harness = harness.replace('void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }', r'''
+void f_005816B0_orig(Cpu *c) {
+    uint32_t key=M32(c->ecx+8);c->eax=(key&0xF0000000u)==0xB0000000u?key-0xB0000000u:160;
+    for(unsigned j=0;j<nadditions;++j)if(additions[j].key==key)c->eax=addition_id(j);
+    c->esp+=4;
+}''')
+    a = harness.index('        CHECK(M32(ld)==NEWKEY);')
+    b = harness.index('        ++constructor_count;', a)
+    harness = harness[:a] + r'''
+        if(M32(ld)==0xPILOTKEYu) {
+            extern uint32_t clone_ld[2];
+            if(M32(ld+4)==PVEHICLE)clone_ld[0]=ld;
+            if(M32(ld+4)==ECAR)clone_ld[1]=ld;
+        }
+''' + harness[b:]
+    harness = harness.replace('static uint32_t clone_ld[2];', 'uint32_t clone_ld[2];')
+    harness = harness.replace('case 0x004549B0: c->eax=!strcasecmp((char *)G+args[0],"CAR85")?NEWKEY:0xD27D5B8D; break;', r'''
+    case 0x004549B0: {
+        const char *s=(char *)G+args[0];
+        if(!strcasecmp(s,"TRAFFICSEDAN"))c->eax=0xPILOTKEYu;
+        else if(!strcasecmp(s,"TRAF4DSEDA"))c->eax=0xDONORKEYu;
+        else if(!strcasecmp(s,"911TURBO"))c->eax=0xD27D5B8D;
+        else if(!strncasecmp(s,"PLAYER",6))c->eax=0xA1000000u+atoi(s+6);
+        else abort(); break;
+    }
+    case 0x00455FD0: c->eax=1; break;
+''')
+    harness = harness.replace('void f_00751540_orig(Cpu *c) { c->eax=0; c->esp+=12; }', 'void f_00751540_orig(Cpu *c) { c->eax=M32(c->esp+4); c->esp+=12; }')
+    harness = harness.replace('M32(c->ecx+8)=0xDB10DBEA;', 'M32(c->ecx+8)=bstr((char *)G+args[0]);')
+    harness += r'''
+void f_0057F7B0(Cpu *c) { c->eax=M32(c->esp+4)+0x59F9; c->esp+=12; }
+void f_0057FFB0(Cpu *c) { c->eax=M32(c->esp+4)+0x36; c->esp+=8; }
+void f_0056E180(Cpu *c) { c->eax=M32(c->esp+4)+4+19*48; c->esp+=4; }
+void f_0057F920(Cpu *c) {
+    CC_MD5(G+M32(c->esp+4),M32(c->esp+12),G+M32(c->esp+8));c->esp+=20;
+}
+'''
+    harness += MAIN
+    harness = harness.replace('static uint32_t clone_ld[2];', 'uint32_t clone_ld[2];')
+    harness = harness.replace('PILOTKEY', f'{base.hash32("trafficsedan"):08X}')
+    harness = harness.replace('DONORKEY', f'{base.hash32("traf4dseda"):08X}')
+    harness = harness.replace('GENERATED', '\n'.join(generated))
+    harness = harness.replace('TABLE_PATH', str(tmp / 'table.bin'))
+    harness = harness.replace('LOAD_FIXTURES', '\n'.join(f'load("{p}",{at},{n});' for at, n, p in bases))
+    harness = harness.replace('REGISTER_SOURCES', '\n'.join(
+        f'''if (!(scenario==1 && M32({ld})==0x{base.hash32('traf4dseda'):08X}u && M32({ld}+4)==PVEHICLE)) {{
+        if(scenario==2 && M32({ld}+4)==ECAR) M32({ld}+0x1C)=0;
+        if(scenario==3 && M32({ld}+4)==PVEHICLE) M32({ld}+8)=0xBAD;
+        register_source(M32({ld}+4)==PVEHICLE?pvault:M32({ld}+4)==ECAR?evault:fvault,{ld}); }}'''
+        for _, ld in rows))
+    harness = harness.replace('SNAPSHOTS', '\n'.join(
+        f'uint8_t *snap{i}=malloc({n});memcpy(snap{i},G+{at},{n});' for i, (at,n,_) in enumerate(bases)), 1)
+    harness = harness.replace('CHECK_SNAPSHOTS', '\n'.join(
+        f'CHECK(!memcmp(snap{i},G+{at},{n}));free(snap{i});' for i, (at,n,_) in enumerate(bases)))
+    return harness
+
+
+def converted_registration(exe, tmp, env):
+    sys.path.insert(0, str(ROOT / 'tools_snapshot'))
+    import uc_traffic as converter
+    reference = converter.batch.DEFAULT_MW / converter.DONOR
+    if not converter.uc.DEFAULT_SOURCE.exists() or not (reference / 'GEOMETRY.BIN').is_file():
+        print('SKIP: private traffic conversion inputs absent (synthetic registration completed)')
+        return 3
+    from test_uc_traffic import predecessor_converter
+    predecessor = predecessor_converter()
+    outputs = {}
+    for label, module in (('converted', converter), ('351e5fdd-converted', predecessor)):
+        out = tmp / label
+        with contextlib.redirect_stdout(io.StringIO()):
+            module.convert(converter.uc.DEFAULT_SOURCE, reference, out)
+        outputs[label] = out
+    # Read actual serialized converter products; do not prepare corrected
+    # sidecar headers in the registration fixture.
+    actual = outputs['converted']
+    legacy = outputs['351e5fdd-converted']
+    for label, out, reason in (('converted', actual, ''),
+                                ('351e5fdd-solidmap', legacy, 'invalid solid map header'),
+                                ('351e5fdd-wheel', legacy, 'traffic wheel identity mismatch')):
+        if label == '351e5fdd-wheel':
+            (legacy / 'SOLIDMAP.BIN').write_bytes((actual / 'SOLIDMAP.BIN').read_bytes())
+        result = subprocess.run([str(exe), '0', '1', '0', '0'], capture_output=True, text=True,
+                                env=dict(env, TEST_PACKS=str(out), TEST_CATALOG='approved'))
+        print(label, result.stdout.strip().splitlines()[-1:] or result.stderr.strip().splitlines()[-1:])
+        assert result.returncode == (2 if reason else 0), (label, result.returncode, result.stderr[-2000:])
+        if reason:
+            assert reason in result.stderr, (label, result.stderr[-2000:])
+    return 0
+
+
+def main(selection_only=False):
+    if not Path(base.recomp.EXE).is_file():
+        print('SKIP: private retail fixtures absent')
+        return 3
+    rc = base.recomp.Recompiler(pe=base.recomp.PE()); rc.calls = True
+    starts = sorted(int(line.split('\t')[0],16) for line in (ROOT/'recomp/functions_v13.tsv').read_text().splitlines()
+                    if line and all(c in '0123456789ABCDEFabcdef' for c in line.split('\t')[0]))
+    rc.functions = dict(zip(starts,starts[1:])); generated = []
+    for address in (0x7398D0,0x739940,0x7398A0,0x7399F0,0x739870,0x460BF0,0x681340,0x56F090,0x739920,0x58FD10):
+        code,error=rc.translate(address,rc.functions[address]); assert not error,error
+        if address in (0x7399F0,0x739870,0x681340,0x56F090,0x739920,0x58FD10):
+            code=code.replace(f'void f_{address:08X}(',f'void f_{address:08X}_orig(',1)
+        generated.append(code)
+    actual=(ROOT/'runtime/car85.c').read_text()
+    predecessor=ORIGINAL_SOURCE
+    wrapper=r'void f_00590D40\(Cpu \*c\) \{.*?\n\}'
+    old_wrapper=re.search(wrapper,predecessor,re.S).group()
+    predecessor_wrapper,n=re.subn(wrapper,lambda _:old_wrapper,actual,count=1,flags=re.S)
+    assert n==1 and predecessor_wrapper!=actual
+    with tempfile.TemporaryDirectory(prefix='traffic-registration-') as directory:
+        tmp=Path(directory); (tmp/'diag').mkdir();(tmp/'diag.user').mkdir();packs=tmp/'packs';packs.mkdir()
+        player_packs=tmp/'players';player_packs.mkdir()
+        for name in ('GEOMETRY.BIN','TEXTURES.BIN'):
+            (packs/name).write_bytes(b'synthetic isolated pack');(player_packs/name).write_bytes(b'player pack')
+        offsets=(1.,.7,0.,.3,1.,-.7,0.,.3,-1.,-.7,0.,.3,-1.,.7,0.,.3)
+        wheel=struct.pack('<4I22f12B',0x31544657,1,base.hash32('trafficsedan'),base.hash32('traf4dseda'),
+                          *offsets,.17,.17,.2,.2,.2,.2,*([0]*12))
+        mapping=struct.pack('<8I',0x31504D53,2,0,2,101,1001,202,2002)
+        # SOLIDMAP uses the uppercase parts hash, unlike WFT's lowercase Attrib key.
+        h=0xFFFFFFFF
+        for ch in b'TRAFFICSEDAN': h=(h*33+ch)&0xFFFFFFFF
+        mapping=mapping[:8]+struct.pack('<I',h)+mapping[12:]
+        (packs/'WHEELFIT.BIN').write_bytes(wheel);(packs/'SOLIDMAP.BIN').write_bytes(mapping)
+        bases,rows=base.fixtures(tmp)
+        source=build_source(tmp,bases,rows,generated);(tmp/'test.c').write_text(source)
+        env={k:v for k,v in os.environ.items() if not k.startswith(('NFS_TEST_','BOOT_DIAG_TRAFFIC'))}
+        env.update(BOOT_DIAG=str(tmp/'diag'),BOOT_USERDATA=str(tmp/'diag.user'),TEST_PACKS=str(packs),ASAN_OPTIONS='detect_leaks=0')
+        variants={
+            'actual':actual,
+            'public':actual,
+            'original':predecessor,
+            'fe-predecessor':predecessor_wrapper,
+            'fe-leak':actual.replace('if (pilot_layout) M32(pilot_layout + 0x1C) = 0;','/* leaked pilot MODEL */'),
+            'namespace-leak':actual.replace('if (!a || !a->solid_count || !hash) return hash;','return hash;'),
+            'lifetime-leak':actual.replace('int car85_traffic_ready(void) {','int car85_traffic_ready(void) { return traffic_active && traffic_addition.key;'),
+            'save-leak':actual.replace('if(type>=TYPES+MAX_ADDITIONS)', 'if(type>TYPES+MAX_ADDITIONS)'),
+        }
+        if selection_only:
+            variants={label:variants[label] for label in ('actual','fe-predecessor')}
+        for variant,code in variants.items():
+            if variant not in ('actual','public','original'): assert code!=actual,variant
+            (tmp/'car85.c').write_text(code)
+            extra=''
+            if variant=='original':
+                extra='\nint car85_traffic_ready(void){return 0;} uint32_t car85_traffic_key(void){return 0;} uint32_t car85_traffic_donor_key(void){return 0;} int car85_traffic_scratch_eligible(void){return 0;}\n'
+            (tmp/'test.c').write_text(source+extra)
+            exe=tmp/variant
+            build=subprocess.run(['clang','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',
+                                  '-I'+str(tmp),'-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
+                                  *(['-DNFS_PUBLIC=1'] if variant=='public' else []),
+                                  str(tmp/'test.c'),str(ROOT/'runtime/car_physics.c'),str(ROOT/'runtime/traffic_pilot.c'),
+                                  '-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
+            assert build.returncode==0,build.stderr[-3500:]
+            cases=[(0,1,0,6)] if variant=='public' else [(0,1,0,0)]
+            if variant=='actual' and not selection_only:
+                cases.extend((0,1,order,scenario) for order,scenario in ((0,7),(1,0),(0,1),(1,2),(0,3)))
+                cases += [(76,1,0,0),(3,1,1,5),(0,0,0,0)]
+            for players,policy,order,scenario in cases:
+                manifest=tmp/'manifest.tsv'
+                # Put traffic between player rows to detect any identity shift.
+                lines=[f'PLAYER{j:02d}\t911TURBO\t{player_packs}\n' for j in range(players)]
+                lines.insert(players//2,f'TRAFFICSEDAN\tTRAF4DSEDA\t{packs}\n');manifest.write_text(''.join(lines))
+                runenv=dict(env,NFS_TEST_ADDCARS=str(manifest))
+                result=subprocess.run([str(exe),str(players),str(policy),str(order),str(scenario)],env=runenv,capture_output=True,text=True)
+                print(variant,players,policy,order,scenario,result.stdout.strip().splitlines()[-1:] or result.stderr[-150:])
+                assert result.returncode==(0 if variant in ('actual','public') else 1),(variant,result.returncode,result.stderr[-3000:])
+            if variant=='actual' and not selection_only:
+                for state in ('approved','pending'):
+                    runenv=dict(env,TEST_CATALOG=state)
+                    result=subprocess.run([str(exe),'0','1','0','0' if state=='approved' else '6'],env=runenv,capture_output=True,text=True)
+                    print('catalog',state,result.stdout.strip().splitlines()[-1:]);assert result.returncode==0,result.stderr[-3000:]
+                manifest.write_text(f'TRAFFICSEDAN\tTRAF4DSEDA\t{packs}\n')
+                result=subprocess.run([str(exe),'0','1','0','0'],env=dict(env,NFS_TEST_ADDCARS=str(manifest),BOOT_DIAG_TRAFFIC_CAR='trafficsedan'),capture_output=True,text=True)
+                print('guarded diagnostic',result.stdout.strip().splitlines()[-1:]);assert result.returncode==0,result.stderr[-2000:]
+                # Malformed/stale namespace and missing sidecars fail before publication.
+                for bad in ('namespace','wheel','map'):
+                    (packs/'SOLIDMAP.BIN').write_bytes(mapping if bad!='namespace' else mapping[:8]+b'BAD!'+mapping[12:])
+                    if bad=='wheel': (packs/'WHEELFIT.BIN').unlink()
+                    if bad=='map': (packs/'SOLIDMAP.BIN').unlink()
+                    manifest.write_text(f'TRAFFICSEDAN\tTRAF4DSEDA\t{packs}\n')
+                    result=subprocess.run([str(exe),'0','1','0','0'],env=dict(env,NFS_TEST_ADDCARS=str(manifest)),capture_output=True,text=True)
+                    assert result.returncode==2,(bad,result.returncode,result.stderr[-1000:])
+                    (packs/'WHEELFIT.BIN').write_bytes(wheel);(packs/'SOLIDMAP.BIN').write_bytes(mapping)
+                converted_result=converted_registration(exe,tmp,env)
+        print('traffic registration PASS')
+    return 0 if selection_only else converted_result
+
+
+if __name__=='__main__': raise SystemExit(main())

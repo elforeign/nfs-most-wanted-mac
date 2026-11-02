@@ -1,10 +1,14 @@
 // runtime.h - CPU state and helpers used by C generated from speed.exe (x86-32) by recomp.py.
 // Guest memory is one flat region: guest address a lives at G + a.
 #pragma once
+#ifdef RECOMP_WINDOWS_COMPILE_ONLY
+#include "windows_compile.h"
+#else
 #include <math.h>
 #include <fenv.h>
 #include <stdint.h>
 #include <string.h>
+#endif
 
 typedef struct Cpu {
     uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;

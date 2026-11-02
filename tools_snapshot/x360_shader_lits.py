@@ -29,7 +29,7 @@ import struct
 import sys
 from pathlib import Path
 
-WINDOW = (0x09BB7000, 0x09C1C000)    # the 18 effects (retail USA disc), searched for containers by content
+WINDOW = (0x09BB7000, 0x09C1C000)    # the 18 effects (retail USA and PAL discs), searched for containers by content
 MAGIC = 0x102A0E00
 
 # Shader (its retail ZZDATA0 offset) -> SHA-256 (first 16 hex digits) of its container with the literal values and the
@@ -71,6 +71,19 @@ PINS = """
 09c0de10 a949e0cb6d8c4cb5
 09c14d8c 9e259c9c82dd27c0
 09c17c18 635176f5f0ba7c31
+"""
+# The European (PAL) disc carries these shaders in another form (same size, same place, same literal registers): their
+# identity hashes there, accepted as well. The other shaders are identical on both discs.
+PINS_PAL = """
+09bb919c 3bcbb3b1029e1623
+09bc78b4 2821a5e5a8d9e0f5
+09bd7e94 b7090f083ca696ab
+09bfd3e0 4deb2a947cbbbab3
+09c0c3b4 62e2e6ff89f9fc19
+09c0d800 fb198376f0614edb
+09c0de10 4800f0901079c841
+09c14d8c 7ee4d2450b5c8a19
+09c17c18 3f0b5ecb962f3286
 """
 
 # Register sets: (shader, first register, count, style) -> X360L_ / X360LC_ macros, one per register.
@@ -281,28 +294,49 @@ def needed():
     return sorted({s[0] for s in SETS} | {s[1] for s in SCALARS} | {s[1] for s in DEFAULTS})
 
 
-def pins():
-    return dict(line.split() for line in PINS.split("\n") if line.strip())
+BUILDS = ("USA", "PAL")
+
+
+def pins(build="USA"):
+    """{shader: identity hash} on the given disc: the USA hashes, and the PAL disc's own where they differ."""
+    out = {}
+    for table in (PINS, PINS_PAL) if build == "PAL" else (PINS,):
+        out.update(line.split() for line in table.split("\n") if line.strip())
+    return out
+
+
+def select(hits, names, extra=None):
+    """(build, {shader: hit}) for the one disc whose pins (plus `extra`) all match exactly once in `hits` (identity hash ->
+    hits). A set that is no single disc's (another build, or shaders mixed from the USA and PAL discs) gives
+    (None, [the shaders missing for the closest disc])."""
+    best = None
+    for build in BUILDS:
+        want = dict(pins(build), **(extra or {}))
+        got, missing = {}, []
+        for name in names:
+            h = hits.get(want.get(name, "-"), [])
+            if len(h) == 1:
+                got[name] = h[0]
+            else:
+                missing.append(name)
+        if not missing:
+            return build, got
+        best = missing if best is None or len(missing) < len(best) else best
+    return None, best
 
 
 def read_all(path):
     found = scan(path)
-    want, have = pins(), {}
-    missing = []
-    for name in needed():
-        hits = found.get(want.get(name, "-"), [])
-        if len(hits) != 1:
-            missing.append(name)
-            continue
-        have[name] = hits[0][1]
-    if missing:
+    build, got = select(found, needed())
+    if build is None:
+        missing = got
         n = sum(len(v) for v in found.values())
         raise SystemExit("x360_shader_lits: refused %s: %d of the %d X360 shaders the port uses are not in it (%s%s; %d "
-                         "shader containers found). It is not the retail USA Xbox 360 NFS Most Wanted NFS/ZZDATA0.BIN "
-                         "(another build or a modified/garbage file). Use the disc's own file, or build without X360 "
-                         "shaders (gen_tables.py --no-x360)." % (path, len(missing), len(needed()), " ".join(missing[:6]),
-                                                                  " ..." if len(missing) > 6 else "", n))
-    return have
+                         "shader containers found). It is not a retail (USA or PAL) Xbox 360 NFS Most Wanted NFS/ZZDATA0.BIN "
+                         "(another build, shaders mixed from both discs, or a modified/garbage file). Use the disc's own "
+                         "file, or build without X360 shaders (gen_tables.py --no-x360)." %
+                         (path, len(missing), len(needed()), " ".join(missing[:6]), " ..." if len(missing) > 6 else "", n))
+    return {name: hit[1] for name, hit in got.items()}
 
 
 def finite(v, what):

@@ -30,6 +30,7 @@
 #include "host.h"
 #include "settings.h"
 #include "materials.h"
+#include "traffic_pilot.h"
 
 #include "gen/attrib_x360.inc"          // tools/gen_tables.py, from the player's files
 #include "gen/attrib_light_data.inc"
@@ -275,13 +276,112 @@ void f_005F3D90(Cpu *c) { find_instances_diag(c, f_005F3D90_orig, 0x5F3D90); }
 void f_005F3F10_orig(Cpu *c);
 void f_005F3F10(Cpu *c) { find_instances_diag(c, f_005F3F10_orig, 0x5F3F10); }
 
+// The retail selector still owns eligibility, its ten-record window, both caps,
+// cursor advancement and zero returns. Extend only its sedan TypeCounter and
+// split successful sedan opportunities without drawing another random value.
+static _Thread_local uint32_t traffic_count_native, traffic_count_pilot;
+static _Thread_local uint32_t traffic_choice;
+typedef struct TrafficSpawn {
+    uint32_t manager, native, pilot;
+} TrafficSpawn;
+static _Thread_local TrafficSpawn *traffic_spawn;
+
+void f_004253C0_orig(Cpu *c);
+void f_004253C0(Cpu *c) {
+    uint32_t out = M32(c->esp + 4), extra_count = 0;
+    if (traffic_count_native && M32(c->esp) == 0x0042630Bu &&
+        M32(c->esp + 16) == traffic_count_native) {
+        // A separate cdecl frame below the live frame leaves all six original
+        // arguments, the hidden result and the returned CPU state untouched.
+        Cpu extra = *c;
+        extra.esp -= 48;
+        memcpy(G + extra.esp, G + c->esp, 28);
+        M32(extra.esp + 4) = extra.esp + 32;
+        M32(extra.esp + 16) = traffic_count_pilot;
+        M32(extra.esp + 24) = 0;
+        f_004253C0_orig(&extra);
+        extra_count = M32(M32(extra.esp) + 8); // esp now points at the result argument
+    }
+    f_004253C0_orig(c);
+    M32(out + 8) += extra_count;
+}
+
+void f_00426230_orig(Cpu *c);
+void f_00426230(Cpu *c) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    f_00426230_orig(c);
+    return;
+#endif
+    uint32_t manager = c->ecx, native = 0, pilot = 0;
+    if (traffic_pilot_enabled() && traffic_pilot_available() && car85_traffic_ready()) {
+        native = car85_traffic_donor_key();
+        pilot = car85_traffic_key();
+    }
+    uint32_t saved_native = traffic_count_native, saved_pilot = traffic_count_pilot;
+    traffic_count_native = native && pilot && native != pilot ? native : 0;
+    traffic_count_pilot = traffic_count_native ? pilot : 0;
+    f_00426230_orig(c);
+    traffic_count_native = saved_native;
+    traffic_count_pilot = saved_pilot;
+    if (!native || !pilot || native == pilot) {
+        if (traffic_pilot_force() == TRAFFIC_PILOT_FORCE_PILOT) {
+            c->eax = 0;
+            if (diag_on) diag_event("traffic_pilot: diagnostic failure: registered sedan keys unavailable");
+        }
+        return;
+    }
+    // Diagnostics constrain eligible sedan opportunities too; another pattern
+    // must never become a way around the sedan's eligibility or quota.
+    if (c->eax != native) return;
+    TrafficPilotInput in = {
+        .original_key = c->eax, .native_key = native, .pilot_key = pilot,
+        .choice = traffic_choice++, .enabled = 1,
+        .native_available = 1, .pilot_available = 1,
+        .force = traffic_pilot_force()
+        // Both quota checks already ran on the combined count in retail code.
+    };
+    TrafficPilotChoice choice = traffic_pilot_choose(&in);
+    c->eax = choice.key;
+    if (choice.key == pilot && traffic_spawn && traffic_spawn->manager == manager) {
+        traffic_spawn->native = native;
+        traffic_spawn->pilot = pilot;
+    }
+    if (diag_on) diag_event("traffic_pilot: NextSpawn subject=%s key=%08X status=%u",
+        choice.key == pilot ? TRAFFIC_PILOT_NAME : TRAFFIC_PILOT_DONOR,
+        choice.key, (unsigned)choice.status);
+}
+
+static void traffic_spawn_reset(Cpu *c, const TrafficSpawn *spawn) {
+    if (!(c->eax & 0xFF) || !spawn->native) return;
+    // SpawnTraffic resets every matching record, not just the selected index.
+    // Use the same accessors/window for the pilot's original sedan records, and
+    // only after a successful spawn. Cache/factory failures never reset a timer.
+    Cpu saved = *c;
+    c->ecx = spawn->manager + 0x3A0;
+    uint32_t n = call_guest(c, 0x00403B70, 0, NULL);
+    if (n > 10) n = 10;
+    for (uint32_t i = 0; i < n; ++i) {
+        c->ecx = spawn->manager + 0x3A0;
+        uint32_t record = call_guest(c, 0x00403B50, 1, &i);
+        if (M32(record + 4) == spawn->native) M32(spawn->manager + 0x64 + 4*i) = 0;
+    }
+    *c = saved;
+}
+
 // AITrafficManager::SpawnTraffic (thiscall, returns bool): diag only, the traffic cars it has put on the road.
 void f_00439A10_orig(Cpu *c);
 void f_00439A10(Cpu *c) {
+    TrafficSpawn spawn = {.manager = c->ecx};
+    TrafficSpawn *saved_spawn = traffic_spawn;
+    traffic_spawn = &spawn;
     f_00439A10_orig(c);
+    traffic_spawn = saved_spawn;
+    traffic_spawn_reset(c, &spawn);
     static uint32_t calls, spawned;
     ++calls;
     if (!diag_on) return;
+    if ((c->eax & 0xFF) && spawn.pilot)
+        diag_event("traffic_pilot: spawned subject=%s key=%08X", TRAFFIC_PILOT_NAME, spawn.pilot);
     if (c->eax & 0xFF) { ++spawned; diag_event("attrib_x360: traffic car spawned (%u spawned, %u attempts)", spawned, calls); }
 }
 

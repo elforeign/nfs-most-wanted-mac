@@ -38,3 +38,19 @@ allocations and frees with references and caller (`sstr alloc/free` in events.lo
 <substring>` (that name allocated as ""), `BOOT_TEST_SHAREDSTR_FULL=<substring>` (pool filled at that name: the loading
 screen never ends), `BOOT_TEST_SHAREDSTR_POISON=1` (a freed name keeps its length as '~'; uses of dead names logged:
 none in a race).                                                               
+
+## Matched sign mip-tail experiment
+
+`BOOT_DIAG_SIGN_AB=1`: after a fresh `arm` file under BOOT_DIAG, matched A/B/C/D sign captures at 3840×2160/2×;
+analyse with `sign_diag_test.py --analyze`. Protocol: [sign_diag.h](../sign_diag.h).
+
+                
+                               
+
+                                                                         
+                                                                              
+                                                   
+                                                                                
+                                                                                 
+                                                                 
+                 

@@ -28,6 +28,8 @@ sys.path.insert(0, HERE)
 import listing  # noqa: E402
 import recomp  # noqa: E402
 import build_inputs  # noqa: E402
+from traffic_detail import traffic_detail_lod
+import hook_coverage  # noqa: E402
 from car_render_diag import car_render_diagnostics  # noqa: E402
 from difftest import load_functions  # noqa: E402
 
@@ -36,6 +38,33 @@ CHUNK = 800
 
 
 PADDING = {("nop", ""), ("int3", "")}
+
+
+def breaker_diagnostic_bodies(bodies):
+    """Diagnostic-only copies; off executes the unmodified translated body.
+
+    Sites live beside their read-only observers. Fail closed if translation no
+    longer contains a site. No observer calls are added to the original bodies.
+    """
+    source = (Path(HERE).parent / 'runtime/breaker_diag.c').read_text()
+    sites = re.findall(r'case 0x([0-9A-F]{8}):', source)
+    result = []
+    for addr, name, code in bodies:
+        if addr not in (0x00640F00, 0x006F51F0):
+            continue
+        clone = code.replace(f'void f_{addr:08X}(Cpu *restrict c)',
+                             f'static void breaker_{addr:08X}(Cpu *restrict c)', 1)
+        for site in sites:
+            if not addr <= int(site, 16) < addr + 0x600:
+                continue
+            needle = f'    /* {site}:'
+            if clone.count(needle) != 1:
+                raise ValueError(f'breaker diagnostic site missing: {site}')
+            clone = clone.replace(needle, f'    breaker_observe(c, 0x{site});\n' + needle)
+        result.append(clone)
+    if len(result) != 2:
+        raise ValueError('breaker diagnostic bodies missing')
+    return '\n'.join(result)
 
 
 def plausible_start(t, starts, ends):
@@ -129,7 +158,7 @@ def add_data_referenced(funcs):
 def load_hooks():
     """hooks.txt: guest functions the runtime replaces (address, then a comment naming the owner)."""
     hooks = {}
-    for line in open(os.path.join(HERE, "hooks.txt")):
+    for line in open(os.path.join(HERE, "hooks.txt"), encoding="utf-8"):
         line = line.split("#", 1)[0].strip()
         if line:
             a, _, why = line.partition(" ")
@@ -167,7 +196,7 @@ def water_reflection_gates(addr, code):
 
 
 def split_shadow_operands(addr, code):
-    """Split-only operand aliases, preserving IDs and the retail branches/state.
+    """Per-view operand aliases and current-fit shadow caster culling.
 
     Assert instruction text as well as operand: a changed decoder must fail closed.
     """
@@ -188,7 +217,7 @@ def split_shadow_operands(addr, code):
                      'M32((uint32_t)(c->eax + 0x919620u))',
                      'split_shadow_section_camera(M32((uint32_t)(c->eax + 0x919620u)))'),),
         0x006E44C0: ((0x006E50C8, 'mov eax, dword ptr [0x982c08]',
-                     '    c->eax =', '    split_shadow_casters(c);\n    c->eax ='),),
+                     '    c->eax =', '    x360_shadow_casters(c, M32(c->ebp + 0xCu), c->ebx);\n    c->eax ='),),
     }
     for site, instruction, old, new in sites.get(addr, ()):
         marker = f'    /* {site:08X}: {instruction} */'
@@ -284,26 +313,37 @@ def split_capture_operands(addr, code):
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
-    ap.add_argument("--exe", help="the player's speed.exe (default: $NFS_SPEED_EXE, else the owner's game folder)")
+    ap.add_argument("--exe", "--game-exe", dest="exe", help="speed.exe (default: $NFS_SPEED_EXE)")
+    ap.add_argument("--generate-only", action="store_true", help="emit portable speed C/headers/report; no compiler, archive or server build")
+    ap.add_argument("--output", type=Path, help="generation output directory (requires --generate-only)")
     ap.add_argument("--server-dll", help="optional server.dll (default: $NFS_SERVER_DLL, else beside speed.exe)")
     ap.add_argument("--skip-server", action="store_true", help="build speed.exe only")
     ap.add_argument("--if-stale", action="store_true", help="reuse outputs only when all production input bytes match")
     args = ap.parse_args()
+    if args.output:
+        if not args.generate_only:
+            ap.error('--output requires --generate-only')
+        OUT = str(args.output.resolve())
+    if args.generate_only and args.if_stale:
+        ap.error('--generate-only does not use the native build cache')
     if args.exe:
         recomp.EXE = args.exe
     os.makedirs(OUT, exist_ok=True)
-    fingerprint = build_inputs.recomp_key(exe=recomp.EXE, server=args.server_dll, skip_server=args.skip_server)
+    fingerprint = None if args.generate_only else build_inputs.recomp_key(
+        exe=recomp.EXE, server=args.server_dll, skip_server=args.skip_server)
     stamp = Path(OUT) / 'build-inputs.json'
     if args.if_stale and build_inputs.fresh(stamp, fingerprint, build_inputs.outputs()):
         print('recompiler: production inputs and outputs unchanged')
         return
-    stamp.unlink(missing_ok=True)
+    if not args.generate_only:
+        stamp.unlink(missing_ok=True)
     # A failed translation, compiler launch or archive must never leave an older
     # library looking like the output of this invocation.
     lib = os.path.join(OUT, "speed.a")
-    if os.path.exists(lib):
+    if not args.generate_only and os.path.exists(lib):
         os.remove(lib)
     funcs = load_functions()
     funcs = add_data_referenced(funcs)
@@ -318,12 +358,14 @@ def main():
         else:
             insns += code.count("\n    /* ")
         bodies.append((a, name, code))
+    (Path(OUT) / "breaker_diag.inc").write_text(breaker_diagnostic_bodies(bodies))
     hooks = load_hooks()
     for k, (a, name, code) in enumerate(bodies):
         code = water_reflection_gates(a, code)
         code = split_shadow_operands(a, code)
         code = split_capture_operands(a, code)
         code = split_fx_operands(a, code)
+        code = traffic_detail_lod(a, code)
         code = car_render_diagnostics(a, code)
         bodies[k] = (a, name, code)
         if a in hooks:
@@ -332,8 +374,9 @@ def main():
             code = code.replace(f"void f_{a:08X}(Cpu *restrict c) {{", f"void f_{a:08X}_orig(Cpu *restrict c) {{", 1)
             code += f"\n__attribute__((weak)) void f_{a:08X}(Cpu *c) {{ f_{a:08X}_orig(c); }}"
             bodies[k] = (a, name, code)
-    with open(os.path.join(OUT, "funcs.h"), "w") as h:
+    with open(os.path.join(OUT, "funcs.h"), "w", newline="\n", encoding="utf-8") as h:
         h.write('#pragma once\n#include "runtime.h"\nvoid untranslated(Cpu *c, uint32_t addr);\n')
+        h.write('int traffic_detail_on(void);\n')
         h.write('extern int diag_on;\nvoid diag_car_observe(Cpu *c, uint32_t site);\nvoid diag_car_reject(uint32_t site);\n')
         h.write('uint32_t x360_water_reflection_level(void);\nfloat x360_water_reflection_wetness(uint32_t site, float wetness);\n')
         h.write('uint32_t split_capture_address(uint32_t original);\nuint32_t split_capture_player(uint32_t original);\n')
@@ -344,10 +387,10 @@ def main():
                 'uint32_t split_fx_drop_count(uint32_t original);\n')
         h.write('uint32_t split_shadow_id(uint32_t object);\nuint32_t split_shadow_player_plat(void);\n'
                 'uint32_t split_shadow_rain(void);\nuint32_t split_shadow_section_camera(uint32_t original);\n'
-                'void split_shadow_casters(Cpu *c);\n')
+                'void x360_shadow_casters(Cpu *c, uint32_t cull, uint32_t light_view);\n')
         h.writelines(f"void f_{a:08X}(Cpu *c);\n" for a, _, _ in bodies)
         h.writelines(f"void f_{a:08X}_orig(Cpu *c);   /* hooked: {hooks[a]} */\n" for a, _, _ in bodies if a in hooks)
-    with open(os.path.join(OUT, "table.c"), "w") as t:
+    with open(os.path.join(OUT, "table.c"), "w", newline="\n", encoding="utf-8") as t:
         t.write('#include "funcs.h"\n')
         t.write("const uint32_t guest_func_addr[] = {" + ",".join(f"0x{a:08X}u" for a, _, _ in bodies) + "};\n")
         t.write("void (*const guest_func_ptr[])(Cpu *) = {" + ",".join(f"f_{a:08X}" for a, _, _ in bodies) + "};\n")
@@ -362,11 +405,13 @@ def main():
     files = []
     for k in range(0, len(bodies), CHUNK):
         path = os.path.join(OUT, f"speed_{k // CHUNK:02d}.c")
-        with open(path, "w") as f:
+        with open(path, "w", newline="\n", encoding="utf-8") as f:
             f.write('#include "funcs.h"\n\n')
             f.write("\n\n".join(code for _, _, code in bodies[k:k + CHUNK]))
         files.append(path)
     files.append(os.path.join(OUT, "table.c"))
+    rows = hook_coverage.generate(OUT)
+    print(f'coverage: {len(rows)} hooks/inline dependencies checked for mac and windows')
 
     def compile_one(path):
         obj = path[:-2] + ".o"
@@ -375,10 +420,11 @@ def main():
         return path, obj, r.returncode, r.stderr[-2000:]
 
     objs, errors = [], []
-    with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
-        for path, obj, rc_, err in ex.map(compile_one, files):
-            (objs if rc_ == 0 else errors).append(obj if rc_ == 0 else (path, err))
-    if not errors:
+    if not args.generate_only:
+        with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
+            for path, obj, rc_, err in ex.map(compile_one, files):
+                (objs if rc_ == 0 else errors).append(obj if rc_ == 0 else (path, err))
+    if not args.generate_only and not errors:
         pending = lib + ".new"
         try:
             if os.path.exists(pending):
@@ -396,11 +442,14 @@ def main():
            "stub reasons:"] + [f"  {n:5d}  {w}" for w, n in reasons.most_common(30)]
     for path, err in errors[:3]:
         rep.append(f"ERROR {path}:\n{err}")
-    with open(os.path.join(OUT, "report.txt"), "w") as report:
+    with open(os.path.join(OUT, "report.txt"), "w", newline="\n", encoding="utf-8") as report:
         report.write("\n".join(rep) + "\n")
     print("\n".join(rep[:6]))
     if errors:
         raise SystemExit(1)
+    if args.generate_only:
+        print('GENERATED speed sources only; no native tools invoked')
+        return
     if not args.skip_server:
         import server_module
         server_path = (args.server_dll or os.environ.get("NFS_SERVER_DLL") or

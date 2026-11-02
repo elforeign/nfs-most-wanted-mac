@@ -2,6 +2,7 @@
 // Measure relay-thread CPU (one core), successful wire bytes (IPv4+UDP included),
 // actual client receive bytes and the longest production tick. No game or router traffic.
 #include "roam_core.h"
+#include "roam_test_peer.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,7 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct { int fd; uint16_t id, seq; uint64_t bytes, packets, entries; } Bot;
+typedef struct { int fd; RoamClient client; uint16_t id, seq; uint64_t bytes, packets, entries; } Bot;
 typedef struct {
     RoamRelay *r; int fd; atomic_int stop, snapshot;
     double cpu;
@@ -60,6 +61,7 @@ static int sock(struct sockaddr_in *a) {
     if (fcntl(fd, F_SETFL, O_NONBLOCK)) { close(fd); return -1; }
     return fd;
 }
+static uint64_t join_uploads;
 static int receive(Bot *b, int count) {
     int bad=0;
     for (int i=0; i<count; ++i) {
@@ -67,6 +69,12 @@ static int receive(Bot *b, int count) {
         while ((n=recv(b[i].fd, pkt, sizeof pkt, MSG_DONTWAIT)) >= 0) {
             int type; uint16_t id, seq;
             if (n>ROAM_MAX_DGRAM || roam_hdr_get(pkt, (int)n, &type, &id, &seq)) { bad++; continue; }
+            if (type==ROAM_CHALLENGE) {
+                roam_client_input(&b[i].client, pkt, (int)n, ms());
+                int len=roam_client_hello(&b[i].client,pkt);
+                if (send(b[i].fd,pkt,(size_t)len,0)!=len) bad++;
+                else join_uploads++;
+            }
             if (type==ROAM_WELCOME && n==ROAM_HDR+4) b[i].id=(uint16_t)(pkt[ROAM_HDR] | pkt[ROAM_HDR+1]<<8);
             if (type==ROAM_BUNDLE) {
                 if (n<ROAM_HDR+1 || n!=ROAM_HDR+1+pkt[ROAM_HDR]*ROAM_ENTRY_BYTES) { bad++; continue; }
@@ -77,7 +85,7 @@ static int receive(Bot *b, int count) {
     }
     return bad;
 }
-static void state(Bot *b, int i, int count, int spread, const struct sockaddr_in *to, uint32_t now) {
+static void state(Bot *b, int i, int count, int spread, uint32_t now) {
     RoamState s={.t=now,.q={0,0,0,32767},.flags=ROAM_FLAG_CAR};
     if (spread) {
         int side=(int)ceil(sqrt(count));
@@ -85,19 +93,26 @@ static void state(Bot *b, int i, int count, int spread, const struct sockaddr_in
     }
     uint8_t pkt[ROAM_HDR+ROAM_STATE_BYTES]; roam_hdr_put(pkt, ROAM_STATE, b->id, b->seq++);
     roam_state_put(pkt+ROAM_HDR, &s);
-    if (sendto(b->fd, pkt, sizeof pkt, MSG_DONTWAIT, (const struct sockaddr *)to, sizeof *to)!=(ssize_t)sizeof pkt) {
+    if (send(b->fd, pkt, sizeof pkt, MSG_DONTWAIT)!=(ssize_t)sizeof pkt) {
         perror("load state send"); exit(1);
     }
 }
+// Scratch-build adapter places the allocator next to wrap without bypassing admission.
+void roam_load_next_id(RoamRelay *r, uint16_t next_id);
+static uint16_t pure_ids[65536];
 static void pure_input(RoamRelay *r, int i, int type, uint16_t seq, float x, uint32_t now) {
     struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons((uint16_t)(20000+i)),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
-    uint8_t b[ROAM_MAX_DGRAM]; int n=roam_hdr_put(b,type,(uint16_t)(i+1),seq);
-    if (type==ROAM_HELLO) { memset(b+n,0,20); b[n]=7; n+=20; }
-    else if (type==ROAM_STATE) { RoamState s={.t=now,.pos={x,0,0},.q={0,0,0,32767},.flags=ROAM_FLAG_CAR}; roam_state_put(b+n,&s); n+=ROAM_STATE_BYTES; }
+    if (type==ROAM_HELLO) {
+        RoamClient c; roam_client_init(&c,7,"load");
+        if (!roam_test_join(r,&c,&a,now)) { fputs("load admission failed\n",stderr); exit(1); }
+        pure_ids[i]=c.id; return;
+    }
+    uint8_t b[ROAM_MAX_DGRAM]; int n=roam_hdr_put(b,type,pure_ids[i],seq);
+    if (type==ROAM_STATE) { RoamState s={.t=now,.pos={x,0,0},.q={0,0,0,32767},.flags=ROAM_FLAG_CAR}; roam_state_put(b+n,&s); n+=ROAM_STATE_BYTES; }
     roam_relay_input(r,b,n,&a,now);
 }
 static int churn(void) {
-    RoamRelay *r=roam_relay_new(-1,32,1024); if (!r) return 1;
+    RoamRelay *r=roam_test_relay(-1,32,1024); if (!r) return 1;
     for (int i=0;i<1000;++i) pure_input(r,i,ROAM_HELLO,0,0,0);
     for (int i=0;i<1000;i+=2) pure_input(r,i,ROAM_BYE,1,0,1000);
     for (int i=1;i<1000;i+=2) pure_input(r,i,ROAM_STATE,1,0,1000);
@@ -108,22 +123,25 @@ static int churn(void) {
     int failed=s.clients!=1000 || s.rx_bad!=0;
     printf("CHURN clients=%" PRIu64 " bad=%" PRIu64 "\n",s.clients,s.rx_bad);
     roam_relay_free(r);
-    r=roam_relay_new(-1,1,2); if (!r) return 1;
+    r=roam_test_relay(-1,1,2); if (!r) return 1;
     pure_input(r,0,ROAM_HELLO,0,0,0); // Keep id 1 alive across a complete id cycle.
     struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(20001),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     uint8_t b[ROAM_HDR];
-    for (int i=0;i<65536;++i) {
-        pure_input(r,1,ROAM_HELLO,0,0,0);
-        roam_hdr_put(b,ROAM_BYE,(uint16_t)(2+i%65534),0);
-        roam_relay_input(r,b,sizeof b,&a,0);
+    int collisions=0;
+    roam_load_next_id(r,65530);
+    for (int i=0;i<16;++i) {
+        pure_input(r,1,ROAM_HELLO,0,0,(uint32_t)i*10);
+        if (pure_ids[1]==pure_ids[0]) collisions++;
+        roam_hdr_put(b,ROAM_BYE,pure_ids[1],0);
+        roam_relay_input(r,b,sizeof b,&a,(uint32_t)i*10);
     }
     s=roam_relay_stats(r);
-    printf("IDWRAP clients=%" PRIu64 " bad=%" PRIu64 " full=%" PRIu64 "\n",s.clients,s.rx_bad,s.full);
-    failed|=s.clients!=1 || s.rx_bad!=0 || s.full!=0;
+    printf("IDWRAP clients=%" PRIu64 " bad=%" PRIu64 " full=%" PRIu64 " collisions=%d\n",s.clients,s.rx_bad,s.full,collisions);
+    failed|=s.clients!=1 || s.rx_bad!=0 || s.full!=0 || collisions!=0;
     roam_relay_free(r); return failed;
 }
 static int fixture(void) {
-    RoamRelay *r=roam_relay_new(-1,32,64); if (!r) return 1;
+    RoamRelay *r=roam_test_relay(-1,32,64); if (!r) return 1;
     for (int i=0;i<34;++i) pure_input(r,i,ROAM_HELLO,0,0,0);
     RoamRelayStats before={0}, after;
     for (int tick=0;tick<100;++tick) {
@@ -140,7 +158,7 @@ static int fixture(void) {
     printf("FLAP changes=%" PRIu64 " tier=%" PRIu64 " overflow=%" PRIu64 "\n",
            after.interest_changes-before.interest_changes,after.tier_changes-before.tier_changes,after.bundle_overflow);
     roam_relay_free(r);
-    r=roam_relay_new(-1,32,40); if (!r) return 1;
+    r=roam_test_relay(-1,32,40); if (!r) return 1;
     for (int i=0;i<33;++i) pure_input(r,i,ROAM_HELLO,0,0,0);
     for (int tick=0;tick<24;++tick) {
         for (int i=0;i<33;++i) pure_input(r,i,ROAM_STATE,(uint16_t)(tick+1),0,(uint32_t)tick*50);
@@ -157,7 +175,7 @@ static int fixture(void) {
     roam_relay_free(r); return churn() || failed;
 }
 static int lookup(void) {
-    RoamRelay *r=roam_relay_new(-1,32,1024); if (!r) return 1;
+    RoamRelay *r=roam_test_relay(-1,32,1024); if (!r) return 1;
     for (int i=0;i<1000;++i) pure_input(r,i,ROAM_HELLO,0,0,0);
     uint64_t before=roam_relay_stats(r).lookup_probes;
     double start=seconds(CLOCK_THREAD_CPUTIME_ID);
@@ -180,13 +198,16 @@ int main(int argc,char **argv) {
     struct sockaddr_in relay; int fd=sock(&relay);
     if (fd<0) { if (errno==EPERM || errno==EACCES) { puts("SOCKET PENDING: loopback load"); return 3; } perror("load socket"); return 1; }
     Bot *b=calloc((size_t)count,sizeof *b); if (!b) return 1;
-    RelayTask w={.fd=fd,.r=roam_relay_new(fd,32,count)};
+    RelayTask w={.fd=fd,.r=roam_test_relay(fd,32,count)};
     atomic_init(&w.stop,0); atomic_init(&w.snapshot,0); if (!w.r) return 1;
     pthread_t thread; if (pthread_create(&thread,NULL,work,&w)) return 1;
     for (int i=0;i<count;++i) {
         struct sockaddr_in a; b[i].fd=sock(&a); if (b[i].fd<0) { perror("load client socket"); exit(1); }
-        uint8_t pkt[ROAM_HDR+20]={0}; roam_hdr_put(pkt,ROAM_HELLO,0,b[i].seq++); pkt[ROAM_HDR]=7;
-        if (sendto(b[i].fd,pkt,sizeof pkt,0,(struct sockaddr *)&relay,sizeof relay)!=(ssize_t)sizeof pkt) return 1;
+        if (connect(b[i].fd,(struct sockaddr *)&relay,sizeof relay)) return 1;
+        roam_client_init(&b[i].client,7,"load");
+        uint8_t pkt[ROAM_HELLO_BYTES]; int len=roam_client_hello(&b[i].client,pkt);
+        if (send(b[i].fd,pkt,(size_t)len,0)!=len) return 1;
+        join_uploads++;
     }
     int welcomed=0,bad=0;
     double until=seconds(CLOCK_MONOTONIC)+2;
@@ -196,11 +217,11 @@ int main(int argc,char **argv) {
     if (welcomed!=count) { fprintf(stderr,"load welcomed %d/%d\n",welcomed,count); exit(1); }
     // Warm up interest membership for one second, then measure an integral number of nominal seconds.
     double start=seconds(CLOCK_MONOTONIC), next=start, measure=start+1, end=measure+duration;
-    int measured=0; uint64_t uploads=(uint64_t)count;
+    int measured=0; uint64_t uploads=join_uploads;
     while (seconds(CLOCK_MONOTONIC)<end) {
         double now=seconds(CLOCK_MONOTONIC);
         if (now>=next) {
-            for (int i=0;i<count;++i) state(&b[i],i,count,spread,&relay,ms());
+            for (int i=0;i<count;++i) state(&b[i],i,count,spread,ms());
             uploads+=(uint64_t)count;
             next+=0.05;
         }

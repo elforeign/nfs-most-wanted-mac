@@ -6,10 +6,10 @@ Setup journal. Four deliberate mutants must fail the same safety oracles: missin
 journal, copy/delete exchange, premature backup deletion, changed staged hash.
 The normal app name must be executable at every observed boundary; recovery must
 produce a whole old/new app/data/roots/preferences set and preserve save bytes.
-Verified controls: 54 SIGKILL cases (21 apply, 12 rollback, 13 preference merge,
+Verified controls: 55 SIGKILL cases (22 apply, 12 rollback, 13 preference merge,
 6 acknowledgment, 2 partial copies); 4/4 unsafe mutants rejected; 8/8 invalid
 ready/destination cases rejected. Native harness: 4 good transfer/receipt paths,
-2 guarded/unhealthy startup refusals. All 25 tests pass with synthetic signatures.
+2 guarded/unhealthy startup refusals. All 31 tests pass with synthetic signatures.
 Restart arguments: correct ordering passes; 1 consumed-token ordering mutant fails.
 Review regressions: private retained tools good=1, broken=12 rejected; serialization
 good=2 intents/1 launch, old=2 intents/3 launches (oracle fails). Full-flush
@@ -19,6 +19,13 @@ Ready index: good=1 small read with 1000 retained jobs, broken scan rejected;
 index publication/retirement good=2 layouts, changed retained tools rejected.
 Retained imports: -I -B leaves hashes unchanged (good=1); enabling bytecode
 writes changes the verified source (broken=1 rejected).
+Install retention regression: original before/after acknowledgment=3/3 (fails),
+shared collector=2/1 (passes); original empty-unmarked preservation=0/1 (fails).
+New collector checks: branch 4/4 pass, original 0/4; 34 SIGKILL boundaries
+(25 apply, 9 acknowledgment) with two Setup builds. Every surviving manifest
+reference must still exist at each deletion boundary.
+Deletion review regressions: original 0/2 pass (case alias deletes rollback data;
+inherited X360 override deletes live data); identity/environment collector 2/2 pass.
 """
 import hashlib
 import json
@@ -136,7 +143,201 @@ class ApplyTests(unittest.TestCase):
         path.mkdir()
         return Fixture(path, **kw)
 
-    def kill_at(self, fixture, action, index):
+    def setup_pair(self, name="pair"):
+        f = self.fixture(name)
+        for index in range(2):
+            stage = f.base / f"setup-{index}"
+            f.make_app(stage / ins.APP_BUNDLE, "old")
+            put(stage / "data/pc/marker", "old")
+            ins.transactional_install(stage / ins.APP_BUNDLE, stage / "data",
+                dict(pc_root=stage / "data/pc"), f.profile, f.dest.parent,
+                a.verify_app, running=lambda: None)
+        f.roots = (f.profile / "roots.txt").read_bytes()
+        f.prefs = (f.profile / "app.txt").read_bytes()
+        f.descriptor["destination"] = dict(path=str(f.dest), identity=ins.ident(f.dest), sha256=ins.digest_tree(f.dest))
+        f.write_ready()
+        return f
+
+    def generations(self, f):
+        return {p.name for p in (f.profile / "installs").iterdir() if ins.GENERATION.fullmatch(p.name)}
+
+    def test_update_collects_setup_generations(self):
+        f = self.setup_pair()
+        self.assertEqual(len(self.generations(f)), 2)
+        token = f.apply()
+        before = len(self.generations(f))
+        f.receipt(token)
+        a.acknowledge(f.profile, token)
+        after = len(self.generations(f))
+        print(f"INSTALL_RETENTION before_ack={before} after_ack={after} expected=2/1")
+        self.assertEqual((before, after), (2, 1))
+        self.assertTrue(ins.owned(f.profile / "installs" / token, f.profile))
+        f.consistent("new")
+
+    def test_collector_never_removes_unmarked_empty_directory(self):
+        f = self.setup_pair()
+        empty = f.profile / "installs" / ("e" * 32)
+        empty.mkdir()
+        token = f.apply()
+        f.receipt(token)
+        a.acknowledge(f.profile, token)
+        # Exercise Setup's same collector too.
+        record = dict(token=token, previous=[], dest=str(f.dest.parent))
+        logs = []
+        ins._prune_generations(f.profile, record, logs.append)
+        self.assertTrue(empty.is_dir())
+        self.assertTrue(any("1 unmarked" in line for line in logs), logs)
+
+    def test_case_variant_roots_keep_rollback_data(self):
+        f = self.setup_pair()
+        old_pc = Path(dict(line.split("=", 1) for line in f.roots.decode().splitlines())["pc_root"])
+        alias = str(old_pc).replace("/installs/", "/INSTALLS/")
+        if not Path(alias).exists():
+            self.skipTest("requires a case-insensitive filesystem")
+        self.assertTrue(os.path.samefile(alias, old_pc))
+        f.roots = f"pc_root={alias}\n".encode()
+        f.prefs = ins.updated_profile(f.prefs, alias)
+        put(f.profile / "roots.txt", f.roots)
+        put(f.profile / "app.txt", f.prefs)
+        f.apply()
+        self.assertTrue(old_pc.is_dir(), "case alias lost its rollback generation before ACK")
+        self.assertEqual(f.recover(), "restored")
+        f.consistent("old")
+        self.assertEqual((old_pc / "marker").read_text(), "old")
+        spare, obsolete = [f.profile / "installs" / (letter * 32) for letter in "cd"]
+        for folder in (spare, obsolete):
+            put(folder / "pc/marker", "extra")
+            ins.mark_owned(folder, f.profile)
+        record = dict(token=old_pc.parent.name, previous=[], dest=str(f.dest.parent),
+                      kind=a.KIND, state="acknowledged", launch_roots={},
+                      launch_generations=[old_pc.parent.name])
+        with (f.profile / "roots.txt").open("a") as stream:
+            alias = str(spare).replace("/installs/", "/INSTALLS/")
+            stream.write(f"optional_root={alias}/pc/missing/child\n")
+        ins._prune_generations(f.profile, record)
+        self.assertTrue(spare.is_dir(), "unresolved descendant must pin its generation by identity")
+        self.assertFalse(obsolete.exists(), "an unrelated unused generation can still be collected")
+        # An unresolved external root cannot prove that any generation is unused.
+        put(obsolete / "pc/marker", "extra")
+        ins.mark_owned(obsolete, f.profile)
+        with (f.profile / "roots.txt").open("a") as stream:
+            stream.write(f"optional_root={f.base}/disconnected/pc\n")
+        generations = self.generations(f)
+        logs = []
+        ins._prune_generations(f.profile, record, logs.append)
+        self.assertEqual(self.generations(f), generations)
+        self.assertTrue(any(f"kept {len(generations)} install folders" in line for line in logs), logs)
+
+    def test_child_root_override_keeps_data_after_ack(self):
+        class Child:
+            def poll(self): return None
+        for key in ("NFS_X360_FILES", "NFS_X360_TEXTURES", "NFS_TEST_CAR_DIR", "NFS_ROOTS"):
+            with self.subTest(override=key):
+                f = self.setup_pair(key)
+                old_pc = Path(dict(line.split("=", 1) for line in f.roots.decode().splitlines())["pc_root"])
+                value = str(old_pc)
+                if key == "NFS_ROOTS":
+                    manifest = f.base / "alternate-roots.txt"
+                    put(manifest, f"pc_root={old_pc}\n")
+                    value = str(manifest)
+                elif key == "NFS_X360_TEXTURES":
+                    value = os.path.relpath(old_pc)
+                elif key == "NFS_TEST_CAR_DIR":
+                    alias = f.base / "linked-root"
+                    alias.symlink_to(old_pc, target_is_directory=True)
+                    value = str(alias)
+                calls = []
+                def launch(command, **kwargs):
+                    calls.append(kwargs["env"])
+                    self.assertTrue(old_pc.is_dir())
+                    f.receipt(command[2])
+                    if key == "NFS_ROOTS":
+                        # The running child has already read the old manifest;
+                        # rereading only its edited contents would lose that pin.
+                        put(Path(value), (f.profile / "roots.txt").read_bytes())
+                    # Cleanup/recovery cannot rely on its own environment still
+                    # matching the one already handed to the child.
+                    os.environ.pop(key)
+                    return Child()
+                real_apply = a.apply_ready
+                with mock.patch.dict(os.environ, {key: value, "NFS_SKIP_MOVIES": "0"}), \
+                        mock.patch.object(a.subprocess, "Popen", side_effect=launch), \
+                        mock.patch.object(a, "apply_ready", side_effect=lambda *args, **kw:
+                                          real_apply(*args, running=lambda: None, **kw)):
+                    a.supervise(f.profile, f.dest, f.ready)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][key], value)
+                self.assertTrue(old_pc.is_dir(), "ACK deleted the running child's root override")
+                self.assertEqual(len(self.generations(f)), 2, "only the new and referenced generations remain")
+                self.assertFalse(ins.journal_path(f.profile).exists())
+                f.consistent("new")
+
+    def test_collector_preserves_resolved_roots_backups_and_decoys(self):
+        f = self.setup_pair()
+        token = f.apply()
+        record = json.loads(ins.journal_path(f.profile).read_bytes())
+        installs = f.profile / "installs"
+        extra, pending, unused = [installs / (letter * 32) for letter in "abc"]
+        for path in (extra, pending, unused):
+            put(path / "pc/marker", path.name)
+            ins.mark_owned(path, f.profile)
+        alias = installs / ("d" * 32)
+        alias.symlink_to(extra, target_is_directory=True)
+        # Every root key matters; resolve the link and '..' before retaining.
+        with (f.profile / "roots.txt").open("a") as stream:
+            stream.write(f"optional_root={alias}/pc/../pc\n")
+        backup = ins._plan(f.profile, record)[0][1][2]
+        put(backup, f"other_root={pending}/pc\n")
+        unmarked = installs / ("e" * 32)
+        put(unmarked / "pc/marker", "unmarked")
+        decoy = installs / ("f" * 32)
+        put(decoy / "pc/marker", "decoy")
+        shutil.copyfile(unused / ins.OWNER_MARK, decoy / ins.OWNER_MARK)
+        ins._prune_generations(f.profile, record)
+        self.assertTrue(extra.is_dir())
+        self.assertTrue(pending.is_dir())
+        self.assertTrue(alias.is_symlink())
+        self.assertFalse(unused.exists())
+        self.assertEqual((unmarked / "pc/marker").read_text(), "unmarked")
+        self.assertEqual((decoy / "pc/marker").read_text(), "decoy")
+        # Even acknowledged journals retain any surviving backup reference.
+        record["state"] = "acknowledged"
+        ins._prune_generations(f.profile, record)
+        self.assertTrue(pending.is_dir())
+        backup.unlink()
+        ins._prune_generations(f.profile, record)
+        self.assertFalse(pending.exists())
+
+    def test_collector_crash_every_step(self):
+        for phase in ("apply", "ack"):
+            baseline = self.setup_pair("baseline-" + phase)
+            if phase == "apply":
+                action = baseline.apply
+            else:
+                token = baseline.apply()
+                baseline.receipt(token)
+                action = lambda: a.acknowledge(baseline.profile, token)
+            steps = self.trace(action, collector=True)
+            self.assertIn("prune-contents", steps)
+            self.assertIn("prune-generation", steps)
+            for index, name in enumerate(steps):
+                with self.subTest(phase=phase, step=name):
+                    f = self.setup_pair(f"{phase}-{index}")
+                    if phase == "apply":
+                        action = f.apply
+                    else:
+                        token = f.apply()
+                        f.receipt(token)
+                        action = lambda: a.acknowledge(f.profile, token)
+                    self.kill_at(f, action, index, collector=True)
+                    f.recover()
+                    f.consistent("old" if phase == "apply" else "new")
+                    self.assertFalse(ins.journal_path(f.profile).exists())
+                    if phase == "ack":
+                        self.assertEqual(len(self.generations(f)), 1)
+            print(f"COLLECTOR_CRASH phase={phase} good={len(steps)} broken=0")
+
+    def kill_at(self, fixture, action, index, collector=False):
         pid = os.fork()
         if pid == 0:
             counter = 0
@@ -145,10 +346,21 @@ class ApplyTests(unittest.TestCase):
                 fixture.launchable()
                 if name != "journal-removed":
                     assert ins.journal_path(fixture.profile).exists(), "missing recovery journal"
+                if name.startswith("prune-"):
+                    record = json.loads(ins.journal_path(fixture.profile).read_bytes())
+                    for path, candidate, backup in ins._plan(fixture.profile, record)[0][1:]:
+                        for manifest in (path, candidate, backup):
+                            if manifest.exists():
+                                for line in manifest.read_text(errors="surrogateescape").splitlines():
+                                    key, eq, value = line.partition("=")
+                                    if eq and (key.endswith("_root") or key == "game_dir"):
+                                        assert Path(value).is_dir(), (name, manifest, value)
                 if counter == index:
                     os.kill(os.getpid(), signal.SIGKILL)
                 counter += 1
             a._step = step
+            if collector:
+                ins._step = step
             try:
                 action()
             except BaseException:
@@ -158,9 +370,10 @@ class ApplyTests(unittest.TestCase):
         self.assertTrue(os.WIFSIGNALED(status), (index, status))
         self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
 
-    def trace(self, action):
+    def trace(self, action, collector=False):
         steps = []
-        with mock.patch.object(a, "_step", side_effect=steps.append):
+        collector_steps = mock.patch.object(ins, "_step", side_effect=steps.append) if collector else nullcontext()
+        with mock.patch.object(a, "_step", side_effect=steps.append), collector_steps:
             action()
         return steps
 
@@ -527,7 +740,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     def test_retained_imports_do_not_change_pinned_hashes(self):
         source = self.root / "retained-source/tools/setup_kit"
         source.mkdir(parents=True)
-        for name in ("apply.py", "install.py"):
+        for name in ("apply.py", "install.py", "export.py"):
             shutil.copy2(ROOT / "tools/setup_kit" / name, source / name)
         before = ins.digest_tree(source)
         command = [sys.executable, "-I", "-B", str(source / "apply.py"), "--help"]

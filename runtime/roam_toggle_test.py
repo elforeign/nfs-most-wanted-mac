@@ -14,12 +14,12 @@ ROOT = Path(__file__).resolve().parent.parent
 RT = ROOT / 'runtime'
 GATE = 'return welcomed && has_car && driving && !menu_open;'
 EDGE = 'int edge = down && !t->held;'
-CF = ['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-g', '-fsanitize=address,undefined', '-I', str(RT)]
+CF = ['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-Wall', '-Wextra', '-Werror', '-g', '-fsanitize=address,undefined', '-I', str(RT)]
 
 
 def run(td, name, core):
     exe = Path(td) / ('toggle_' + name)
-    p = subprocess.run(CF + [str(RT / 'roam_toggle_test.c'), str(core), str(RT / 'roam_relay.c'), '-o', str(exe)],
+    p = subprocess.run(CF + [str(RT / 'roam_auth.c'), str(RT / 'roam_moderation.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if __import__('sys').platform == 'darwin' else ['-lcrypto', '-lm']) + [str(RT / 'roam_toggle_test.c'), str(core), str(RT / 'roam_relay.c'), '-o', str(exe)],
                        capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-2500:]
     p = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)

@@ -13,7 +13,11 @@ static FILE *post_snapshot;
 static uint32_t height=721;
 #define CHECK(x) do {++checks;if(!(x)){++failures;if(failures<12)printf("FAIL %d %s\n",__LINE__,#x);}}while(0)
 uint8_t *G;
-int diag_on,gpt_on,pass_dirty,render_static_made;
+int diag_on,gpt_on,pass_dirty,render_static_made,sign_diag_on;
+int sign_diag_active(void) { return 0; }
+void sign_diag_freeze(const char *name, void *p, size_t n) { (void)name; (void)p; (void)n; abort(); }
+void sign_diag_record_history(const char *name, const void *p, size_t n) { (void)name; (void)p; (void)n; abort(); }
+void sign_diag_scene(id<MTLCommandBuffer> cb, id<MTLTexture> scene) { (void)cb; (void)scene; abort(); }
 const char *diag_dir="/tmp";
 int x360_post_ssao_enabled(void){return 0;}
 int postfx_look_variant(const char *s){(void)s;return 0;}

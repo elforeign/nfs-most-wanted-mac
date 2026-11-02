@@ -10,12 +10,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include "d3d9_internal.h"
+#include "rt_native.h"
 
 int rt_on = -1;
 
 enum { OP_RENC = 1, OP_BENC, OP_BENCD, OP_END, OP_LABEL, OP_PSO, OP_DSS, OP_FTEX, OP_VTEX, OP_FSAMP, OP_VSAMP, OP_VBUF, OP_FBUF,
        OP_VBOFF, OP_FBOFF, OP_VBYTES, OP_FBYTES, OP_VIEWPORT, OP_SCISSOR, OP_CULL, OP_WINDING, OP_BIAS, OP_STENCIL, OP_BLENDC,
-       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB, OP_RLIST, OP_MIPMAPS };
+       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB, OP_RLIST, OP_MIPMAPS, OP_NATIVE };
+
+@interface RTNative : NSObject {
+@public
+    RTNativeEncode encode;
+    NSData *bytes;
+    NSArray *resources;
+}
+@end
+@implementation RTNative
+@end
+
+static void native_hold_until_completed(id<MTLCommandBuffer> buffer, RTNative *operation) {
+    __block RTNative *keep = operation;
+    [buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        (void)completed;
+        (void)keep->resources.count;
+        keep = nil;
+    }];
+}
 
 @interface RTCmd : NSObject {
 @public
@@ -118,6 +138,24 @@ static inline uint64_t obj_w(RTCmd *c, id o) {
 }
 - (void)doesNotRecognizeSelector:(SEL)s { fprintf(stderr, "boot: render thread: command buffer recorder lacks %s\n", sel_getName(s)); abort(); }
 @end
+
+void rt_native_encode(id<MTLCommandBuffer> buffer, RTNativeEncode encode,
+                      const void *bytes, size_t size, NSArray *resources) {
+    if (!buffer || !encode || (size && !bytes)) abort();
+    RTNative *entry = [RTNative new];
+    entry->encode = encode;
+    entry->bytes = [NSData dataWithBytes:bytes length:size];
+    entry->resources = resources ? [resources copy] : @[];
+    if ([(id)buffer isKindOfClass:[RTCmd class]]) {
+        RTCmd *c = (RTCmd *)buffer;
+        if (c->state) abort();
+        [c->owned addObject:entry];
+        op(c, OP_NATIVE, 1)[0] = (uint64_t)(uintptr_t)(__bridge void *)entry;
+    } else {
+        native_hold_until_completed(buffer, entry);
+        entry->encode(buffer, entry->bytes.bytes, entry->bytes.length, entry->resources);
+    }
+}
 
 #define REC(kind, nw) uint64_t *a = op(c, kind, nw)
 @implementation RTRender
@@ -268,6 +306,13 @@ static void replay(RTCmd *c) {
         case OP_BENC: b = [real blitCommandEncoder]; break;
         case OP_BENCD: b = [real blitCommandEncoderWithDescriptor:O(a[0])]; break;
         case OP_END: if (r) [r endEncoding]; if (b) [b endEncoding]; r = nil; b = nil; break;
+        case OP_NATIVE: {
+            if (r || b) abort();
+            RTNative *entry = O(a[0]);
+            native_hold_until_completed(real, entry);
+            entry->encode(real, entry->bytes.bytes, entry->bytes.length, entry->resources);
+            break;
+        }
         case OP_LABEL: if (r) r.label = O(a[0]); else if (b) b.label = O(a[0]); break;
         case OP_COPY_TT: [b copyFromTexture:O(a[0]) toTexture:O(a[1])]; break;
         case OP_MIPMAPS: [b generateMipmapsForTexture:O(a[0])]; break;

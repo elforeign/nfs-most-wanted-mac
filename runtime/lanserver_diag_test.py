@@ -22,7 +22,7 @@ uint64_t fake_clock(clockid_t);
 #undef clock_gettime_nsec_np
 uint8_t *G;
 int diag_on;
-uint32_t last_error;
+__thread uint32_t last_error;
 uint32_t ws2_local_ip = 0x7F000001;
 int ws2_trace, ws2_trace_listening, ws2_trace_accepts;
 uint16_t ws2_trace_port, ws2_trace_peers[64];

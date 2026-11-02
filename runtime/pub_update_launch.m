@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "pub_update_write.h"
+#include "bundle_roots.h"
 
 extern const char *game_dir;  // assigned only after app_start validates the PC root
 
@@ -151,6 +152,7 @@ static void UpdateError(NSString *reason) {
 // the main queue: the profile is then locked and normal startup has reached its
 // event pump. A blocked/failed startup never acknowledges the replacement.
 void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
+    if (roots_exported()) return;
     if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"io.github.nfsmw-native-mac"]) return;
     NSString *profile = CanonicalPath([NSString stringWithUTF8String:profilePath]);
     NSString *destination = CanonicalPath(NSBundle.mainBundle.bundlePath);

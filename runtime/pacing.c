@@ -30,6 +30,7 @@
 
 #include "funcs.h"
 #include "host.h"
+#include "sign_diag.h"
 
 #define SCHEDULER 0x009203B0u              // Scheduler::fgScheduler
 #define RUN_SLEEP_RET 0x00642ED7u          // return address of Scheduler::Run's bThreadYield(ms) call
@@ -74,7 +75,9 @@ static int catching_up;                    // Scheduler requested multiple ticks
 // switches' held passes draw the same scene: no camera mover or emitter may move either), none otherwise. It quantizes to 1/3600 s (RealTimeElapsed) and carries the rest, so 1/hz s comes out
 // exactly for 60 Hz and its divisors of 3600.
 void f_00661280(Cpu *c) {
-    if (diag_fixed_step) {
+    if (diag_on && sign_diag_on && sign_diag_active()) {
+        MF32(c->esp + 4) = 0.0f;
+    } else if (diag_fixed_step) {
         // Front-end captures: loading can run several main-loop passes per Present.
         // Advance animation once per image, including the script's frame clock.
         static uint32_t prepared;
@@ -114,10 +117,10 @@ void f_006484E0(Cpu *c) {
 }
 
 // SimTask::SimTask(index, rate, taskable, delay, mode) (006ECCD0, thiscall): sim tasks count ticks. A task with rate
-// r < 1 runs every 1/r ticks with dt = step / r, and `delay` is a number of ticks before its first run. At a faster
-// tick rate those would run more often and start sooner (the race countdown's 35-tick wait came 0.29 s early at
-// 120 Hz), so rates below 1 are scaled by 60/hz and delays by hz/60: every task keeps its original real-time rate,
-// dt and delay, while every-tick tasks (physics, rate 1) run at the full tick rate.
+// 0 < r < 1 runs every 1/r ticks with dt = step / r. Run starts its accumulator at -delay and adds rate per tick:
+// its first call is after (1 + delay)/rate ticks. Scaling sub-rate tasks by 60/hz therefore preserves their delay
+// too; scaling delay again would postpone the first call. Every-tick tasks (physics, rate >= 1, clamped to 1 by
+// the constructor) keep the full tick rate and scale positive delays by hz/60 as before.
 void diag_timeline(const char *fmt, ...);
 void f_006ECCD0(Cpu *c) {
     if (diag_on) {
@@ -129,7 +132,7 @@ void f_006ECCD0(Cpu *c) {
     if (sim_hz && sim_hz != 60) {
         float k = 60.0f / (float)sim_hz, rate = MF32(c->esp + 8), delay = MF32(c->esp + 16);
         if (rate > 0.0f && rate < 1.0f) MF32(c->esp + 8) = rate * k;
-        if (delay > 0.0f) MF32(c->esp + 16) = delay / k;
+        else if (delay > 0.0f) MF32(c->esp + 16) = delay / k;
     }
     f_006ECCD0_orig(c);
 }
@@ -252,10 +255,12 @@ void f_0065C6D0(Cpu *c) {
     if (diag_on) { void diag_warp_pass(Cpu *c); diag_warp_pass(c); void lanserver_selftest_pass(Cpu *c); lanserver_selftest_pass(c); }
     if (!pace_on()) { if (portmenu_hold()) hold_real_time(c); f_0065C6D0_orig(c); return; }
     int postfx_ab_hold(void);              // x360_post.m, BOOT_DIAG_POSTFX_AB: drop this pass's time (the next draws the same scene)
+    int traffic_detail_ab_hold(void);
     int carpaint_ab_hold(void);            // materials.m, BOOT_DIAG_CARPAINT_AB: same-frame X360 / PC car paint
     int detail_ab_hold(void);              // detail.c, BOOT_DIAG_DETAIL_AB: same-frame detail distances
     int envcube_ab_hold(void);
-    int held = postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold() | envcube_ab_hold();   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
+    int shadow_near_ab_hold(void);
+    int held = (diag_on && sign_diag_on && sign_diag_hold()) | (diag_on && traffic_detail_ab_hold()) | postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold() | envcube_ab_hold() | (diag_on && shadow_near_ab_hold());   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
     if (held) hold_real_time(c);
     uint32_t s = M32(SCHEDULER);
     int frame_pass = presents != presents_adv, lock = sim_hz && s && lockstep_now();

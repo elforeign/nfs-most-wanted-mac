@@ -276,10 +276,8 @@ static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) 
         uint8_t *p = px + 4 * i, a = p[3];
         if (a && a < 255) for (int k = 0; k < 3; ++k) p[k] = (uint8_t)((p[k] * 255 + a / 2) / a);
     }
-    // The TextureInfo: the PC's own L1 glyph record (GLOBAL\GLOBALB.BUN: class 001A93CF, render order 5, alpha usage
-    // 2, blend 1; read from the player's file at build time, tools_snapshot/pubtables_gen.py), resized; 32-bit
-    // (compression 0x20, as Init's P8 path writes for A8R8G8B8).
-#include "gen/padprompts_l1.inc"                            // tools/gen_tables.py, from the player's GLOBALB.BUN
+    // Port-authored TextureInfo fields: straight-alpha front-end art, resized here.
+#include "gen/padprompts_l1.inc"                            // tools_snapshot/pad_metadata.py; no asset template
     uint8_t rec[124], pl[32] = {[8] = 1};
     memcpy(rec, l1, sizeof rec);
     snprintf((char *)rec + 0x0C, 24, "%s", name);
@@ -347,6 +345,27 @@ void f_00503400(Cpu *c) {
 }
 
 // ---------------- the hooks ----------------
+static int shop_mirror;                   // sync hidden console groups even with PC keycaps selected
+void f_007B1070_orig(Cpu *c);
+void maxperf_career_header(Cpu *c, uint32_t self);
+void f_007B1070(Cpu *c) {                  // CustomizeSub::RefreshHeader: keep both Max Performance groups in sync
+    uint32_t self = c->ecx, package = M32(self + 0x10);
+    f_007B1070_orig(c);
+    maxperf_career_header(c, self);
+    Cpu saved = *c;
+    uint32_t a[2] = {package, 0x8805E665u};
+    uint32_t pc = call_guest(c, 0x00524850u, 2, a);
+    a[1] = 0x5AEC8D91u;
+    uint32_t pad = call_guest(c, 0x00524850u, 2, a);
+    if (pc && pad) {
+        uint32_t visible = !(M32(pc + 0x1C) & 1u);
+        int previous = shop_mirror;
+        shop_mirror = 1;
+        call_guest(c, visible ? 0x00514CC0u : 0x00514C70u, 1, &pad);
+        shop_mirror = previous;
+    }
+    *c = saved;
+}
 // Objects of PC-only packages (no 0x40 object) that stay drawn with a controller despite flag 0x8: an open-addressing
 // table of object addresses -> keep, refreshed for every 0x8 object when its package loads (addresses get reused).
 #define KEEP_N 16384u
@@ -381,7 +400,7 @@ void f_00516230(Cpu *c) {                  // FEngHidePCObjects::Callback (thisc
 void f_00514CC0_orig(Cpu *c);
 void f_00514CC0(Cpu *c) {                  // FEngSetVisible (cdecl, FEObject *): also the console set
     uint32_t o = arg(c, 0);
-    if (!mode() || !o || !(M32(o + 0x1C) & 0x40)) { f_00514CC0_orig(c); return; }
+    if ((!mode() && !shop_mirror) || !o || !(M32(o + 0x1C) & 0x40)) { f_00514CC0_orig(c); return; }
     M32(o + 0x1C) &= ~0x40u;
     f_00514CC0_orig(c);
     M32(o + 0x1C) |= 0x40u;
@@ -495,10 +514,18 @@ void f_0056ADA0(Cpu *c) {                  // LoadingTips::GetARandomTipScreen (
 // The PC build never constructs the screen (FUN_0058F070 / 0056B190 have no callers: the package plays its script alone,
 // the diagram image empty), so the X360's work is done when the package is loaded (PackageWasLoaded, below): the image's
 // texture set to the diagram and a streaming load of it, once per layout (the PC never unloads it).
-// The labels under the callouts: LanguageHash per button (17) and controller configuration (options +0x88, 5), the X360's
-// table at 828FFBB0 (the PC's 0091D278 is zeroed, so every callout stayed hidden or the template's text), read from the
-// player's X360 executable at build time (tools_snapshot/xex_read.c).
-#include "gen/callout_labels.inc"   // tools/gen_tables.py, from the player's X360 default.xex (no X360 copy: zeros)
+// Action IDs per FNG callout slot (17) and configuration (5), derived from our
+// presets, plus port-written action text. The IDs also serve Controls/Drag.
+#include "gen/callout_labels.inc"   // tools_snapshot/pad_metadata.py; no executable table
+uint32_t prompts_action_text(uint32_t hash) {
+    static uint32_t guest[sizeof pad_action_labels / sizeof *pad_action_labels];
+    for (size_t i = 0; i < sizeof pad_action_labels / sizeof *pad_action_labels; ++i) {
+        if (pad_action_labels[i].id != hash) continue;
+        if (!guest[i]) guest[i] = gstr(pad_action_labels[i].text);
+        return guest[i];
+    }
+    return 0;
+}
 // The PlayStation layout's labels, one per callout slot, from what the controls do here (user32.m pad_apply_layout;
 // hashes found with BOOT_DIAG_STRINGS=1, which logs the game's own SearchForString lookups). Slots sit at the Xbox
 // diagram's positions, which the DualShock 2 art shares: 1 left shoulder (L1: nitrous), 2 left stick, 3 right shoulder

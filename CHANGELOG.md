@@ -2,6 +2,9 @@
 
 ## 4.3.0 (unreleased)
 
+- **Build from your PC game discs, no Windows needed:** Setup accepts the PC discs as `.iso` images (or mounted in Finder) with the game's official 1.3 update. It installs the game from the discs into its work folder and applies the update without running it, checking every file. The `speed.exe` on the discs and in the update is copy-protected, so a `speed.exe` with the 1.3 code is still needed. **Update now** remembers all three.
+- **European (PAL) Xbox 360 disc:** Setup now takes the PAL retail Xbox 360 copy as well as the USA one for the Xbox 360 features. Its executable is told apart by its hash and read with its own address tables; its differing shaders are pinned too. Also fixes reading an Xbox 360 executable whose compressed data ends right after its last code.
+
 - **In-game Guide:** open **F10 > Help > Guide**, with keyboard or controller navigation.
 - **Look presets:** choose Port, PC retail, Xbox 360 retail or My picks. Picture edits are saved as My picks. The full Xbox 360 look needs your own Xbox 360 files. Both retail presets turn HDR, contact shadows and soft smoke Off.
 - **Update now:** download, verify and prepare an update for the next launch, with progress, cancellation, retry and rollback if startup fails. The original sources remembered by Setup must remain available. From 4.2.0, download the new Setup through the browser and run it manually first.

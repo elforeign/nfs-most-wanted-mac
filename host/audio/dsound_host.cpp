@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mach/mach_time.h>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -34,6 +35,53 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr int kOut = 6;  // FL FR FC LFE BL BR
 constexpr uint64_t kOne = 1ull << 32;
+
+// Never assume the C++ steady clock's epoch or suspend behavior matches mach_absolute_time.
+struct HostClock {
+    mach_timebase_info_data_t scale{};
+    HostClock() { mach_timebase_info(&scale); }
+};
+const HostClock &host_clock() { static const HostClock c; return c; }
+uint64_t frame_ticks(uint64_t frames, int rate) {
+    const auto &c = host_clock();
+    return (uint64_t)std::llround((long double)frames * 1e9L * c.scale.denom / (rate * (long double)c.scale.numer));
+}
+uint64_t host_at(Clock::time_point time) {
+    const auto &c = host_clock();
+    auto before = Clock::now();
+    uint64_t absolute = mach_absolute_time();
+    auto after = Clock::now();
+    auto steady = before + (after - before) / 2;
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(time - steady).count();
+    return absolute + (int64_t)std::llround((long double)ns * c.scale.denom / c.scale.numer);
+}
+
+struct Capture {
+    std::mutex control;                    // only start/stop, never delivery
+    std::atomic<unsigned> gate{0};          // bit 0: subscribed, bit 1: callback in flight
+    std::atomic<uint64_t> newest{0};
+    DsCaptureFn fn = nullptr;              // published by gate; immutable until callback quiescence
+    void *user = nullptr;
+    uint64_t stream = 0, generation = 0, next_frame = 0;
+};
+Capture &capture() { static auto *c = new Capture; return *c; }
+void capture_deliver(const DsTimedMixBlock &snapshot, const float *pcm) {
+    auto &c = capture();
+    if (snapshot.stream_id != c.newest.load(std::memory_order_acquire)) return;
+    unsigned expected = 1;
+    if (!c.gate.compare_exchange_strong(expected, 3, std::memory_order_acquire)) return;
+    if (snapshot.stream_id == c.newest.load(std::memory_order_acquire)) {
+        DsTimedMixBlock block = snapshot;
+        block.pcm51 = pcm;
+        if (c.stream != block.stream_id || c.generation != block.clock_generation || c.next_frame != block.sample_position)
+            block.flags |= DS_CAPTURE_DISCONTINUITY;
+        c.stream = block.stream_id;
+        c.generation = block.clock_generation;
+        c.next_frame = block.sample_position + block.frames;
+        c.fn(c.user, &block);
+    }
+    c.gate.fetch_and(~2u, std::memory_order_release);
+}
 
 bool g_log = getenv("NFS_DSOUND_LOG") != nullptr;
 #define DSLOG(...) do { if (g_log) { fprintf(stderr, "[dsound] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
@@ -237,6 +285,9 @@ struct DsDevice {
     bool primed = false;               // the sink queue has reached the latency since the (re)start
     uint64_t snap_played = 0;          // device sink: frames played at snap_time
     Clock::time_point snap_time, t0;   // t0: null sink clock origin
+    uint64_t clock_generation = 1;
+    uint64_t manual_host_time = 0;
+    uint64_t manual_frame = 0;
 
     std::vector<float> tmp, scratch, block;
     const bool diag = getenv("BOOT_DIAG") && *getenv("BOOT_DIAG");
@@ -512,6 +563,29 @@ void stop_buffer(DsBuffer &b, std::vector<uint32_t> &events) {
     fire_stop(b, events);
 }
 
+// Snapshot BEFORE mixing, with d.m held: format, position and the clock belong to exactly this PCM block.
+DsTimedMixBlock timed_block(DsDevice &d, size_t n) {
+    DsTimedMixBlock b{};
+    b.frames = n;
+    b.sample_rate = d.cfg.mix_rate;
+    b.stream_id = d.id;
+    b.clock_generation = d.clock_generation;
+    b.sample_position = d.written;
+    if (d.cfg.sink == DS_SINK_MANUAL) {
+        b.first_sample_host_time = d.manual_host_time + frame_ticks(d.written - d.manual_frame, b.sample_rate);
+    } else if (d.cfg.sink == DS_SINK_NULL || d.detached) {
+        b.first_sample_host_time = host_at(d.t0) + frame_ticks(d.written, b.sample_rate);
+    } else {
+        // Queue depth uses input-rate frames, including encoder input not yet wrapped in a playable burst.
+        // Sample the host clock next to the queue observation, never at delivery after mixing or notifications.
+        auto before = mach_absolute_time();
+        uint64_t ahead = d.out->queued_frames() + d.out->pending_frames();
+        auto after = mach_absolute_time();
+        b.first_sample_host_time = before + (after - before) / 2 + frame_ticks(ahead, b.sample_rate);
+    }
+    return b;
+}
+
 // Mixes one block into d.block (6 x n), advances the clock, collects notification events. Called with d.m held.
 void mix_block(DsDevice &d, size_t n, std::vector<uint32_t> &events) {
     d.block.assign(n * kOut, 0.0f);
@@ -574,11 +648,13 @@ void mix_block(DsDevice &d, size_t n, std::vector<uint32_t> &events) {
     }
 }
 
-void deliver(DsDevice &d, const float *pcm, size_t n, std::vector<uint32_t> &events) {
+void deliver(DsDevice &d, const float *pcm, size_t n, std::vector<uint32_t> &events,
+             const DsTimedMixBlock &timing) {
     if (d.cfg.notify)
         for (uint32_t e : events) d.cfg.notify(d.cfg.notify_user, e);
     events.clear();
     if (d.cfg.tap) d.cfg.tap(d.cfg.tap_user, pcm, n);
+    capture_deliver(timing, pcm);
 }
 
 void follow_output(DsDevice &d);
@@ -586,6 +662,7 @@ void follow_output(DsDevice &d);
 // With m held. The device sink logs its underruns (the queue ran dry: the mixer or the game fell behind), at most once a second.
 void note_underrun(DsDevice &d, uint64_t count = 1) {
     d.underruns += count;
+    if (d.cfg.sink == DS_SINK_DEVICE) ++d.clock_generation;
     auto now = Clock::now();
     if (d.cfg.sink == DS_SINK_DEVICE && now - d.underrun_logged >= std::chrono::seconds(1)) {
         d.underrun_logged = now;
@@ -611,6 +688,7 @@ void mixer_thread(DsDevice *dp) {
         bool chain_due = diag && now - chain_at >= std::chrono::seconds(1);
         media::AudioCallbackStats chain;
         size_t pending = 0;
+        DsTimedMixBlock timing{};
         {
             std::lock_guard<std::mutex> g(d.m);
             if (d.cfg.sink == DS_SINK_DEVICE && !bitstream(d.cfg.mode)) output_latency(d);
@@ -619,6 +697,7 @@ void mixer_thread(DsDevice *dp) {
             if (wall) {
                 uint64_t clock = (uint64_t)(std::chrono::duration<double>(Clock::now() - d.t0).count() * rate);
                 if (clock > d.written) {  // fell behind: the virtual device starved; restart its clock here
+                    ++d.clock_generation;
                     if (d.primed) note_underrun(d);
                     d.primed = false;
                     d.t0 = Clock::now() - std::chrono::duration_cast<Clock::duration>(
@@ -636,6 +715,7 @@ void mixer_thread(DsDevice *dp) {
             }
             if (lag >= (uint64_t)d.cfg.latency_frames) d.primed = true;
             if (lag < (uint64_t)d.cfg.latency_frames) {
+                timing = timed_block(d, n);
                 mix_block(d, n, events);
                 pcm.assign(d.block.begin(), d.block.end());
             }
@@ -650,7 +730,7 @@ void mixer_thread(DsDevice *dp) {
             chain_at = now;
         }
         if (lag < (uint64_t)d.cfg.latency_frames) {
-            deliver(d, pcm.data(), n, events);
+            deliver(d, pcm.data(), n, events, timing);
             if (!wall) {
                 d.out->write(d.cfg.mute_device ? zeros.data() : pcm.data(), n);
                 size_t q = d.out->queued_frames();
@@ -692,9 +772,12 @@ int output_rate(const DsDevice &d, DsOutputMode mode) {
 void rebase_rate(DsDevice &d, int rate) {
     DSLOG("mix rate %d -> %d Hz", d.cfg.mix_rate, rate);
     d.cfg.mix_rate = rate;
+    ++d.clock_generation;
     d.last_played = d.snap_played = d.written;
     d.primed = false;
     d.snap_time = Clock::now();
+    d.manual_host_time = mach_absolute_time();
+    d.manual_frame = d.written;
     d.t0 = d.snap_time - std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(d.written / (double)rate));
     for (DsBuffer *b : d.buffers) {
         if (b->primary) continue;
@@ -709,6 +792,7 @@ void detach(DsDevice &d, const char *why) {
         std::lock_guard<std::mutex> g(d.m);
         uint64_t p = played_now(d);
         d.detached = true;
+        ++d.clock_generation;
         d.primed = false;
         d.t0 = Clock::now() - std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(p / (double)d.cfg.mix_rate));
     }
@@ -956,7 +1040,7 @@ void follow_output(DsDevice &d) {
             d.cfg.mode = mode;
             output_latency(d);
             if (rate != d.cfg.mix_rate) rebase_rate(d, rate);
-            else { d.snap_played = p; d.snap_time = Clock::now(); d.primed = false; }
+            else { d.snap_played = p; d.snap_time = Clock::now(); d.primed = false; ++d.clock_generation; }
             d.detached = false;
             ds_log("device %u: output now %s (%s)", d.id, out_text(*d.out, rate).c_str(), why.c_str());
         } else if (rate) {
@@ -1016,7 +1100,11 @@ void set_mix_rate(DsDevice &d, int rate) {
         if (!d.out) {
             d.out = open_output(d.cfg.mode, d.cfg.mix_rate);
             if (!d.out) detach(d, "the output device went away");    // follow_output reopens it
-            else ds_log("device %u: could not reopen at %d Hz, stays at %s", d.id, rate, out_text(*d.out, d.cfg.mix_rate).c_str());
+            else {
+                // The fallback reopened at the old rate, but its previous queue was still abandoned.
+                { std::lock_guard<std::mutex> g(d.m); ++d.clock_generation; }
+                ds_log("device %u: could not reopen at %d Hz, stays at %s", d.id, rate, out_text(*d.out, d.cfg.mix_rate).c_str());
+            }
             start_thread(d);
             return;
         }
@@ -1040,6 +1128,27 @@ void destroy_device(DsDevice *d) { delete d; }
 
 // ====================================================================== C API
 extern "C" {
+
+DsResult ds_capture_start(DsCaptureFn fn, void *user) {
+    if (!fn) return DSERR_INVALIDPARAM;
+    auto &c = capture();
+    std::lock_guard<std::mutex> lock(c.control);
+    if (c.gate.load(std::memory_order_acquire)) return DSERR_ALLOCATED;
+    c.fn = fn;
+    c.user = user;
+    c.stream = c.generation = c.next_frame = 0;
+    c.gate.store(1, std::memory_order_release);
+    return DS_OK;
+}
+
+void ds_capture_stop(void) {
+    auto &c = capture();
+    std::lock_guard<std::mutex> lock(c.control);
+    c.gate.fetch_and(~1u, std::memory_order_acq_rel);
+    while (c.gate.load(std::memory_order_acquire) & 2u) std::this_thread::yield();
+    c.fn = nullptr;
+    c.user = nullptr;
+}
 
 void ds_set_log(void (*fn)(const char *line)) { g_log_hook = fn; }
 
@@ -1143,6 +1252,9 @@ DsResult ds_device_create(const DsConfig *cfg_in, DsDevice **out) {
     if (cfg.speaker_config) d->speaker = cfg.speaker_config;
     make_format(d->primary_fmt, 2, 22050, 8);  // DirectSound's default primary format
     d->t0 = d->snap_time = d->retry_at = d->created = Clock::now();
+    d->manual_host_time = mach_absolute_time();
+    (void)host_clock();
+    (void)capture();
     // NFS_AUDIO_TEST_DROP=<s>[/<n>],...: at s seconds the output device stops taking audio (as when a TV sleeps) and the
     // next n opens fail (no device yet), to test following the device; 0/<n> fails the opens at creation.
     for (const char *e = getenv("NFS_AUDIO_TEST_DROP"); e && *e;) {
@@ -1158,6 +1270,7 @@ DsResult ds_device_create(const DsConfig *cfg_in, DsDevice **out) {
         std::lock_guard<std::mutex> g(sh.m);
         d->id = ++sh.next_id;
         sh.live.push_back(d);
+        capture().newest.store(d->id, std::memory_order_release);
         static bool registered = false;
         if (!registered) { registered = true; atexit(close_all_at_exit); }
     }
@@ -1231,6 +1344,7 @@ void ds_device_release(DsDevice *d) {
             Shared &sh = shared();
             std::lock_guard<std::mutex> g(sh.m);
             sh.live.erase(std::remove(sh.live.begin(), sh.live.end(), d), sh.live.end());
+            capture().newest.store(sh.live.empty() ? 0 : sh.live.back()->id, std::memory_order_release);
         }
         // A working output waits for the game's next device (Snd re-creates its device: see take_parked).
         if (d->out && d->cfg.sink == DS_SINK_DEVICE && !d->detached && !d->out->stalled(0.5)) park_output(*d);
@@ -1360,13 +1474,15 @@ DsResult ds_device_render(DsDevice *d, float *pcm, size_t frames) {
     std::vector<float> chunk;
     for (size_t done = 0; done < frames;) {
         size_t n = std::min(bs, frames - done);
+        DsTimedMixBlock timing{};
         {
             std::lock_guard<std::mutex> g(d->m);
+            timing = timed_block(*d, n);
             mix_block(*d, n, events);
             chunk.assign(d->block.begin(), d->block.end());
         }
         memcpy(pcm + done * kOut, chunk.data(), n * kOut * sizeof(float));
-        deliver(*d, chunk.data(), n, events);
+        deliver(*d, chunk.data(), n, events, timing);
         done += n;
     }
     return DS_OK;

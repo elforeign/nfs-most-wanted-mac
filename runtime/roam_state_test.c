@@ -1,5 +1,6 @@
 // Invalid network snapshots must never enter relay cells or client history.
 #include "roam_core.h"
+#include "roam_test_peer.h"
 #include <arpa/inet.h>
 #include <float.h>
 #include <math.h>
@@ -11,7 +12,7 @@ int main(void) {
     RoamRelay *relay = roam_relay_new(-1, 2, 4); CHECK(relay != NULL); if (!relay) return 2;
     RoamClient c; roam_client_init(&c, 42, "fixture");
     struct sockaddr_in from = {.sin_family=AF_INET, .sin_port=htons(10001), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
-    uint8_t b[1200]; int n = roam_client_hello(&c, b); roam_relay_input(relay, b, n, &from, 1000); c.id = 1;
+    uint8_t b[1200]; int n; CHECK(roam_test_join(relay, &c, &from, 1000));
     RoamState good = {.t=1000, .pos={1,2,3}, .vel={4,5,6}, .q={0,0,0,32767}, .flags=ROAM_FLAG_CAR};
     n = roam_client_state(&c, &good, b); roam_relay_input(relay, b, n, &from, 1000);
     roam_view_add(&c.view, 7, 1, &good, 1000);

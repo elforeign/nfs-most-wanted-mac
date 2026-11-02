@@ -52,7 +52,7 @@ int roam_look_put(uint8_t *b, const RoamLook *l) {
 }
 
 int roam_look_get(const uint8_t *b, int n, RoamLook *l) {
-    if (n < 7 || b[2] > ROAM_LOOK_PARTS || n < 7 + 4 * b[2]) return -1;
+    if (n < 7 || b[2] > ROAM_LOOK_PARTS || n != 7 + 4 * b[2]) return -1;
     l->rev = get16(b); l->nparts = b[2]; l->car = get32(b + 3);
     for (int i = 0; i < l->nparts; ++i) l->parts[i] = get32(b + 7 + 4 * i);
     return 0;
@@ -177,10 +177,17 @@ void roam_client_init(RoamClient *c, uint32_t room, const char *name) {
 }
 
 int roam_client_hello(RoamClient *c, uint8_t *out) {
+    // Calling HELLO is an explicit online operation. init/view/off never generate keys.
+    if (!c->auth.ready && !roam_auth_generate(&c->auth)) return 0;
     int n = roam_hdr_put(out, ROAM_HELLO, c->id, c->seq++);
     put32(out + n, c->room);
     memcpy(out + n + 4, c->name, 16);
-    return n + 20;
+    memcpy(out + n + 20, c->auth.secret, ROAM_AUTH_PUBLIC);
+    if (!c->has_cookie) return n + ROAM_HELLO_BASE;
+    memcpy(out + n + ROAM_HELLO_BASE, c->cookie, 20);
+    uint8_t *sig = out + n + ROAM_HELLO_BASE + 20;
+    if (!roam_auth_sign(&c->auth, ROAM_VERSION, out+n, c->cookie, sig+1, sig)) return 0;
+    return ROAM_HELLO_BYTES;
 }
 
 int roam_client_state(RoamClient *c, const RoamState *s, uint8_t *out) {
@@ -219,6 +226,13 @@ void roam_client_input(RoamClient *c, const uint8_t *b, int n, uint32_t local_ms
     if (n > ROAM_MAX_DGRAM || roam_hdr_get(b, n, &type, &id, &seq)) { c->rx_bad++; return; }
     b += ROAM_HDR; n -= ROAM_HDR;
     switch (type) {
+    case ROAM_CHALLENGE:
+        if (n != 20 || id) break;
+        memcpy(c->cookie, b, 20); c->has_cookie = 1;
+        c->welcomed = 0; c->id = 0;
+        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;
+        c->has_members = c->nmembers = 0; roam_view_init(&c->view);
+        return;
     case ROAM_NAME: {
         if (n != 16) break;
         if (!c->has_members || member_index(c, id) < 0 || (uint32_t)(local_ms - c->member_ms) > 1000) return;
@@ -231,7 +245,7 @@ void roam_client_input(RoamClient *c, const uint8_t *b, int n, uint32_t local_ms
         if (!c->welcomed || c->id != get16(b) || (c->has_members && (uint32_t)(local_ms - c->member_ms) > 1000)) {
             roam_view_init(&c->view); c->has_members = c->nmembers = 0;
         }
-        c->id = get16(b); c->near = b[2]; c->welcomed = 1;
+        c->id = get16(b); c->near = b[2]; c->welcomed = 1; c->last_err = 0;
         return;
     case ROAM_MEMBERS: {
         if (n < 1 || b[0] > ROAM_INTEREST_MAX || n != 1 + b[0] * 5) break;
@@ -285,7 +299,13 @@ void roam_client_input(RoamClient *c, const uint8_t *b, int n, uint32_t local_ms
         return;
     }
     case ROAM_ERR:
-        if (n >= 1) c->last_err = b[0];
+        if (n != 1) break;
+        // A ban remains visible through cookie renewal and other errors until WELCOME or leave.
+        if (c->last_err != ROAM_ERR_BANNED) c->last_err = b[0];
+        if (c->last_err == ROAM_ERR_BANNED) {
+            c->welcomed = 0; c->id = 0;
+            c->has_members = c->nmembers = 0; roam_view_init(&c->view);
+        }
         return;
     default: break;
     }

@@ -1,20 +1,37 @@
 #!/bin/sh
 # Builds the host DirectSound library and its tests.
+#   ./build.sh lib [--release]   archives only; release pins arm64/macOS 14.5 and checks members
 #   build/libhostaudio.a  DirectSound 8 (dsound_host.cpp)
 #   build/libmedia.a      port/media/media.cpp (AudioOutput, AC-3), compiled here unchanged
 #   build/dstest          headless tests (./build/dstest; add "device" to also run the muted CoreAudio tests)
 #   build/ctest           links the library from plain C
+#   build/timedtap_test   timed game-mix capture and numerical baseline/mutation proofs (no audio device)
 # The runtime links: build/libhostaudio.a build/libmedia.a + the FFmpeg libs, -lc++ -lz and the frameworks below.
 set -e
 cd "$(dirname "$0")"
+mode=tests
+release=0
+for arg in "$@"; do
+    case "$arg" in
+        lib) mode=lib ;;
+        --release) release=1 ;;
+        *) echo 'usage: build.sh [lib] [--release]' >&2; exit 2 ;;
+    esac
+done
+[ "$release" = 0 ] || [ "$mode" = lib ] || { echo '--release requires lib' >&2; exit 2; }
 F=../../third_party/ffmpeg
 mkdir -p build
 CXX="clang++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter"
+[ "$release" = 0 ] || CXX="$CXX -arch arm64 -mmacosx-version-min=14.5"
 $CXX -c dsound_host.cpp -o build/dsound_host.o
 $CXX -I"$F/include" -c ../../media/media.cpp -o build/media.o
 rm -f build/libhostaudio.a build/libmedia.a
 ar rcs build/libhostaudio.a build/dsound_host.o
 ar rcs build/libmedia.a build/media.o
+if [ "$release" = 1 ]; then
+    "${TOOLS_PY:-$(cd ../../.. && pwd)/tools/.venv/bin/python}" -I ../../media/check_libraries.py --group audio
+fi
+[ "$mode" != lib ] || exit 0
 $CXX dstest.cpp -o build/dstest build/libhostaudio.a build/libmedia.a \
   "$F/lib/libavformat.a" "$F/lib/libavcodec.a" "$F/lib/libswscale.a" "$F/lib/libswresample.a" "$F/lib/libavutil.a" \
   -lz -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
@@ -25,6 +42,17 @@ clang -std=c11 -Wall -Wextra ctest.c -o build/ctest build/libhostaudio.a build/l
 # Per-channel level stats (perf.tsv rms_/peak_/clip/dip_): leveltest, and leveltest_broken against a copy whose
 # 50 ms sub-window is 500 ms (`build/leveltest --broken` must fail). A leveltest failure fails this build.
 LIBS="$F/lib/libavformat.a $F/lib/libavcodec.a $F/lib/libswscale.a $F/lib/libswresample.a $F/lib/libavutil.a -lz -framework AudioToolbox -framework CoreAudio -framework CoreFoundation"
+# Forced dstest timing proofs: restore each original ordering separately; each must fail exactly.
+# Fixed: post-stop 0/512, startup 0/256. Broken: post-stop 256/768, startup 64/512.
+for control in STOP_BEFORE_SNAPSHOT PLAY_BEFORE_REFILL; do
+    $CXX -DDSTEST_$control dstest.cpp -o build/dstest_$control build/libhostaudio.a build/libmedia.a $LIBS
+    if NFS_AUDIO=null build/dstest_$control timing > build/dstest_$control.txt 2>&1; then
+        echo "error: dstest $control negative control unexpectedly passed"; exit 1
+    fi
+done
+grep -q 'forced post-stop tap: 256 bad of 768' build/dstest_STOP_BEFORE_SNAPSHOT.txt
+grep -q 'forced startup refill: 64 bad of 512' build/dstest_PLAY_BEFORE_REFILL.txt
+NFS_AUDIO=null build/dstest timing > build/dstest_timing.txt 2>&1 || { tail -30 build/dstest_timing.txt; exit 1; }
 $CXX leveltest.cpp -o build/leveltest build/libhostaudio.a build/libmedia.a $LIBS
 sed -e 's/++d.sub_frames == 2400)/++d.sub_frames == 24000)/' -e 's|d.sub_sumsq\[q\] / 2400.0|d.sub_sumsq[q] / 24000.0|' dsound_host.cpp > build/dsound_host_broken.cpp
 grep -q "== 24000)" build/dsound_host_broken.cpp && grep -q "/ 24000.0" build/dsound_host_broken.cpp
@@ -107,3 +135,31 @@ if build/limitertest_stats_broken > build/limitertest_stats_broken.txt 2>&1; the
     echo 'error: limiter minimum negative control unexpectedly passed'; exit 1
 fi
 grep -q 'FAIL: host stats report linked minimum next to limited samples' build/limitertest_stats_broken.txt
+
+# Timed post-limiter capture: manual/null/offline outputs only, and numerical old-code/mutation controls.
+# The pinned baseline adapter deliberately supplies PCM with zero metadata; it must link and fail numerically.
+$CXX -I. timedtap_test.cpp -o build/timedtap_test build/libmedia.a $LIBS
+build/timedtap_test > build/timedtap_test.txt 2>&1 || { tail -30 build/timedtap_test.txt; exit 1; }
+$CXX -I. -DTIMEDTAP_BASELINE timedtap_test.cpp -o build/timedtap_baseline build/libmedia.a $LIBS
+if build/timedtap_baseline > build/timedtap_baseline.txt 2>&1; then
+    echo 'error: timed capture baseline unexpectedly passed'; exit 1
+fi
+grep -q 'pcm_samples=3510 metadata_blocks=0/3 distinct_channels=18/18' build/timedtap_baseline.txt
+grep -q 'FAIL: timed metadata present at actual rate' build/timedtap_baseline.txt
+# Each independent mutation must fail its named numeric contract assertion.
+sed 's/b.first_sample_host_time = d.manual_host_time + frame_ticks(d.written - d.manual_frame, b.sample_rate);/b.first_sample_host_time = mach_absolute_time();/' dsound_host.cpp > build/timedtap_arrival_source.cpp
+sed 's/frame_ticks(ahead, b.sample_rate)/frame_ticks(0, b.sample_rate)/' dsound_host.cpp > build/timedtap_queue_source.cpp
+sed 's/d.out->queued_frames() + d.out->pending_frames()/d.out->queued_frames()/' dsound_host.cpp > build/timedtap_pending_source.cpp
+sed 's/while (c.gate.load(std::memory_order_acquire) \& 2u) std::this_thread::yield();/(void)0;/' dsound_host.cpp > build/timedtap_lifetime_source.cpp
+sed 's/capture_deliver(timing, pcm);/auto late = timing; late.sample_rate = d.cfg.mix_rate; capture_deliver(late, pcm);/' dsound_host.cpp > build/timedtap_snapshot_source.cpp
+for variant in arrival queue pending lifetime snapshot; do
+    $CXX -I. -DTIMEDTAP_SOURCE=\"build/timedtap_${variant}_source.cpp\" timedtap_test.cpp -o build/timedtap_$variant build/libmedia.a $LIBS
+    if build/timedtap_$variant > build/timedtap_$variant.txt 2>&1; then
+        echo "error: timed capture $variant mutant unexpectedly passed"; exit 1
+    fi
+done
+grep -q 'FAIL: manual sample clock <= one input sample' build/timedtap_arrival.txt
+grep -q 'FAIL: 4096-frame playback lead <= one input sample error' build/timedtap_queue.txt
+grep -q 'FAIL: pending encoder input contributes to playback lead' build/timedtap_pending.txt
+grep -q 'FAIL: stop waits for in-flight callback' build/timedtap_lifetime.txt
+grep -q 'FAIL: delivery retains PCM rate and clock snapshot across concurrent rebase' build/timedtap_snapshot.txt

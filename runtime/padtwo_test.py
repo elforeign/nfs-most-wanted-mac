@@ -120,7 +120,8 @@ int portmenu_is_open(void) { return menu_hide; }
 static void di_event(uint8_t key, int down) { (void)key; (void)down; ++key_calls; }
 static int script_layout = 0;
 static int pad_layout_xbox(void) { return script_layout; }
-int controltype_passthrough(void) { return 0; }
+int controltype_passthrough(int idx) { (void)idx; return 0; }
+int padbind_edited_set(void) { return PADBIND_DEFAULT; }
 static int sim_kind = -1, script_trigger_pair;
 static uint32_t script_pad2, script_raw2;
 static char script_axis2[32];

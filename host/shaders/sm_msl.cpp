@@ -20,6 +20,8 @@
 #include <set>
 #include <string>
 
+#include "shadow_near_msl.h"
+
 namespace sm {
 namespace {
 
@@ -1048,6 +1050,10 @@ extern "C" void sm_default_options(SmOptions *opt) {
 extern "C" int sm_translate(const uint32_t *tokens, size_t n, const SmOptions *opt_in, SmResult *out) {
     memset(out, 0, sizeof *out);
     out->entry = "sm_main";
+    uint64_t program=1469598103934665603ull;
+    const unsigned char *bytes=(const unsigned char *)tokens;
+    for(size_t i=0;i<n*4;++i) {program^=bytes[i];program*=1099511628211ull;}
+    out->program_key=program;
     SmOptions opt;
     if (opt_in) opt = *opt_in; else sm_default_options(&opt);
     sm::Shader sh;
@@ -1088,4 +1094,11 @@ extern "C" void sm_result_free(SmResult *r) {
     free(r->constants);
     r->msl = nullptr;
     r->constants = nullptr;
+}
+
+extern "C" char *sm_shadow_near_patch(const char *source,const uint32_t *tokens,size_t n,const SmResult *pc) {
+    return source && pc ? sm::near_patch(source,tokens,n,*pc) : nullptr;
+}
+extern "C" int sm_shadow_near_taps(uint64_t key) {
+    const auto *p=sm::near_program(key);return p?p->taps:0;
 }

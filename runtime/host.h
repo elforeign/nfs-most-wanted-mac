@@ -22,7 +22,7 @@ uint32_t gstr(const char *s);
 uint32_t gmalloc(uint32_t n);           // freeable guest memory (resources), 64-byte aligned, zeroed (heap.c)
 uint32_t gmalloc_try(uint32_t n);       // optional resource preflight: returns 0 on arena exhaustion
 void gfree(uint32_t a);
-extern uint32_t last_error;
+extern __thread uint32_t last_error;
 extern const char *game_dir;
 extern int boot_trace;
 
@@ -59,6 +59,7 @@ extern int diag_on;
 extern int diag_fixed_step;             // BOOT_DIAG_FIXED_STEP: capture animation/script time at 60 Hz
 extern const char *diag_dir;
 void diag_init(void);
+void breaker_diag_load(Cpu *c);
 void diag_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void diag_event_ring(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void diag_idle(int idle);
@@ -274,9 +275,16 @@ void padbind_follow(Cpu *c);                // padbind.c: the same change check,
 int padbind_port_begin(int idx);             // temporary P2 layout defaults; returns whether a restore is needed
 void padbind_port_end(int swapped);
 void padbind_swap(int on);                    // padbind.c: controltype.c has preset bindings in the table (padbind_sync leaves the pad alone)
-int pedals_selected(void);
-int pedals_binding(int action, uint32_t out[6]); // effective joystick slots 2/3; no pressure remapping
-int padbind_pedals(int port);               // selected and this logical port has a native PlayStation pad
+enum { PADBIND_DEFAULT, PADBIND_DRAG };
+void padbind_race_update(Cpu *c);              // refresh retail IsDragRace, including unindexed SkipFE parameters
+int padbind_input_set(void);                  // live race selection; Default during capture, pause and menus
+int padbind_edited_set(void);                 // Controls page being edited, including during capture
+int padbind_effective_binding(int binding_set, int action, uint32_t out[6]);
+int padbind_edit_set(int binding_set);         // store current joystick page, install requested page; keyboard shared
+void padbind_drag_defaults(Cpu *c);            // reset only the edited Drag set from this controller's defaults
+void padbind_controls_dump(const char *why);   // BOOT_DIAG controls page snapshots/cancel/exit
+int padbind_input_begin(int binding_set);      // install resolved input page temporarily, returns restore token
+void padbind_input_end(int swapped);
 void pedals_trace_sample(unsigned step, float lt, float rt);
 enum { PADBIND_ROLE_GAS = 1, PADBIND_ROLE_BRAKE, PADBIND_ROLE_SHIFT, PADBIND_ROLE_OTHER, PADBIND_ROLE_NONE };
 int padbind_trigger_role(int right);        // padbind.c: what L2 (0) / R2 (1) is bound to (a PlayStation pad's set)

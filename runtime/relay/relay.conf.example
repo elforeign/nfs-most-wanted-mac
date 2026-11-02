@@ -1,0 +1,8 @@
+# Trusted operator settings. Keep private settings/credentials out of this file.
+# Replace with the actual reviewed image digest or local sha256 content ID.
+RELAY_IMAGE=
+RELAY_BIND=127.0.0.1
+# UDP 47800, near 32 and max 100 are fixed by the shipped launchers.
+# Container only: dedicated mode-0700 host directory, owned by uid/gid 65532.
+# It stores verified public identifiers and expiry only. Keep /run/relay transient.
+RELAY_STATE_DIR=

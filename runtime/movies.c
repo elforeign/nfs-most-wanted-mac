@@ -137,7 +137,7 @@ static const char *x360_dir(void) {
     static int done;
     if (done) return dir[0] ? dir : NULL;
     done = 1;
-    const char *env = getenv("NFS_X360_MOVIES");
+    const char *env = roots_exported() ? NULL : getenv("NFS_X360_MOVIES");
     if (env) snprintf(dir, sizeof dir, "%s", env);                 // used as given, even when empty or missing
     else if (!roots_movies_dir(dir, sizeof dir)) dir[0] = 0;
     mlog("X360 movie folder: %s%s", dir[0] ? dir : "(none found)", env ? " (NFS_X360_MOVIES)" : "");

@@ -13,11 +13,13 @@ entries across 33 clients/second), zero packing overflow and stable interests. C
 no hysteresis must increase flaps; no staggering must exceed the 27-entry bundle budget;
 linear endpoint lookup must exceed the lookup CPU regression budget and 8 probes/packet.
 Recorded controls: membership changes 0/828, packing overflow 0/390; hash/linear probes 1.118/500.500.
-Hash deletion/slot reuse and 65,536 joins across id wrap pass; broken chain unlink reports 32 bad ingress packets versus 0.
-Reusing a live id across wrap produces 2 bad packets versus 0 and is rejected.
+Hash deletion/slot reuse and 16 authenticated joins placed across id wrap pass; broken chain unlink reports 32 bad ingress packets versus 0.
+Reusing a live id across wrap produces one duplicate live id versus zero and is rejected.
 The lookup budget is max(0.1% of one core, 4x measured hash CPU), separate from full-service CPU.
 Socket load measures actual 20 Hz ingress and receiver bytes for 8/32/256/1000 clients,
-co-located and a 120 m grid. Decimal kB/s/Mbit/s include IPv4+UDP. LOOK is excluded.
+co-located and a 120 m grid. Decimal kB/s/Mbit/s include IPv4+UDP. LOOK is excluded. Explicit fixture policy: 1,000,000 packets/s and packet/admission/source/challenge
+bursts; 128 MiB/s byte rates/bursts. Every peer completes the cryptographic cookie exchange; production
+limits are proved separately by roam_admission_test.py, without loopback or sink exemptions.
 Design full-crowd estimates (8/32/1000): 6.900/28.760/29.640 old, 6.900/12.620/12.708
 with tiers, plus 5 Hz membership: 0.360/0.960/0.985 kB/s. Max tick includes control work.
 """
@@ -25,25 +27,27 @@ from pathlib import Path
 import re
 import json
 import subprocess
+import sys
 import tempfile
 
 RT = Path(__file__).resolve().parent
-CF = ['clang', '-O2', '-std=c11', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror',
+CF = ['clang', '-O2', '-std=c11', '-D_DEFAULT_SOURCE', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror',
       '-pthread', '-I', str(RT)]
+LINK = [] if sys.platform == 'darwin' else ['-lcrypto', '-lm']
 
 
 def build(td, name, define=None, relay=None):
     exe = td / name
-    cmd = CF + ([f'-D{define}=1'] if define else [])
+    cmd = CF + [str(RT / 'roam_auth.c'), str(RT / 'roam_moderation.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if sys.platform == 'darwin' else []) + ([f'-D{define}=1'] if define else [])
     # Instrument only the production tick-cost clock in the scratch build. Service
     # scheduling and packet timestamps still use the harness's monotonic clock.
     source = Path(relay or RT / 'roam_relay.c').read_text()
     clock = 'clock_gettime(CLOCK_MONOTONIC, &t)'
     assert source.count(clock) == 1
     timed = td / (name + '_relay.c')
-    timed.write_text(source.replace(clock, 'clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)'))
+    timed.write_text(source.replace(clock, 'clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)') + '\nvoid roam_load_next_id(RoamRelay *r, uint16_t next_id) { r->next_id = next_id; }\n')
     p = subprocess.run(cmd + [str(RT / 'roam_load.c'), str(RT / 'roam_core.c'), str(timed)]
-                       + ['-o', str(exe)], capture_output=True, text=True)
+                       + ['-o', str(exe)] + LINK, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-3000:]
     return exe
 
@@ -127,7 +131,7 @@ def main():
         broken_id = td / 'roam_relay_id.c'
         broken_id.write_text(src.replace(old, 'while (!r->next_id) r->next_id++;'))
         bad = run(build(td, 'bad_id', relay=broken_id), '--fixture', expected=1)
-        assert number(bad.split('IDWRAP')[1], 'bad') > 0, 'live-id reuse control did not fail'
+        assert number(bad.split('IDWRAP')[1], 'collisions') > 0, 'live-id reuse control did not fail'
         report['controls']['id_wrap'] = bad
         good = run(normal, '--lookup')
         bad = run(linear, '--lookup')

@@ -76,13 +76,17 @@ static int roam_open(const char *target, uint32_t room_override) {
         fprintf(stderr, "roam: NFS_ROAM is not ip:port; online free roam off\n");
         return -1;
     }
+    RoamAuth installation;
+    if (!roam_auth_no_dumps() || !roam_auth_load(&installation, userdata_dir())) {
+        fprintf(stderr, "roam: installation credential unavailable (error %d)\n", errno); return -1;
+    }
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { fprintf(stderr, "roam: socket: %s\n", strerror(errno)); return -1; }
+    if (fd < 0) { roam_auth_clear(&installation); fprintf(stderr, "roam: socket: %s\n", strerror(errno)); return -1; }
     // A loopback relay gets a loopback source address: the socket never receives on another interface.
     me.sin_addr.s_addr = (ntohl(to.sin_addr.s_addr) >> 24) == 127 ? htonl(INADDR_LOOPBACK) : htonl(INADDR_ANY);
     if (bind(fd, (struct sockaddr *)&me, sizeof me) || connect(fd, (struct sockaddr *)&to, sizeof to)) {
         fprintf(stderr, "roam: bind/connect: %s\n", strerror(errno));
-        close(fd);
+        close(fd); roam_auth_clear(&installation);
         return -1;
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -97,13 +101,14 @@ static int roam_open(const char *target, uint32_t room_override) {
     if (profile && profile < 0x10000000u) snprintf(profile_name, sizeof profile_name, "%.15s", (const char *)G + profile);
     roam_client_init(&roam, target ? room_override : room ? (uint32_t)strtoul(room, NULL, 0) : 1u,
                      name && *name ? name : *profile_name ? profile_name : "player");
+    roam.auth = installation; roam_auth_clear(&installation);
     roam_started = roam_last_rx = roam_ms();
     if (diag_on && diag_dir) {
         char path[1024];
         snprintf(path, sizeof path, "%s/roam.log", diag_dir);
         roam_log = fopen(path, "w");
     }
-    if (diag_on) diag_event("roam: on, relay %s:%d room %u name %s (wire v%d)", host, port, roam.room, roam.name, ROAM_VERSION);
+    if (diag_on) diag_event("roam: online (wire v%d)", ROAM_VERSION);
     return fd;
 }
 
@@ -157,13 +162,17 @@ static int roam_local(RoamState *s, uint32_t now) {
 // ---- Friends' cars (driver class 6 -> RBRemote body, no AI brain; pose written after each sim step) ----
 // VehicleParams as GRacerInfo::CreateVehicle 005E9004-005E90B7 builds it: +0 VehicleParams::TypeName(), +4 0xA6B47FAC,
 // +8 &params, +0x10 driver class, +0x14 pvehicle key, +0x18 &direction, +0x1c &position, +0x20 customization,
-// +0x24 owner (0 = no cache eviction, 00687710 tests it), +0x28 performance, +0x2c flags. The factory 0041CB10
+// +0x24 cache owner, +0x28 performance, +0x2c flags. The factory 0041CB10
 // returns the ISimable (PVehicle+0x2c, vtable 008AA940: +8 Kill); IVehicle = ISimable+0x80, IRigidBody = [ISimable+0x4c].
 #define ROAM_CARS ROAM_CAR_BUDGET
 typedef struct { uint16_t id; uint8_t used, clone, ghost; uint16_t look_rev; uint32_t sim; } RoamCar;
 static RoamCar roam_car[ROAM_CARS];
 static uint32_t roam_mem;
 static unsigned roam_spawned, roam_spawn_fail, roam_killed, roam_lost;
+static uint32_t roam_cache;
+static int roam_cache_listed, roam_spawning;
+static const char *roam_spawn_reason;
+static unsigned roam_cache_protected;
 typedef struct { uint32_t since, delay; } RoamWait;
 static RoamWait roam_retry_wait, roam_lifecycle_wait;
 static int roam_waiting(RoamWait *wait, uint32_t now) {
@@ -176,6 +185,74 @@ static uint32_t roam_call(Cpu *c, uint32_t self, uint32_t fn, int n, const uint3
     q.esp = roam_mem + 0x40000;
     q.ecx = self;
     return call_guest(&q, fn, n, args);
+}
+// 00687710 caps all cached PVehicles at 20 (0092CD24), also enforcing model memory.
+// It deletes candidates directly unless an IVehicleCache query returns 0. Without an owner,
+// Construct cannot evict candidates; without a registered query, traffic can evict our cars.
+// Six friends occupy six of the 20 cache slots, leaving 14 for traffic/cops.
+static int roam_cache_query(Cpu *c) {
+    uint32_t vehicle = arg(c, 0);
+    for (int k = 0; k < ROAM_CARS; ++k) {
+        if (roam_car[k].used && roam_car[k].sim + 0x80 == vehicle) {
+            if (diag_on) roam_cache_protected++;
+            RET(0, 2); // __thiscall OnQueryVehicleCache(vehicle, requesting_cache)
+        }
+    }
+    if (arg(c, 1) == roam_cache) {
+        // Ambient driver class 1: 0042644B. Never reclaim cops, racers or other drivers.
+        uint32_t traffic = M32(0x0092C674u); // ITrafficMgr; its IVehicleCache is +8 (0044192C)
+        if (!vehicle || M32(vehicle + 0x94) != 1 || !traffic) RET(0, 2);
+        // 00410823-00410848 vetoes active/loading traffic only for its own cache requester.
+        // Use the callback's stack below the factory frames, not roam_call's scratch stack.
+        Cpu q = *c; q.ecx = traffic + 8;
+        uint32_t args[2] = {vehicle, traffic + 8};
+        uint32_t eligible = call_guest(&q, 0x00410800u, 2, args);
+        RET(eligible, 2);
+    }
+    RET(1, 2);
+}
+static int roam_cache_removed(Cpu *c) { RET(0, 1); }
+static int roam_cache_name(Cpu *c) { RET(roam_cache + 0x40, 0); }
+static void roam_cache_start(Cpu *c) {
+    if (!roam_cache) {
+        roam_cache = roam_mem + 0x40300;
+        uint32_t vt = roam_cache + 0x20;
+        // Standalone IVehicleCache: only its Listable base participates in the registry.
+        // +4 is the stable identity compared by 00687710, never a vehicle's owner.
+        uint32_t removed = host_fn(roam_cache_removed, "roam cache removed");
+        M32(vt) = removed; // persistent storage; no deleting destructor
+        M32(vt + 4) = host_fn(roam_cache_name, "roam cache name"); // GetName, also read by Construct
+        M32(vt + 8) = host_fn(roam_cache_query, "roam cache query");
+        M32(vt + 12) = removed;
+        M32(roam_cache) = vt;
+        M32(roam_cache + 4) = roam_cache;
+        memcpy(G + roam_cache + 0x40, "Online roam", 12);
+    }
+    if (!roam_cache_listed) {
+        roam_call(c, roam_cache + 8, 0x00425300u, 0, NULL); // Listable<IVehicleCache,18>
+        roam_cache_listed = 1;
+    }
+}
+// Observe the actual factory guards, rather than guessing from a texture reload or a position.
+void f_00687710_orig(Cpu *c);
+void f_00687710(Cpu *c) {
+    uint32_t owner = 0, requested = 0;
+    if (roam_spawning && diag_on) { owner = arg(c, 0); requested = M32(arg(c, 1) + 8); }
+    f_00687710_orig(c);
+    if (roam_spawning && !(c->eax & 0xff)) {
+        roam_spawn_reason = "vehicle-cache-resources";
+        if (diag_on) diag_event("roam: factory check=vehicle-cache-resources cached=%u requested=%u limit=20 owner=%08X",
+            M32(0x0092CD24u), requested, owner);
+    }
+}
+void f_006ED260_orig(Cpu *c);
+void f_006ED260(Cpu *c) {
+    uint32_t limit = roam_spawning && diag_on ? (arg(c, 1) ? 64u : 52u) : 0;
+    f_006ED260_orig(c);
+    if (roam_spawning && !(c->eax & 0xff)) {
+        roam_spawn_reason = "rigid-body-limit";
+        if (diag_on) diag_event("roam: factory check=rigid-body-limit bodies=%u limit=%u", M32(0x009377C8u), limit);
+    }
 }
 static int roam_vehicle_listed(uint32_t ivehicle) {   // vehicle list 0 (DebugWorld 0075546C)
     uint32_t base = M32(0x0092CD7Cu), n = M32(0x0092CD84u);
@@ -207,8 +284,12 @@ static void roam_clone_offset(int clone, float pos[3]) { pos[0] += 5.0f * (float
 static void roam_to_bond(const float r[3], float b[3]) { b[0] = -r[1]; b[1] = r[2]; b[2] = r[0]; }
 
 static uint32_t roam_spawn(Cpu *c, const float pos[3], const float m[4][4], const RoamRemote *remote, int slot) {
+    roam_spawn_reason = "no-local-vehicle";
     uint32_t local = roam_local_vehicle();
-    if (!local || !M32(local + 0x28)) return 0;
+    if (!local) return 0;
+    roam_spawn_reason = "no-local-attributes";
+    if (!M32(local + 0x28)) return 0;
+    roam_cache_start(c);
     uint32_t key = M32(M32(local + 0x28) + 0x20), custom = M32(local + 0x38);
     if (remote->has_look) {
         uint32_t lookup[2] = {0x4A97EC8Fu, remote->look.car}; // Attrib pvehicle class, explicit collection (no default)
@@ -244,10 +325,15 @@ static uint32_t roam_spawn(Cpu *c, const float pos[3], const float m[4][4], cons
     M32(p + 0x18) = dir;
     M32(p + 0x1c) = at;
     M32(p + 0x20) = custom;
+    M32(p + 0x24) = roam_cache;
     M32(p + 0x2c) = 8;                                // racers pass 9; bit 1 skips ECommitRenderAssets (0075D320), so the car is never drawn
     uint32_t name = 0x0089121Cu;                      // "PVehicle"
     uint32_t args[4] = {roam_call(c, 0, 0x005CC240u, 1, &name), M32(p), M32(p + 4), p};
-    return roam_call(c, 0, 0x0041CB10u, 4, args);    // Factory<Sim::Param,ISimable,UCrc32>::CreateInstance
+    roam_spawn_reason = "factory-model-customization-collision-or-allocation";
+    roam_spawning = 1;
+    uint32_t sim = roam_call(c, 0, 0x0041CB10u, 4, args);
+    roam_spawning = 0;
+    return sim;
 }
 static void roam_kill(Cpu *c, RoamCar *k) {
     if (k->sim && roam_vehicle_listed(k->sim + 0x80)) {
@@ -275,8 +361,8 @@ static void roam_write_pose(Cpu *c, uint32_t sim, const float m[4][4], const flo
     roam_call(c, rb, M32(vt + 0x70), 1, &mat);         // SetOrientation(Matrix4) 00696D90
 }
 // Spawn, pose and remove the friends' cars; `now` is this frame's ms.
-// The game keeps cars only where its world is streamed in: a friend's car ~2.1 km away was removed from the vehicle
-// list and every spawn there failed. Spawn within ROAM_SPAWN_M of the local car, remove beyond ROAM_DROP_M.
+// Bound draw/physics work to nearby friends, with hysteresis. These are our interest distances;
+// PVehicle::Construct's spawn guards check resources and rigid-body count, not road validity.
 #define ROAM_SPAWN_M 300.0f
 #define ROAM_DROP_M 400.0f
 #define ROAM_GHOST_CLEAR_M 6.0f   // centres this far apart cannot overlap (car ~4.7 x 1.9 m), so collisions resume
@@ -308,7 +394,11 @@ static void roam_cars(Cpu *c, uint32_t now, int has_local) {
     if (!roam_mem && has_local) roam_mem = galloc(0x42000);
     for (int k = 0; k < ROAM_CARS; ++k) { // world unload owns its own destruction
         RoamCar *car = &roam_car[k];
-        if (car->used && !roam_vehicle_listed(car->sim + 0x80)) { memset(car, 0, sizeof *car); roam_lost++; }
+        if (car->used && !roam_vehicle_listed(car->sim + 0x80)) {
+            if (diag_on) diag_event("roam: lost friend %u car %u reason=vehicle-unlisted sim=%08X cached=%u",
+                car->id, car->clone, car->sim, M32(0x0092CD24u));
+            memset(car, 0, sizeof *car); roam_lost++;
+        }
     }
     RoamChoice chosen[ROAM_CAR_BUDGET];
     int n = 0;
@@ -365,7 +455,8 @@ static void roam_cars(Cpu *c, uint32_t now, int has_local) {
         changed = 1; roam_lifecycle_wait = (RoamWait){now, ROAM_LIFECYCLE_MS};
         if (!sim) {
             roam_spawn_fail++; roam_retry_wait = (RoamWait){now, 1000};
-            diag_event("roam: spawn of friend %u car %d failed (%u failures)", a->id, a->clone, roam_spawn_fail);
+            if (diag_on) diag_event("roam: spawn of friend %u car %d failed reason=%s cached=%u owner=%08X (%u failures)",
+                a->id, a->clone, roam_spawn_reason, M32(0x0092CD24u), roam_cache, roam_spawn_fail);
         } else {
             *slot = (RoamCar){.id=a->id, .clone=a->clone, .used=1, .sim=sim, .ghost=1, .look_rev=remote->has_look ? remote->look.rev : 0};
             roam_spawned++;
@@ -426,28 +517,25 @@ static int ghost_get(void) { return roam_ghost_mode; }
 static Setting s_ghost = {.id = "roam.ghost", .category = SET_ONLINE, .order = 50, .label = "Ghost mode",
     .help = "In online free roam your car and friends' cars pass through each other. D-pad Down or G while driving also toggles it.",
     .type = SET_TOGGLE, .def = 0, .pref = "", .apply = ghost_apply, .get = ghost_get};
-static void online_host(int v) { (void)v; roam_online_host(settings_text("online.public_ip")); }
+static void online_host(int v) { (void)v; roam_online_create(); }
 static void online_join(int v) { (void)v; roam_online_join(settings_text("online.code")); }
 static void online_leave(int v) { (void)v; roam_online_leave(); }
-static Setting s_host = {.id="online.host", .category=SET_ONLINE, .order=10, .label="Host", .type=SET_ACTION,
-    .help="Start a free-roam session and show a code for friends.", .pref="", .apply=online_host};
-static Setting s_host_code = {.id="online.host_code", .category=SET_ONLINE, .order=15, .label="Host code (private)",
+static Setting s_host = {.id="online.host", .category=SET_ONLINE, .order=10, .label="Create room", .type=SET_ACTION,
+    .help="Create a free room on the shared relay and show its code for friends.", .pref="", .apply=online_host};
+static Setting s_host_code = {.id="online.host_code", .category=SET_ONLINE, .order=15, .label="Room code (private)",
     .type=SET_INFO, .pref="", .value_text=roam_online_host_code,
-    .help="Send privately to your friend. Contains your internet address; not a password."};
+    .help="Access is free. Send privately to friends; codes identify rooms, not passwords."};
 static Setting s_code = {.id="online.code", .category=SET_ONLINE, .order=20, .label="Join code", .type=SET_TEXT,
-    .help="Type or paste your friend's XXXX-XXXXX code, then press Enter to join.", .pref="", .apply=online_join};
+    .help="Type or paste your friend's R-XXXX-XXXXX code, then press Enter to join.", .pref="", .apply=online_join};
 static Setting s_join = {.id="online.join", .category=SET_ONLINE, .order=30, .label="Join", .type=SET_ACTION,
     .help="Connect using the code above.", .pref="", .apply=online_join};
 static Setting s_leave = {.id="online.leave", .category=SET_ONLINE, .order=40, .label="Leave", .type=SET_ACTION,
-    .help="Disconnect and close the hosted session and router port.", .pref="", .apply=online_leave};
+    .help="Disconnect from the room. Other players may stay.", .pref="", .apply=online_leave};
 static Setting s_status = {.id="online.status", .category=SET_ONLINE, .order=60, .label="Status", .type=SET_INFO,
     .pref="", .value_text=roam_online_status};
-static Setting s_public_ip = {.id="online.public_ip", .category=SET_ONLINE, .order=70, .label="Public IPv4 (optional)",
-    .help="Only needed if your router cannot report its address. Forward UDP 47800, enter your public IPv4, then Host.",
-    .type=SET_TEXT, .pref=""};
 __attribute__((constructor)) static void roam_register(void) {
     settings_add(&s_host); settings_add(&s_host_code); settings_add(&s_code); settings_add(&s_join); settings_add(&s_leave);
-    settings_add(&s_ghost); settings_add(&s_status); settings_add(&s_public_ip);
+    settings_add(&s_ghost); settings_add(&s_status);
 }
 
 // Driving, as user32.m's pad layout decides it: racing (game-flow 6), the sim not paused, no menu package in control
@@ -510,8 +598,8 @@ static void roam_frame(Cpu *c) {
     }
     roam_view_expire(&roam.view, now, 1000);
     if (roam.welcomed && (uint32_t)(now - roam_last_rx) > 5000) roam.welcomed = 0;
-    // A periodic HELLO is also a heartbeat when alone.
-    if (now - roam_last_hello >= (roam.welcomed ? 2000u : 500u)) {
+    // A periodic HELLO is also a heartbeat when alone. Banned retries stay within the cookie lifetime.
+    if (now - roam_last_hello >= (roam.last_err == ROAM_ERR_BANNED ? 5000u : roam.welcomed ? 2000u : 500u)) {
         roam_last_hello = now; roam_send(b, roam_client_hello(&roam, b));
     }
     if (roam.welcomed) {
@@ -553,9 +641,9 @@ static void roam_frame(Cpu *c) {
         roam_last_sec = now;
         if (roam_log) fflush(roam_log);
         if (diag_on)
-            diag_event("roam: id %u welcomed %d remotes %d tx %u rx %u bundles %u entries %u bad %u err %d cars spawned %u failed %u killed %u lost %u ghosts %d skips %u",
+            diag_event("roam: id %u welcomed %d remotes %d tx %u rx %u bundles %u entries %u bad %u err %d cars spawned %u failed %u killed %u lost %u ghosts %d skips %u cache_protected %u",
                        roam.id, roam.welcomed, remotes, roam_tx, roam_rx, roam.rx_bundles, roam.rx_entries, roam.rx_bad,
-                       roam.last_err, roam_spawned, roam_spawn_fail, roam_killed, roam_lost, roam_ghosts, roam_ghost_skips);
+                       roam.last_err, roam_spawned, roam_spawn_fail, roam_killed, roam_lost, roam_ghosts, roam_ghost_skips, roam_cache_protected);
     }
 }
 
@@ -570,6 +658,11 @@ static void roam_session(Cpu *c) {
         if (action) {
             if (roam_fd >= 0) { uint8_t b[ROAM_HDR]; roam_send(b, roam_client_bye(&roam, b)); close(roam_fd); roam_fd = -1; }
             for (int k = 0; k < ROAM_CARS; ++k) if (roam_car[k].used) roam_kill(c, &roam_car[k]);
+            if (roam_cache_listed) {
+                roam_call(c, roam_cache + 8, 0x004258D0u, 0, NULL); // Unlist
+                roam_cache_listed = 0;
+            }
+            roam_auth_clear(&roam.auth);
             roam_ghosts = 0; memset(&roam, 0, sizeof roam);
             memset(&roam_local_look, 0, sizeof roam_local_look); roam_last_look = 0;
             roam_toggle_pad.held = roam_toggle_key.held = 0;

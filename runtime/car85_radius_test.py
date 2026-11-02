@@ -33,6 +33,8 @@ typedef struct {
 } Addition;
 static Addition additions[1];
 static unsigned nadditions=1, enabled=1, allocations, fallbacks, failures, checks;
+static unsigned asset_count(void) { return nadditions; }
+static Addition *asset(unsigned i) { return additions+i; }
 static uint32_t cursor=0x100000;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; fprintf(stderr,"line %d: %s\n",__LINE__,#x); } } while (0)
 static int on(void) { return enabled; }

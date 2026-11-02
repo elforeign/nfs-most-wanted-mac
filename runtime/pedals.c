@@ -1,32 +1,6 @@
-// Selectable PlayStation trigger pedals. Only the four driving joystick actions
-// are overlaid; the profile's bindings and keyboard slots remain the player's.
+// Physical trigger diagnostics; driving bindings belong to the Controls screen.
 #include "host.h"
-#include "settings.h"
 #include <math.h>
-
-static const char *const pedal_choices[] = {"Shift", "Pedals"};
-static const char *const pedal_values[] = {"shift", "pedals"};
-static Setting s_pedals = {.id = "controls.triggers", .category = SET_CONTROLS, .order = 25,
-    .label = "Triggers", .help = "PlayStation: Shift keeps your bindings. Pedals uses R2 gas, L2 brake/reverse, Cross shift up, Square shift down.",
-    .type = SET_CHOICE, .choices = pedal_choices, .values = pedal_values, .nchoices = 2,
-    .def = 0, .env = "NFS_TRIGGER_LAYOUT"};
-__attribute__((constructor)) static void pedals_register(void) { settings_add(&s_pedals); }
-
-int pedals_selected(void) { return s_pedals.value == 1; }
-int pedals_binding(int action, uint32_t out[6]) {
-    if (!pedals_selected()) return 0;
-    uint32_t type, object;
-    switch (action) {
-    case 0: type = 7; object = 2; break; // gas: Rz+ (R2), no additional deadzone
-    case 1: type = 5; object = 2; break; // brake: Z+ (L2)
-    case 7: type = 2; object = 2; break; // shift down: Square
-    case 8: type = 2; object = 0; break; // shift up: Cross
-    default: return 0;
-    }
-    out[0] = type; out[1] = 0; out[2] = object;
-    out[3] = out[4] = out[5] = 0;
-    return 1;
-}
 
 #ifndef PEDALS_NO_TRACE
 // BOOT_DIAG + scripted physical trigger pairs only. FetchInput identifies the

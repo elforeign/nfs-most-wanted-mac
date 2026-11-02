@@ -38,7 +38,7 @@ def run(base, name, source, original=False, budgets=False):
                       'CFBundlePackageType': 'APPL'}, f)
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-fobjc-arc', '-I'+str(ROOT/'recomp'), '-I'+str(ROOT/'recomp/out'), '-I'+str(RUNTIME),
-               str(work/'menu_raster_test.m'), str(RUNTIME/'settings.c'), str(RUNTIME/'offline_stubs.c'),
+               str(work/'menu_raster_test.m'), str(RUNTIME/'settings.c'), str(RUNTIME/'text_fit.c'), str(RUNTIME/'offline_stubs.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'QuartzCore',
                '-framework', 'Metal', '-Wl,-dead_strip', '-o', str(binary)]
     if original:

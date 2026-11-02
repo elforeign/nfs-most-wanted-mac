@@ -1,0 +1,54 @@
+# Native installation alternative: systemd is the only restart supervisor.
+[Unit]
+Description=NFS MW free roam relay
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=nfsmw-relay
+Group=nfsmw-relay
+Environment=RELAY_BIND=127.0.0.1
+EnvironmentFile=-/etc/nfsmw-relay/relay.conf
+StateDirectory=nfsmw-relay
+StateDirectoryMode=0700
+RuntimeDirectory=nfsmw-relay
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/lib/nfsmw-relay /run/nfsmw-relay
+ExecStart=/opt/nfsmw-relay/current/roam_relay --bind ${RELAY_BIND} --port 47800 --near 32 --max 100 --state-dir /var/lib/nfsmw-relay --admin-dir /run/nfsmw-relay
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+KillSignal=SIGTERM
+SendSIGKILL=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/
+ProtectHome=yes
+InaccessiblePaths=/tmp /var/tmp
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=128M
+MemorySwapMax=0
+TasksMax=16
+LimitNOFILE=256
+LimitCORE=0
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+LogNamespace=nfsmw-relay
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

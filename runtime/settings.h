@@ -67,7 +67,7 @@ struct Setting {
     char env_text[48];                // the switch's value as set
     int saved;                        // came from app.txt
     int hidden;                       // absent from F10: preset-owned preference, or missing X360 files (PC fallback)
-    char text[96];                    // SET_TEXT
+    char text[257];                   // SET_TEXT (TEXT_FIELD_MAX characters, text_fit.h)
 };
 
 void settings_add(Setting *s);              // register (start-up; static storage); reads app.txt and the environment

@@ -24,7 +24,7 @@ static int nanosleep_stub(const struct timespec *ts, struct timespec *rem) {
 #include THREADS_C
 #undef host_ticks
 #undef nanosleep
-uint8_t *G; int diag_on = 0; int boot_trace; uint32_t last_error; uint64_t diag_idle_ns[IDLE_N]; volatile uint64_t perf_nframes;
+uint8_t *G; int diag_on = 0; int boot_trace; __thread uint32_t last_error; uint64_t diag_idle_ns[IDLE_N]; volatile uint64_t perf_nframes;
 uint64_t host_ticks(void) { return host_ticks_stub(); }
 uint64_t host_filetime(void) { return 0; }
 void diag_event(const char *f, ...) { (void)f; }

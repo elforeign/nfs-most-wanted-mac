@@ -1,51 +1,42 @@
-"""Menu session lifecycle with fake router/server backends; no real sockets/router traffic.
-Proof: normal 125 checks/0 failures; broken host/protocol/upstream hint/wording/renewal: 1/3/6/7/8 failures.
-Code/address log controls: 28 leaked codes / 3 leaked addresses rejected; normal zero.
-Each starts/stops 20/20, deletes 16.
-Includes RFC1918/shared-address boundaries with manual public IPv4, failed mapping, unavailable public IP,
-NAT-PMP/PCP/UPnP, loopback unavailable, renewal failure, and timeout advice; no socket/router calls.
+"""Shared endpoint controller, fake router/server backends; no sockets.
+Before: 125/0, server starts/stops 20/20, mapping deletes 16, address code TE29-43A2W.
+After: 59/0 normal; router/listener/endpoint/room/unconfigured mutants: 1/1/3/2/31 failures.
+Banned status uses reserved synthetic error 5; the current relay drops bans silently.
+Normal router/embedded calls 0/0; restored setup/listener each makes 3 forbidden calls.
 """
 from pathlib import Path
-import subprocess
 import re
+import subprocess
 import tempfile
-RT = Path(__file__).resolve().parent
-CF = ['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g', '-pthread',
-      '-fsanitize=address,undefined', '-I', str(RT)]
-
-
+RT=Path(__file__).resolve().parent
+CF=['clang','-std=c11','-D_DARWIN_C_SOURCE','-Wall','-Wextra','-Werror','-g','-pthread',
+    '-fsanitize=address,undefined','-I',str(RT)]
 def main():
-    source = (RT / 'roam_online.c').read_text()
-    old = 'set_target(1, 0x7f000001u, mapping.internal_port,'
-    assert source.count(old) == 1
+    source=(RT/'roam_online.c').read_text()
+    harness=(RT/'roam_session_test.c').read_text()
+    mutants={
+        'normal':None,
+        'router':('reset(); mode = create ? 1 : 2;', 'NatMap m = {0}; natmap_open(&m, 47800, NULL); reset(); mode = create ? 1 : 2;'),
+        'listener':('reset(); mode = create ? 1 : 2;', '(void)roam_server_start(0x7f000001, 0); reset(); mode = create ? 1 : 2;'),
+        'endpoint':('snprintf(target_host, sizeof target_host, "%s", host);','snprintf(target_host, sizeof target_host, "%s", "198.51.100.1");'),
+        'room':('target_room = room;', 'target_room = 1;'),
+        'unconfigured':('if (!endpoint(host, &port))', 'if (!endpoint(host, &port) && 0)'),
+    }
     with tempfile.TemporaryDirectory(prefix='roam-session-') as tmp:
-        td = Path(tmp)
-        for label, text in [('normal', source), ('broken', source.replace(old, 'set_target(1, external, mapping.internal_port,')),
-                            ('broken_status', source.replace('mapping.protocol == 1 ? "NAT-PMP"', 'mapping.protocol == 1 ? "wrong"')),
-                            ('broken_classification', source.replace('upstream_class(mapping.external_ip)', 'upstream_class(external)')),
-                            ('broken_log', source.replace('mapping.mapped, renewed, mapping.protocol, upstream, hairpin);', 'mapping.mapped, renewed, mapping.protocol, upstream, hairpin);\n    fprintf(stderr, \"roam: host code %s\\n\", code);')),
-                            ('broken_address_log', source.replace('mapping.mapped, renewed, mapping.protocol, upstream, hairpin);', 'mapping.mapped, renewed, mapping.protocol, upstream, hairpin);\n    fprintf(stderr, \"roam: %s\\n\", status);')),
-                            ('broken_hint', source.replace('Possible double NAT / carrier NAT', 'Router blocks it')),
-                            ('broken_renewal', source.replace('return half < 1000 ? 1000 : half;', '(void)half; return (uint64_t)(lifetime > 1 ? lifetime / 2 : 30) * 1000;'))]:
-            src = td / (label + '.c'); src.write_text(text + '\nvoid test_publish_upstream(uint32_t ip) { mapping.external_ip=ip; publish_host(1); }\nuint64_t test_renewal_ms(uint32_t lifetime) { return renewal_ms(lifetime); }\n')
-            exe = td / label
-            p = subprocess.run(CF + [str(RT / 'roam_session_test.c'), str(src), str(RT / 'roam_code.c'), '-o', str(exe)], capture_output=True, text=True)
-            assert p.returncode == 0, p.stderr[-2500:]
-            p = subprocess.run([str(exe)], capture_output=True, text=True, timeout=15)
-            print(label + ':', p.stdout.strip(), flush=True)
-            leaks = re.findall(r'(?<![\w-])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{5}(?![\w-])', p.stderr, re.I)
-            addresses = re.findall(r'(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?!\w|\.[0-9])', p.stderr)
-            if label == 'broken_log':
-                assert leaks, 'code-bearing logger escaped detection'
-                print('broken_log: rejected %d leaked codes' % len(leaks), flush=True)
-            elif label == 'broken_address_log':
-                assert addresses, 'address-bearing logger escaped detection'
-                print('broken_address_log: rejected %d leaked addresses' % len(addresses), flush=True)
-            else:
-                assert not leaks and not addresses, 'endpoint leaked in session logs'
-                assert p.returncode == (0 if label == 'normal' else 1), p.stderr[-2500:]
+        td=Path(tmp)
+        for name,mutation in mutants.items():
+            text=source
+            if mutation:
+                old,new=mutation; assert text.count(old)==1
+                text=text.replace(old,new)
+            src=td/(name+'.c'); src.write_text(text)
+            test=td/(name+'_test.c'); test.write_text(harness.replace('"roam_online.c"','"'+str(src)+'"'))
+            exe=td/name
+            p=subprocess.run(CF+[str(test),str(RT/'roam_code.c'),'-o',str(exe)],capture_output=True,text=True)
+            assert p.returncode==0,p.stderr[-3000:]
+            p=subprocess.run([str(exe)],capture_output=True,text=True,timeout=15)
+            print(name+': '+p.stdout.strip(),flush=True)
+            assert not re.search(r'(?:\d{1,3}\.){3}\d{1,3}|R-[A-Z2-9]{4}-[A-Z2-9]{5}',p.stderr), 'session log leak'
+            assert p.returncode==(1 if mutation else 0),p.stderr[-3000:]
     return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())
+if __name__=='__main__': raise SystemExit(main())

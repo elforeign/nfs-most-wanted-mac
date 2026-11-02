@@ -1,7 +1,8 @@
 // NFS Most Wanted Native - Setup.
 //
-// A small Mac app in front of the setup backend (tools/setup.py). The player chooses an installed PC game folder and,
-// optionally, their own Xbox 360 copy; the backend builds the native app on this Mac. The app carries no game files:
+// A small Mac app in front of the setup backend (tools/setup.py). The player chooses an installed PC game folder (or
+// its .zip, or the PC disc images with the 1.3 update) and, optionally, their own Xbox 360 copy; the backend builds the
+// native app on this Mac. The app carries no game files:
 // it ships this project's reviewed source (Resources/source.tar.gz), a relocatable Python (Resources/python) and the
 // FFmpeg source tarball (Resources/third_party/dl), and talks to the backend only through its command line and its
 // JSON-line events (the setup contract).
@@ -38,7 +39,7 @@ let stageTable: [(id: String, title: String)] = [
 ]
 
 /// Shown to the player and used to refuse a full disk. Measured peak: 9.4 GB with a game folder and an
-/// Xbox 360 copy, plus 2.8 GB for an unpacked .zip.
+/// Xbox 360 copy, plus 2.8 GB for an unpacked .zip or disc set.
 let requiredFreeGB = 12.0
 
 enum SetupEvent: Equatable {
@@ -100,7 +101,7 @@ enum Outcome: Equatable {
     case failed(FailureInfo)
 }
 
-enum RunMode { case check, build }
+enum RunMode { case check, build, exportApp }
 
 struct RunState {
     var currentStage = ""
@@ -261,12 +262,31 @@ func prepareSource() throws {
     try fm.moveItem(at: tmp, to: src)
 }
 
-func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL) -> [String] {
+func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL,
+                      pcUpdate: URL? = nil, pcExe: URL? = nil, pcDiscs: [URL] = []) -> [String] {
+    if mode == .exportApp {
+        return ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
+                "--export-all-in-one", "--app", pc.path, "--dest", dest.path, "--work", work.path, "--events"]
+    }
     var a = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
              mode == .check ? "--check" : "--build", "--pc", pc.path]
+    if let u = pcUpdate { a += ["--pc-update", u.path] }
+    if let e = pcExe { a += ["--pc-exe", e.path] }
+    for d in pcDiscs { a += ["--pc-disc", d.path] }
     if let x = x360 { a += ["--x360", x.path] }
     a += ["--dest", dest.path, "--work", work.path, "--events"]
     return a
+}
+
+/// The disc numbers a failed check could not find ("Disc 2, 3 of the set (4 discs) was not found ..."), so the page can
+/// offer a choice for each; empty for any other message.
+func missingDiscNumbers(_ message: String) -> [Int] {
+    let start = message.index(message.startIndex, offsetBy: 5, limitedBy: message.endIndex) ?? message.endIndex
+    guard message.hasPrefix("Disc "), let end = message.range(of: " of the set", range: start..<message.endIndex)
+    else { return [] }  // searched after the prefix: a disc named "Disc of the set.iso" is no list
+    let list = message[start..<end.lowerBound]
+    let numbers = list.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) }
+    return numbers.contains(nil) ? [] : numbers.compactMap { $0 }
 }
 
 // MARK: - Child process in its own process group
@@ -356,13 +376,22 @@ func quitPlan(childActive: Bool, building: Bool) -> QuitPlan {
 
 enum Page: Int { case welcome, pc, x360, review, build, finished }
 
+/// An installed game folder (or its .zip), or the PC disc images, which also take the 1.3 update and, as both carry a
+/// copy-protected speed.exe, a speed.exe that has the 1.3 code.
+enum PCKind: Int { case folder, disc }
+
 final class Setup: ObservableObject {
     static let shared = Setup()
 
     @Published var page: Page = .welcome
     @Published var tools = hasCommandLineTools()
     @Published var installingTools = false
+    @Published var pcKind = PCKind.folder
     @Published var pc: URL?
+    @Published var pcUpdate: URL?
+    @Published var pcExe: URL?
+    @Published var pcDiscs: [Int: URL] = [:]   // discs chosen one by one (not beside the first), by the number asked for
+    @Published var missingDiscs: [Int] = []
     @Published var pcStatus = ""
     @Published var pcOK = false
     @Published var x360: URL?
@@ -371,6 +400,7 @@ final class Setup: ObservableObject {
     @Published var dest: URL
     @Published var checking = false
     @Published var running = false
+    @Published var exporting = false
     @Published var stopping = false
     @Published var state = RunState()
     @Published var outcome: Outcome?
@@ -427,6 +457,46 @@ final class Setup: ObservableObject {
         runCheck(forX360: false)
     }
 
+    func chooseKind(_ kind: PCKind) {
+        guard kind != pcKind else { return }
+        pcKind = kind; pc = nil; pcUpdate = nil; pcExe = nil; pcDiscs = [:]; missingDiscs = []; pcStatus = ""; pcOK = false
+        features = nil
+    }
+
+    func chooseDisc() {
+        // An .iso, or a disc mounted in Finder (a folder); the set's other discs are found beside it.
+        let iso = [UTType(filenameExtension: "iso")].compactMap { $0 }
+        guard let url = pickFolder(message: "Choose disc 1 of your PC game: its .iso image, or the disc mounted in Finder. Keep the images of the other discs in the same folder.",
+                                   files: true, types: [.folder] + iso) else { return }
+        pc = url; pcDiscs = [:]; missingDiscs = []; features = nil; x360 = nil; x360Status = ""
+        runCheck(forX360: false)
+    }
+
+    /// A disc that is not beside the first one (another folder or drive). The backend reads its number from the disc.
+    func chooseOtherDisc(_ number: Int) {
+        let iso = [UTType(filenameExtension: "iso")].compactMap { $0 }
+        guard let url = pickFolder(message: "Choose disc \(number) of your PC game: its .iso image, or the disc mounted in Finder.",
+                                   files: true, types: [.folder] + iso) else { return }
+        pcDiscs[number] = url
+        if pc != nil { runCheck(forX360: false) }
+    }
+
+    var otherDiscRows: [Int] { Array(Set(missingDiscs).union(pcDiscs.keys)).sorted() }
+
+    func chooseUpdate() {
+        guard let url = pickFolder(message: "Choose the PC game's official 1.3 update (nfsmwpatch1.3.exe). Setup only reads it; it is never run.",
+                                   files: true, types: [.exe]) else { return }
+        pcUpdate = url
+        if pc != nil { runCheck(forX360: false) }
+    }
+
+    func chooseExe() {
+        guard let url = pickFolder(message: "Choose a speed.exe that has the version 1.3 code. The one on the discs and in the update is copy-protected.",
+                                   files: true, types: [.exe]) else { return }
+        pcExe = url
+        if pc != nil { runCheck(forX360: false) }
+    }
+
     func chooseX360() {
         guard let url = pickFolder(message: "Choose your Xbox 360 copy: its folder, or the .iso file.", files: true) else { return }
         x360 = url
@@ -452,7 +522,8 @@ final class Setup: ObservableObject {
     }
 
     // One backend run, check or build; all state changes happen on the main queue.
-    private func launch(mode: RunMode, pc: URL, x360: URL?, finish: @escaping (Outcome, RunState) -> Void) {
+    private func launch(mode: RunMode, pc: URL, x360: URL?, destination: URL? = nil,
+                        finish: @escaping (Outcome, RunState) -> Void) {
         state = RunState(); lines = []; stderrTail = []; splitter = LineSplitter(); cancelled = false; stopping = false
         let python = bundledPython()
         let work = workDir()
@@ -461,7 +532,10 @@ final class Setup: ObservableObject {
             try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
             let env = childEnvironment(inherited: ProcessInfo.processInfo.environment, python: python,
                                        roots: work.appendingPathComponent("roots.txt").path)
-            let c = try ChildProcess(exe: python, args: backendArguments(mode: mode, pc: pc, x360: x360, dest: dest, work: work),
+            let disc = pcKind == .disc
+            let c = try ChildProcess(exe: python, args: backendArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work,
+                                                                       pcUpdate: disc ? pcUpdate : nil, pcExe: disc ? pcExe : nil,
+                                                                       pcDiscs: disc ? pcDiscs.keys.sorted().compactMap { pcDiscs[$0] } : []),
                                      env: env, cwd: sourceDir().path)
             child = c
             c.run(onOut: { [weak self] data in
@@ -513,10 +587,17 @@ final class Setup: ObservableObject {
             switch outcome {
             case .success:
                 if forX360 { self.x360Status = "Your Xbox 360 copy can be used." }
-                else { self.pcStatus = pc.pathExtension.lowercased() == "zip" ? "Your game .zip can be used." : "Your game folder can be used."; self.pcOK = true }
+                else {
+                    self.pcStatus = self.pcKind == .disc ? "Your disc images can be used."
+                        : pc.pathExtension.lowercased() == "zip" ? "Your game .zip can be used." : "Your game folder can be used."
+                    self.pcOK = true
+                }
             case let .failed(f):
                 let text = [f.message, f.fix].filter { !$0.isEmpty }.joined(separator: "\n")
-                if forX360 { self.x360Status = text; self.x360 = nil } else { self.pcStatus = text; self.pcOK = false }
+                if forX360 { self.x360Status = text; self.x360 = nil } else {
+                    self.pcStatus = text; self.pcOK = false
+                    if self.pcKind == .disc { self.missingDiscs = missingDiscNumbers(f.message) }
+                }
             case .cancelled: break
             }
         }
@@ -524,6 +605,7 @@ final class Setup: ObservableObject {
 
     func build() {
         guard let pc, !running else { return }
+        exporting = false
         page = .build; running = true; outcome = nil; started = Date()
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "Building NFS Most Wanted Native")
@@ -538,6 +620,35 @@ final class Setup: ObservableObject {
     }
 
     var busy: Bool { child != nil }
+
+    func exportAllInOne() {
+        guard !busy else { return }
+        let source = NSOpenPanel()
+        source.canChooseDirectories = false
+        source.canChooseFiles = true
+        source.allowedContentTypes = [.applicationBundle]
+        source.allowsMultipleSelection = false
+        source.directoryURL = URL(fileURLWithPath: installedPath).deletingLastPathComponent()
+        source.message = "Choose the installed game app to export. Quit the game first."
+        guard source.runModal() == .OK, let app = source.url else { return }
+        let save = NSSavePanel()
+        save.allowedContentTypes = [.applicationBundle]
+        save.nameFieldStringValue = app.deletingPathExtension().lastPathComponent + " All-in-one.app"
+        save.message = "Choose a new name. Keep the previous export to roll back. Saves and settings stay in Application Support."
+        guard save.runModal() == .OK, let target = save.url else { return }
+        exporting = true
+        page = .build; running = true; outcome = nil; started = Date()
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                                                         reason: "Exporting the all-in-one app")
+        launch(mode: .exportApp, pc: app, x360: nil, destination: target) { [weak self] outcome, _ in
+            guard let self else { return }
+            if let a = self.activity { ProcessInfo.processInfo.endActivity(a) }
+            self.activity = nil
+            self.running = false
+            self.outcome = outcome
+            if case .success = outcome { self.page = .finished }
+        }
+    }
 
     func cancel() {
         guard let c = child else { return }
@@ -650,6 +761,9 @@ struct ContentView: View {
                 }.padding(4)
             }
             nav(back: nil, next: .pc, nextEnabled: s.tools)
+            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+            Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -657,17 +771,26 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             GroupBox(label: Text("Your PC game").bold()) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("", selection: .constant(0)) {
-                        Text("Installed PC game folder or .zip").tag(0)
-                        Text("PC disc image").tag(1)
-                    }.pickerStyle(.radioGroup).labelsHidden()
-                    Text("PC disc image: Not available yet; choose an installed PC game folder.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    HStack {
-                        Text(s.pc?.path ?? "The folder with speed.exe, or a .zip of it (version 1.3).")
-                            .lineLimit(2).truncationMode(.middle).foregroundStyle(s.pc == nil ? .secondary : .primary)
-                        Spacer()
-                        Button("Choose…") { s.choosePC() }.disabled(s.checking)
+                    Picker("", selection: Binding(get: { s.pcKind }, set: { s.chooseKind($0) })) {
+                        Text("Installed PC game folder or .zip").tag(PCKind.folder)
+                        Text("PC disc images").tag(PCKind.disc)
+                    }.pickerStyle(.radioGroup).labelsHidden().disabled(s.checking)
+                    if s.pcKind == .folder {
+                        HStack {
+                            Text(s.pc?.path ?? "The folder with speed.exe, or a .zip of it (version 1.3).")
+                                .lineLimit(2).truncationMode(.middle).foregroundStyle(s.pc == nil ? .secondary : .primary)
+                            Spacer()
+                            Button("Choose…") { s.choosePC() }.disabled(s.checking)
+                        }
+                    } else {
+                        Text("Setup installs the game from your discs into its own work folder, without Windows. It also needs the game's 1.3 update and, because the speed.exe on the discs and in the update is copy-protected, a speed.exe that has the 1.3 code.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        choice("Discs", s.pc, "Disc 1 (.iso or mounted disc), the other discs beside it") { s.chooseDisc() }
+                        ForEach(s.otherDiscRows, id: \.self) { n in
+                            choice("Disc \(n)", s.pcDiscs[n], "Not found with the chosen disc: choose it") { s.chooseOtherDisc(n) }
+                        }
+                        choice("1.3 update", s.pcUpdate, "nfsmwpatch1.3.exe") { s.chooseUpdate() }
+                        choice("speed.exe", s.pcExe, "A speed.exe with the version 1.3 code") { s.chooseExe() }
                     }
                     if !s.pcStatus.isEmpty {
                         Label(s.pcStatus, systemImage: s.pcOK ? "checkmark.circle.fill" : (s.checking ? "hourglass" : "exclamationmark.triangle.fill"))
@@ -677,6 +800,15 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
             nav(back: .welcome, next: .x360, nextEnabled: s.pcOK)
+        }
+    }
+
+    func choice(_ title: String, _ url: URL?, _ placeholder: String, _ action: @escaping () -> Void) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).bold().frame(width: 80, alignment: .leading)
+            Text(url?.path ?? placeholder).lineLimit(2).truncationMode(.middle).foregroundStyle(url == nil ? .secondary : .primary)
+            Spacer()
+            Button("Choose…", action: action).disabled(s.checking)
         }
     }
 
@@ -721,7 +853,12 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             GroupBox(label: Text("Review").bold()) {
                 VStack(alignment: .leading, spacing: 6) {
-                    row("PC game", s.pc?.path ?? "")
+                    row(s.pcKind == .disc ? "PC discs" : "PC game", s.pc?.path ?? "")
+                    if s.pcKind == .disc {
+                        ForEach(s.pcDiscs.keys.sorted(), id: \.self) { n in row("Disc \(n)", s.pcDiscs[n]?.path ?? "") }
+                        if let u = s.pcUpdate { row("1.3 update", u.path) }
+                        if let e = s.pcExe { row("speed.exe", e.path) }
+                    }
                     row("Xbox 360 copy", s.x360?.path ?? "None (PC game only)")
                     HStack {
                         row("Install in", s.dest.path)
@@ -762,13 +899,17 @@ struct ContentView: View {
                 Label("Stopped. Anything already installed was left as it was.", systemImage: "stop.circle").font(.headline)
                 backOrAgain
             } else {
-                ProgressView(value: s.state.overall)
+                if s.exporting { ProgressView() }
+                else { ProgressView(value: s.state.overall) }
                 HStack {
                     Text(s.state.currentTitle.isEmpty ? "Starting…" : s.state.currentTitle).bold()
                     Spacer()
                     TimelineView(.periodic(from: .now, by: 1)) { _ in Text(s.elapsedText()).monospacedDigit() }
                 }
-                stageList
+                if s.exporting {
+                    Text("Copying your installed game files into a new app, then signing it. Saves and settings stay in Application Support.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else { stageList }
                 if s.stopping {
                     Label(s.state.currentStage == "install" ? "Restoring your previous version…" : "Stopping…",
                           systemImage: "hourglass")
@@ -796,7 +937,7 @@ struct ContentView: View {
 
     func failure(_ f: FailureInfo) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("The build stopped" + (f.stage.isEmpty ? "." : " at: \(stageTable.first { $0.id == f.stage }?.title ?? f.stage)."),
+            Label((s.exporting ? "The export stopped" : "The build stopped") + (f.stage.isEmpty ? "." : " at: \(stageTable.first { $0.id == f.stage }?.title ?? f.stage)."),
                   systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.headline)
             Text(f.message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             if !f.fix.isEmpty { Text(f.fix).fixedSize(horizontal: false, vertical: true).foregroundStyle(.secondary) }
@@ -810,8 +951,12 @@ struct ContentView: View {
             Button("Show Log") { s.showLog() }
             Button("Copy Log") { s.copyLog() }
             Spacer()
-            Button("Back") { s.page = .review; s.outcome = nil }
-            Button("Build again") { s.build() }.buttonStyle(.borderedProminent)
+            Button("Back") { s.page = s.exporting ? .welcome : .review; s.outcome = nil }
+            if s.exporting {
+                Button("Export again…") { s.exportAllInOne() }.buttonStyle(.borderedProminent)
+            } else {
+                Button("Build again") { s.build() }.buttonStyle(.borderedProminent)
+            }
         }
     }
 
@@ -821,7 +966,8 @@ struct ContentView: View {
             Text(s.installedPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             Text("The first launch takes a little longer while the Mac prepares the game's shaders.").font(.caption).foregroundStyle(.secondary)
             // Install-stage notes for the player, e.g. the 3.x career copy (backend migrate_3x_saves).
-            ForEach(s.state.warnings.filter { $0.hasPrefix("install: ") }.map { String($0.dropFirst(9)) }, id: \.self) { note in
+            ForEach(s.state.warnings.filter { $0.hasPrefix("install: ") || $0.hasPrefix("bundle: ") }
+                .map { String($0.dropFirst($0.hasPrefix("install: ") ? 9 : 8)) }, id: \.self) { note in
                 Label(note, systemImage: "info.circle").font(.callout).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -830,6 +976,7 @@ struct ContentView: View {
                 Button("Show Log") { s.showLog() }
                 Spacer()
             }
+            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
         }
     }
 }

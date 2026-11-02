@@ -73,9 +73,8 @@ def read_window(path):
 
 
 def locate(d, names):
-    """{shader: offset in d} for every wanted shader whose identity hash matches its pin exactly once."""
-    want = dict(lits.pins())
-    want.update(EXTRA_PINS)
+    """{shader: offset in d} for every wanted shader whose identity hash matches its pin exactly once, all on one disc
+    (lits.select: a set mixed from the USA and PAL discs is refused)."""
     hits = {}
     for i in range(0, len(d) - 0x18, 4):
         if (u32(d, i) & 0xFFFFFF00) != lits.MAGIC:
@@ -83,14 +82,8 @@ def locate(d, names):
         r = lits.parse(d, i)
         if r:
             hits.setdefault(r[0], []).append(i)
-    found, missing = {}, []
-    for n in names:
-        h = hits.get(want.get(n, "-"), [])
-        if len(h) != 1:
-            missing.append(n)
-        else:
-            found[n] = h[0]
-    return found, missing, sum(len(v) for v in hits.values())
+    build, got = lits.select(hits, names, EXTRA_PINS)
+    return (got, [], sum(len(v) for v in hits.values())) if build else ({}, got, sum(len(v) for v in hits.values()))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -576,7 +569,7 @@ def generate(zz, work):
     found, missing, n = locate(d, names)
     if missing:
         raise SystemExit("x360_shader_body: refused %s: %d of the %d X360 shaders the port translates are not in it (%s; "
-                         "%d shader containers found). It is not the retail USA Xbox 360 NFS Most Wanted NFS/ZZDATA0.BIN "
+                         "%d shader containers found). It is not a retail (USA or PAL) Xbox 360 NFS Most Wanted NFS/ZZDATA0.BIN "
                          "(another build or a modified/garbage file). Use the disc's own file, or build without X360 "
                          "shaders (gen_tables.py --no-x360)." % (zz, len(missing), len(names), " ".join(missing), n))
     containers, consts = {}, {}

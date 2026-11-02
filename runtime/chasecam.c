@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include "host.h"
 #include "settings.h"
+#include "shadow_near.h"
 
 static const char *const kValues[] = {"off", "on"};
 static Setting h_camera = {.id = "controls.h_camera", .category = SET_CONTROLS, .order = 135,
@@ -227,14 +228,123 @@ static void chase_compare(Cpu *c, ChaseFrame *f, int broken) {
     diag_event("chasecam parity: kmh=%.3f broken=%d different_words=%u", f->kmh, broken, different);
 }
 
+// Measurement fixture: park the eye/FOV at sim 10, hold until 12, then yaw
+// about world Z at 2 degrees/s. 'hold' keeps the same camera as a noise control.
+// Reuse Camera::SetCameraMatrix so position/forward/velocity stay consistent.
+void f_004700D0(Cpu *c);
+void x360_set_shadow_stable(int on);
+void x360_set_shadow_fit(int preset);
+static int shadow_pan_active, shadow_pan_environment_active;
+// Record the exact shared caster/receiver fit before texture bias, including
+// unfrozen parked holds. Camera records alone cannot attribute light movement.
+void shadow_pan_matrix(uint32_t matrix) {
+    if (!diag_on || !shadow_pan_active) return;
+    static FILE *log;
+    if (!log) {
+        char path[1024]; snprintf(path, sizeof path, "%s/shadow_pan_fit.tsv", diag_dir);
+        log = fopen(path, "w");
+        if (log) fprintf(log, "frame\tsim\tfrozen\tlight_x\tlight_y\tlight_z\tfit_hex\n");
+    }
+    if (!log) return;
+    uint64_t diag_current_frame(void);
+    uint32_t tod = M32(0x009B392Cu);
+    fprintf(log, "%llu\t%.6f\t%d\t%.9g\t%.9g\t%.9g\t",
+            (unsigned long long)diag_current_frame(), MF32(0x009885D8u), shadow_pan_environment_active,
+            tod ? MF32(tod + 0x180) : 0, tod ? MF32(tod + 0x184) : 0, tod ? MF32(tod + 0x188) : 0);
+    for (int i = 0; i < 16; ++i) fprintf(log, "%08x", M32(matrix + i * 4));
+    fputc('\n', log); fflush(log);
+}
+// Keep weather and the shadow-light input constant across the diagnostic A/B.
+// This is render-only fixture data; ordinary gameplay never enters this path.
+void shadow_pan_environment(void) {
+    if (!diag_on || !shadow_pan_environment_active) return;
+    uint32_t rain = M32(0x00919650u + 0x68), tod = M32(0x009B392Cu);
+    static uint32_t light[3];
+    static int saved;
+    if (tod) {
+        if (!saved) { memcpy(light, G + tod + 0x180, 12); saved = 1; }
+        memcpy(G + tod + 0x180, light, 12);
+    }
+    if (rain) {
+        MF32(rain + 0x290) = 0; MF32(rain + 0x28C) = 0; MF32(rain + 0x36A0) = 0;
+    }
+    MF32(0x008FAE64) = 1; MF32(0x008FAE68) = 1;
+}
+static void shadow_pan(Cpu *c, uint32_t camera, uint32_t view) {
+    static int mode = -1, saved, ab, both, switched;
+    static float epoch = -1, base[16], eye[3];
+    static uint16_t fov;
+    static FILE *log;
+    if (mode < 0) {
+        const char *e = getenv("BOOT_DIAG_SHADOW_PAN");
+        mode = e && !strcmp(e, "yaw") ? 2 : e && !strcmp(e, "hold") ? 1 : 0;
+        ab = getenv("BOOT_DIAG_SHADOW_AB") != NULL;
+        both = ab && !strcmp(getenv("BOOT_DIAG_SHADOW_AB"), "both");
+    }
+    if (!mode || view != 1 || M32(0x00925E90u) != 6) return;
+    float now = MF32(0x009885D8u);
+    if (epoch < 0) epoch = now;
+    float t = now - epoch;
+    if (t < 10) return;
+    shadow_pan_active = 1;
+    shadow_pan_environment_active = ab;
+    shadow_pan_environment();
+    if (!saved) {
+        memcpy(base, G + camera, sizeof base); fov = M16(camera + 0xC4);
+        for (int i = 0; i < 3; ++i)
+            eye[i] = -(base[12] * base[i * 4] + base[13] * base[i * 4 + 1] + base[14] * base[i * 4 + 2]);
+        char path[1024]; snprintf(path, sizeof path, "%s/shadow_pan.tsv", diag_dir);
+        log = fopen(path, "w");
+        if (log) fprintf(log, "frame\tsim\trace_sim\tyaw_deg\tfov\tsx\tsy\tstable\tview_hex\n");
+        saved = 1;
+    }
+    int near_ab = shadow_near_ab_enabled();
+    if (near_ab) { shadow_pan_environment_active=1; shadow_pan_environment(); }
+    float sweep = (ab || near_ab) ? fmodf(t - 10, 4) - 2 : t - 12;
+    float degrees = mode == 2 && sweep > 0 ? sweep * 2 : 0;
+    int stable = t >= 18 && (!both || t < 26 || t >= 38);
+    if (ab) x360_set_shadow_stable(stable);
+    // One process can measure both map presets within a bounded run budget.
+    // Start with PC; allow four seconds after the normal device reset before
+    // the next stationary hold. The same saved eye/FOV serves both presets.
+    if (both && t >= 26 && !switched) { switched = 1; x360_set_shadow_fit(0); }
+    float a = degrees * (3.14159265358979323846f / 180), co = cosf(a), si = sinf(a);
+    float m[16]; memcpy(m, base, sizeof m);
+    for (int j = 0; j < 3; ++j) {
+        m[j] = co * base[j] - si * base[4 + j];
+        m[4 + j] = si * base[j] + co * base[4 + j];
+        m[12 + j] = -(eye[0] * m[j] + eye[1] * m[4 + j] + eye[2] * m[8 + j]);
+    }
+    Cpu before = *c;
+    uint32_t scratch = c->esp - 1024;
+    memcpy(G + scratch, m, sizeof m);
+    c->esp = scratch - 12; M32(c->esp) = 0;
+    M32(c->esp + 4) = scratch; M32(c->esp + 8) = 0;
+    c->ecx = camera; f_004700D0(c); *c = before;
+    M16(camera + 0xC4) = fov;
+    if (log) {
+        uint64_t diag_current_frame(void);
+        uint32_t plat = M32(0x00919650u);
+        fprintf(log, "%llu\t%.6f\t%.6f\t%.6f\t%u\t%.9g\t%.9g\t%d\t",
+                (unsigned long long)diag_current_frame(), now, t, degrees, fov,
+                MF32(plat + 0x40), MF32(plat + 0x54), ab && stable);
+        for (int i = 0; i < 16; ++i) fprintf(log, "%08x", M32(camera + i * 4));
+        fputc('\n', log); fflush(log);
+    }
+}
+
 void f_0047D3C0(Cpu *c) {
     if (!s_chase.value && !diag_on) { f_0047D3C0_orig(c); return; }
     uint32_t mover = c->ecx, view = M32(mover + 0x10), mode = M32(mover + 0x98);
     uint32_t camera = M32(mover + 0x1C);
     // Main local player views only: never mirrors, capture cameras, NIS or other POVs.
-    if ((view != 1 && view != 2) || (mode != 2 && mode != 3) ||
-        camera != M32(0x009195E0u + view * 0x70 + 0x40)) {
+    if ((view != 1 && view != 2) || camera != M32(0x009195E0u + view * 0x70 + 0x40)) {
         f_0047D3C0_orig(c); return;
+    }
+    if (mode != 2 && mode != 3) {
+        f_0047D3C0_orig(c);
+        if (diag_on) { shadow_pan(c,camera,view); shadow_near_pose_camera(c,camera,view,mode); }
+        return;
     }
     ChaseFrame local = {.mover = mover, .anchor = M32(mover + 0x80), .camera = camera, .mode = mode,
                          .active = s_chase.value != 0};
@@ -251,5 +361,6 @@ void f_0047D3C0(Cpu *c) {
         else f_0047D3C0_orig(c);
     } else f_0047D3C0_orig(c);
     frame = previous;
+    if (diag_on) { shadow_pan(c, camera, view); shadow_near_pose_camera(c,camera,view,mode); }
     if (diag_on && local.sampled) chase_record(&local);
 }

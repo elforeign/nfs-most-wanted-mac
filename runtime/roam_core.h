@@ -1,12 +1,13 @@
-// roam_core.h - online free roam: wire format v2, client session, interpolation and the relay.
+// roam_core.h - online free roam: wire format v3, client session, interpolation and the relay.
 //
 // Players in their own career free roam see each other's cars. Each game sends its car's state 20 times a second
 // to one relay over UDP; the relay sends bounded, staggered bundles for 32 interests in the same room. The relay
 // is the same code in the standalone CLI (roam_relay_main.c) and in tests. All fields are little-endian.
 //
 // Every datagram starts with an 8-byte header:  'R' 'M' version type | sender id u16 | seq u16.
-// A datagram with another version is dropped; the relay answers it once per address with ERR(ROAM_ERR_VERSION).
-//   HELLO   c->r  room u32, name[16]                         WELCOME r->c  your id u16, near u8, hz u8
+// Wrong-version errors and challenges share bounded source/global reply budgets; replies never amplify.
+//   HELLO   c->r  room u32, name[16], public[65], optional cookie[20], DER signature length + padded signature[72]                         WELCOME r->c  your id u16, near u8, hz u8
+//   CHALLENGE r->c timestamp u32, HMAC-SHA256 tag[16]; retry HELLO with this opaque cookie.
 //   STATE   c->r  RoamState (40 bytes)                       BUNDLE  r->c  count u8, count x (id u16, seq u16, RoamState)
 //   LOOK    c->r  rev u16, count u8, car u32, count x part u32   (the relay forwards it with the sender's id in the
 //           header to each client that gains the sender as a neighbour or sees a new rev)
@@ -18,8 +19,9 @@
 // Tier 0/1/2 = 20/10/2 Hz; tier 2 is map-only. Stale states leave membership within 750+200 ms.
 #pragma once
 #include <stdint.h>
+#include "roam_auth.h"
 
-#define ROAM_VERSION 2
+#define ROAM_VERSION 3
 #define ROAM_PORT 47800
 #define ROAM_MAX_DGRAM 1200
 #define ROAM_HDR 8
@@ -39,8 +41,8 @@
 #define ROAM_FLAG_GHOST 2    // bit 1: the sender has ghost mode on (no collisions with anyone's car)
 
 enum { ROAM_HELLO = 1, ROAM_WELCOME, ROAM_STATE, ROAM_BUNDLE, ROAM_LOOK, ROAM_BYE, ROAM_ERR,
-       ROAM_MEMBERS, ROAM_PINS, ROAM_NAME };
-enum { ROAM_ERR_VERSION = 1, ROAM_ERR_FULL = 2 };
+       ROAM_MEMBERS, ROAM_PINS, ROAM_NAME, ROAM_CHALLENGE };
+enum { ROAM_ERR_VERSION = 1, ROAM_ERR_FULL = 2, ROAM_ERR_BANNED = 5 };
 
 typedef struct {
     uint32_t t;              // sender's clock, ms
@@ -107,6 +109,9 @@ typedef struct {
     uint16_t id, seq;
     int welcomed, near;
     int last_err;
+    RoamAuth auth;
+    uint8_t cookie[20];
+    int has_cookie;
     RoamView view;
     uint32_t rx_bundles, rx_entries, rx_bad;
     uint16_t members[ROAM_INTEREST_MAX], member_state_seq[ROAM_INTEREST_MAX], member_seq;
@@ -141,11 +146,36 @@ typedef struct {
     uint64_t rx_bytes, tx_attempts, tx_errors, tx_wouldblock, tx_error_bytes;
     uint64_t lookup_probes, candidates, selections, interest_changes, tier_changes;
     uint64_t bundle_overflow, state_entries[3], ticks, max_tick_us;
+    uint64_t admission_rejected, cookie_rejected, source_rejected, source_records;
+    uint64_t ingress_dropped, challenge_suppressed, challenges, tx_suppressed, tx_suppressed_bytes, tx_wire_bytes;
+    uint64_t receive_yields;
+    uint64_t signature_checks, auth_rejected, auth_limited, replay_rejected, ban_rejected, kicks;
 } RoamRelayStats;
+// Rates/second and bursts; defaults are the public service policy. Fixtures must opt in explicitly.
+typedef struct {
+    uint32_t admission_rate, admission_burst, source_rate, source_burst;
+    uint32_t challenge_rate, challenge_burst;
+    uint32_t signature_rate, signature_burst;
+    uint32_t ingress_packets, ingress_packet_burst, ingress_bytes, ingress_byte_burst;
+    uint32_t egress_packets, egress_packet_burst, egress_bytes, egress_byte_burst;
+} RoamRelayPolicy;
+RoamRelayPolicy roam_relay_policy(void);
+RoamRelay *roam_relay_new_policy(int fd, int near, int max_clients, const RoamRelayPolicy *policy);
 RoamRelay *roam_relay_new(int fd, int near, int max_clients);
+// Optional transport for deterministic fixtures; the same admission and tx ceilings still apply.
+typedef int (*RoamRelaySend)(void *, const struct sockaddr_in *, const uint8_t *, int);
+void roam_relay_sender(RoamRelay *r, RoamRelaySend send, void *context);
 void roam_relay_free(RoamRelay *r);
 void roam_relay_input(RoamRelay *r, const uint8_t *b, int n, const struct sockaddr_in *from, uint32_t now_ms);
 void roam_relay_tick(RoamRelay *r, uint32_t now_ms);   // call ROAM_HZ times a second
 // Drain the socket (non-blocking) into roam_relay_input, ticking when due. Returns datagrams read.
 int roam_relay_service(RoamRelay *r, uint32_t now_ms);
 RoamRelayStats roam_relay_stats(const RoamRelay *r);
+struct RoamModeration;
+// Borrowed moderation state, serviced by the same thread as the relay.
+void roam_relay_moderation(RoamRelay *r, struct RoamModeration *m);
+void roam_relay_enforce_bans(RoamRelay *r);
+int roam_relay_identity(RoamRelay *r, uint16_t session, uint8_t id[32]);
+int roam_relay_kick(RoamRelay *r, uint16_t session);
+int roam_relay_kick_identity(RoamRelay *r, const uint8_t id[32]);
+int roam_relay_list(RoamRelay *r, uint16_t after, char *out, size_t capacity);

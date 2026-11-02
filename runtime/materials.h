@@ -48,14 +48,9 @@ typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all
 #ifndef NFS_PUBLIC
 #include "carbon_lamp_private.h"
 #else
-// The public build has no converted cars; this pass-through keeps the call sites compiling and is never selected.
-#define CARBON_LAMP_MSL \
-"static float4 carbon_lamp(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) {\n" \
-"    return float4(light.rgb * shade * tex.rgb + specular + reflection, tex.a * light.a);\n" \
-"}\n" \
-"static float4 carbon_lamp_retail(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) { return carbon_lamp(tex, light, shade, specular, reflection, masks); }\n" \
-CLEAR_HEADLAMP_MSL
-#define CARBON_LAMP_RETAIL_MSL "static float4 carbon_lamp(float4 tex, float4 light, float shade, float3 specular, float3 reflection, float2 masks) { return float4(light.rgb * shade * tex.rgb + specular + reflection, tex.a * light.a); }\n"
+#include "car_lamp_public.h"
+#define CARBON_LAMP_MSL PUBLIC_CAR_LAMP_FULL_MSL
+#define CARBON_LAMP_RETAIL_MSL PUBLIC_CAR_LAMP_MSL
 #endif
 
 // Called by render.m's compile_entry (any thread) after sm_translate succeeded: the replacement MSL (malloc'd) when
@@ -71,6 +66,7 @@ char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult 
 enum { MAT_VARIANT_SOFT_SMOKE = 0x104, MAT_VARIANT_SOFT_SMOKE_RESOLVED = 0x105, MAT_VARIANT_SOFT_SMOKE_LATE = 0x106 };
 int mat_is_particle(int id);
 int mat_soft_particle_view(void);
+unsigned mat_particle_view(const uint32_t viewport[4]);
 char *mat_soft_smoke_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 char *mat_soft_smoke_resolved_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 char *mat_soft_smoke_late_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
@@ -181,6 +177,7 @@ void mat_trees_frame(void);                // Present: BOOT_DIAG per-second `tre
 enum { MAT_VARIANT_BONE = 0x103, MAT_BONE_VS_BUF = 20, MAT_BONE_PS_BUF = 5, MAT_BONE_TEX = 12, MAT_BONE_K = 96 };
 enum { BONE_NO_DRAW, BONE_PC, BONE_TEXTURE, BONE_STATE, BONE_SHADER, BONE_PIPELINE, BONE_SKIP_COUNT };
 void mat_bone_car_cube(uint32_t tex);      // render.m, every draw with a cube on sampler 1: kept when it is a car draw
+void mat_bone_reset(void);                // release the cached cube on device reset / teardown
 int mat_bone_draw(uint32_t tex[3], int *skip);   // 1: replace this draw; tex = normal, specular, env cube (guest D3D)
 void mat_bone_skip(int reason);
 char *mat_bone_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint);

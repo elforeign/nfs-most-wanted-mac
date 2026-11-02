@@ -26,7 +26,7 @@ def run(args, expected=0):
 
 src = (ROOT / 'runtime/render.m').read_text()
 key = src.split('    int a2c = alpha_to_coverage_draw(rs,', 1)[1]
-key = '    int a2c = alpha_to_coverage_draw(rs,' + key.split('    static typeof(pk) last_pk;', 1)[0]
+key = '    id<MTLFunction> sign_direct = nil;\n    int a2c = alpha_to_coverage_draw(rs,' + key.split('    static typeof(pk) last_pk;', 1)[0]
 flag = '        pd.alphaToCoverageEnabled = a2c;'
 assert flag in src
 aux = src.split('    pa.alpha_func = rs[15]', 1)[1].split('    for (int s = 0; s < 8;', 1)[0]

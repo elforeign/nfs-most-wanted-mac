@@ -1,0 +1,13 @@
+// SDK-free declarations for emitter COFF compile proof only. Not a C++ ABI model.
+#pragma once
+#include <stddef.h>
+namespace std {
+class string {
+public:
+    string(); string(const char *); string(const string &); ~string();
+    string &operator=(const string &); string &operator=(const char *);
+    string &operator+=(const char *); string &operator+=(const string &);
+    bool empty() const; void clear();
+    const char *c_str() const; const char *data() const; size_t size() const;
+};
+}

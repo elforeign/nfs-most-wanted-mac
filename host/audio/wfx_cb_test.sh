@@ -1,8 +1,9 @@
 #!/bin/sh
+# Baseline integrity proof: 1/1 authentic fragments accepted; 1/1 one-byte corruptions rejected.
 # audit2 #7: a float WAVEFORMATEX with a huge cbSize used to be memcpy'd (18+cbSize bytes) into Format::raw[40].
 # Builds dsound_host.cpp under ASan and creates a stereo-float buffer with cbSize=64 (82-byte format).
 # Fixed code: format accepted, GetFormat returns an 18-byte format, no ASan report -> "wfx_cb_test: PASS".
-# Old code (sh wfx_cb_test.sh --old, uses the HEAD~ source via git): ASan stack-buffer-overflow in parse_format -> FAIL.
+# Old code (sh wfx_cb_test.sh --old, uses the pinned pre-fix format parser): ASan stack-buffer-overflow in parse_format -> FAIL.
 # Run: sh host/audio/wfx_cb_test.sh [--old]     (headless, manual sink, no device)
 set -e
 cd "$(dirname "$0")"
@@ -10,7 +11,53 @@ F=../../third_party/ffmpeg
 T=$(mktemp -d)
 SRC=dsound_host.cpp
 if [ "$1" = "--old" ]; then
-    git show "${OLD_REF:-main}:port/host/audio/dsound_host.cpp" > "$T/old.cpp" 2>/dev/null || git show "${OLD_REF:-main}:host/audio/dsound_host.cpp" > "$T/old.cpp"
+    NFS_ENV_ROOT=$(cd ../.. && pwd)
+    . "$NFS_ENV_ROOT/runtime/env.sh"; nfs_need_py
+    "$TOOLS_PY" -I - dsound_host.cpp "$T/old.cpp" <<'PYBASE'
+from pathlib import Path
+import hashlib
+OLD_PARSE = r'''bool parse_format(const void *wfx, Format &f) {
+    if (!wfx) return false;
+    const uint8_t *p = (const uint8_t *)wfx;
+    int tag = rd16(p);
+    Format r;
+    r.channels = rd16(p + 2);
+    r.rate = (int)rd32(p + 4);
+    r.block = rd16(p + 12);
+    r.bits = rd16(p + 14);
+    uint32_t cb = tag == 1 ? 0 : rd16(p + 16);
+    r.mask = default_mask(r.channels);
+    if (tag == 1) {
+        r.is_float = false;
+    } else if (tag == 3) {
+        r.is_float = true;
+    } else if (tag == 0xFFFE) {
+        if (cb < 22) return false;
+        uint32_t sub = rd32(p + 24);
+        if (memcmp(p + 28, kKsGuidTail, 12) != 0 || (sub != 1 && sub != 3)) return false;
+        r.is_float = sub == 3;
+        uint32_t m = rd32(p + 20);
+        if (m) r.mask = m;
+        cb = 22;
+    } else {
+        return false;
+    }
+    if (r.channels < 1 || r.channels > 8 || r.rate < DSBFREQUENCY_MIN || r.rate > DSBFREQUENCY_MAX) return false;
+    if (r.is_float ? r.bits != 32 : (r.bits != 8 && r.bits != 16 && r.bits != 24 && r.bits != 32)) return false;
+    if (r.block != r.channels * r.bits / 8) return false;
+    r.raw_len = 18 + cb;
+    memcpy(r.raw, p, r.raw_len);
+    if (tag == 1) r.raw[16] = r.raw[17] = 0;
+    f = r;
+    return true;
+}'''
+assert hashlib.sha256(OLD_PARSE.encode()).hexdigest() == '44805c7e36def3be5bf37ba6890511a68da21b56ab3b81d765dc9b428f6e0dd6', 'pinned baseline changed'
+import sys
+source = Path(sys.argv[1]).read_text()
+start = source.index('bool parse_format(')
+end = source.index('\n}', start)+2
+Path(sys.argv[2]).write_text(source[:start]+OLD_PARSE+source[end:])
+PYBASE
     SRC="$T/old.cpp"
 fi
 cat > "$T/t.cpp" <<'CPP'

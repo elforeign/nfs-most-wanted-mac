@@ -12,6 +12,7 @@
 
 
 
+
 """
 import os
 from pathlib import Path
@@ -72,11 +73,16 @@ def main():
         # deterministic race setup and executable's main (never invoked here).
         boot = (ROOT / 'runtime/boot.c').read_text().split('// ---------------- deterministic race start')[0]
         harness = tmp / 'harness.c'
+        save_stubs=tmp/'save-stubs.c'
+        save_stubs.write_text('int carsave_public_save_allowed(void){return 1;}\n'
+                              'int carsave_public_save_prepare(const char *p){(void)p;return 1;}\n'
+                              'void carsave_public_save_complete(int c){(void)c;}\n'
+                              'int carsave_public_backup_before_write(const char *a,const char *b){(void)a;(void)b;return 1;}\n')
         boot = boot.replace('void dispatch(Cpu *c, uint32_t t) {', 'static void before_dispatch(Cpu *, uint32_t);\nvoid dispatch(Cpu *c, uint32_t t) {\n    before_dispatch(c, t);')
         source = (ROOT / 'runtime/server_loader.c').read_text()
         ws = (ROOT / 'runtime/ws2_32.c').read_text()
         threads = (ROOT / 'runtime/threads.c').read_text()
-        release = 't->type = K_FREE; // module unload releases the abandoned thread handle'
+        release = 'if (handle_obj[i] == t) threads_close(KOBJ_BASE + 4 * i); // module unload releases the abandoned thread handle'
         assert threads.count(release) == 1, 'module-handle release mutation must apply exactly once'
         # Test-only visibility into the real allocator, with no runtime API.
         threads += '\nunsigned test_handle_count(void) { unsigned n=0; for(unsigned i=1;i<MAX_KOBJ;++i) n+=kobj[i].type!=K_FREE; return n; }\n'
@@ -103,7 +109,7 @@ def main():
             exe = tmp / name
             cmd = ['clang', '-O1', '-g', '-w', '-DNFS_SERVER_LINKED=1', '-I'+str(ROOT/'runtime'),
                    '-I'+str(ROOT/'recomp'), '-I'+str(ROOT/'recomp/out'), str(harness), str(loader),
-                   str(ROOT/'runtime/heap.c'), str(ROOT/'runtime/private_cars_public.c'), str(thread_file), str(ws_file), str(archive),
+                   str(ROOT/'runtime/heap.c'), str(ROOT/'runtime/private_cars_public.c'), str(ROOT/'runtime/car_catalog.c'), str(save_stubs), str(thread_file), str(ws_file), str(archive),
                    '-Wl,-dead_strip', '-o', str(exe)]
             if name == 'attach_failure':
                 cmd.insert(1, '-DEXPECT_ATTACH_FAILURE=1')

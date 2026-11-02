@@ -23,6 +23,7 @@ extern int di_mouse_dx, di_mouse_dy, di_mouse_dz;
 extern uint8_t di_mouse_btn[8];
 int user32_di_next(uint32_t *ofs, uint32_t *data, uint32_t *time, uint32_t *seq);
 void user32_pump(void);
+void pad_sim_enumerated(void);
 
 #define DI_OK 0
 #define DI_BUFFEROVERFLOW 1
@@ -124,6 +125,7 @@ static int i_EnumDevices(Cpu *c) {             // (this, devType, callback, ref,
     // after the Xbox 360 pad; the first controller's type then takes it over (padbind.c padbind_sync).
     PadState ps;
     int want_pad = type == 0 || type == 4 || type == 0x15;
+    if (want_pad) pad_sim_enumerated();
     if (want_pad) for (int idx = 0; idx < pad_count(); ++idx) {
         int present = pad_read_n(idx, &ps);       // a controller already there names the device
         fill_instance(inst, DEV_PAD, idx);

@@ -2,6 +2,7 @@
 #include "render_internal.h"
 #include "hdrclip.h"
 #include "post_cuts.h"
+#include "sign_diag.h"
 #include "gen/x360_shader_lits.inc"   // tools/gen_tables.py: X360S_VT_* (the X360 visualtreatment PS literals, fs_vt)
 #include "gen/x360_engine.inc"         // X360E_DROP_* (the lens raindrops, from default.xex)
 
@@ -1047,6 +1048,25 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         if (slot->pending && slot->serial < frame_serial && slot->serial <= completed) slot->pending=0;
         if (!slot->pending && !writable) writable=slot;
     }
+    if (diag_on && sign_diag_on && !view && sign_diag_active()) {
+        static int recorded;
+        if (!recorded++) {
+            for (unsigned i=0;i<X_LUM_SLOTS;++i) {
+                struct XLumSlot *slot=&xr->readback[i];
+                uint64_t header[4]={slot->serial,slot->generation,(uint64_t)slot->pending,(uint64_t)slot->floating};
+                char name[48];snprintf(name,sizeof name,"lum%u-header",i);
+                sign_diag_record_history(name,header,sizeof header);
+                if (slot->buffer && (!slot->pending || slot->serial<frame_serial)) {
+                    if (slot->pending) wait_serial(slot->serial);
+                    snprintf(name,sizeof name,"lum%u-buffer",i);
+                    sign_diag_record_history(name,slot->buffer.contents,slot->buffer.length);
+                }
+            }
+        }
+        float history[3]={measured,xr->alpha,xr->masked};
+        sign_diag_freeze("luminance",history,sizeof history);
+        measured=history[0];xr->alpha=history[1];xr->masked=history[2];
+    }
     x360_post_alpha=xr->alpha; x360_post_masked=xr->masked;
     // No completed sample returns -1; the caller retains its previous measured
     // luminance. Saturation skips a copy rather than overwriting pending data.
@@ -1067,6 +1087,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     if (!scene) return -2;
     extern void render_soft_smoke_late(id<MTLTexture> scene);
     if(!view)render_soft_smoke_late(scene);
+    if (diag_on && sign_diag_on && !view) sign_diag_scene(cmd, scene);
     id<MTLTexture> original_scene=scene;
     x_contact_depth(depth_tex,p,view);
     scene=x_contact_scene(scene,depth_tex,p,view);

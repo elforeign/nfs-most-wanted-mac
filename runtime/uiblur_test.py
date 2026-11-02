@@ -66,20 +66,21 @@ def run(cmd, expected=(0,)):
     return p
 
 
-def build(tmp):
+def build(tmp, source=None, harness="uiblur_test.m"):
     guest = (ROOT / 'recomp/out/speed_41.c').read_text()
     original = re.search(r'void f_006DDD90_orig\(Cpu \*restrict c\) \{.*?\n\}', guest, re.S)[0]
-    src = (ROOT / 'runtime/x360_textures.m').read_text()
+    src = source if source is not None else (ROOT / 'runtime/x360_textures.m').read_text()
     tail = src.split('    uint32_t ww = hx->ww, hh = hx->hh, mips = hx->mips, fmt = hx->fmt;', 1)[1]
     tail = '    uint32_t ww = hx->ww, hh = hx->hh, mips = hx->mips, fmt = hx->fmt;' + tail
     wrapper = ('\nstatic void replay_swap(Cpu *c, HdTex *hx, int is_later) {\n'
                'uint32_t ti=c->ecx, pi=M32(ti), raw=0, size=0;\n'
                'if (0) { hd_lookup: abort(); }\n' + tail)
-    (tmp / 'uiblur_generated.h').write_text(original + wrapper)
+    helpers = src.split('// HD_MIP_TAIL_BEGIN', 1)[1].split('\n', 1)[1].split('// HD_MIP_TAIL_END', 1)[0] if '// HD_MIP_TAIL_BEGIN' in src else ''
+    (tmp / 'uiblur_generated.h').write_text(original + helpers + wrapper)
     exe = tmp / 'uiblur'
     run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
          '-DRECOMP_ABICHECK', '-fobjc-arc', '-I', str(ROOT / 'recomp'), '-I', str(tmp),
-         str(ROOT / 'runtime/uiblur_test.m'), '-framework', 'Foundation', '-framework', 'Metal', '-o', str(exe)])
+         str(ROOT / 'runtime' / harness), '-framework', 'Foundation', '-framework', 'Metal', '-o', str(exe)])
     return exe
 
 

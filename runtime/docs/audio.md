@@ -2,6 +2,8 @@
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
+The ABKC bounds checks in `x360abk.c` change the Mac sound-bank parser; Windows uses its separate host implementation and its behavior is unchanged.
+
 ## Audio mode
 
                 

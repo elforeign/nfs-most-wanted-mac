@@ -1,0 +1,3 @@
+// SDK-free declarations for emitter COFF compile proof only. Never link these.
+#pragma once
+#include <stdint.h>

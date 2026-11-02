@@ -8,6 +8,7 @@
 // Split/partial: all channels identical; nonempty reuse/proof retain stores.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import "render_upscale_route.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,6 +112,9 @@ static id<MTLDevice> mtl;
 static id<MTLCommandBuffer> cmd;
 static id<MTLRenderCommandEncoder> enc;
 typedef struct {id<MTLTexture> tex,ms;} RenderTex;
+// This fixture exercises native coverage; the spatial alias stays inactive.
+static NFSUpscaleRoute *fs_upscale;
+static RenderTex fs_native_depth;
 static RenderTex ssao_mask,ssao_reference_mask,ssao_cpu_reference_mask;
 static id<MTLTexture> ssao_half_depth,ssao_depth;
 static int ssao_reference_record,ssao_cpu_reference_record,proof_mode;

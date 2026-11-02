@@ -11,7 +11,9 @@ Membership/map/order/duplicate-age controls: normal exit 0, each mutant exit 1 o
 Stale-state control: normal removes a LOOK-only peer within 950 ms; freshness mutant retains it and exits 1.
 """
 from pathlib import Path
+import re
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,11 +23,12 @@ BROKEN = 'off = r->off[(r->ioff + ROAM_OFFS - 1) % ROAM_OFFS];'
 APPEAR = 'if (r->n && ((s->flags ^ r->s[r->n - 1].flags) & ROAM_FLAG_CAR)) {'
 CF = ['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
       '-fsanitize=address,undefined', '-I', str(RT)]
+LIBS = ['-lm', '-lcrypto'] if sys.platform.startswith('linux') else []
 
 
 def run(td, name, core, relay=None, args=()):
     exe = Path(td) / ('roam_' + name)
-    p = subprocess.run(CF + [str(RT / 'roam_test.c'), str(core), str(relay or RT / 'roam_relay.c'), '-o', str(exe)],
+    p = subprocess.run(CF + [str(RT / 'roam_auth.c'), str(RT / 'roam_moderation.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if __import__('sys').platform == 'darwin' else []) + [str(RT / 'roam_test.c'), str(core), str(relay or RT / 'roam_relay.c'), *LIBS, '-o', str(exe)],
                        capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-2500:]
     p = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=120)
@@ -81,12 +84,13 @@ def main():
         assert rc == 1 and 'stale state retained by LOOK heartbeat' in out, (rc, out[-2500:])
         # The standalone relay builds and runs (loopback, an ephemeral port, 1 s).
         cli = Path(td) / 'roam_relay'
-        p = subprocess.run(CF + [str(RT / 'roam_relay_main.c'), str(RT / 'roam_core.c'), str(RT / 'roam_relay.c'),
-                                 '-o', str(cli)], capture_output=True, text=True)
+        p = subprocess.run(['sh', str(RT / 'roam_relay_build.sh'), str(cli)],
+                           capture_output=True, text=True)
         assert p.returncode == 0, p.stderr[-2500:]
         p = subprocess.run([str(cli), '--port', '0', '--seconds', '1'], capture_output=True, text=True, timeout=20)
         print('cli:', p.stdout.strip().splitlines()[:1], 'exit', p.returncode, flush=True)
-        assert p.returncode == 0 and 'listening on 127.0.0.1:0' in p.stdout, p.stdout + p.stderr
+        selected = re.search(r'listening port (\d+) near 32 max 100 seconds 1', p.stdout)
+        assert p.returncode == 0 and selected and int(selected[1]) > 0, p.stdout + p.stderr
     print('ROAM TEST PASS: normal + seven clock/appearance/membership/freshness mutants rejected; relay CLI runs')
     return 0
 

@@ -1,16 +1,23 @@
-"""Public report destinations, clipboard, privacy, consent and actual F10/controller input; no desktop/network/game.
+"""Public report review, consent, privacy and actual F10 input; fake transports only.
 
-Proof: public 219 checks/0 failures; private 6/0; all 38 broken controls rejected.
-Old join-code redaction (IP rules retained): 11 failures; unsanitized bundle export: 60 failures (six text attachments).
-Old IPv4 sentence boundary: 7 failures (preview plus all six bundle attachments).
-Case-insensitive compact/formatted and all-letter checksum-valid codes leave zero leaks; display/perf text survives.
-Pre-fix branch: 28 failures vs production 0, including te2943a2w and ABCDEFGAU in previews/six attachments.
-IPv4/IPv6 rule removal: 18/16 failures; both destinations and the bundle use the shared endpoint rules.
-Missing checksum/time checks: 7 failures each; compact-letter guard: 7; uppercase-only: 14.
-Every privacy rule has its own removal control, including each known identity class.
-The runtime suite discovers this driver and its paired Objective-C fixture automatically.
+Proof: public 401 checks/0 failures; private 6/0; 49 broken controls rejected.
+Pinned original 13984ab7: 16 checks/11 failures, including fake creation, fallback copy,
+constant fallback URL, diagnostics, account/public warning, screenshot review and fresh input.
+Archive regression without history: predecessor 1 failure/0 completed proofs; fixed 0 failures/1 completed proof.
+The predecessor requests 1 private object; the fixed proof makes 0 history lookups.
+Pinned source and SHA-256 digests ship in report_github_baseline.py; behavioral logs stay under
+.metal-cache/report-submit/original-proof/.
+Applicable identity/endpoint/bundle and F10 input controls are retained. The removed query builder's
+encoding/URL-size controls are replaced by constant-URL, Unicode/body-bound and exact-copy checks.
+Every mutation must finish with failing behavioral assertions; compile failures/crashes do not count.
+The offline suite discovers this driver and its paired Objective-C fixture automatically.
+Room-code checks cover both destination snapshots and all six text attachments.
+Both sides' large-input cases use the snapshot section/body bounds and constant fallback URL.
+
 """
 import os
+import runpy
+from unittest.mock import patch
 from pathlib import Path
 import re
 import shutil
@@ -30,24 +37,34 @@ MUTANTS = {
     'computer': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"serial", @"wifi"]'),
     'serial_identity': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"wifi"]'),
     'wifi_identity': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"serial"]'),
-    'length': ('report_github.m', 'static const NSUInteger IssueLimit = 7500;', 'static const NSUInteger IssueLimit = 75000;'),
-    'encoding': ('report_github.m', 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~', 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~&?# +'),
     'consent': ('report_github.m', 'active = 1; confirmSelected = 0;', 'OpenBrowser([NSURL URLWithString:issueURL]); active = 1; confirmSelected = 0;'),
-    'network': ('report_github.m', '    (void)unused;', '    (void)unused; [[[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:IssueBase]] resume];'),
-    'cancel_default': ('report_github.m', 'active = 1; confirmSelected = 0;', 'active = 1; confirmSelected = 1;'),
+    'network': ('report_github.m', 'static void SendToGitHub(int discord) {', 'static void SendToGitHub(int discord) { [[[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:IssueBase]] resume];'),
+    'cancel_default': ('report_github.m', 'padArmed = !padHeld; confirmSelected = 0;', 'padArmed = !padHeld; confirmSelected = 1;'),
     'preview': ('report_github.m', 'NSString *text = issueBody;', 'NSString *text = @"different text";'),
-    'priority': ('report_github.m', 'if (notable.length) {', 'if (0 && notable.length) {'),
-    'keyboard': ('portmenu.m', 'if (report_github_active()) { report_github_key(vk);', 'if (0 && report_github_active()) { report_github_key(vk);'),
-    'controller': ('portmenu.m', 'if (report_github_active()) { report_github_pad(0, edge);', 'if (0 && report_github_active()) { report_github_pad(0, edge);'),
+    'keyboard': ('portmenu.m', 'if (report_github_active()) { report_github_key_event(vk, down, repeat);', 'if (0 && report_github_active()) { report_github_key_event(vk, down, repeat);'),
+    'controller': ('portmenu.m', 'if (report_github_active()) { report_github_pad_release(phys); report_github_pad(0, edge);', 'if (0 && report_github_active()) { report_github_pad_release(phys); report_github_pad(0, edge);'),
     'close': ('portmenu.m', 'if (!o) report_github_close();', 'if (0) report_github_close();'),
     'folder': ('report_github.m', 'portmenu_open_folder(issueFolder.fileSystemRepresentation);', '(void)issueFolder;'),
     'discord_clipboard': ('report_github.m', '[pasteboard setString:text forType:NSPasteboardTypeString]', '[pasteboard setString:[text stringByAppendingString:@" different"] forType:NSPasteboardTypeString]'),
-    'discord_limit': ('report_github.m', 'static const NSUInteger DiscordLimit = 2000;', 'static const NSUInteger DiscordLimit = 20000;'),
     'discord_invite': ('report_github.m', '@"https://discord.gg/VYKkrVhMrd"', '@"https://discord.gg/wrong"'),
     'discord_absent': ('report_github.m', 'settings_add(&s_discord);', '(void)s_discord;'),
-    'discord_copy_failure': ('report_github.m', 'discord && !CopyReport(issueBody)', 'discord && !CopyReport(issueBody) && 0'),
-    'discord_mouse': ('report_github.m', 'else if (x >= 240 && x < 440) Confirm(1);', 'else if (x >= 240 && x < 440) Confirm(0);'),
-    'discord_controller': ('report_github.m', 'Confirm(confirmSelected == 2)', 'Confirm(0)'),
+    'discord_copy_failure': ('report_github.m', 'if (!CopyReport(issueBody))', 'if (NO && !CopyReport(issueBody))'),
+    'discord_mouse': ('report_github.m', 'else if (x >= 600 && x < 800) Confirm(3);', 'else if (x >= 600 && x < 800) Confirm(2);'),
+    'discord_controller': ('report_github.m', 'if ((edge & 1) && padArmed) { padArmed = NO; Confirm(confirmSelected); }', 'if ((edge & 1) && padArmed) { padArmed = NO; Confirm(0); }'),
+    'section_bounds': ('report_github.m', 'discord ? 220 : 1400', 'discord ? 14000 : 14000'),
+    'fallback_query': ('report_github.m', '@"https://github.com/elforeign/nfs-most-wanted-mac/issues/new"', '@"https://github.com/elforeign/nfs-most-wanted-mac/issues/new?body=unreviewed"'),
+    'key_repeat': ('report_github.m', 'if (repeat && (key == 0x0D || key == 0x20)) return;', '(void)repeat;'),
+    'mouse_release': ('report_github.m', 'if (!mouseArmed || wasHeld) return;', 'if (wasHeld) return;'),
+    'shot_seen': ('report_github.m', 'if (!screenshotSeen) return;', 'if (NO && !screenshotSeen) return;'),
+    'shot_metadata': ('report_github.m', 'frozenFrame = [clean representationUsingType:NSBitmapImageFileTypePNG properties:@{}];', 'frozenFrame = source;'),
+    'snapshot_atomic': ('report_github.m', 'BOOL requestedDiscord = discord != 0;', 'if (!reuse) submission = nextSubmission; BOOL requestedDiscord = discord != 0;'),
+    'display_rows': ('report_github.m', 'if ([key isEqual:@"display"] && fields[key])', 'if (NO && [key isEqual:@"display"] && fields[key])'),
+    'read_error_visible': ('report_github.m', 'issueError = @"Couldn\'t safely read the saved report. Save a new report and retry.";', 'issueError = nil;'),
+    'frame_available': ('report_github.m', 'if (age > 600) {', 'frameInfo = savedAge; if (age > 600) {'),
+    'account_visible': ('report_github.m', 'if (submission.state == ReportSubmitReady && !accountSeen)', 'if (NO && submission.state == ReportSubmitReady && !accountSeen)'),
+    'preview_clip': ('report_github.m', 'CGContextClipToRect(ctx, CGRectMake(viewport.origin.x, height - viewport.origin.y - viewHeight, viewport.size.width, viewHeight));', 'CGContextClipToRect(ctx, CGRectMake(viewport.origin.x, height - CGRectGetMaxY(viewport), viewport.size.width, viewHeight));'),
+    'destination_atomic': ('report_github.m', 'BOOL requestedDiscord = discord != 0;', 'BOOL requestedDiscord = discord != 0; discordPreview = requestedDiscord;'),
+    'diagnostic_allowlist': ('report_github.m', 'if ([numeric numberOfMatchesInString:line options:0 range:NSMakeRange(0, line.length)])', 'if (line.length)'),
     'private': ('report_github.m', '#if defined(NFS_PUBLIC) && NFS_PUBLIC', '#if 1'),
 }
 
@@ -55,7 +72,7 @@ MUTANTS = {
 def build_and_run(base, name, mutation=None, public=True):
     work = base / name
     work.mkdir()
-    for filename in ('report_github.m', 'report_github.h', 'report_github_test.m', 'portmenu.m', 'report_privacy.h'):
+    for filename in ('report_github.m', 'report_github.h', 'report_github_test.m', 'portmenu.m', 'report_privacy.h', 'report_submit.m', 'report_submit.h'):
         shutil.copyfile(RUNTIME / filename, work / filename)
     if mutation:
         filename, old, new = mutation
@@ -69,12 +86,15 @@ def build_and_run(base, name, mutation=None, public=True):
         if name == 'private':
             header = work / 'report_github.h'
             header.write_text(header.read_text().replace('#if defined(NFS_PUBLIC) && NFS_PUBLIC', '#if 1'))
+            for extra in ('report_submit.m', 'report_submit.h'):
+                extra_path = work / extra
+                extra_path.write_text(extra_path.read_text().replace('#if defined(NFS_PUBLIC) && NFS_PUBLIC', '#if 1'))
         path.write_text(source)
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
-               '-Wno-unused-variable', '-fsanitize=address,undefined', '-fobjc-arc', f'-DNFS_PUBLIC={int(public)}',
+               '-Wno-unused-variable', '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fobjc-arc', f'-DNFS_PUBLIC={int(public)}',
                '-I' + str(ROOT / 'recomp'), '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME),
-               str(work / 'report_github_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'offline_stubs.c'),
-               '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'QuartzCore', '-framework', 'Metal',
+               str(work / 'report_github_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'),
+               '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'ImageIO', '-framework', 'QuartzCore', '-framework', 'Metal',
                '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert compiled.returncode == 0, name + ' compile failed:\n' + compiled.stderr[-6000:]
@@ -89,6 +109,38 @@ def build_and_run(base, name, mutation=None, public=True):
         assert result.returncode != 0 and failures > 0, name + ' mutation escaped detection'
     else:
         assert result.returncode == 0 and failures == 0 and requests == 0, result.stderr[-5000:]
+
+
+def original_proof():
+    import hashlib
+    import json
+    work = ROOT / '.metal-cache' / 'report-submit' / 'original-proof'
+    work.mkdir(parents=True, exist_ok=True)
+    fixture = runpy.run_path(str(RUNTIME / 'report_github_baseline.py'))
+    digests = {}
+    for filename in ('report_github.m', 'report_github.h', 'portmenu.m', 'report_privacy.h'):
+        data = fixture['SOURCES'][filename].encode()
+        assert hashlib.sha256(data).hexdigest() == fixture['SHA256'][filename]
+        (work / filename).write_bytes(data)
+        digests[filename] = hashlib.sha256(data).hexdigest()
+    (work / 'digests.json').write_text(json.dumps({'fixture': 'report_github_baseline.py', 'sha256': digests}, indent=2) + '\n')
+    (work / 'report_github_test.m').write_text((RUNTIME / 'report_github_test.m').read_text())
+    command = ['clang', '-O1', '-g', '-Wno-unused-function', '-Wno-unused-variable', '-fobjc-arc',
+               '-DNFS_PUBLIC=1', '-DREPORT_ORIGINAL_PROBES=1', '-I' + str(ROOT / 'recomp'),
+               '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME), str(work / 'report_github_test.m'),
+               str(RUNTIME / 'settings.c'), str(RUNTIME / 'offline_stubs.c'), '-framework', 'Cocoa',
+               '-framework', 'CoreText', '-framework', 'ImageIO', '-framework', 'QuartzCore', '-framework', 'Metal',
+               '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
+    compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
+    (work / 'compile.log').write_text(compiled.stdout + compiled.stderr)
+    assert compiled.returncode == 0, compiled.stderr[-3000:]
+    profile = work / 'profile'
+    profile.mkdir(exist_ok=True)
+    result = subprocess.run([str(work / 'check'), str(profile)], capture_output=True, text=True, timeout=30)
+    (work / 'proof.log').write_text(result.stdout + result.stderr)
+    counts = re.search(r'github report: (\d+) checks, (\d+) failures', result.stdout)
+    assert counts and result.returncode == 1 and int(counts[2]) >= 10, result.stdout + result.stderr[-3000:]
+    print('original 13984ab7: ' + counts[1] + ' checks, ' + counts[2] + ' failures (expected)', flush=True)
 
 
 def main():
@@ -109,6 +161,8 @@ def main():
     for name, marker in {'ipv4': '(?:[0-9]{1,3}', 'ipv6': '(?:[0-9a-f]{0,4}:)'}.items():
         line = next(line for line in privacy.splitlines() if marker in line)
         MUTANTS[name] = ('report_privacy.h', line, '        @"^$",')
+    room_line = next(line for line in privacy.splitlines() if 'R-[A-Za-z0-9]' in line)
+    MUTANTS['room_codes'] = ('report_privacy.h', room_line, '        @"^$"')
     # Pin the original broad rules: ordinary words and times must reject both controls.
     ipv6_line = next(line for line in privacy.splitlines() if '(?:[0-9a-f]{0,4}:)' in line)
     MUTANTS['clock_times'] = ('report_privacy.h', ipv6_line,
@@ -121,17 +175,23 @@ def main():
     MUTANTS['uppercase_only'] = ('report_privacy.h',
         'options:NSRegularExpressionCaseInsensitive error:NULL',
         'options:i == 3 ? 0 : NSRegularExpressionCaseInsensitive error:NULL')
-    # The only external action in production is NSWorkspace's URL opener. Block added transports.
+    # Preparation/UI must use only the consent-gated adapter; prohibit a second transport.
     forbidden = r'NSURLSession|NSURLConnection|CFHTTP|CFReadStream|\bNSTask\b|\b(?:socket|connect|sendto|send|curl|system|popen)\s*\('
-    assert not re.search(forbidden, source), 'issue preparation must not have a network/process transport'
+    assert not re.search(forbidden, source), 'review must not bypass the submission adapter'
     assert 'report_github.m' in (RUNTIME / 'build.sh').read_text().split('else', 1)[0]
-    with tempfile.TemporaryDirectory(prefix='github-report-') as directory:
+    # An exported source archive has no private Git objects. Exercise the production-source
+    # proof with history access unavailable; the predecessor raises before any behavioral check.
+    with patch.object(subprocess, 'check_output', side_effect=AssertionError('history access unavailable')) as history:
+        original_proof()
+        assert history.call_count == 0
+    print('archive proof: 0 history lookups; pinned behavioral proof completed', flush=True)
+    with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache', prefix='github-report-') as directory:
         base = Path(directory)
         build_and_run(base, 'good_public')
         build_and_run(base, 'good_private', public=False)
         for name, mutation in MUTANTS.items():
             build_and_run(base, name, mutation, public=name != 'private')
-    print('PASS: GitHub/Discord report URL/clipboard/privacy/consent and F10 input; all broken controls rejected')
+    print(f'PASS: GitHub/Discord snapshot/clipboard/privacy/consent and F10 input; {len(MUTANTS)} broken controls rejected')
 
 
 if __name__ == '__main__':

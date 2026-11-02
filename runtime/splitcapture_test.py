@@ -40,6 +40,8 @@ PRE = r'''
 #include "funcs.h"
 #include <stdlib.h>
 #include <stdarg.h>
+int sign_diag_on;
+void sign_diag_world(Cpu *c) { (void)c; __builtin_trap(); }
 uint8_t *G;
 int diag_on;
 uint32_t galloc(uint32_t n){static uint32_t a=0x710000;uint32_t r=a;a=(a+n+15)&~15u;return r;}

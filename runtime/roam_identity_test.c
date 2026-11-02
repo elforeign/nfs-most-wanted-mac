@@ -34,7 +34,11 @@ int main(void) {
     for (int i=0;i<3;++i) {
         addr[i]=(struct sockaddr_in){.sin_family=AF_INET,.sin_port=htons((uint16_t)(10000+i)),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
         roam_client_init(&peers[i],i==2?2:1,i==0?"A\nB\033C":"Roadrunner");
-        now=1000; int n=roam_client_hello(&peers[i],b);roam_relay_input(relay,b,n,&addr[i],now);
+        now=1000; int n;
+        for (int retry=0;retry<2;++retry) {
+            n=roam_client_hello(&peers[i],b);roam_relay_input(relay,b,n,&addr[i],now);
+        }
+        CHECK(peers[i].welcomed);
         RoamState st={.t=1000,.pos={10+i,20,30},.q={0,0,0,32767},.flags=ROAM_FLAG_CAR};
         n=roam_client_state(&peers[i],&st,b);roam_relay_input(relay,b,n,&addr[i],now);
     }

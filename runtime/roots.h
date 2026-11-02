@@ -10,6 +10,8 @@
 // With no roots.txt ("legacy"; a development checkout) every lookup is today's: NFS_* switches, then the owner's X360 extract,
 // then the checkout's legacy asset folders. With a roots.txt nothing is searched beside the game or in the cwd: a key that is absent means
 // that root does not exist, and the feature using it falls back to PC. NFS_* switches (development, tests) still win.
+// All-in-one exports instead load Contents/Resources/AllInOne/roots.txt from the
+// running executable's bundle. Its relative asset roots take precedence.
 #pragma once
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +19,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include "bundle_roots.h"
 // The X360 shader constants (ZZDATA0.BIN) and engine constants (default.xex) the build generated, if any
 // (tools/gen_tables.py): X360_SHADER_LITS / X360_ENGINE_CONSTS are 1 when the player's files were found and identified.
 #if defined(__has_include)
@@ -41,6 +44,8 @@ extern const char *game_dir __attribute__((weak));   // boot.c; weak so offline 
 static inline const char *roots_file_(void) {
     static char path[1100];
     static int done;
+    const char *bundled = bundle_roots_file();
+    if (bundled) return bundled;
     if (done) return path[0] ? path : NULL;
     done = 1;
     const char *e = getenv("NFS_ROOTS");
@@ -64,7 +69,7 @@ static inline int roots_active(void) { return roots_file_() != NULL; }
 
 // The manifest value of a key, or NULL (also when there is no manifest).
 static inline const char *roots_get(const char *key) {
-    static char vals[8][1100];
+    static char vals[8][4096];
     static const char *keys[8];
     static int n, loaded;
     if (!loaded) {
@@ -82,7 +87,10 @@ static inline const char *roots_get(const char *key) {
             for (char *k = line + strlen(line); k > line && (k[-1] == ' ' || k[-1] == '\t'); ) *--k = 0;
             static char names[8][32];
             snprintf(names[n], sizeof names[n], "%s", line);
-            snprintf(vals[n], sizeof vals[n], "%s", v);
+            if (roots_exported()) {
+                if (strcmp(line, "pc_root") && strcmp(line, "x360_root") && strcmp(line, "assets_root") && strcmp(line, "movies")) continue;
+                if (!bundle_root_value(v, vals[n], sizeof vals[n])) continue;
+            } else snprintf(vals[n], sizeof vals[n], "%s", v);
             keys[n] = names[n];
             ++n;
         }
@@ -92,6 +100,12 @@ static inline const char *roots_get(const char *key) {
     return NULL;
 }
 
+// An export always uses its embedded PC data, including Option/argument launches.
+static inline const char *roots_pc_choice(const char *argument, const char *preference) {
+    if (roots_exported()) return roots_get("pc_root");
+    return argument ? argument : preference ? preference : roots_get("pc_root");
+}
+
 // The X360 extract's "files" folder: NFS_X360_FILES, else the manifest's x360_root (ROOTS_NONE when the manifest has
 // none), else the legacy sibling asset folder if it exists.
 static inline const char *roots_x360_files(void) {
@@ -99,7 +113,7 @@ static inline const char *roots_x360_files(void) {
     if (dir[0]) return dir;
     const char *env = getenv("NFS_X360_FILES");
     struct stat st;
-    if (env && *env) snprintf(dir, sizeof dir, "%s", env);
+    if (!roots_exported() && env && *env) snprintf(dir, sizeof dir, "%s", env);
     else if (roots_active()) snprintf(dir, sizeof dir, "%s", roots_get("x360_root") ? roots_get("x360_root") : ROOTS_NONE);
     else if (game_dir && (snprintf(dir, sizeof dir, "%s/../x360/files", game_dir), !stat(dir, &st))) {}
     else snprintf(dir, sizeof dir, "../x360/files");
@@ -147,6 +161,7 @@ static inline int roots_file_ok_(const char *root, const char *rel) {
 // (public build: it wins over the manifest too, as roots_x360_files() and tools/gen_tables.py have it), so the build and the runtime agree.
 static inline const char *roots_x360_root_(void) {
     const char *r = roots_get("x360_root"), *env = getenv("NFS_X360_FILES");
+    if (roots_exported()) return r;
 #ifdef NFS_PUBLIC
     if (env && *env) return env;     // public: an explicit override wins over the manifest, as in roots_x360_files()
     return r;

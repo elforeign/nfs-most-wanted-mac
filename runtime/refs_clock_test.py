@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture clock: compile the real timestep hook and script-clock expressions.
 
-Proof: good 9/9 checks; wall-timestep mutant 3 failures; wall-script and
+Proof: good 11/11 checks (including armed sign hold and disabled restoration); wall-timestep mutant 3 failures; wall-script and
 movie-bypass mutants 1 each; diag-guard mutant 2. No game, GPU, assets or emulation.
 Offline suite autodiscovers it.
 """
@@ -26,6 +26,8 @@ HARNESS = r'''
 typedef struct { uint32_t esp; } Cpu;
 static float mem[8], received;
 #define MF32(a) mem[(a)/4]
+static int sign_diag_on, sign_active;
+static int sign_diag_active(void) { return sign_active; }
 static int diag_fixed_step, sim_hz = 60;
 static uint32_t presents;
 static uint64_t now;
@@ -89,6 +91,10 @@ int main(void) {
     diag_fixed_step = 0;
     now += 1000000000ull;
     CHECK(script_clock(19) != 19);            // ordinary scripts retain wall time
+    sign_diag_on = sign_active = 1;
+    MF32(4) = .123f; f_00661280(&c); CHECK(received == 0);
+    sign_diag_on = 0;
+    MF32(4) = .123f; f_00661280(&c); CHECK(received == .123f);
     printf("%d/%d checks\n", checks - failures, checks);
     return failures ? 1 : 0;
 }
@@ -107,7 +113,8 @@ def check(h, c, i=init):
 good = check(hook, clock)
 print('good:', good.stdout.strip())
 ok = good.returncode == 0
-for name, h, c, i in [('wall-timestep', hook.replace('if (diag_fixed_step)', 'if (0)', 1), clock, init),
+for name, h, c, i in [('sign-hold', hook.replace('sign_diag_on && sign_diag_active()', '0'), clock, init),
+                      ('wall-timestep', hook.replace('if (diag_fixed_step)', 'if (0)', 1), clock, init),
                       ('wall-script', hook, clock.replace('if (diag_fixed_step) frame = real_frame;', ''), init),
                       ('movie-bypass', hook, clock, init.replace('if (diag_fixed_step) M32(0x00926144u) = 1;', '')),
                       ('diag-guard', hook, clock, init.replace('if (!diag_dir)', 'if (0)'))]:

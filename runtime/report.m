@@ -13,7 +13,7 @@
 //   screenshot.png the game frame when the menu opened (user reports; none for crash/hang reports)
 //   stats.txt      the per-second ring, oldest first, one line a second with a header
 //   events.txt     the notable-events ring, then the last 400 lines of the diagnostic event ring
-//   log.txt        the end (256 KB) of this run's log (stderr: NFSMW.log in the app, the run script's file)
+//   log.txt        the sanitized end (256 KB) of this run's stderr log; a notice if its privacy scan exceeds 1 MiB
 //   settings.txt   every setting: id, value, source (default / app.txt / env NFS_...)
 //   crash.txt      crash and hang reports only: the diagnostic report (backtraces, guest stacks, events)
 // Crash and hang reports are written by themselves (category Crash-freeze): diag.c diag_report calls report_auto for
@@ -29,6 +29,7 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreAudio/CoreAudio.h>
 #import <GameController/GameController.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
@@ -560,6 +561,24 @@ void report_live(float *fps, float *p99, float *gpu) {
 static volatile int shot_wanted;
 static char shot_file[1100];
 static double shot_at;
+static pthread_mutex_t shot_lock = PTHREAD_MUTEX_INITIALIZER;
+static CFDataRef shot_data;
+// The PNG queue calls this after encoding, so retaining the image never reads a file under the guest lock.
+void report_shot_ready(const char *path) {
+    pthread_mutex_lock(&shot_lock);
+    int ours = shot_file[0] && !strcmp(path, shot_file);
+    pthread_mutex_unlock(&shot_lock);
+    if (!ours) return;
+    @autoreleasepool {
+        NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+        CFDataRef image = data.length ? CFRetain((__bridge CFDataRef)data) : NULL;
+        pthread_mutex_lock(&shot_lock);
+        CFDataRef old = shot_data;
+        shot_data = image;
+        pthread_mutex_unlock(&shot_lock);
+        if (old) CFRelease(old);
+    }
+}
 static const char *reports_dir(void) {
     static char dir[1100];
     if (!dir[0]) { snprintf(dir, sizeof dir, "%s/reports", userdata_dir()); mkdir(dir, 0755); }
@@ -570,25 +589,22 @@ void report_request_shot(void) { shot_wanted = 1; }
 int report_shot(char *path, size_t n) {
     if (!shot_wanted || path[0]) return 0;
     shot_wanted = 0;
-    snprintf(shot_file, sizeof shot_file, "%s/.menu_frame.png", reports_dir());
+    const char *root = reports_dir();
+    pthread_mutex_lock(&shot_lock);
+    snprintf(shot_file, sizeof shot_file, "%s/.menu_frame.png", root);
     snprintf(path, n, "%s", shot_file);
     shot_at = host_ticks() / 1e9;
+    pthread_mutex_unlock(&shot_lock);
     return 1;
 }
 
 // ---------------- writing a report ----------------
 static void copy_tail(const char *from, const char *to, long max) {
+    if (max > 0) { ReportPrivacyCopyLog(from, to, max); return; }
     FILE *in = fopen(from, "rb");
     if (!in) return;
     FILE *out = fopen(to, "wb");
     if (!out) { fclose(in); return; }
-    fseek(in, 0, SEEK_END);
-    long size = ftell(in);
-    if (max > 0 && size > max) {
-        fseek(in, size - max, SEEK_SET);
-        int ch;
-        while ((ch = fgetc(in)) != EOF && ch != '\n') {}     // start at a line
-    } else fseek(in, 0, SEEK_SET);
     char buf[65536];
     size_t got;
     while ((got = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, got, out);
@@ -605,21 +621,48 @@ static const char *flow_name(uint32_t f) {
 }
 
 static char last_report[1200];
-const char *report_last_path(void) { return last_report; }
+static pthread_mutex_t report_path_lock = PTHREAD_MUTEX_INITIALIZER;
+const char *report_last_path(void) {
+    static _Thread_local char path[sizeof last_report];
+    pthread_mutex_lock(&report_path_lock);
+    snprintf(path, sizeof path, "%s", last_report);
+    pthread_mutex_unlock(&report_path_lock);
+    return path;
+}
 
-// Writes a report folder; returns its path ("" on failure). safe: called from a normal thread (not a signal handler).
-const char *report_write(const char *category, const char *note, const char *why, const char *attach) {
-    time_t now = time(NULL);
+// One owned, immutable snapshot. Only capture reads guest memory/settings/rings; the writer never does.
+typedef struct {
+    char *text[4];
+    size_t size[4];
+    char root[1100], log[1024];
+    CFDataRef shot;
+    char *category, *attach;
     struct tm tm;
-    localtime_r(&now, &tm);
-    char stamp[32], dir[1200];
-    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
-    snprintf(dir, sizeof dir, "%s/%s", reports_dir(), stamp);
-    for (int k = 2; mkdir(dir, 0755) != 0 && k < 10; ++k) snprintf(dir, sizeof dir, "%s/%s-%d", reports_dir(), stamp, k);
-    char path[1400];
+} ReportSnapshot;
+
+static void report_snapshot_free(ReportSnapshot *r) {
+    if (!r) return;
+    for (int i = 0; i < 4; ++i) free(r->text[i]);
+    free(r->category);
+    free(r->attach);
+    if (r->shot) CFRelease(r->shot);
+    free(r);
+}
+
+// Called with the guest lock by F10. Formatting uses memory streams, with no bundle I/O or Cocoa calls.
+static ReportSnapshot *report_capture(const char *category, const char *note, const char *why, const char *attach) {
+    ReportSnapshot *r = calloc(1, sizeof *r);
+    if (!r) return NULL;
+    r->category = strdup(category ? category : "?");
+    r->attach = attach ? strdup(attach) : NULL;
+    if (!r->category || (attach && !r->attach)) goto fail;
+    snprintf(r->root, sizeof r->root, "%s/reports", userdata_dir());
+    time_t now = time(NULL);
+    localtime_r(&now, &r->tm);
+    struct tm tm = r->tm;
     // settings.txt
-    snprintf(path, sizeof path, "%s/settings.txt", dir);
-    FILE *f = fopen(path, "w");
+    FILE *f = open_memstream(&r->text[0], &r->size[0]);
+    if (!f) goto fail;
     char vbuf[96];
     if (f) {
         fprintf(f, "# id = value (source)\n");
@@ -630,11 +673,12 @@ const char *report_write(const char *category, const char *note, const char *why
             fprintf(f, "%s = %s (%s%s%s)%s\n", s->id, settings_value_name(s, v, vbuf, sizeof vbuf), settings_source(s),
                     s->locked ? "=" : "", s->locked ? s->env_text : "", s->restart && v != s->boot_value ? " [after restart]" : "");
         }
-        fclose(f);
+        if (fclose(f)) goto fail;
     }
     // stats.txt
-    snprintf(path, sizeof path, "%s/stats.txt", dir);
-    if ((f = fopen(path, "w"))) {
+    f = open_memstream(&r->text[1], &r->size[1]);
+    if (!f) goto fail;
+    {
         fprintf(f, "# t(s)     frame     fps   p50ms  p99ms  maxms  busyms  gpums  flow  mixrms FL FR C LFE BL BR\n");
         uint64_t first = nsecs > SECS ? nsecs - SECS : 0;
         for (uint64_t i = first; i < nsecs; ++i) {
@@ -644,37 +688,27 @@ const char *report_write(const char *category, const char *note, const char *why
             if (s->have_rms) fprintf(f, "%.3f %.3f %.3f %.3f %.3f %.3f\n", s->rms[0], s->rms[1], s->rms[2], s->rms[3], s->rms[4], s->rms[5]);
             else fprintf(f, "n/a\n");
         }
-        fclose(f);
+        if (fclose(f)) goto fail;
     }
     // events.txt
-    snprintf(path, sizeof path, "%s/events.txt", dir);
-    if ((f = fopen(path, "w"))) {
+    f = open_memstream(&r->text[2], &r->size[2]);
+    if (!f) goto fail;
+    {
         fprintf(f, "# notable events (time since start, frame), oldest first\n");
         uint32_t head = notes_head, start = head > NOTES ? head - NOTES : 0;
         for (uint32_t i = start; i < head; ++i) fprintf(f, "%s\n", notes[i % NOTES]);
         diag_ring_dump(f, 400);
-        fclose(f);
+        if (fclose(f)) goto fail;
     }
-    // log.txt: this run's stderr when it goes to a file
-    char logp[1024] = "";
-    if (fcntl(2, F_GETPATH, logp) == 0 && logp[0]) {
-        snprintf(path, sizeof path, "%s/log.txt", dir);
-        copy_tail(logp, path, 256 * 1024);
-    }
-    // screenshot.png: the frame when the menu opened (a user report while the menu is open)
-    int have_shot = 0;
-    if (!attach && shot_file[0] && host_ticks() / 1e9 - shot_at < 600 && access(shot_file, R_OK) == 0) {
-        snprintf(path, sizeof path, "%s/screenshot.png", dir);
-        copy_tail(shot_file, path, 0);
-        have_shot = 1;
-    }
-    if (attach) {
-        snprintf(path, sizeof path, "%s/crash.txt", dir);
-        copy_tail(attach, path, 0);
-    }
+    // Only copy paths here. File reads, image copying and redaction belong to the writer.
+    fcntl(2, F_GETPATH, r->log);
+    pthread_mutex_lock(&shot_lock);
+    if (!attach && shot_data && host_ticks() / 1e9 - shot_at < 600) r->shot = CFRetain(shot_data);
+    pthread_mutex_unlock(&shot_lock);
     // report.txt, the summary on top
-    snprintf(path, sizeof path, "%s/report.txt", dir);
-    if ((f = fopen(path, "w"))) {
+    f = open_memstream(&r->text[3], &r->size[3]);
+    if (!f) goto fail;
+    {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
         uint32_t flow = M32(GAMEFLOW_STATE);
@@ -718,16 +752,114 @@ const char *report_write(const char *category, const char *note, const char *why
         fprintf(f, "\nsettings that differ from their defaults or are set by a switch:\n");
         int any = print_nondefault(f);
         if (!any) fprintf(f, "  (none)\n");
-        fprintf(f, "\nfiles: report.txt%s, stats.txt, events.txt%s, settings.txt%s\n", have_shot ? ", screenshot.png" : "",
-                logp[0] ? ", log.txt" : "", attach ? ", crash.txt" : "");
-        fclose(f);
+        if (fclose(f)) goto fail;
+    }
+    return r;
+fail:
+    report_snapshot_free(r);
+    return NULL;
+}
+
+// No guest lock needed. The potentially slow file, image and privacy work runs on the report queue for F10.
+static int report_store(ReportSnapshot *r, char *dir, size_t n) {
+    char stamp[32], path[1500];
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &r->tm);
+    mkdir(r->root, 0755);
+    for (unsigned k = 1;; ++k) {
+        if (k == 1) snprintf(dir, n, "%s/%s", r->root, stamp);
+        else snprintf(dir, n, "%s/%s-%u", r->root, stamp, k);
+        if (mkdir(dir, 0755) == 0) break;
+        if (errno != EEXIST || k >= 1000) { dir[0] = 0; return 0; }
+    }
+    int have_shot = 0;
+    if (r->shot) {
+        snprintf(path, sizeof path, "%s/screenshot.png", dir);
+        FILE *image = fopen(path, "wb");
+        if (image) {
+            size_t bytes = (size_t)CFDataGetLength(r->shot);
+            have_shot = fwrite(CFDataGetBytePtr(r->shot), 1, bytes, image) == bytes;
+            if (fclose(image)) have_shot = 0;
+        }
+    }
+    if (r->log[0]) {
+        snprintf(path, sizeof path, "%s/log.txt", dir);
+        copy_tail(r->log, path, 256 * 1024);
+    }
+    if (r->attach) {
+        snprintf(path, sizeof path, "%s/crash.txt", dir);
+        copy_tail(r->attach, path, 0);
+    }
+    const char *names[] = {"settings", "stats", "events", "report"};
+    int ok = 1;
+    for (int i = 0; i < 4; ++i) {
+        snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
+        FILE *f = fopen(path, "w");
+        if (!f) { ok = 0; continue; }
+        if (fwrite(r->text[i], 1, r->size[i], f) != r->size[i]) ok = 0;
+        if (i == 3)
+            fprintf(f, "\nfiles: report.txt%s, stats.txt, events.txt%s, settings.txt%s\n", have_shot ? ", screenshot.png" : "",
+                    r->log[0] ? ", log.txt" : "", r->attach ? ", crash.txt" : "");
+        if (fclose(f)) ok = 0;
     }
     ReportRedactBundle([NSString stringWithUTF8String:dir]);
+    for (int i = 0; i < 4; ++i) {
+        snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
+        if (access(path, R_OK)) ok = 0;
+    }
+    return ok;
+}
+
+static void report_complete(const char *dir, const char *category) {
+    pthread_mutex_lock(&report_path_lock);
     snprintf(last_report, sizeof last_report, "%s", dir);
-    report_note("report written: %s (%s)", dir, category ? category : "?");
+    pthread_mutex_unlock(&report_path_lock);
+    report_note("report written: %s (%s)", dir, category);
     fprintf(stderr, "boot: problem report written: %s\n", dir);
-    if (diag_on) diag_event("report: %s (%s)", dir, category ? category : "?");
-    return last_report;
+    if (diag_on) diag_event("report: %s (%s)", dir, category);
+}
+
+// Automatic crash/hang callers already run outside the menu and retain the synchronous API.
+const char *report_write(const char *category, const char *note, const char *why, const char *attach) {
+    ReportSnapshot *r = report_capture(category, note, why, attach);
+    if (!r) return "";
+    char dir[1400];
+    int ok;
+    @autoreleasepool { ok = report_store(r, dir, sizeof dir); }
+    if (ok) report_complete(dir, r->category);
+    report_snapshot_free(r);
+    return ok ? report_last_path() : "";
+}
+
+static dispatch_queue_t report_queue;
+static int report_pending;
+static void report_drain(void) { if (report_queue) dispatch_sync(report_queue, ^{}); }
+void portmenu_status(const char *fmt, ...);
+// The main thread owns pending/UI state. Repeated presses keep one pending save, with no unbounded queue.
+void report_save_async(const char *category, const char *note) {
+    if (report_pending) { portmenu_status("Saving report..."); return; }
+    ReportSnapshot *r = report_capture(category, note, NULL, NULL);
+    if (!r) { portmenu_status("Couldn't write the report"); return; }
+    if (!report_queue) {
+        report_queue = dispatch_queue_create("nfsmw.reports", DISPATCH_QUEUE_SERIAL);
+        atexit(report_drain);
+    }
+    report_pending = 1;
+    portmenu_status("Saving report...");
+    dispatch_async(report_queue, ^{
+        @autoreleasepool {
+            char dir[1400];
+            int ok = report_store(r, dir, sizeof dir);
+            if (ok) report_complete(dir, r->category); // session/stderr/diagnostic logging is host I/O too
+            NSString *path = ok ? [NSString stringWithUTF8String:dir] : nil;
+            report_snapshot_free(r);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                report_pending = 0;
+                if (path) {
+                    portmenu_status("Report saved: %s", path.fileSystemRepresentation);
+                } else portmenu_status("Couldn't write the report");
+            });
+        }
+    });
 }
 
 // diag.c diag_report: a crash or a hang writes a report folder by itself (at most 3 a run, 30 s apart).

@@ -26,11 +26,25 @@ def digest(path):
 def production(name):
     p = Path(name)
     return (p.parts[0] == 'recomp' and len(p.parts) == 2
+            and not p.name.startswith('.')
             and p.suffix in ('.py', '.h', '.c', '.tsv', '.txt')
             and not p.stem.endswith('_test') and not p.stem.startswith('test_'))
 
 
-def toolchain():
+def source_glob(folder, pattern, recursive=False):
+    folder = Path(folder)
+    paths = folder.rglob(pattern) if recursive else folder.glob(pattern)
+    return [p for p in paths if not any(part.startswith('.') for part in p.relative_to(folder).parts)]
+
+
+def toolchain(target=None, compiler='clang'):
+    if target and 'windows' in target:
+        # Cross builds have no Apple SDK. In particular, do not run the xcrun
+        # launcher or include its timestamped failures in a Windows fingerprint.
+        p = subprocess.run([compiler, '--version'], capture_output=True, text=True)
+        return {'target': target, 'compiler': compiler,
+                'version': [p.returncode, p.stdout],
+                'RECOMP_CFLAGS': os.environ.get('RECOMP_CFLAGS', '')}
     result = {}
     for command in (['clang', '--version'], ['ar', '-V'], ['xcrun', '--show-sdk-path'], ['xcrun', '--show-sdk-version']):
         p = subprocess.run(command, capture_output=True, text=True)
@@ -85,6 +99,7 @@ def recomp_key(root=ROOT, exe=None, server=None, skip_server=False, compiler=Non
     server = Path(server or os.environ.get('NFS_SERVER_DLL') or exe.parent / 'server.dll')
     files = [(str(p.relative_to(root)), p) for p in (root / 'recomp').iterdir()
              if p.is_file() and production(str(p.relative_to(root)))]
+    files += [('runtime/breaker_diag.c', root / 'runtime/breaker_diag.c')]
     files += [('speed.exe', exe)]
     if not skip_server:
         files += [('server.dll', server)]
@@ -95,8 +110,8 @@ def recomp_key(root=ROOT, exe=None, server=None, skip_server=False, compiler=Non
 
 def outputs(root=ROOT):
     out = Path(root) / 'recomp/out'
-    paths = [out / n for n in ('speed.a', 'funcs.h')]
-    paths += list((out / 'server').glob('*.h')) + list((out / 'server').glob('*.a'))
+    paths = [out / n for n in ('speed.a', 'funcs.h', 'breaker_diag.inc')]
+    paths += source_glob(out / 'server', '*.h') + source_glob(out / 'server', '*.a')
     return {str(p.relative_to(out)): digest(p) for p in paths}
 
 
@@ -120,16 +135,18 @@ def record(stamp, fingerprint, artifacts):
 def runtime_key(root=ROOT, compiler=None):
     root = Path(root)
     paths = [p for p in (root / 'runtime').iterdir() if p.suffix in ('.c', '.m', '.mm', '.cpp', '.h')
+             and not p.name.startswith('.')
              and '_test' not in p.stem and not p.stem.startswith('test_')]
     paths += [root / 'runtime/build.sh', root / 'runtime/env.sh']
-    paths += list((root / 'runtime/gen').glob('*.inc'))
-    paths += list((root / 'recomp').glob('*.h')) + list((root / 'recomp/out').glob('*.h'))
-    paths += list((root / 'recomp/out/server').glob('*.h')) + list((root / 'recomp/out/server').glob('*.a'))
-    paths += [root / 'recomp/out/speed.a', root / 'recomp/build_inputs.py']
+    paths += source_glob(root / 'runtime/gen', '*.inc')
+    paths += source_glob(root / 'recomp', '*.h') + source_glob(root / 'recomp/out', '*.h')
+    paths += source_glob(root / 'recomp/out/server', '*.h') + source_glob(root / 'recomp/out/server', '*.a')
+    paths += [root / 'recomp/out/speed.a', root / 'recomp/build_inputs.py',
+              root / 'recomp/hook_coverage.py', root / 'recomp/hooks.txt']
     for folder in ('host/audio/build', 'host/shaders/build', 'third_party/ffmpeg/lib'):
-        paths += list((root / folder).glob('*.a'))
+        paths += source_glob(root / folder, '*.a')
     for folder in ('host/audio', 'host/shaders', 'media', 'third_party/ffmpeg/include'):
-        paths += list((root / folder).rglob('*.h'))
+        paths += source_glob(root / folder, '*.h', recursive=True)
     # Production can include files named *_test or *.inc (the live carpaint
     # diagnostic and the generated music manifest). Follow quoted includes
     # instead of assuming their suffix/name makes them test-only.

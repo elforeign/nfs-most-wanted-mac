@@ -5,6 +5,7 @@
 // blocking calls (waits, Sleep, contended critical sections) and, time-sliced, at import calls. Translated code
 // has no atomics (speed.exe has no lock-prefixed instructions), so this also sidesteps x86 vs. ARM memory
 // ordering. All host-side state (heap, handles, message queue) is touched only with the GIL held.
+// Windows uses its separate runtime/win/threads.c implementation; these Mac synchronization changes leave it unchanged.
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -109,10 +110,16 @@ void threads_set_event_async(uint32_t h) { threads_set_event_generation_async(h,
 static void apply_pending_events(void);
 // Called at every import: after 2 ms of holding the GIL with others waiting, hand it over.
 void gil_maybe_yield(Cpu *c) {
-    if (npending) apply_pending_events();
     static int every = -1;      // TEST (local): BOOT_TEST_GILYIELD=1 hands over at every import, as heavy load does
     if (every < 0) every = getenv("BOOT_TEST_GILYIELD") != NULL;
-    if (next_ticket - serving > 1 && (every || host_ticks() - held_since > 2000000)) gil_yield(c);
+    // The GIL protects held_since, but host event producers and threads joining
+    // the ticket queue do not hold it. Snapshot their state under gm as well.
+    pthread_mutex_lock(&gm);
+    int pending = npending;
+    int yield = next_ticket - serving > 1 && (every || host_ticks() - held_since > 2000000);
+    pthread_mutex_unlock(&gm);
+    if (pending) apply_pending_events();
+    if (yield) gil_yield(c);
 }
 // Releases the GIL until another object changes state or `deadline` (host_ticks ns, 0 = none) passes.
 static void wait_change(uint64_t deadline) {
@@ -144,6 +151,7 @@ static void wait_change(uint64_t deadline) {
 enum { K_FREE, K_EVENT, K_MUTEX, K_SEM, K_THREAD, K_TIMER };
 typedef struct {
     int type;
+    uint32_t handle_refs;        // slot lifetime and guest-handle lifetime are separate
     uint64_t generation;
     int manual, signaled;         // event, timer
     uint32_t count, max;          // semaphore
@@ -159,6 +167,9 @@ typedef struct {
 #define KOBJ_BASE 0x2000u         // to 0x2800: find handles start there (boot.c lists all the handle ranges)
 #define MAX_KOBJ 512
 static KObj kobj[MAX_KOBJ];
+// Guest handle slot -> object (NULL once closed). Each handle, duplicates included,
+// owns one handle_refs reference and closes independently, as on Windows.
+static KObj *handle_obj[MAX_KOBJ];
                                                                     
 static pthread_mutex_t cpu_snapshot_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t next_generation;
@@ -168,15 +179,27 @@ static __thread KObj *self;       // NULL on the main thread
 
 static KObj *kget(uint32_t h) {
     uint32_t i = (h - KOBJ_BASE) / 4;
-    return (h >= KOBJ_BASE && i < MAX_KOBJ && kobj[i].type) ? &kobj[i] : NULL;
+    return (h >= KOBJ_BASE && i < MAX_KOBJ) ? handle_obj[i] : NULL;
+}
+// A slot is free for a new handle only when neither a handle nor an object uses it.
+static uint32_t khandle(KObj *o) {
+    for (int i = 1; i < MAX_KOBJ; ++i)
+        if (!kobj[i].type && !handle_obj[i]) {
+            handle_obj[i] = o;
+            ++o->handle_refs;
+            return KOBJ_BASE + 4 * (uint32_t)i;
+        }
+    fprintf(stderr, "boot: out of kernel objects\n");
+    exit(1);
 }
 static uint32_t knew(int type, KObj **out) {
     for (int i = 1; i < MAX_KOBJ; ++i)
-        if (!kobj[i].type) {
+        if (!kobj[i].type && !handle_obj[i]) {
             memset(&kobj[i], 0, sizeof kobj[i]);
             kobj[i].type = type;
+            kobj[i].handle_refs = 1;
             kobj[i].generation = ++next_generation;
-            *out = &kobj[i];
+            handle_obj[i] = *out = &kobj[i];                // the creation handle uses the object's own slot
             return KOBJ_BASE + 4 * (uint32_t)i;
         }
     fprintf(stderr, "boot: out of kernel objects\n");
@@ -214,11 +237,12 @@ static int ready(KObj *o) {       // would try_take succeed (without consuming)?
 }
 
 // Releases the GIL until `pred` says the wait may be satisfied, `deadline` (host_ticks ns, 0 = none) passes, a
-// host-set event is queued, or this thread is asked to suspend or terminate. pred runs under gm without the GIL:
-// kernel objects (and critical sections in guest memory) only change with the GIL held, and every change is
-// followed by changed(), which takes gm, so a waiter never misses one. Unlike wait_change, a waiter whose objects
-// are still not ready keeps waiting without taking the GIL back: every GIL hand-over costs the game thread a
-// thread wake-up. pred may lower *wake to the time a waitable timer becomes due.
+// host-set event is queued, or this thread is asked to suspend or terminate. Check
+// pred and thread flags with the GIL held: taking gm after a write in changed()
+// does not protect a concurrent reader holding only gm. After each notification
+// reacquire the GIL before checking again. gm and change_seq bridge the predicate
+// check and condition wait so that no notification is lost. pred may lower *wake
+// to the time a waitable timer becomes due.
 // What each guest thread is blocked on, for hang reports (diag.c guest_state): written by the thread itself around
 // its wait, read racily by the hang monitor (diagnostic only). Slot 0 is the main thread, slot i kobj[i].
 typedef struct { const char *kind; uint32_t obj, owner, n; uint32_t h[4]; uint64_t since; } WaitRec;
@@ -231,25 +255,30 @@ static void wait_mark(const char *kind, uint32_t obj, uint32_t owner) {
 static void wait_clear(void) { my_wait()->kind = NULL; }
 static void wait_until(int (*pred)(void *arg, uint64_t *wake), void *arg, uint64_t deadline) {
     pthread_mutex_lock(&gm);
-    gil_release_locked();
     for (;;) {
         if (npending || (self && (self->terminate || self->suspend > 0))) break;
         uint64_t wake = deadline;
         if (pred(arg, &wake)) break;
         uint64_t now = host_ticks();
         if (wake && now >= wake) break;
-        if (wake) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            uint64_t ns = (uint64_t)ts.tv_nsec + (wake - now);
-            ts.tv_sec += (time_t)(ns / 1000000000ull);
-            ts.tv_nsec = (long)(ns % 1000000000ull);
-            pthread_cond_timedwait(&obj_cv, &gm, &ts);
-        } else {
-            pthread_cond_wait(&obj_cv, &gm);
+        uint64_t seq = change_seq;
+        gil_release_locked();
+        while (seq == change_seq) {
+            if (wake) {
+                now = host_ticks();
+                if (now >= wake) break;
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                uint64_t ns = (uint64_t)ts.tv_nsec + (wake - now);
+                ts.tv_sec += (time_t)(ns / 1000000000ull);
+                ts.tv_nsec = (long)(ns % 1000000000ull);
+                pthread_cond_timedwait(&obj_cv, &gm, &ts);
+            } else {
+                pthread_cond_wait(&obj_cv, &gm);
+            }
         }
+        gil_acquire_locked();
     }
-    gil_acquire_locked();
     pthread_mutex_unlock(&gm);
 }
 typedef struct { KObj **o; uint32_t n; int all; } WaitSet;
@@ -281,7 +310,7 @@ static uint32_t wait_handles(Cpu *c, uint32_t n, const uint32_t *h, int all, uin
         // Events set by host threads (DirectSound notifications) are queued until a guest thread applies them. A waiter
         // must do it too: otherwise, with every guest thread waiting, the event stays unseen until the wait times out
         // (the 1.0 s stalls in soak races).
-        if (npending) apply_pending_events();
+        apply_pending_events();
         if (all) {
             uint32_t k = 0;
             while (k < n && ready(o[k])) ++k;
@@ -318,6 +347,15 @@ static void thread_checkpoint(Cpu *c) {
 static struct { uint32_t lo, size; } free_stacks[32];
 static int nfree_stacks;
 
+                                                                                 
+                                                                                 
+static void thread_reclaim(KObj *t) {
+    pthread_mutex_lock(&cpu_snapshot_mu);
+    free(t->cpu);
+    memset(t, 0, sizeof *t);
+    pthread_mutex_unlock(&cpu_snapshot_mu);
+}
+
 static void *thread_main(void *p) {
     KObj *t = p;
     self = t;
@@ -350,6 +388,7 @@ static void *thread_main(void *p) {
     t->signaled = 1;
     if (nfree_stacks < 32) { free_stacks[nfree_stacks].lo = t->stack_lo; free_stacks[nfree_stacks++].size = t->stack_size; }
     if (boot_trace) fprintf(stderr, "  [thread %u] exit %u\n", t->tid, t->exit_code);
+    if (!t->handle_refs) thread_reclaim(t);
     changed();
     gil_release();
     return NULL;
@@ -357,19 +396,14 @@ static void *thread_main(void *p) {
 
 static void split_sound_worker_reap(uint32_t start) {
     // Both modes leak this exact saved handle: shutdown joins but never closes
-                                                                                
+    // it, and init overwrites it. Close only that handle, and only for a finished
+                                                                  
     if (start != 0x00820BD7u) return;
-    pthread_mutex_lock(&cpu_snapshot_mu);
     uint32_t handle = M32(0x009C22E8u);
     KObj *old = kget(handle);
-    if (!old || old->type != K_THREAD || old->start != start || old->running || !old->signaled) {
-        pthread_mutex_unlock(&cpu_snapshot_mu);
-        return;
-    }
-    free(old->cpu);
-    memset(old, 0, sizeof *old);
-    pthread_mutex_unlock(&cpu_snapshot_mu);
-    if (diag_on) diag_event("split lifecycle: reclaimed completed SNDREAL thread handle %04X (00820063/00820C64)", handle);
+    if (!old || old->type != K_THREAD || old->start != start || old->running || !old->signaled) return;
+    threads_close(handle);
+    if (diag_on) diag_event("split lifecycle: closed completed SNDREAL thread handle %04X (00820063/00820C64)", handle);
 }
 
 static uint32_t thread_create(uint32_t stack, uint32_t start, uint32_t param, uint32_t flags, uint32_t *tid_out) {
@@ -498,6 +532,9 @@ static int cs_free(void *arg, uint64_t *wake) {
 static void cs_enter(Cpu *c, uint32_t cs) {
     uint32_t me = cur_tid();
     while (M32(cs + 12) && M32(cs + 12) != me) {
+        // A host post can arrive after the import's drain. Consume it before
+        // retrying so wait_until can release the GIL for the section's owner.
+        apply_pending_events();
         wait_mark("EnterCriticalSection", cs, M32(cs + 12));
         wait_until(cs_free, (void *)(uintptr_t)cs, 0);
         wait_clear();
@@ -701,16 +738,20 @@ int win32_threads(Cpu *c, const char *fn) {
         uint32_t src = arg(c, 1);
         if (src == 0xFFFFFFFE) {                                // GetCurrentThread() -> a real handle to this thread
             KObj *t = self;
-            if (!t) {                                           // main thread: give it a thread object too
-                static uint32_t main_h;
-                if (!main_h) { KObj *m; main_h = knew(K_THREAD, &m); m->tid = 1; m->running = 1; }
-                M32(arg(c, 3)) = main_h;
+            static KObj *main_obj;                              // main thread: give it a thread object too
+            if (!t && !main_obj) {
+                M32(arg(c, 3)) = knew(K_THREAD, &main_obj);
+                main_obj->tid = 1; main_obj->running = 1;
                 RET(1, 7);
             }
-            M32(arg(c, 3)) = KOBJ_BASE + 4 * (uint32_t)(t - kobj);
+            M32(arg(c, 3)) = khandle(t ? t : main_obj);
             RET(1, 7);
         }
-        M32(arg(c, 3)) = src;
+        // A kernel duplicate is a new handle with its own reference.
+        KObj *o = kget(src);
+        uint32_t dst = o ? khandle(o) : src;
+        if (o && (arg(c, 6) & 1)) threads_close(src);           // DUPLICATE_CLOSE_SOURCE
+        M32(arg(c, 3)) = dst;
         RET(1, 7);
     }
     if (!strcmp(fn, "InterlockedIncrement")) { M32(arg(c, 0)) += 1; RET(M32(arg(c, 0)), 1); }
@@ -725,11 +766,15 @@ int win32_threads(Cpu *c, const char *fn) {
     return 0;
 }
 
-// CloseHandle on a kernel object (threads keep running; their record stays until they exit).
+                                                                               
+// including when it is suspended and has not entered guest code.
 int threads_close(uint32_t h) {
     KObj *o = kget(h);
     if (!o) return 0;
-    if (o->type != K_THREAD || o->signaled) o->type = K_FREE;
+    handle_obj[(h - KOBJ_BASE) / 4] = NULL;
+    if (--o->handle_refs) return 1;
+    if (o->type != K_THREAD) o->type = K_FREE;
+    else if (o->signaled) thread_reclaim(o);
     return 1;
 }
 
@@ -755,14 +800,17 @@ int threads_drain_module(uint32_t lo, uint32_t hi) {
     for (unsigned i = 0; i < MAX_KOBJ; ++i) {
         KObj *t = &kobj[i];
         if (t->type != K_THREAD || t->start < lo || t->start >= hi) continue;
+        uint64_t generation = t->generation;
         if (!t->signaled) {
             t->terminate = 1;
             changed();
-            while (!t->signaled) wait_change(0);
+            while (t->type == K_THREAD && t->generation == generation && !t->signaled) wait_change(0);
+                                                                               
+            if (t->type != K_THREAD || t->generation != generation) continue;
         }
-        // StopServer discards its handle without CloseHandle. On unload every
+        // StopServer discards its creation handle without CloseHandle. On unload
                                                                               
-        t->type = K_FREE; // module unload releases the abandoned thread handle
+        if (handle_obj[i] == t) threads_close(KOBJ_BASE + 4 * i); // module unload releases the abandoned thread handle
     }
     return 1;
 }

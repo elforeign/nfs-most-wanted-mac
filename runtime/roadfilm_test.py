@@ -317,7 +317,7 @@ int main(void){double angles[]={0,60,80},want[]={.020059,.059126,.346916};int fa
         run(['clang', '-Wno-unused-parameter', '-I', RUNTIME, tmp / 'selector-broken.c', '-o', tmp / 'selector-broken'])
         assert subprocess.run([tmp / 'selector-broken']).returncode == 8, 'dry native-selection control escaped'
         # Execute the actual draw selector, including asynchronous publication.
-        draw = renderer.split('    ShaderEntry *pse = get_shader(ps, &po);', 1)[1].split('    if (mat_carbon_lamp_draw())', 1)[0]
+        draw = renderer.split('    ShaderEntry *pse = get_shader(ps, &po);', 1)[1].split('    int real_material =', 1)[0]
         draw = '    ShaderEntry *pse = get_shader(ps, &po);' + draw + '    return pse;\n'
         draw_fixture = r'''
 #include "roadfilm.m"

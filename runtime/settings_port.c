@@ -10,7 +10,11 @@
 
 #include "host.h"
 #include "settings.h"
+#include "cliprec.h"
 #include "roadfilm.h"
+#include "realworld_materials.h"
+#include "particles_physical.h"
+#include "traffic_detail.h"
 #include "roots.h"            // X360_ENGINE_CONSTS / X360E_MIRROR_WORLD (gen/x360_engine.inc)
 #include "posaudio.h"
 #include "../host/audio/dsound_host.h"
@@ -20,6 +24,8 @@ void app_quit_game(int unused);            // app.m: confirmation, then the norm
 void x360_set_tone_curve(int x360);
 void x360_set_reflection(int x360);
 void x360_set_shadow_fit(int preset);
+void x360_set_shadow_stable(int on);
+void shadow_near_set_enabled(int on);
 void mirror_set_size(int pct);
 void mirror_set_detail(int full);
 void mirror_set_msaa(int on);
@@ -48,7 +54,7 @@ void x360_post_set_deband(int mode);
 void rumble_set_enabled(int on);              // rumble.m
 void feedback_set_surfaces(int on);           // feedback.c
 void feedback_set_props(int on);
-const char *report_write(const char *category, const char *note, const char *why, const char *attach);   // report.m
+void report_save_async(const char *category, const char *note);   // report.m
 const char *report_last_path(void);
 const char *report_audio_device(void);
 void report_live(float *fps, float *p99, float *gpu);
@@ -93,6 +99,11 @@ static Setting s_look_mirror_art = {.id = "graphics.look_mirror_art", .type = SE
 static Setting s_look_reflections = {.id = "graphics.look_reflections", .type = SET_CHOICE, .hidden = 1,
     .choices = (const char *const[]){"Standard", "Sharp"}, .values = (const char *const[]){"pc", "sharp"},
     .nchoices = 2, .def = 1, .env = "NFS_CAR_REFLECTION", .restart = 1};
+static Setting s_addcar_weight = {.id = "cars.added_weight", .category = SET_CARS, .order = 55,
+    .label = "Added cars' weight", .help = "Real weight in collisions; driving uses the retail donor. CCX uses dry weight. Restart game to apply.",
+    .type = SET_CHOICE, .choices = (const char *const[]){"Real in contact (default)", "Retail"},
+    .values = (const char *const[]){"contact", "retail"}, .nchoices = 2,
+    .def = 0, .env = "NFS_ADDCAR_PHYSICS", .restart = 1};
 static Setting s_look_later_textures = {.id = "graphics.look_later_textures", .type = SET_TOGGLE, .hidden = 1,
     .def = 1, .env = "NFS_LATER_TEXTURES", .restart = 1};
 #endif
@@ -116,6 +127,17 @@ HEAD(h_wdet, "world.h_detail", SET_WORLD, 108, "Detail and textures", "How far d
 HEAD(h_career, "gameplay.h_career", SET_GAMEPLAY, 5, "Career", "Rules of your career and the game's start-up.");
 HEAD(h_cheats, "gameplay.h_cheats", SET_GAMEPLAY, 100, "Changes your save", "These change what your save contains.");
 
+#include "cash_cheat.h"
+HEAD(h_cash, "gameplay.h_cash", SET_GAMEPLAY, 130, "Add cash", "One-shot career cash awards, saved with your profile as usual.");
+static Setting s_cash20 = {.id = "gameplay.cash_20000", .category = SET_GAMEPLAY, .order = 140, .label = "+20,000",
+    .type = SET_INFO, .pref = "", .apply = cash_cheat_20000, .value_text = cash_cheat_status};
+static Setting s_cash50 = {.id = "gameplay.cash_50000", .category = SET_GAMEPLAY, .order = 150, .label = "+50,000",
+    .type = SET_INFO, .pref = "", .apply = cash_cheat_50000, .value_text = cash_cheat_status};
+static Setting s_cash100 = {.id = "gameplay.cash_100000", .category = SET_GAMEPLAY, .order = 160, .label = "+100,000",
+    .type = SET_INFO, .pref = "", .apply = cash_cheat_100000, .value_text = cash_cheat_status};
+static Setting s_cash_amount = {.id = "gameplay.cash_amount", .category = SET_GAMEPLAY, .order = 170, .label = "Add amount",
+    .type = SET_INFO, .pref = "", .apply = cash_cheat_typed, .value_text = cash_cheat_status};
+
 // ---------------- Display ----------------
 static const char *const kWindow[] = {"Full screen", "Window"}, *const kWindowV[] = {"1", "0"};
 static int window_get(void) { return !user32_fullscreen(); }
@@ -125,10 +147,10 @@ static Setting s_window = {.id = "display.window", .category = SET_DISPLAY, .ord
     .type = SET_CHOICE, .choices = kWindow, .values = kWindowV, .nchoices = 2, .env = "NFS_FULLSCREEN", .pref = "",
     .own_pref = 1, .apply = window_apply, .get = window_get};
 
-static const char *const kFullScreen[] = {"Borderless", "Native"}, *const kFullScreenV[] = {"borderless", "native"};
+static const char *const kFullScreen[] = {"Borderless", "Native", "Auto"}, *const kFullScreenV[] = {"borderless", "native", "auto"};
 static Setting s_fullscreen = {.id = "display.fullscreen", .category = SET_DISPLAY, .order = 11, .label = "Full screen",
-    .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Restart game to apply.",
-    .type = SET_CHOICE, .choices = kFullScreen, .values = kFullScreenV, .nchoices = 2, .def = 0,
+    .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Auto picks Native on the Mac screen and Borderless on any other display. Restart game to apply.",
+    .type = SET_CHOICE, .choices = kFullScreen, .values = kFullScreenV, .nchoices = 3, .def = 0,
     .env = "NFS_FULLSCREEN_MODE", .restart = 1};
 
 static const char *const kOverlay[] = {"Off", "Compact", "Full"};
@@ -137,6 +159,19 @@ static Setting s_overlay = {.id = "display.overlay", .category = SET_DISPLAY, .o
     .help = "Frame rate and timing in the corner, and Full adds a frame-time graph, memory, render, audio and controller details (View menu, Cmd-Option-P).",
     .type = SET_CHOICE, .choices = kOverlay, .nchoices = 3, .env = "NFS_OVERLAY", .pref = "overlay", .own_pref = 1,
     .apply = overlay_apply, .get = overlay_level};
+
+static const char *const kClipResolution[] = {"1080p", "1440p", "4K"};
+static Setting s_clip_resolution = {.id = "display.clip_resolution", .category = SET_DISPLAY, .order = 44,
+    .label = "Clip resolution",
+    .help = "Next clip; keeps aspect, never upscales smaller pictures. Approx MB/min (HEVC / H.264): 1080p 75 / 113, 1440p 133 / 200, 4K 300 / 450 at 16:9; smaller pictures use less.",
+    .type = SET_CHOICE, .choices = kClipResolution, .nchoices = 3, .def = CLIPREC_DEFAULT_RESOLUTION};
+
+static Setting s_cliprec = {.id = "display.cliprec", .category = SET_DISPLAY, .order = 45, .label = "Video clip",
+    .help = "Record SDR video to Movies/NFSMW, including with HDR output on. Select to start or stop; select again after saving to record another clip. Stereo game sound; always starts Off.",
+    .type = SET_ACTION, .pref = "", .apply = cliprec_action, .value_text = cliprec_status};
+static Setting s_clips_open = {.id = "display.clips_open", .category = SET_DISPLAY, .order = 46,
+    .label = "Show clips in Finder", .help = "Opens Movies/NFSMW in Finder.",
+    .type = SET_ACTION, .pref = "", .apply = cliprec_open_folder};
 
 // ---------------- Graphics ----------------
 // Restart: hc_transform specializes world shaders for float_scene_on, while
@@ -169,18 +204,29 @@ static Setting s_tone = {.id = "graphics.tone_curve", .category = SET_PICTURE, .
     .help = "PC keeps the PC's colour-bloom curve with a brighter sky; X360 uses the X360's black-bloom curve for both terms.",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .env = "NFS_TONE_CURVE", .apply = tone_apply};
 // BEGIN private car settings
-#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 #include "private_cars.h"
 static Setting s_later_cars = {.id="cars.later_games", .category=SET_CARS, .order=50,
     .label="Cars from later games", .help="Use approved installed cars. Takes effect after restart.",
-    .type=SET_TOGGLE, .def=1, .restart=1};
+    .type=SET_TOGGLE,
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    .def=0,
+#else
+    .def=1,
+#endif
+    .restart=1};
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+static Setting s_traffic_pilot = {.id="cars.traffic_pilot", .category=SET_CARS, .order=52,
+    .label="Traffic sedan pilot", .help="Allow the approved installed traffic sedan. Takes effect after restart.",
+    .type=SET_CHOICE, .choices=(const char *const[]){"Off","On"},
+    .values=(const char *const[]){"off","on"}, .nchoices=2, .def=0,
+    .env="NFS_TRAFFIC_PILOT", .restart=1};
 static Setting h_original_cars = {.id="cars.original_models", .category=SET_CARS, .order=60,
     .label="Use original MW model", .type=SET_HEADING};
 static const char *const original_car_names[] = {PRIVATE_CARS_SWAP_NAMES};
 static Setting s_original_cars[14];
 static char original_car_ids[14][64];
 static void register_private_car_settings(void) {
-    settings_add(&s_later_cars); settings_add(&h_original_cars);
+    settings_add(&s_later_cars); settings_add(&s_traffic_pilot); settings_add(&h_original_cars);
     for (unsigned i=0;i<14;++i) {
         snprintf(original_car_ids[i],sizeof original_car_ids[i],"cars.original.%s",original_car_names[i]);
         s_original_cars[i]=(Setting){.id=original_car_ids[i], .category=SET_CARS, .order=61+(int)i,
@@ -189,16 +235,37 @@ static void register_private_car_settings(void) {
         settings_add(&s_original_cars[i]);
     }
 }
+#else
+static void public_car_status(char *buf,int n) {
+    const char *error=private_cars_error();
+    if (*error) snprintf(buf,n,"Imports unavailable: %s",error);
+    else if (!private_cars_count()) snprintf(buf,n,"No imported cars active");
+    else snprintf(buf,n,"%zu imported cars active",private_cars_count());
+}
+static Setting s_imported_car_status={.id="cars.imported_status",.category=SET_CARS,.order=51,
+    .label="Imported cars",.help="Manage installed cars in Setup. Changes take effect after restart.",
+    .type=SET_INFO,.pref="",.value_text=public_car_status};
 #endif
 // END private car settings
 static void paint_apply(int v) { materials_set_car_paint(v == 0); }
 static Setting s_paint = {.id = "graphics.car_paint", .category = SET_CARS, .order = 10, .label = "Car paint",
     .help = "X360 gives the console's sun-coloured paint highlight, while PC uses a fixed highlight.",
     .type = SET_CHOICE, .choices = kX360Pc, .values = kX360PcV, .nchoices = 2, .env = "NFS_CAR_PAINT", .live_from_default = 1, .apply = paint_apply};
+static const char *const kTraffic[] = {"Off", "On"}, *const kTrafficV[] = {"off", "on"};
+static Setting s_traffic = {.id = "graphics.traffic_detail", .category = SET_CARS, .order = 25, .label = "Traffic detail",
+    .help = "On applies your car glass treatment to traffic windows and uses racer model distances. Off keeps the original traffic materials and distances.",
+    .type = SET_CHOICE, .choices = kTraffic, .values = kTrafficV, .nchoices = 2, .def = 0,
+    .env = "NFS_TRAFFIC_DETAIL", .apply = traffic_detail_set};
 static void glass_apply(int v) { materials_set_car_glass(v == 1); }
 static Setting s_glass = {.id = "graphics.car_glass", .category = SET_CARS, .order = 20, .label = "Car glass",
     .help = "PC keeps the retuned car windows, while X360 uses the console's window opacity and stronger reflections.",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_CAR_GLASS", .apply = glass_apply};
+static const char *const kRealMaterials[] = {"Off", "Glass", "Chrome", "All"};
+static const char *const kRealMaterialsV[] = {"off", "glass", "chrome", "all"};
+static Setting s_real_materials = {.id = "graphics.realworld_materials", .category = SET_PICTURE, .order = 66, .label = "Physical car materials",
+    .help = "Adds clear window optics and polished chrome highlights to selected car materials.",
+    .type = SET_CHOICE, .choices = kRealMaterials, .values = kRealMaterialsV, .nchoices = 4, .def = 0,
+    .env = "NFS_REALWORLD_MATERIALS", .apply = realworld_materials_set};
 static const char *const kHeadlamp[] = {"Retail", "Clear"}, *const kHeadlampV[] = {"retail", "clear"};
 static void headlamp_apply(int v) { materials_set_headlamp_glass(v == 1); }
 static Setting s_headlamp = {.id = "graphics.headlamp_glass", .category = SET_PICTURE, .order = 65, .label = "Headlamp glass",
@@ -218,10 +285,15 @@ static Setting s_trees = {.id = "graphics.trees", .category = SET_WORLD, .order 
     .help = "PC lights tree leaves by their flat faces, X360 shades each tree as a soft ball with a lit side and a brighter shade (trees without X360 data keep PC).",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_TREES", .apply = trees_apply};
 static void water_apply(int v) { materials_set_water(v == 1); }
-static void particles_apply(int v) { materials_set_particles(v == 1); }
-static Setting s_particles = {.id = "graphics.particles", .category = SET_WORLD, .order = 75, .label = "Smoke and dust shading",
-    .help = "X360 softens shadows on smoke and sparks and keeps close smoke from filling the screen, while PC uses hard shadows.",
-    .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_PARTICLES", .apply = particles_apply};
+static void particles_apply(int v) {
+    materials_set_particles(v != 2);
+    particles_physical_set(v == 1);
+}
+static Setting s_particles = {.id = "graphics.particles", .category = SET_WORLD, .order = 75, .label = "Particles",
+    .help = "PC and X360 keep their original shading and particle sizes. Retail uses the X360 style. Physical adds surface fading and scene lighting to that style.",
+    .type = SET_CHOICE, .choices = (const char *const[]){"Retail", "Physical", "PC", "X360"},
+    .values = (const char *const[]){"retail", "physical", "pc", "x360"}, .nchoices = 4, .def = 0,
+    .env = "NFS_PARTICLES", .apply = particles_apply};
 static void aux_apply(int v) { auxlights_set_enabled(v == 1); }
 static Setting s_aux = {.id = "graphics.scenery_lights", .category = SET_WORLD, .order = 45, .label = "Scenery lights",
     .help = "PC keeps the original scenery lighting, while X360 adds tunnel and road lights on exactly matched scenery (unmatched scenery keeps PC lighting).",
@@ -352,6 +424,17 @@ static Setting s_fit = {.id = "graphics.shadow_fit", .category = SET_WORLD, .ord
     .help = "X360 uses the console's light camera with a 1600x1600 shadow map, white border and front-face casters; shadow quality itself is in Video options.",
     .type = SET_CHOICE, .choices = kFit, .values = kFitV, .nchoices = 3, .env = "NFS_SHADOW_FIT", .apply = x360_set_shadow_fit};
 
+static const char *const kSteadyV[] = {"off", "on"};
+static Setting s_steady = {.id = "graphics.shadow_stable", .category = SET_WORLD, .order = 45,
+    .label = "Steady shadow edges", .help = "Experimental stable shadow grid. Rejected baseline: loses thin shadow detail. Keep Off for normal play.",
+    .type = SET_TOGGLE, .values = kSteadyV, .nchoices = 2, .def = 0,
+    .env = "NFS_SHADOW_STABLE", .apply = x360_set_shadow_stable};
+
+static Setting s_near = {.id = "graphics.shadow_near", .category = SET_WORLD, .order = 46,
+    .label = "Dense near shadows", .help = "Experimental extra shadow map near the camera. Uses additional video memory. Appearance is under review.",
+    .type = SET_TOGGLE, .values = kSteadyV, .nchoices = 2, .def = 0,
+    .env = "NFS_SHADOW_NEAR", .apply = shadow_near_set_enabled};
+
 // ---------------- Audio ----------------
 static Setting s_limiter = {.id = "audio.peak_limiter", .category = SET_AUDIO, .order = 40, .label = "Peak limiter",
     .help = "Stops loud game sounds distorting while keeping the surround balance, adding up to 2 ms (movies are unaffected).",
@@ -445,27 +528,25 @@ static Setting s_perf = {.id = "diag.perf", .category = SET_DIAGNOSTICS, .order 
 static Setting s_audio_now2 = {.id = "diag.audio", .category = SET_DIAGNOSTICS, .order = 20, .label = "Audio output", .type = SET_INFO,
     .help = "The format the game's sound goes out in, and the output device.", .value_text = audio_now};
 static Setting h_report = {.id = "diag.h_report", .category = SET_DIAGNOSTICS, .order = 30, .label = "Report a problem", .type = SET_HEADING,
-    .help = "Saves a folder with a screenshot, recent stats, the log and your settings."};
+    .help = "Saves a local folder with a game-frame screenshot, recent stats, the log and settings. Saving sends nothing; public posting requires a separate review and explicit consent."};
 static const char *const kCat[] = {"Audio", "Graphics", "Controls", "Gameplay", "Crash / freeze", "Other"};
 static const char *const kCatV[] = {"Audio", "Graphics", "Controls", "Gameplay", "Crash-freeze", "Other"};
 static Setting s_cat = {.id = "diag.report_category", .category = SET_DIAGNOSTICS, .order = 40, .label = "What's wrong",
     .help = "Pick the kind of problem; it goes on the report's first lines.", .type = SET_CHOICE, .choices = kCat, .values = kCatV,
     .nchoices = N(kCat), .def = 5, .pref = ""};
 static Setting s_note = {.id = "diag.report_note", .category = SET_DIAGNOSTICS, .order = 50, .label = "Note", .type = SET_TEXT,
-    .help = "Select to enter a short optional description with your keyboard or controller."};
+    .help = "Select to type up to 256 characters. Controller: hold Circle to delete, R3 clears all. Keyboard: Cmd+Backspace clears all."};
 static void report_save(int v) {
     (void)v;
     Setting *c = settings_find("diag.report_category");
-    const char *p = report_write(c ? kCatV[c->get ? c->get() : c->value] : "Other", settings_text("diag.report_note"), NULL, NULL);
-    if (p && *p) portmenu_status("Report saved: %s", p);
-    else portmenu_status("Couldn't write the report");
+    report_save_async(c ? kCatV[c->get ? c->get() : c->value] : "Other", settings_text("diag.report_note"));
 }
 static void report_saved_text(char *buf, int n) {
     const char *p = report_last_path(), *slash = p ? strstr(p, "/reports/") : NULL;
     snprintf(buf, (size_t)n, "%s", slash ? slash + 1 : "");
 }
 static Setting s_save = {.id = "diag.report_save", .category = SET_DIAGNOSTICS, .order = 60, .label = "Save report", .type = SET_ACTION,
-    .help = "Writes a folder in reports/ with a screenshot, the last minutes of stats and events, the log and all settings.",
+    .help = "Writes a local folder in reports/ with the saved game frame, recent stats/events, log and settings. Review text before sending; screenshot sharing starts Off and requires viewing the saved frame.",
     .apply = report_save, .value_text = report_saved_text};
 static void open_reports(int v) {
     (void)v;
@@ -590,6 +671,10 @@ const char *settings_game_language(void) {
 }
 
 __attribute__((constructor)) static void settings_port_register(void) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    settings_add(&s_later_cars);
+    settings_add(&s_imported_car_status);
+#endif
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     register_private_car_settings();
 #endif
@@ -602,17 +687,18 @@ __attribute__((constructor)) static void settings_port_register(void) {
         }
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
-    REG(s_window); REG(s_fullscreen); REG(s_overlay); REG(s_lan);
+    REG(s_window); REG(s_fullscreen); REG(s_overlay); REG(s_clip_resolution); REG(s_cliprec); REG(s_clips_open); REG(s_lan);
     REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);
     REG(s_vrr);
-    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_headlamp); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
+    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_traffic); REG(s_headlamp); REG(s_real_materials); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit); REG(s_steady); REG(s_near);
     REG(s_look_data); REG(s_look_contact); REG(s_look_smoke); REG(s_look_fog); REG(s_look_mirror_art);
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
-    REG(s_look_reflections); REG(s_look_later_textures);
+    REG(s_look_reflections); REG(s_look_later_textures); REG(s_addcar_weight);
 #endif
     REG(s_audio); REG(s_limiter); REG(s_speaker_layout); REG(s_engine_sound); REG(s_audio_now);
     REG(s_menubtn); REG(s_layout); REG(s_prompts); REG(s_pads); REG(s_rumble); REG(s_rumble_surfaces); REG(s_rumble_props);
     REG(h_perf); REG(s_perf); REG(s_audio_now2);
     REG(h_report); REG(s_cat); REG(s_note); REG(s_save); REG(s_open);
     REG(h_log); REG(s_full); REG(s_logs); REG(s_quit); REG(s_restart);
+    REG(h_cash); REG(s_cash20); REG(s_cash50); REG(s_cash100); REG(s_cash_amount);
 }

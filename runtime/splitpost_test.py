@@ -17,7 +17,8 @@ short-dev-args: ASan stack-buffer-overflow. Other encoder controls: P1-depth-rec
 P1-lamp-source 22, shader-bounds 2, shared-ring 19, unsafe-slot-reuse 9, full-aspect 24, whole-lens-copy 72.
 Five MSL variants compile; SP shader identical (11,905 bytes). Two six-frame SP command/consumed-
 constant/readback snapshots match pinned pre-split 4175000^ (57,396 bytes; unset/1), plus three exact
-SP guest/CPU/parameter snapshots match HEAD (50,331,648 guest bytes).
+SP guest/CPU/parameter snapshots match pinned behavioral digests (50,331,648 guest bytes).
+Integrity controls: 3/3 snapshot byte flips and 1/1 shader byte flip rejected.
 Covers 1280x721/719, separate focal distances/speeds/bases/brightness/VT records/drop lists,
 PC targets/replay/failure fallback, viewport depth range/scissor, completed-only readback and ring saturation.
 Recording objects prove ownership/submission contracts, not GPU pixel output; MCP probes cover screen reach.
@@ -46,6 +47,8 @@ PRE=r'''
 #include <stdlib.h>
 #include <math.h>
 #include <stdarg.h>
+int sign_diag_on;
+void sign_diag_freeze(const char *name, void *p, size_t n) { (void)name; (void)p; (void)n; abort(); }
 uint8_t *G;
 static struct {uint32_t ds,rs[256],rt[4],viewport[6],scissor[4];} dev;
 int diag_on;
@@ -346,8 +349,9 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         body=src.split('static const char *'+name+' =',1)[1].split(';\n',1)[0]
         return ''.join(ast.literal_eval(x[0]) if x[0].startswith('"') else macros[x[0]] for x in re.finditer(r'"(?:[^"\\]|\\.)*"|\bX360\w+\b',body))
     base=shader(RENDER,'x360_src')
-    old=shader(run(['git','show','HEAD:runtime/render_post.m']),'x360_src')
-    assert base==old,'single-player shader changed'
+    # Exact output fingerprint of the previously compared 11,905-byte shader.
+    shader_digest='0727607df247f88c2f86c94efd433e0716a6596d4fd280540408127909578dee'
+    assert len(base)==11905 and hashlib.sha256(base.encode()).hexdigest()==shader_digest,'single-player shader changed'
     variants={'base':base,'view':base.replace('float4 tp; float4 rx; };','float4 tp; float4 rx; float4 depth_uv; float4 depth_bounds; };').replace('float d = depth.sample(lin, uv);','float d = depth.sample(lin, clamp(k.depth_uv.xy + uv * k.depth_uv.zw, k.depth_bounds.xy, k.depth_bounds.zw));'),'drops':shader(RENDER,'drops_src')}
     extra=shader((ROOT/'runtime/lampglow_shader.h').read_text(),'lampglow_src')
     for name in ('base','view'):
@@ -358,14 +362,20 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         run([metal,'-fmodules-cache-path='+str(tmp/'modules'),'-c',f,'-o',tmp/(name+'.air')])
     print(f'MSL: {len(variants)} compiled; single-player shader identical ({len(base)} bytes)')
 
-    # Exact single-player memory, CPU and submitted parameter snapshots against HEAD.
+    # Exact single-player memory, CPU and submitted parameters from the existing
+    # baseline harness, captured before replacing the history read. Keep these
+    # behavioral controls alongside the earlier six-frame renderer fingerprints.
     single_main=r'\nint main(int argc,char **argv){G=calloc(1,16*1024*1024);Cpu c={0};c.esp=0xF00000;c.eax=123;c.ecx=456;frame=1;bank=0;postfx=1;M32(VT_PLAT)=0x400000;M32(VT_TECHNIQUE)=0x430000;M32(SCREEN_TEXTURES)=11;M32(BACKBUFFER_SURF)=12;M32(CAMERA_PTR)=0x450000;M32(GAMEFLOW_STATE)=6;M32(MOTION_BLUR_ON)=1;MF32(REAL_TIME_ELAPSED)=1.f/30;for(int j=0;j<14;j++)MF32(0x400000+LOOK_OFFS[j])=1;MF32(0x450000+0xBC)=.5f;MF32(0x450000+0xC0)=10000;MF32(0x450000+0xB4)=20;MF32(0x450000+0xB8)=2;MF32(0x450000+0x200)=50;MF32(PLAYER_VIEW)=1;M32(c.esp+4)=1;int mode=atoi(argv[1]);if(mode==1)postfx=0;if(mode==2)M32(VT_TECHNIQUE)=0;f_006D53D0(&c);FILE*f=fopen(argv[2],"wb");fwrite(G,1,16*1024*1024,f);fwrite(&c,1,sizeof c,f);fwrite(params,1,sizeof params,f);fclose(f);free(G);return 0;}'
     single_main=single_main.replace(r'\n','\n',1)
-    baseline=run(['git','show','HEAD:runtime/x360_post.m']).replace('#include "x360_internal.h"','').replace('#include "settings.h"','')
+    snapshot_digests=('deb1bc0295347404a6d758564a33bf6402d89c3098383a87173b478a46835f9d',
+                      '9ef3665e5495c1262356fcfb2c037baff20f68e24a661ecf643d4e99aad0bc97',
+                      'df2139e92bfb4b1995ba450ed56a4ce809f480d2243a164dd8fabda28c64aea4')
     prefix=PRE.replace('float x360_post_alpha',constants+'\nfloat x360_post_alpha')
-    for name,source in [('baseline',baseline),('current',SRC.replace('#include "x360_internal.h"','').replace('#include "settings.h"',''))]:
+    for name,source in [('current',SRC.replace('#include "x360_internal.h"','').replace('#include "settings.h"',''))]:
         f=tmp/(name+'-single.c');f.write_text(prefix+source+single_main)
         run(['clang','-x','c','-O1','-w','-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',f,'-Wl,-dead_strip','-o',tmp/(name+'-single')])
         for mode in range(3):run([tmp/(name+'-single'),mode,tmp/(name+str(mode)+'.snapshot')])
-    for mode in range(3):assert (tmp/('baseline'+str(mode)+'.snapshot')).read_bytes()==(tmp/('current'+str(mode)+'.snapshot')).read_bytes(),f'single {mode} changed'
+    for mode,digest in enumerate(snapshot_digests):
+        snapshot=(tmp/('current'+str(mode)+'.snapshot')).read_bytes()
+        assert len(snapshot)==16777776 and hashlib.sha256(snapshot).hexdigest()==digest,f'single {mode} changed'
     print('single-player: 3 exact 16 MiB memory + CPU + parameter snapshots identical (50,331,648 guest bytes)')

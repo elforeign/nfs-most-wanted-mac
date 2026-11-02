@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nfsmw:added-car-catalog:1",
+  "title": "Added-car catalog, pointer and independently pinned approval policy",
+  "description": "Shapes only: also enforce the semantic, canonical-byte, trust and filesystem rules in added-car-catalog.md. All 90 slots are ordered and permanently reserved.",
+  "oneOf": [
+    {"$ref": "#/$defs/catalog"},
+    {"$ref": "#/$defs/pointer"},
+    {"$ref": "#/$defs/policy"}
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "token": {"type": "string", "pattern": "^[A-Z0-9_]{1,31}$"},
+    "slot": {"type": "integer", "minimum": 0, "maximum": 89},
+    "pin": {
+      "type": "object", "additionalProperties": false,
+      "required": ["size", "sha256"],
+      "properties": {
+        "size": {"type": "integer", "minimum": 0, "maximum": 2147483648},
+        "sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "pins": {
+      "type": "object", "minProperties": 1, "maxProperties": 1024,
+      "propertyNames": {"type": "string", "maxLength": 512, "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\\\\u0000-\u001f\u007f-\uffff]+(?:/[^/\\\\\u0000-\u001f\u007f-\uffff]+)*$"},
+      "additionalProperties": {"$ref": "#/$defs/pin"}
+    },
+    "row": {
+      "type": "object",
+      "required": ["slot", "id", "role", "swap_index", "state"],
+      "properties": {
+        "slot": {"$ref": "#/$defs/slot"},
+        "id": {"oneOf": [{"const": 0}, {"type": "integer", "minimum": 84, "maximum": 159}]},
+        "role": {"enum": ["addition", "swap"]},
+        "swap_index": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 13}]},
+        "state": {"enum": ["absent", "ready"]},
+        "identity": {"$ref": "#/$defs/hash"},
+        "origin": {
+          "type": "object", "additionalProperties": false,
+          "required": ["game", "platform", "folder"],
+          "properties": {
+            "game": {"const": "carbon"}, "platform": {"enum": ["pc", "x360"]},
+            "folder": {"$ref": "#/$defs/token"}
+          }
+        },
+        "display": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "manufacturer"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 128},
+            "manufacturer": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        },
+        "bindings": {
+          "type": "object", "additionalProperties": false,
+          "required": ["folder", "pvehicle", "frontend", "ecar"],
+          "properties": {
+            "folder": {"$ref": "#/$defs/token"}, "pvehicle": {"$ref": "#/$defs/token"},
+            "frontend": {"$ref": "#/$defs/token"}, "ecar": {"$ref": "#/$defs/token"}
+          }
+        },
+        "donors": {
+          "type": "object", "additionalProperties": false,
+          "required": ["model", "price"],
+          "properties": {"model": {"$ref": "#/$defs/token"}, "price": {"$ref": "#/$defs/token"}}
+        },
+        "parts": {
+          "type": "array", "minItems": 1, "maxItems": 255,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["type", "keys"],
+            "properties": {
+              "type": {"type": "integer", "minimum": 0, "maximum": 254},
+              "keys": {"type": "array", "minItems": 1, "maxItems": 32768, "uniqueItems": true, "items": {"$ref": "#/$defs/token"}}
+            }
+          }
+        },
+        "converter": {
+          "type": "object", "additionalProperties": false, "required": ["revision", "policy"],
+          "properties": {
+            "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "policy": {"$ref": "#/$defs/hash"}
+          }
+        },
+        "inputs": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source", "dependencies", "donor", "converter"],
+          "properties": {
+            "source": {"$ref": "#/$defs/pins"}, "dependencies": {"$ref": "#/$defs/pins"},
+            "donor": {"$ref": "#/$defs/pins"}, "converter": {"$ref": "#/$defs/pins"}
+          }
+        },
+        "outputs": {
+          "type": "object", "minProperties": 3, "maxProperties": 1024,
+          "required": ["GEOMETRY.BIN", "TEXTURES.BIN", "SOLIDMAP.BIN"],
+          "propertyNames": {"pattern": "^[A-Z0-9_]{1,31}\\.BIN$"},
+          "additionalProperties": {"$ref": "#/$defs/pin"}
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"role": {"const": "addition"}}},
+          "then": {"properties": {"id": {"minimum": 84, "maximum": 159}, "slot": {"maximum": 75}, "swap_index": {"type": "null"}}},
+          "else": {"properties": {"id": {"const": 0}, "slot": {"minimum": 76}, "swap_index": {"type": "integer"}, "state": {"const": "absent"}}}
+        },
+        {
+          "if": {"properties": {"state": {"const": "ready"}}},
+          "then": {"required": ["identity", "origin", "display", "bindings", "donors", "parts", "converter", "inputs", "outputs"]},
+          "else": {"maxProperties": 5}
+        }
+      ]
+    },
+    "catalog": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "policy_sha256", "compatibility", "cars"],
+      "properties": {
+        "schema": {"const": 1}, "policy_sha256": {"$ref": "#/$defs/hash"},
+        "compatibility": {"$ref": "#/$defs/hash"},
+        "cars": {"type": "array", "minItems": 90, "maxItems": 90, "items": {"$ref": "#/$defs/row"}}
+      }
+    },
+    "pointer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "generation", "catalog_sha256", "compatibility", "selection"],
+      "properties": {
+        "schema": {"const": 1},
+        "generation": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^g-[0-9a-f]{64}$"}]},
+        "catalog_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]},
+        "compatibility": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]},
+        "selection": {"type": "array", "uniqueItems": true, "maxItems": 90, "items": {"$ref": "#/$defs/slot"}}
+      },
+      "allOf": [{
+        "if": {"properties": {"generation": {"type": "null"}}},
+        "then": {"properties": {"catalog_sha256": {"type": "null"}, "compatibility": {"type": "null"}, "selection": {"maxItems": 0}}},
+        "else": {"properties": {"catalog_sha256": {"$ref": "#/$defs/hash"}, "compatibility": {"$ref": "#/$defs/hash"}}}
+      }]
+    },
+    "policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "revision", "slots"],
+      "properties": {
+        "schema": {"const": 1},
+        "revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "slots": {
+          "type": "array", "minItems": 90, "maxItems": 90,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["slot", "identity", "variants"],
+            "properties": {
+              "slot": {"$ref": "#/$defs/slot"},
+              "identity": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]},
+              "variants": {
+                "type": "array", "maxItems": 256, "uniqueItems": true,
+                "items": {
+                  "type": "object", "additionalProperties": false, "required": ["contract", "compatibility"],
+                  "properties": {"contract": {"$ref": "#/$defs/hash"}, "compatibility": {"$ref": "#/$defs/hash"}}
+                }
+              }
+            },
+            "allOf": [{
+              "if": {"properties": {"identity": {"type": "null"}}},
+              "then": {"properties": {"variants": {"maxItems": 0}}}
+            }]
+          }
+        }
+      }
+    }
+  }
+}

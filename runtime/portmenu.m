@@ -33,6 +33,7 @@
 
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "text_fit.h"
 #include "guide.h"
 #include "report_github.h"
 #include "onscreen_keyboard.h"
@@ -151,12 +152,18 @@ static void paste_text(void) {
     if (!is_open || !editing || !s || s->type != SET_TEXT) return;
     NSString *paste = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
     if (!paste) return;
-    const char *p = paste.UTF8String; size_t used = 0;
-    while (p && *p && used + 1 < sizeof s->text) {
-        unsigned char ch = (unsigned char)*p++;
-        if (ch >= 32 && ch < 127) s->text[used++] = (char)ch;
+    NSData *raw = [paste dataUsingEncoding:NSUTF8StringEncoding];
+    // Keep the raw text for the submitter to validate. Filtering characters
+    // could turn a negative amount or non-ASCII digits into a positive award.
+    // Refuse oversized / embedded-NUL input as a whole, never a valid prefix.
+    if (!raw || raw.length >= sizeof s->text || memchr(raw.bytes, 0, raw.length)) {
+        s->text[0] = 0;
+        portmenu_status("Text is too long or contains a NUL character; enter it again.");
+    } else {
+        memcpy(s->text, raw.bytes, raw.length);
+        s->text[raw.length] = 0;
     }
-    s->text[used] = 0; dirty = 1;
+    dirty = 1;
 }
 static void activate(Setting *s) {
     if (!s) return;
@@ -227,9 +234,9 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
         return 0;
     }
     swallowed[vk] = (uint8_t)down;
+    if (report_github_active()) { report_github_key_event(vk, down, repeat); dirty = 1; return 1; }
     if (!down) return 1;
     if (device != 0) { device = 0; dirty = 1; }
-    if (report_github_active()) { report_github_key(vk); dirty = 1; return 1; }
     if (guide_active()) {
         switch (vk) {
         case 0x1B: case 0x08: guide_command(GUIDE_BACK); break;
@@ -252,7 +259,10 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
         else if (vk == 'V' && (NSEvent.modifierFlags & NSEventModifierFlagCommand) && s) {
             paste_text();
         }
-        else if (vk == 0x08 && s && s->text[0]) { s->text[strlen(s->text) - 1] = 0; dirty = 1; }
+        else if (s && s->type == SET_TEXT) {
+            NSEventModifierFlags mods = NSEvent.modifierFlags;
+            if (text_edit_key(s->text, vk, (mods & NSEventModifierFlagCommand) != 0, (mods & NSEventModifierFlagControl) != 0)) dirty = 1;
+        }
         return 1;
     }
     int shift = (NSEvent.modifierFlags & NSEventModifierFlagShift) != 0;
@@ -275,14 +285,27 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
     }
     return 1;
 }
+// Only this Command shortcut belongs to a text row; other shortcuts stay with Cocoa.
+int portmenu_command_key(uint8_t vk, int repeat) {
+    if (vk != 0x08 || !is_open || !editing) return 0;
+    Setting *s = current();
+    if (!s || s->type != SET_TEXT) return 0;
+    return portmenu_key(vk, 1, repeat);
+}
 // Characters (WM_CHAR): the note being typed; all of them are the menu's while it's open.
 int portmenu_char(uint32_t ch) {
     if (!is_open) return 0;
     if (report_github_active()) return 1;
     Setting *s = current();
-    if (editing && s && s->type == SET_TEXT && ch >= 32 && ch < 256 && ch != 127) {
-        size_t n = strlen(s->text);
-        if (n + 1 < sizeof s->text) { s->text[n] = (char)ch; s->text[n + 1] = 0; dirty = 1; }
+    if (editing && s && s->type == SET_TEXT && ch >= 32 && ch != 127) {
+        // Keep every typed character (as UTF-8) so a non-digit like U+2212 reaches validation instead of vanishing.
+        NSString *typed = [[NSString alloc] initWithBytes:&ch length:sizeof ch encoding:NSUTF32LittleEndianStringEncoding];
+        const char *raw = typed.UTF8String ?: "\xEF\xBF\xBD";
+        size_t n = strlen(s->text), k = strlen(raw);
+        if (n + k < sizeof s->text) {
+            for (size_t i = 0; i < k; ++i) text_append(s->text, sizeof s->text, (unsigned char)raw[i]);
+            dirty = 1;
+        }
     }
     return 1;
 }
@@ -406,7 +429,7 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
     uint32_t edge = phys & ~last_phys;
     last_phys = phys;
     if ((edge || dir) && device != 2) { device = 2; dirty = 1; }
-    if (report_github_active()) { report_github_pad(0, edge); if (edge) dirty = 1; return ~0u; }
+    if (report_github_active()) { report_github_pad_release(phys); report_github_pad(0, edge); if (edge) dirty = 1; return ~0u; }
     if (guide_active()) {
         if (edge & B_CIRCLE) guide_command(GUIDE_BACK);
         if (edge & B_L1) guide_command(GUIDE_PAGE_UP);
@@ -475,6 +498,10 @@ static double text(CGContextRef ctx, const char *s, double x, double y, CTFontRe
     CGContextSetTextPosition(ctx, px, PH - (y + CTFontGetAscent(f)));
     CTLineDraw(line, ctx);
     return w;
+}
+static double measure_line(const char *s, void *f) {
+    CTLineRef line = s && *s ? (__bridge CTLineRef)cached_layout(s, (CTFontRef)f, c_text, 0) : NULL;
+    return line ? CTLineGetTypographicBounds(line, NULL, NULL, NULL) : 0;
 }
 static void wrapped(CGContextRef ctx, const char *s, double x, double y, double w, double h, CTFontRef f, CGColorRef col) {
     CTFramesetterRef fs = (__bridge CTFramesetterRef)cached_layout(s, f, col, 1);
@@ -627,11 +654,16 @@ static int render(void) {
             break;
         }
         case SET_TEXT:
-            if (editing && i == sel) {
-                snprintf(vb, sizeof vb, "%s_", s->text);
+            if (editing && i == sel) {                     // the end of the line, caret last, always on screen
+                char typed[sizeof s->text + 2];
+                snprintf(typed, sizeof typed, "%s_", s->text);
+                text_window(typed, 1, PW - 40 - vx - 12, measure_line, (void *)fnt(0, 15), vb, sizeof vb);
                 fill(ctx, vx - 6, y + 2, PW - 40 - vx, ROW - 6, 5, c_hover);
                 w = text(ctx, vb, vx, ty, fnt(0, 15), c_amber, 0);
-            } else w = text(ctx, s->text[0] ? s->text : "(none)", vx, ty, fnt(0, 15), s->text[0] ? c_text : c_faint, 0);
+            } else {                                        // the start, with an ellipsis when it is longer than the row
+                text_window(s->text, 0, PW - 40 - vx - 12, measure_line, (void *)fnt(0, 15), vb, sizeof vb);
+                w = text(ctx, s->text[0] ? vb : "(none)", vx, ty, fnt(0, 15), s->text[0] ? c_text : c_faint, 0);
+            }
             break;
         case SET_ACTION:
             readout(s, i, vb, sizeof vb);
@@ -735,7 +767,7 @@ typedef struct {
 typedef struct {
     size_t W, H;
     int xbox, count[5];
-    char title[128], text[512];
+    char title[128], text[640];
     KeyboardKey keys[5][16];
 } KeyboardPixels;
 static KeyboardPixels keyboard_previous;
@@ -819,7 +851,9 @@ static void keyboard_update(void) {
         text(ctx, pixels.title, 32, 310, fnt(1, 16), c_accent, 0);
         CGContextSaveGState(ctx);
         CGContextClipToRect(ctx, CGRectMake(215, PH - 339, PW - 245, 26));
-        text(ctx, pixels.text, 220, 309, fnt(0, 17), c_text, 0);
+        char shown[sizeof pixels.text];
+        text_window(pixels.text, 1, PW - 245 - 10, measure_line, (void *)fnt(0, 17), shown, sizeof shown);   // the end, where the caret is
+        text(ctx, shown, 220, 309, fnt(0, 17), c_text, 0);
         CGContextRestoreGState(ctx);
     }
     unsigned regions = text_changed;
@@ -839,10 +873,10 @@ static void keyboard_update(void) {
         }
     }
     if (full) {
-        text(ctx, pixels.xbox ? "A  Type     B  Delete     X  Accept     Y  Cancel" : "✕  Type     ○  Delete     □  Accept     △  Cancel",
+        text(ctx, pixels.xbox ? "A  Type     B  Delete (hold)     X  Accept     Y  Cancel" : "✕  Type     ○  Delete (hold)     □  Accept     △  Cancel",
              PW / 2, 578, fnt(1, 15), c_text, 2);
-        text(ctx, pixels.xbox ? "D-pad / Left stick  Move       LB  Shift       RB  Symbols" :
-                             "D-pad / Left stick  Move       L1  Shift       R1  Symbols", PW / 2, 606, fnt(0, 12), c_dim, 2);
+        text(ctx, pixels.xbox ? "D-pad / Left stick  Move       LB  Shift       RB  Symbols       RS click  Clear all" :
+                             "D-pad / Left stick  Move       L1  Shift       R1  Symbols       R3  Clear all", PW / 2, 606, fnt(0, 12), c_dim, 2);
     }
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     if (!img) { CGContextRelease(ctx); return; }

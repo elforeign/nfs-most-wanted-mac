@@ -77,7 +77,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 ## Display & performance
 
 - **Window mode** switches between Full screen and a resizable Window.
-- **Full screen** chooses Borderless (default, recommended) or Native. **Known issue with Native:** on some Macs, macOS can drop the graphics chip to its slowest speed during long, busy scenes (big pursuits) and not raise it again, so the frame rate falls to about a third until you leave Native. If that happens, switch to Borderless. For Native, also set **Window mode > Full screen**, save your career and restart. Native uses its own macOS Space so Game Mode can engage; macOS controls whether it does.
+- **Full screen** chooses Borderless (default, recommended), Native, or Auto (Native on the Mac screen, Borderless on a TV or other display). **Known issue with Native:** on some Macs, macOS can drop the graphics chip to its slowest speed during long, busy scenes (big pursuits) and not raise it again, so the frame rate falls to about a third until you leave Native. If that happens, switch to Borderless. For Native, also set **Window mode > Full screen**, save your career and restart. Native uses its own macOS Space so Game Mode can engage; macOS controls whether it does.
 - **Frame rate limit** offers Off, 120, 60 or 40. Display refresh affects the result: 40 on a 60 Hz screen gives 30 fps. **Variable refresh pacing** asks compatible displays for adaptive pacing.
 - **Performance overlay** shows Compact numbers or Full details and a timing graph while you drive.
 - **Quit game** and **Restart game** need a second press within four seconds. Settings are saved; race progress since your last save is lost.
@@ -85,29 +85,23 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 
 ## Online (beta)
 
-Online free roam is an early beta, Off until you choose Host or Join. Use the same game version on both Macs. Online races are not included. Begin with two players on different internet connections.
+Online free roam is an early beta, Off until you choose **Create room** or **Join**. Access is free. Use the same game version on both Macs. Online races are not included. Begin with two players on different internet connections.
 
-Host: enter career free roam, then open **F10 > Online (beta) > Host**. Hosting allows incoming UDP traffic. If macOS asks to allow incoming connections for the game, choose **Allow**. If Local Network access is requested, allow it for router setup.
+Create: enter career free roam, then open **F10 > Online (beta) > Create room**. Both Create and Join connect to the release's shared relay. Send the displayed room code privately to your friend. Codes look like **R-XXXX-XXXXX** and identify rooms rather than passwords; they contain no player's internet address. Anyone with a room code can try joining it.
 
-If you previously denied access, allow the game in **System Settings > Network > Firewall > Options**, and check **Privacy & Security > Local Network**. Keep the firewall enabled.
+Join: enter career free roam, open **F10 > Online (beta) > Join code**, paste the complete prefixed code and choose **Join**. Old endpoint codes are unsupported. Close F10 and check that both players see each other's cars moving. **Leave** disconnects your installation; other players can stay in the room. A room is an ephemeral identifier, with no reserved owner or lasting registration.
 
-Send the displayed join code privately to your friend. Keep the game running and the Mac awake. Join codes contain the host’s internet address; they are not passwords.
+No home router setup, port forwarding or public-IP entry is needed for this flow. Keep the firewall enabled. Your network must permit outgoing UDP to the shared relay. The direct numeric-address transport remains a diagnostic tool.
 
-Join: enter career free roam, open **F10 > Online (beta) > Join code**, enter the nine letters/numbers, then choose **Join**. Close F10 and check that both players see each other’s cars moving. **Leave** disconnects; when the host leaves, the session closes.
+If Status says **no shared relay configured**, online free roam is not available in this release yet; it arrives in a later update, and entering a different room code cannot configure a server. **Relay unavailable** means no response or a local connection/credential failure. Check your connection, then try again later. A full relay requires waiting for capacity; a different game version requires the matching release. If an installation is banned, contact the service operator through the existing private project contact. **Reconnecting** retries automatically after a lost connection or relay restart.
 
-A router mapping or join code does not prove a friend can connect. Router loopback failure alone does not mean internet joining will fail. Test from another internet connection.
+The relay authenticates a random installation credential stored in your selected profile's online-identity directory. Rooms are not passwords or accounts. UDP is unencrypted: the relay and network/provider observers can see addresses, names, room identifiers and car states. The service retains verified installation identifiers and expiry for bans; see the moderation/privacy documentation for limits. A new identity can evade an installation ban.
 
-If joining fails, confirm the host is still hosting, check the latest code and permissions, then try swapping hosts. If automatic router setup fails, forward **UDP 47800** to the host Mac’s local address shown in Status. Joiners normally need no forwarding.
-
-If the public address is unknown, enter your router’s public IPv4 in **Public IPv4 (optional)** after arranging forwarding, then choose Host again. Entering an address does not open a port. With two home routers, both may need configuration; with ISP/shared-address NAT, ask your ISP whether inbound public IPv4 is available.
-
-Some networks cannot host this beta. Try another host or connection. No internet relay fallback is provided in this beta. Remove manual forwarding when finished.
-
-**Ghost mode** lets your car and friends’ cars pass through each other. Toggle it in **F10 > Online (beta) > Ghost mode**, or press **D-pad Down / G** while driving.
+**Ghost mode** lets your car and friends' cars pass through each other. Toggle it in **F10 > Online (beta) > Ghost mode**, or press **D-pad Down / G** while driving.
 
 Online sessions cap the frame rate at **60 fps** and render at most **six nearby remote cars**. Actual frame rates depend on your Mac, settings and the scene.
 
-Report successes and failures from both Macs: game/macOS versions, Mac and router models, host/joiner roles, separate networks, mapping protocol, last Status and whether cars appeared. Preview reports and inspect every attachment. Remove join codes, addresses and personal details from logs and screenshots before posting.
+Report successes and failures from both Macs: game/macOS versions, Mac models, creator/joiner roles, separate networks, last Status and whether cars appeared. Preview reports and inspect every attachment. Remove join codes, addresses and personal details from logs and screenshots before posting. Real two-network delivery and packaged visual checks remain required before beta release.
 
 ## Audio
 
@@ -121,7 +115,7 @@ Report successes and failures from both Macs: game/macOS versions, Mac and route
 
 - **Controller: open this menu** chooses the F10 button.
 - **Button layout** selects PlayStation or Xbox. **Button prompts** chooses Automatic, Console glyphs or PC keycaps; restart after changing prompts.
-- The new **Triggers** selector chooses Shift (the default) or Pedals on a PlayStation controller. Pedals uses R2 for proportional gas, L2 for brake/reverse, Cross to shift up and Square to shift down. Nitrous and handbrake keep their bindings.
+- For PlayStation trigger pedals, bind Accelerate to R2 and Brake to L2 in the game’s **Options > Controls**. Choose Control type 1 to use your saved bindings.
 - **Controllers > 2 (split-screen)** enables the two-controller option after a restart. Split Screen is in Quick Race; this feature is in development.
 - **Rumble** also needs the game's own Rumble option on. Cobbles and prop-hit settings add road texture and impact-based feedback. DualSense adaptive triggers, lightbar, trigger road loading and player indicator LEDs are built in and On by default on supported controllers.
 - **Control type** offers X360 driving layouts; Type 1 keeps your bindings and Types 6–10 steer with the D-pad. **Steering dead zone**, **Steering response** and **Speed-reactive chase camera** change stick feel and camera movement.
@@ -134,7 +128,7 @@ Report successes and failures from both Macs: game/macOS versions, Mac and route
 
 Before you choose a layout, the active controller uses its own console's layout. If gas is on A and the triggers shift gears, choose **Controls > Button layout > Xbox**.
 
-On a PlayStation controller, choose **F10 > Controls > Triggers > Pedals** for trigger pedals, or keep Shift and customize bindings in the game's **Options > Controls**. Returning to Shift restores your saved bindings. On DualSense, a trigger bound to gas has a light rising spring, brake gets firmer late in its travel, and gear shifts keep their click. These effects follow the binding automatically.
+On a PlayStation controller, bind Accelerate to R2 and Brake to L2 in the game’s **Options > Controls** for trigger pedals. Your other saved bindings, including the right stick, remain available. On DualSense, a trigger bound to gas has a light rising spring, brake gets firmer late in its travel, and gear shifts keep their click. These effects follow the binding automatically.
 
 ## Type with a controller
 
@@ -159,7 +153,7 @@ You can also use your Mac keyboard. Follow the displayed buttons: text entry use
 - **Guide** opens this document. **Last second** and **Audio output** show recent performance and sound information.
 - Under **Report a problem**, choose **What's wrong** and add an optional **Note** describing what happened.
 - **Save report** collects a screenshot, recent performance, logs and settings. **Show reports in Finder** opens the saved folder.
-- In public builds, **Send to GitHub** and **Post on Discord** preview report text before opening an issue draft or copying text to paste. You submit it and add attachments yourself.
+- In public builds, **Send to GitHub** reviews saved text before an explicit public post or **Copy text & open GitHub**. **Post on Discord** reviews its shorter text before copying it for you to paste. Cancel is selected initially; screenshots start Off.
 - **Show logs in Finder** opens the current logs. **Full diagnostic logging** collects extra detail from the next launch; turn it off after reproducing the problem.
 
 ## Update the game
@@ -175,10 +169,19 @@ Update now needs the original PC and any selected Xbox 360 sources remembered by
 ## Report a problem
 
 Open **Help > Report a problem**, choose **What's wrong**, add a **Note** and select **Save report**. Saving a report does not send it anywhere.
+This report exporter and its privacy sanitizer are Mac-only; Windows does not use this report path.
 
-In public builds, choose **Send to GitHub** or **Post on Discord** to preview the report text. GitHub opens an issue draft; Discord copies text for you to paste in **#bug-reports**. You submit the post and add attachments yourself.
+The F10 report UI and GitHub CLI submission route are Mac-only; Windows keeps its original game UI and can use the GitHub issue page manually.
 
-Use **Show reports in Finder** to find attachments. Review the text, screenshots and logs for personal details before posting. Include your Mac model, macOS and game versions, what you did, what you expected and what happened. Please do not attach game files.
+In public builds, **Send to GitHub** shows the exact saved text for posting. Only allowlisted diagnostic numbers and error counts are included; raw logs are never attached automatically. Unavailable and shortened sections are marked. **Cancel** is selected initially.
+
+If the optional GitHub CLI is installed and already signed in, **Check GitHub account** contacts github.com for identity only. The credential used for that check stays fixed for this review, even if the CLI’s active account changes. Review the verified account and **github.com/elforeign/nfs-most-wanted-mac**, then choose **Yes, post publicly** with a fresh press to create one public issue. The pending state disables another submission. A confirmed issue link is kept so attachment problems cannot create a duplicate. If creation is unconfirmed, it may already have succeeded: check GitHub before posting manually. There are no automatic retries or queued posts.
+
+**Copy text & open GitHub** copies exactly the current preview before opening the repository's new-issue page, where you paste the text, enter its shown title and submit it yourself. The page may require sign-in. Clipboard or browser failures keep the preview available for another explicit attempt. After confirmed creation, this action opens the existing issue. **Post on Discord** first switches to its shorter preview; select it again to copy that exact text and open Discord, then paste it in **#bug-reports**. Switching destinations does not send anything.
+
+Screenshot sharing starts **Off**. **Review saved game frame** previews the frame saved with the report, never the desktop. Its saved age is shown; the capture may already have been up to 600 seconds old when saved. Missing or stale saved frames are unavailable. Review the visible pixels for player/profile names, join codes, secrets and personal paths; exclude any frame containing them. There is no automatic pixel redaction. Only after viewing the frozen frame can you select **Include reviewed frame**. That selection keeps those exact pixels and re-encodes them without source metadata as **reviewed-frame.png**. This submission route supports text only: open the issue in your browser and attach that reviewed file manually. A frame preparation failure offers an attachment-only retry; it does not create another issue.
+
+Use **Show reports in Finder** to find attachments. Prefer **reviewed-frame.png** for the selected screenshot. Review the text, screenshots and logs for personal details before posting. Include your Mac model, macOS and game versions, what you did, what you expected and what happened. Please do not attach game files.
 
 You can also open Discord or GitHub yourself:
 
@@ -198,11 +201,11 @@ Setup logs are in **~/Library/Logs/NFSMW-Setup/**. Use Setup's **Show Log** when
 
 ## FAQ: Why don't the triggers accelerate?
 
-The PS2 layout uses face buttons for gas/brake and triggers for gears. Choose **Controls > Button layout > Xbox** on an Xbox controller. On PlayStation, choose **Controls > Triggers > Pedals** for R2 gas and L2 brake/reverse.
+The PS2 layout uses face buttons for gas/brake and triggers for gears. Choose **Controls > Button layout > Xbox** on an Xbox controller. On PlayStation, bind Accelerate to R2 and Brake to L2 in the game’s **Options > Controls**.
 
 ## FAQ: Are remapped trigger pedals analog?
 
-Yes; remapped proportional triggers were already supported in 4.2. R2/L2 pressure is proportional from release to full travel, with the game's own small release/full-press clamp. On PlayStation, **Controls > Triggers > Pedals** sets R2 gas and L2 brake/reverse; binding Accelerate and Brake to R2/L2 in the game's **Options > Controls** works too. If they still feel like on/off buttons, report your controller model, USB/Bluetooth connection, layout and bindings.
+Yes; remapped proportional triggers were already supported in 4.2. R2/L2 pressure is proportional from release to full travel, with the game's own small release/full-press clamp. On PlayStation, bind Accelerate and Brake to R2/L2 in the game’s **Options > Controls**. If they still feel like on/off buttons, report your controller model, USB/Bluetooth connection, layout and bindings.
 
 ## FAQ: Why won't F10 open?
 
@@ -214,13 +217,13 @@ It uses the PC game's original colour treatment at full strength. Choose **Port 
 
 ## FAQ: Why are some Xbox 360 settings missing?
 
-They need files from your own Xbox 360 copy. A PC-only installation can still play, but cannot show every console effect. Setup accepts a complete Xbox 360 folder or an Xbox 360 .iso.
+They need files from your own Xbox 360 copy. A PC-only installation can still play, but cannot show every console effect. Setup accepts a complete Xbox 360 folder or an Xbox 360 .iso, from the USA or the European (PAL) retail disc.
 
 ## FAQ: Which PC folder does Setup need?
 
 Choose the installed folder containing **speed.exe**, GLOBAL, TRACKS, CARS, FRONTEND and SOUND, or a .zip of that folder. Choose the folder from one level up if the Choose button is grey.
 
-A PC installer or disc image is not an installed game folder. The executable must contain the PC game's version 1.3 code.
+A PC installer is not an installed game folder. Your game discs work too: choose **PC disc images** in Setup, then disc 1 (as an .iso, with the other discs beside it), the official 1.3 update and a speed.exe with the 1.3 code. The executable must contain the PC game's version 1.3 code.
 
 ## FAQ: Why does macOS block Setup?
 

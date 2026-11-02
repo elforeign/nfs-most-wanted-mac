@@ -2,6 +2,7 @@
 #include "funcs.h"
 #include "host.h"
 #include "onscreen_keyboard.h"
+#include "text_fit.h"
 #include <string.h>
 #include <math.h>
 
@@ -15,11 +16,12 @@ static uint64_t serial;
 static int last_pad, fe_port = -1, fe_depth;
 static char *note_text;
 static size_t note_capacity;
-static char note_original[256];
+static char note_original[512];   // a text row's whole buffer (text_fit.h TEXT_FIELD_MAX + 1 at most)
 static uint32_t physical[2], held[2];
 static int directions[2], present[2], xbox_pad[2], armed[2];
+static int clear_pending[2];
 static uint64_t seen_generation[2];
-static double repeat_at[2];
+static double repeat_at[2], delete_at[2];
 static int row, column, shifted, page;
 typedef struct { uint64_t generation; uint32_t target; int note, action; unsigned ch; } Event;
 static Event events[32];
@@ -44,7 +46,7 @@ int osk_visible(void) {
            present[s->owner] && (s->note || !portmenu_is_open());
 }
 static void utf8(char *out, size_t *n, unsigned ch) {
-    if (*n + 4 >= 512) return;
+    if (*n + 4 >= sizeof ((OskCapture *)0)->text) return;
     if (ch < 128) out[(*n)++] = (char)ch;
     else if (ch < 2048) { out[(*n)++] = (char)(0xC0 | ch >> 6); out[(*n)++] = (char)(0x80 | (ch & 63)); }
     else { out[(*n)++] = (char)(0xE0 | ch >> 12); out[(*n)++] = (char)(0x80 | ((ch >> 6) & 63)); out[(*n)++] = (char)(0x80 | (ch & 63)); }
@@ -114,12 +116,14 @@ void osk_pass(Cpu *c) {
             size_t n = strlen(note_text);
             if (e.action == OSK_TYPE && e.ch < 256 && note.allowed[e.ch] && n < note.limit) { note_text[n] = (char)e.ch; note_text[n + 1] = 0; }
             else if (e.action == OSK_DELETE && n) note_text[n - 1] = 0;
+            else if (e.action == OSK_CLEAR) note_text[0] = 0;
             else if (e.action == OSK_ACCEPT || e.action == OSK_CANCEL) osk_note_end(e.action == OSK_CANCEL);
             if (note.active) note_snapshot();
         } else {
             // Recheck the live target immediately before every call, including queued bursts.
             if (!M8(KM + 0x410) || M32(KM + 0x414) != e.target) { retire_game(); continue; }
-            unsigned ch = e.action == OSK_DELETE ? 8 : e.ch;
+            unsigned ch = e.action == OSK_DELETE || e.action == OSK_CLEAR ? 8 : e.ch;
+            if (e.action == OSK_CLEAR) { for (unsigned k = 0; k < 256 && M32(KM + 0x300); ++k) invoke(c, f_005A8700, KM, 1, &ch); game_snapshot(c); continue; }
             if (e.action == OSK_TYPE || e.action == OSK_DELETE) invoke(c, f_005A8700, KM, 1, &ch);
             else if (e.action == OSK_ACCEPT) invoke(c, f_00599100, e.target, 0, NULL);
             else if (e.action == OSK_CANCEL) invoke(c, f_005991B0, e.target, 0, NULL);
@@ -231,14 +235,20 @@ int osk_pad(int port, uint32_t buttons, int up, int down, int left, int right,
     if (changed && connected) { last_pad = port; prompts_input(1); }
     const OskCapture *s = osk_capture();
     int taking = s->active && prompts_last_input() == 1 && (s->note || !portmenu_is_open());
+    if (seen_generation[port] != s->generation) {
+        seen_generation[port] = s->generation; armed[port] = 0; clear_pending[port] = 0;
+        delete_at[port] = 0;
+    }
+    if (!taking || !connected || (buttons & (256 | OSK_MENU_SHORTCUT))) clear_pending[port] = 0;
+    if (!taking || !connected || port != s->owner) delete_at[port] = 0;
     if (taking) {
         held[port] = buttons | (dir ? 0x10000u : 0);
         // Let the primary pad's menu shortcut suspend either text adapter.
         if (port == 0 && port == s->owner && (buttons & OSK_MENU_SHORTCUT)) {
+            delete_at[port] = 0;
             directions[port] = dir;
             return 0;
         }
-        if (seen_generation[port] != s->generation) { seen_generation[port] = s->generation; armed[port] = 0; }
         if (!buttons && !dir) armed[port] = 1;
         if (port == s->owner && connected && armed[port]) {
             double now = host_ticks() / 1e9;
@@ -247,7 +257,13 @@ int osk_pad(int port, uint32_t buttons, int up, int down, int left, int right,
                 osk_navigation(dir == 3 ? -1 : dir == 4 ? 1 : 0, dir == 1 ? -1 : dir == 2 ? 1 : 0);
             }
             if (edge & 1) osk_choose();
-            if (edge & 2) osk_queue(s->generation, OSK_DELETE, 0);
+            for (int k = text_delete_repeat(&delete_at[port], (buttons & 2) != 0, now); k > 0; --k) osk_queue(s->generation, OSK_DELETE, 0);
+            // R3 alone clears on release; L3 joining at any point cancels the pending edit.
+            if ((edge & 512) && !(buttons & 256)) clear_pending[port] = 1;
+            if (!(buttons & 512) && clear_pending[port]) {
+                clear_pending[port] = 0;
+                osk_queue(s->generation, OSK_CLEAR, 0);
+            }
             if (edge & 4) osk_queue(s->generation, OSK_ACCEPT, 0);
             if (edge & 8) osk_queue(s->generation, OSK_CANCEL, 0);
             if (edge & 16) osk_toggle(0);

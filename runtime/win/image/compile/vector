@@ -1,0 +1,10 @@
+// SDK-free declarations for emitter COFF compile proof only. Never execute these.
+#pragma once
+#include <stddef.h>
+namespace std {
+template<class T> class vector {
+public:
+    const T *begin() const; const T *end() const;
+    const T &operator[](size_t) const; size_t size() const; bool empty() const;
+};
+}

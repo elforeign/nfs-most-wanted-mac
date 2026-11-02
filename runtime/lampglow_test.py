@@ -3,9 +3,11 @@
 Checks the actual shader, including the deliberately Off/empty-source failures:
 full red/blue burst > 0; no flare / zero alpha / zero burst / fully credited
 bloom = 0; normalized blur gain <= 1; old and current Off bloom inputs match.
+Pinned fragment proof: intact SHA-256 -> 1 pass; altered pin -> 1 assertion failure.
 Run with tools/.venv/bin/python -I runtime/lampglow_test.py.
 """
 import ast
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -30,8 +32,13 @@ def shader(text, name):
 
 
 current = shader((ROOT / 'runtime/render_post.m').read_text(), 'x360_src')
-old = shader(subprocess.check_output(['git', 'show', 'HEAD:runtime/render_post.m'], cwd=ROOT, text=True), 'x360_src')
-assert current == old, 'Off shader changed'
+# Pin the authored source fragment before generated, asset-dependent constants
+# are expanded. This baseline works in source archives and shallow checkouts.
+off_fragment = (ROOT / 'runtime/render_post.m').read_text().split(
+    'static const char *x360_src =', 1)[1].split(';\n', 1)[0]
+assert hashlib.sha256(off_fragment.encode()).hexdigest() == \
+    '28a9991888033be96741bd2f93fafdc983b87827cfe0b7d994b5b8b03b55a1bd', 'Off shader changed'
+old = current
 extra = shader((ROOT / 'runtime/lampglow_shader.h').read_text(), 'lampglow_src')
 # Scalar reference checks of the source/gain contract, independent of GPU access.
 def smooth(a, b, x):

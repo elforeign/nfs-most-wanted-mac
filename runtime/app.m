@@ -30,9 +30,22 @@ int app_bundled;
 extern char **environ;
 
 // BEGIN offline fullscreen policy: nativefs_test.py uses a fake window, without NSApp.
-int app_native_fullscreen(void) {
+int app_screen_is_builtin(void);   // app.m below; the offline test supplies a stub
+// 1 = Native Space, 0 = Borderless. "auto" is Native on the built-in display; unknown text is Borderless.
+int app_fullscreen_resolve(const char *mode, int builtin) {
+    if (!mode) return 0;
+    if (!strcasecmp(mode, "native")) return 1;
+    return !strcasecmp(mode, "auto") && builtin;
+}
+int app_fullscreen_is_auto(void) {
     const char *mode = getenv("NFS_FULLSCREEN_MODE");
-    return mode && !strcasecmp(mode, "native");
+    return mode && !strcasecmp(mode, "auto");
+}
+int app_native_fullscreen(void) {
+    static int builtin = -1;   // Auto is decided once, at launch, from the screen the window opens on
+    const char *mode = getenv("NFS_FULLSCREEN_MODE");
+    if (mode && !strcasecmp(mode, "auto") && builtin < 0) builtin = app_screen_is_builtin();
+    return app_fullscreen_resolve(mode, builtin > 0);
 }
 int app_request_fullscreen_space(NSWindow *window, int full) {
     window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -41,6 +54,10 @@ int app_request_fullscreen_space(NSWindow *window, int full) {
     return 1;
 }
 // END offline fullscreen policy
+int app_screen_is_builtin(void) {
+    NSNumber *n = NSScreen.mainScreen.deviceDescription[@"NSScreenNumber"];
+    return n && CGDisplayIsBuiltin((CGDirectDisplayID)n.unsignedIntValue);
+}
 
 // Capture the launch environment before settings_init/report_init export saved switches. Reusing those exports
 // would lock stale app.txt values in the replacement process. Preserve launch overrides and their original cwd.
@@ -492,6 +509,15 @@ void app_restart_game(int unused) {
 }
 - (void)changeGameFolder:(id)sender {
     (void)sender;
+    if (roots_exported()) {
+        gil_release();
+        NSAlert *a = [NSAlert new];
+        a.messageText = @"This app includes its game files";
+        a.informativeText = @"Choose a different install in Setup and export a new app to change these files.";
+        [a runModal];
+        gil_acquire();
+        return;
+    }
     gil_release();                       // a modal panel inside the game's message pump: let the game's threads run
     NSString *dir = ask_game_dir(NULL);
     if (dir) {
@@ -676,6 +702,19 @@ const char *app_start(int argc, char **argv) {
         pub_update_launch(&argc, &argv, userdata_dir());
         restart_capture(argv);  // update startup tokens have been consumed before a later settings restart
         profile_lock();
+        if (roots_exported()) {
+            const char *pc = roots_pc_choice(NULL, NULL);
+            char reason[1400];
+            if (!pc || check_game_dir(pc, reason, sizeof reason)) {
+                app_cocoa_init();
+                NSAlert *a = [NSAlert new];
+                a.messageText = @"The exported game files are missing or damaged";
+                a.informativeText = @"Re-export this app from Setup using your complete installation.";
+                [a runModal];
+                exit(1);
+            }
+            return strdup(pc);
+        }
         const char *arg = NULL;
         for (int i = 1; i < argc; ++i) if (strncmp(argv[i], "-psn_", 5)) { arg = argv[i]; break; }   // Finder's old -psn_ argument
         static char why[1400];
@@ -684,8 +723,7 @@ const char *app_start(int argc, char **argv) {
             return arg;
         }
         if (!app_bundled) { fprintf(stderr, "usage: boot <game folder>\n"); exit(1); }
-        const char *saved = arg ? arg : app_pref("game_dir");    // open NFSMW.app --args <folder> also sets it
-        if (!saved) saved = roots_get("pc_root");                // else the manifest Setup wrote (roots.h)
+        const char *saved = roots_pc_choice(arg, app_pref("game_dir"));
         int ask = saved == NULL || (NSEvent.modifierFlags & NSEventModifierFlagOption);
         if (saved && !ask && !check_game_dir(saved, why, sizeof why)) {
             if (arg) app_pref_set("game_dir", arg);

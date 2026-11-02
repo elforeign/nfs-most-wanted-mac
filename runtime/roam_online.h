@@ -15,13 +15,17 @@ typedef struct {
     int drawable;
 } RoamHudPlayer;
 int roam_game_hud(RoamHudPlayer *out, int capacity);
+/* Diagnostic router fixtures only; the beta endpoint lives in roam_shared_endpoint.h. */
 #define ROAM_CODE_PORT 47800
-#define ROAM_CODE_SIZE 11
-int roam_code_encode(uint32_t ip, uint16_t port, char out[ROAM_CODE_SIZE]);
-int roam_code_decode(const char *code, uint32_t *ip, uint16_t *port);
-uint32_t roam_code_room(uint32_t ip, uint16_t port);
+#define ROAM_CODE_SIZE 13
+#define ROAM_CODE_VERSION 1
+/* Room format version and nonzero room only; never an endpoint. */
+int roam_code_encode(uint32_t room, char out[ROAM_CODE_SIZE]);
+int roam_code_decode(const char *code, uint32_t *room);
+/* Session-local errors 3/4 are connection/unavailable; 5 matches ROAM_ERR_BANNED on the wire. */
+#define ROAM_ONLINE_BANNED 5
 /* Session requests are consumed on the game thread. 1 target, -1 leave, 0 unchanged. */
-void roam_online_host(const char *public_ip);
+void roam_online_create(void);
 void roam_online_join(const char *code);
 void roam_online_leave(void);
 int roam_online_target(char host[64], int *port, uint32_t *room);

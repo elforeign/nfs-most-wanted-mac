@@ -17,6 +17,8 @@ typedef struct Obj {
     uint32_t ms_type, ms_quality, samples;   // multisampled surfaces: D3DMULTISAMPLE_TYPE, quality, Metal sample count (0/1 = none)
     uint32_t surfaces[16 * 6];   // cached surface objects per level/face
     int dirty;
+    uint64_t buffer_generation;  // vertex/index contents: bumped on writable Lock and Unlock
+    uint8_t buffer_lock_write, pane_cached;
     uint8_t hd_swap, hd_tinted;  // an X360 HD texture (x360_textures.m); uploaded with the probe's signature (probe.m)
                                  // (hd_swap 2: an X360 arrest-scene character texture, its draws counted)
     // shaders / declarations
@@ -79,6 +81,7 @@ void render_set_gamma(const uint16_t ramp[768]);   // render_present.m: the game
 void render_stretch(uint32_t src, uint32_t src_rect, uint32_t dst, uint32_t dst_rect, uint32_t filter);
 void render_readback(uint32_t src, uint32_t dst);
 void render_release(Obj *o);
+void render_panes_changed(Obj *o);  // discard cached streams that depend on this buffer
 void render_targets_changed(void);
 void render_query_issue(Obj *q, uint32_t flags);     // occlusion queries: Issue(END 1 / BEGIN 2)
 int render_query_result(Obj *q, uint32_t *pixels);   // 1 when its frame has completed

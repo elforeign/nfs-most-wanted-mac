@@ -6,6 +6,7 @@
 // timeout, and a 1000-client relay tick timed without sockets. Exit 0 pass, 1 fail, 3 socket EPERM (SOCKET PENDING).
 // Recorded: see roam_test.py (normal and broken numbers).
 #include "roam_core.h"
+#include "roam_test_peer.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -105,7 +106,7 @@ static void relay_rx(RoamRelay *r, int fd, uint32_t now) {
 static void hello_all(RoamRelay *r, int rfd, Peer *p, int n, uint32_t *now) {
     for (int k = 0; k < 20; ++k) {
         int all = 1;
-        for (int i = 0; i < n; ++i) if (!p[i].c.welcomed) { uint8_t b[64]; psend(&p[i], b, roam_client_hello(&p[i].c, b)); all = 0; }
+        for (int i = 0; i < n; ++i) if (!p[i].c.welcomed) { uint8_t b[ROAM_MAX_DGRAM]; psend(&p[i], b, roam_client_hello(&p[i].c, b)); all = 0; }
         if (all) return;
         relay_rx(r, rfd, *now);
         for (int i = 0; i < n; ++i) prx(&p[i], *now);
@@ -116,7 +117,7 @@ static void hello_all(RoamRelay *r, int rfd, Peer *p, int n, uint32_t *now) {
 static void send_static(Peer *p, uint32_t now, float x, float y) {
     float pos[3] = {x, y, 5}, vel[3] = {0}, q[4] = {0, 0, 0, 1};
     RoamState s; tostate(&s, now, pos, vel, q);
-    uint8_t b[64]; psend(p, b, roam_client_state(&p->c, &s, b));
+    uint8_t b[ROAM_MAX_DGRAM]; psend(p, b, roam_client_state(&p->c, &s, b));
 }
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
@@ -181,10 +182,10 @@ static void interest_boundaries(int rfd,uint32_t *clock) {
     hello_all(r,rfd,peers,3,clock);
     for (int phase=0;phase<5;++phase) {
         if (phase==1) {
-            uint8_t b[64]; uint16_t pin=peers[2].c.id;
+            uint8_t b[ROAM_MAX_DGRAM]; uint16_t pin=peers[2].c.id;
             psend(&peers[0],b,roam_client_pins(&peers[0].c,&pin,1,b));
         }
-        if (phase==3) { uint8_t b[64]; psend(&peers[0],b,roam_client_pins(&peers[0].c,NULL,0,b)); }
+        if (phase==3) { uint8_t b[ROAM_MAX_DGRAM]; psend(&peers[0],b,roam_client_pins(&peers[0].c,NULL,0,b)); }
         uint32_t duration=phase==4?1100:600;
         for (uint32_t t0=*clock;*clock<t0+duration;*clock+=10) {
             if ((*clock-t0)%50==0) {
@@ -193,7 +194,7 @@ static void interest_boundaries(int rfd,uint32_t *clock) {
                     float x=phase==0?90:phase==1?110:phase==2?120:200;
                     if (phase==2) {
                         RoamState st={.t=*clock,.pos={120,0,5},.vel={-80,0,0},.q={0,0,0,32767},.flags=ROAM_FLAG_CAR};
-                        uint8_t b[64]; psend(&peers[1],b,roam_client_state(&peers[1].c,&st,b));
+                        uint8_t b[ROAM_MAX_DGRAM]; psend(&peers[1],b,roam_client_state(&peers[1].c,&st,b));
                     } else send_static(&peers[1],*clock,x,0);
                 } else {
                     RoamLook look={.rev=2,.car=123}; uint8_t b[256];
@@ -314,7 +315,7 @@ int main(int argc, char **argv) {
         float pos[3], vel[3], q[4];
         truth(now, pos, vel, q);
         RoamState s; tostate(&s, now + skew, pos, vel, q);
-        uint8_t b[64];
+        uint8_t b[ROAM_MAX_DGRAM];
         psend(&P[0], b, roam_client_state(&P[0].c, &s, b));
         send_static(&P[1], now, 100, 0);
         relay_rx(r, rfd, now);
@@ -350,7 +351,7 @@ int main(int argc, char **argv) {
     int badfd=dup(rfd); r=roam_relay_new(badfd,32,2);
     CHECK(r && (fcntl(badfd,F_GETFL)&O_NONBLOCK),"relay socket is blocking");
     close(badfd);
-    RoamClient error_client; roam_client_init(&error_client,1,"error"); uint8_t eb[64];
+    RoamClient error_client; roam_client_init(&error_client,1,"error"); uint8_t eb[ROAM_MAX_DGRAM];
     roam_relay_input(r,eb,roam_client_hello(&error_client,eb),&ra,now);
     RoamRelayStats errors=roam_relay_stats(r);
     CHECK(errors.tx_attempts==1 && errors.tx_errors==1 && !errors.tx && !errors.tx_bytes,"send error counted as success");
@@ -358,12 +359,12 @@ int main(int argc, char **argv) {
     close(rfd);
 
     // ---- 1000 clients, no sockets: tick cost and bytes per client
-    r = roam_relay_new(-1, ROAM_NEAR_DEFAULT, 1024);
+    r = roam_test_relay(-1, ROAM_NEAR_DEFAULT, 1024);
     for (int i = 0; i < 1000; ++i) {
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)(20000 + i)), .sin_addr.s_addr = htonl(0x0A000000u + (uint32_t)i)};
-        RoamClient c; roam_client_init(&c, 1, "x"); c.id = (uint16_t)(i + 1);
+        RoamClient c; roam_client_init(&c, 1, "x");
         uint8_t b[256];
-        roam_relay_input(r, b, roam_client_hello(&c, b), &a, 0);
+        CHECK(roam_test_join(r, &c, &a, 0), "scale admission");
         // half spread over 4 km x 4 km, half in one 300 m crowd (the worst case for interest)
         float pos[3] = {i < 500 ? (float)(xr() % 4000) : 2000 + (float)(xr() % 300), i < 500 ? (float)(xr() % 4000) : 2000 + (float)(xr() % 300), 0};
         float vel[3] = {0}, q[4] = {0, 0, 0, 1};

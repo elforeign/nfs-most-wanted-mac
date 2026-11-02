@@ -1,93 +1,20 @@
-"""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+"""Depth-aware Physical particle shader and pass regression proof.
+
+Production: 0/90 fade failures; disabled-fade control: 60/90. The current
+selector is 0/8; main's Retail-fade behavior is reproduced by a 5/8 mutant.
+Retail source digest is pinned at e09a0440 with the optional coverage epilogue
+normalized. The actual draw gate submits 1,000 Off draws with zero variant
+lookups/snapshots. Six particle variants and four depth/copy shaders compile.
+Native scene-light/phase tests live in particles_physical_test.py.
+
+--validate checks identical raw command inputs and fixed road/car contact ROIs;
+it requires >=1% fewer >8/255 smoke-gradient jumps in BOTH populated ROIs.
+Later shots without the target contact can fail that scene-specific metric;
+never interpret their result as a moving-camera acceptance.
+--cost consumes held Off/On GPU pass sums; exclude proof-image replay runs.
 """
 import ctypes
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -276,27 +203,29 @@ int main(void) {
             assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
             print(label, result.stdout.strip())
         selector = function(renderer, 'soft_smoke_on')
-        mutant = selector.replace('!e || strcmp(e, "off")', 'e && !strcmp(e, "on")')
+        mutant = selector.replace('particles_physical_enabled() && ', '')
         assert mutant != selector
-        for label, body, expected in (('production', selector, 0), ('Off-default mutant', mutant, 5)):
+        for label, body, expected in (('production', selector, 0), ('Retail fade mutant', mutant, 5)):
             (tmp / 'default.c').write_text(
                 '#include <stdlib.h>\n#include <string.h>\n'
-                'static int soft_smoke=-1, diag_on;\n'
+                'static int diag_on;\n'
                 'static int postfx_look_variant(const char *v) {(void)v; return 0;}\n'
+                'int particles_physical_enabled(void) {const char *e=getenv("NFS_PARTICLES"); return e && !strcmp(e,"physical");}\n'
                 + body + '\nint main(void) {return soft_smoke_on();}\n')
             run(['clang', '-Wall', '-Wextra', '-Werror', tmp / 'default.c', '-o', tmp / 'default'])
             failures = 0
-            for value, wanted in ((None, 1), ('', 1), ('on', 1), ('off', 0), ('OFF', 1), ('garbage', 1), ('0', 1)):
-                case_env = dict(env)
-                if value is not None:
-                    case_env['NFS_SOFT_SMOKE'] = value
+            cases = ((None,None,0), ('retail',None,0), ('pc',None,0), ('x360',None,0),
+                     ('garbage',None,0), ('physical',None,1), ('physical','off',0), ('physical','on',1))
+            for mode, fade, wanted in cases:
+                case_env = {k:v for k,v in env.items() if k not in ('NFS_PARTICLES','NFS_SOFT_SMOKE')}
+                if mode is not None: case_env['NFS_PARTICLES'] = mode
+                if fade is not None: case_env['NFS_SOFT_SMOKE'] = fade
                 result = subprocess.run([tmp / 'default'], env=case_env, capture_output=True, text=True)
                 assert result.returncode in (0, 1) and not result.stderr, result.stderr
-                if value is None:
-                    default = result.returncode
                 failures += result.returncode != wanted
-            assert failures == expected and default == (expected == 0), (label, failures, default)
-            print(f'{label} selector: {failures}/7 failures; unset={default}')
+            assert failures == expected, (label, failures)
+            print(f'{label} selector: {failures}/{len(cases)} failures')
+
 
 
 def main():
@@ -322,7 +251,8 @@ def main():
         raise SystemExit(3)
     materials = (RT / 'materials.m').read_text()
     renderer = (RT / 'render.m').read_text()
-    original = run(['git', 'show', 'HEAD:runtime/materials.m'], cwd=ROOT)
+    # Normalized Retail source pinned at e09a0440; no repository history needed.
+    retail_digest = '24074aa892329eb1c1e3cb77ed33e9fb47b7883dd7b7fabf873e141666048c3c'
     # Alpha-to-coverage adds only a shared optional epilogue. Preserve the full
     # source-byte oracle for the particle body and its original discard branch.
     def particle_body(text):
@@ -332,9 +262,9 @@ def main():
         return value.replace('uint alpha_to_coverage, pad1;', 'uint pad0, pad1;')
     assert cstring(materials, 'particles_msl').count('SM_ALPHA_COVERAGE_MSL\n') == 1
     assert cstring(materials, 'particles_msl').count('SM_ALPHA_COVERAGE_APPLY("o.c0.w")\n') == 1
-    assert particle_body(materials) == particle_body(original), 'Off particle body changed'
+    assert hashlib.sha256(particle_body(materials).encode()).hexdigest() == retail_digest, 'Off particle body changed'
     unexpected = materials.replace('o.c0.w, aux.alpha_ref', 'o.c0.x, aux.alpha_ref')
-    assert particle_body(unexpected) != particle_body(original), 'particle body oracle lost its negative control'
+    assert hashlib.sha256(particle_body(unexpected).encode()).hexdigest() != retail_digest, 'particle body oracle lost its negative control'
     assert cstring(materials, 'particles_msl').find('smoke_fade') == -1
     look = (RT / 'settings.c').read_text().split('kLook[] = {', 1)[1].split('};', 1)[0]
     assert '"graphics.soft_smoke"' not in look
@@ -349,6 +279,10 @@ def main():
         src += function(materials, 'edit') + '\n'
         src += 'char *mat_replace(const uint32_t *t,uint32_t n,const SmResult *r,int *id) { *id=1; return strdup(particles_msl); }\n'
         src += 'int mat_is_particle(int id) { return id==1; }\n'
+        physical = (RT / 'particles_physical.c').read_text()
+        src += cstring(physical, 'particles_phase_msl') + '\n'
+        src += function(physical, 'particle_edit') + '\n'
+        src += function(physical, 'particles_physical_shader') + '\n'
         src += function(materials, 'mat_soft_smoke_shader') + '\n'
         src += function(materials, 'mat_soft_smoke_resolved_shader') + '\n'
         src += function(materials, 'mat_soft_smoke_late_shader') + '\n'
@@ -360,7 +294,7 @@ def main():
         resolved_shader = run([tmp / 'dump', 'resolved'])
         late_shader=run([tmp/'dump','late'])
         # Actual scalar MSL functions compiled as C, including the near-camera rule.
-        math = shader[shader.index('inline float smoke_view_z'):shader.index('fragment Out sm_main')]
+        math = shader[shader.index('inline float smoke_view_z'):shader.index('struct ParticleLamps')]
         math = math.replace('inline float', 'float')
         prefix = '#include <math.h>\nstatic float saturate(float x) { return fminf(1,fmaxf(0,x)); }\n'
         for broken in (False, True):

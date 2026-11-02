@@ -23,6 +23,9 @@
 
 #ifdef HEAP_TEST
 extern uint8_t *G;
+extern void *heap_test_memset(void *dst, int value, size_t n);
+#undef memset
+#define memset heap_test_memset
 #else
 #include "host.h"
 #endif
@@ -279,6 +282,7 @@ uint32_t heap_realloc(Heap *h, uint32_t a, uint32_t n, int in_place_only) {
             r = a; goto out;
         }
     } else if (n > SMALL_MAX || in_place_only) {
+        if (n > h->npages * PAGE) goto out;                  // reject oversized requests before page rounding can wrap
         uint32_t np = (n + PAGE - 1) / PAGE, p = (a - h->base) / PAGE;
         if (np <= s->npages) {                               // shrink: give the tail pages back
             if (np < s->npages && np) { pages_free(h, p + np, s->npages - np); s->npages = np; }

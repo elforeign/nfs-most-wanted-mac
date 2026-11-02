@@ -12,7 +12,7 @@
 #define THREADS_C "threads.c"
 #endif
 #include THREADS_C
-uint8_t *G; int diag_on = 0; int boot_trace; uint32_t last_error; uint64_t diag_idle_ns[IDLE_N]; volatile uint64_t perf_nframes;
+uint8_t *G; int diag_on = 0; int boot_trace; __thread uint32_t last_error; uint64_t diag_idle_ns[IDLE_N]; volatile uint64_t perf_nframes;
 uint64_t host_ticks(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 uint64_t host_filetime(void) { return 0; }
 void diag_event(const char *f, ...) { (void)f; }

@@ -14,9 +14,6 @@
 #include "host.h"
 #include <math.h>
 #include <stdarg.h>
-#define PEDALS_NO_TRACE 1
-#include "pedals.c"
-void settings_add(Setting *s) { (void)s; }
 typedef struct { float values[10]; } GCDualSenseAdaptiveTriggerPositionalResistiveStrengths;
 
 static int checks, failures, fake_writes, real_writes, real_opens, discovery_calls, rejected_writes;
@@ -136,6 +133,10 @@ static uint32_t rec(int a,int slot) { return 0x91F418u+0x34u*(uint32_t)a+4+12u*(
 static uint32_t joy(void) { return M32(0x91F150); }
 static char *joy_name(uint32_t dev) { return (char *)G+dev+0x114; }
 static int name_ps(const char *name) { return !strcmp(name,"Controller (DualSense)"); }
+int padbind_input_set(void) { return PADBIND_DEFAULT; }
+int padbind_effective_binding(int set,int a,uint32_t out[6]) {
+    (void)set; memcpy(out,G+rec(a,2),24); return 1;
+}
 #include "padfx_roles.inc"
 static void bind(int a,int type,int obj) { uint32_t r=rec(a,2); M32(r)=type; M32(r+8)=obj; }
 static void clear_bindings(void) { memset(G+0x91F418,0,76*0x34); }
@@ -205,9 +206,9 @@ int main(int argc,char **argv) { @autoreleasepool {
     // Bindings and half-travel detent remain exact, including when loading is enabled.
     bind(A_SHIFTDOWN,T_AXIS_HI,2); bind(A_SHIFTUP,T_ROT_HI,2);
     CHECK(padbind_trigger_role(0)==PADBIND_ROLE_SHIFT && padbind_trigger_role(1)==PADBIND_ROLE_SHIFT);
-    s_pedals.value=1;
+    bind(A_GAS,T_ROT_HI,2); bind(A_BRAKE,T_AXIS_HI,2);
     CHECK(padbind_trigger_role(0)==PADBIND_ROLE_BRAKE && padbind_trigger_role(1)==PADBIND_ROLE_GAS);
-    s_pedals.value=0;
+    bind(A_GAS,0,0); bind(A_BRAKE,0,0);
     CHECK(padbind_trigger_role(0)==PADBIND_ROLE_SHIFT && padbind_trigger_role(1)==PADBIND_ROLE_SHIFT);
     trig_sw=light_sw=1; player_sw=broken==4 ? 0 : 1; road_sw=1;
     active(a,b); live(a,b);

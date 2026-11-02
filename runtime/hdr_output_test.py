@@ -188,6 +188,7 @@ def main():
               'static Map legacy_blit_pipelines;\n' +
               legacy_names(LEGACY_BLIT + LEGACY_GAMMA + LEGACY_COPY + LEGACY_QUAD))
     env = dict(os.environ)
+    env['NFS_UPSCALE'] = 'off'
     env.pop('NFS_HDR_OUTPUT', None)
     env.pop('NFS_TEST_GAMMA', None)
     env.pop('NFS_PADS', None)
@@ -209,7 +210,7 @@ def main():
         (scratch / 'quad.inc').write_text(maps + '\nstatic Map blit_pipelines;\n' + blit + quad)
         (scratch / 'routing.inc').write_text(
             section(render, 'static MTLTextureDescriptor *texture_descriptor(', 'RenderTex *gpu_tex(') +
-            section(render, 'void render_float_scene_begin(void) {', '// Only actual pre-post screen-copy destinations'))
+            section(render, 'static int upscale_copy_active(void)', '// Only actual pre-post screen-copy destinations'))
         (scratch / 'guard.inc').write_text(
             section(guard, 'enum { HC_FAMILIES=', 'static const char *hc_names') +
             section(guard, 'static NSString *hc_msl(', 'int hdrclip_test(') +
@@ -221,6 +222,7 @@ def main():
         exe = scratch / 'test'
         build = ['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                  '-Wno-unused-variable', '-fobjc-arc', '-I', scratch, '-I', ROOT, scratch / 'test.m',
+                 ROOT / 'render_upscale_route.m', ROOT / 'render_metalfx_spatial.m', '-weak_framework', 'MetalFX',
                  '-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal', '-o', exe]
         checked(build)
         checked([exe, '--cpu'], env=env)

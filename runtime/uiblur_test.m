@@ -16,11 +16,42 @@ static uint32_t hd_loaded, hd_bytes, hd_tone_loaded, hd_later_applied_mask, hd_l
 enum { HD_KEEP = 2 };
 typedef struct { uint32_t hash; const char *path; int state; uint32_t ww, hh, mips, fmt; } HdTex;
 static HdTex hd_tone[1];
-typedef struct { uint32_t guest, w, h, levels, fmt, pitch[16], mem[16]; } Uploaded;
+typedef struct { uint32_t guest, w, h, levels, fmt, pitch[16], mem[96]; int kind, dirty, refs; uint32_t parent; void *gpu; uint32_t d, usage, samples; uint8_t hd_swap, hd_tinted; } Uploaded;
 static Uploaded upload;
+typedef Uploaded Obj;
+enum { K_TEXTURE = 3 };
+static Obj *obj(uint32_t guest) { return guest == upload.guest ? &upload : NULL; }
+static uint32_t mipdim(uint32_t v, uint32_t l) { return (v >> l) ? v >> l : 1; }
 
-static uint32_t gmalloc(uint32_t n) { uint32_t p = heap; heap += (n + 15) & ~15u; assert(heap < (64u << 20)); return p; }
-static void gfree(uint32_t p) { (void)p; }
+#ifdef HD_MIP_TAIL_TEST
+static unsigned live_allocs;
+static int fail_after = -1;
+static struct LiveAlloc { uint32_t guest, size; struct LiveAlloc *next; } *live_head;
+#endif
+static uint32_t gmalloc(uint32_t n) {
+#ifdef HD_MIP_TAIL_TEST
+    if (fail_after == 0) return 0;
+    if (fail_after > 0) --fail_after;
+    ++live_allocs;
+#endif
+    uint32_t p = heap; heap += (n + 15) & ~15u; assert(heap < (64u << 20));
+#ifdef HD_MIP_TAIL_TEST
+    struct LiveAlloc *entry = malloc(sizeof *entry); assert(entry);
+    *entry = (struct LiveAlloc){p, n, live_head}; live_head = entry;
+#endif
+    return p; }
+static void gfree(uint32_t p) {
+#ifdef HD_MIP_TAIL_TEST
+    if (p) {
+        struct LiveAlloc **link = &live_head;
+        while (*link && (*link)->guest != p) link = &(*link)->next;
+        assert(*link && live_allocs); struct LiveAlloc *entry = *link;
+        *link = entry->next; memset(G + p, 0xDD, entry->size); free(entry); --live_allocs;
+    }
+#else
+    (void)p;
+#endif
+}
 static uint32_t hd_read(const char *path, uint32_t *size) {
     FILE *f = fopen(path, "rb"); assert(f);
     fseek(f, 0, SEEK_END); *size = (uint32_t)ftell(f); rewind(f);
@@ -43,7 +74,7 @@ void f_00652AD0(Cpu *c) { c->eax = gmalloc(arg(c, 0)); c->esp += 4; }
 void f_00652B10(Cpu *c) { c->esp += 4; }
 void dispatch(Cpu *c, uint32_t target) {
     if (target == 1) { // IDirect3DDevice9::CreateTexture
-        upload = (Uploaded){.guest = 0x32000, .w = arg(c, 1), .h = arg(c, 2), .levels = arg(c, 3), .fmt = arg(c, 5)};
+        upload = (Uploaded){.refs = 1, .kind = K_TEXTURE, .guest = 0x32000, .w = arg(c, 1), .h = arg(c, 2), .levels = arg(c, 3), .fmt = arg(c, 5)};
         assert(upload.levels && upload.levels <= 16);
         M32(upload.guest) = 0x33000;
         M32(arg(c, 7)) = upload.guest;
@@ -118,6 +149,7 @@ static int draw_crop(const char *vertices, const char *out) {
     free(pixels); free(v); return 0;
 }
 
+#ifndef HD_MIP_TAIL_TEST
 int main(int argc, char **argv) { @autoreleasepool {
     assert(argc == 7); // PC fixture, DDS, vertices, output crop, pc|fixed|broken, quality drop
     G = calloc(1, 64u << 20); assert(G);
@@ -143,3 +175,5 @@ int main(int argc, char **argv) { @autoreleasepool {
     int rc = !strcmp(argv[4], "-") ? 0 : draw_crop(argv[3], argv[4]);
     free(G); return rc;
 } }
+
+#endif

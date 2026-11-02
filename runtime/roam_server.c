@@ -21,6 +21,7 @@ static void *serve(void *arg) {
     return NULL;
 }
 RoamServer *roam_server_start(uint32_t ip, uint16_t port) {
+    if (!roam_auth_no_dumps()) return NULL;
     RoamServer *s = calloc(1, sizeof *s); if (!s) return NULL;
     atomic_init(&s->stop, 0);
     s->fd = socket(AF_INET, SOCK_DGRAM, 0); if (s->fd < 0) { free(s); return NULL; }
@@ -52,9 +53,17 @@ int roam_server_probe(uint32_t ip, uint16_t port, const atomic_int *stop) {
     if (send(fd, b, (size_t)n, 0) == n) {
         for (int i = 0; i < 16 && !atomic_load(stop) && !c.welcomed; ++i) {
             struct pollfd p = {.fd = fd, .events = POLLIN};
-            if (poll(&p, 1, 50) <= 0) continue;
+            if (poll(&p, 1, 50) <= 0) {
+                if (i % 4 == 3) { n = roam_client_hello(&c, b); (void)send(fd, b, (size_t)n, 0); }
+                continue;
+            }
             int got = (int)recv(fd, b, sizeof b, 0);
-            if (got > 0) roam_client_input(&c, b, got, 0);
+            if (got > 0) {
+                roam_client_input(&c, b, got, 0);
+                if (!c.welcomed && c.has_cookie) {
+                    n = roam_client_hello(&c, b); (void)send(fd, b, (size_t)n, 0);
+                }
+            }
         }
     }
     n = roam_client_bye(&c, b); send(fd, b, (size_t)n, 0); close(fd); return c.welcomed;

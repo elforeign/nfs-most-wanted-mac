@@ -19,7 +19,7 @@ uint8_t *G;
 const char *game_dir;
 int diag_on=1;
 const char *diag_dir="/tmp";
-uint32_t last_error;
+__thread uint32_t last_error;
 static unsigned checks, failures, allocations;
 static _Thread_local int test_gil=1;
 static double test_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec*1e3+t.tv_nsec/1e6; }

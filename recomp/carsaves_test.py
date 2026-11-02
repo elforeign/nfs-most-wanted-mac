@@ -15,6 +15,9 @@ dependency publication. Saves adding no dependencies succeed with backups
 unavailable, including capacity-fallback MW serialization.
 New MW profile/create/autosave: good 53/53, zero private lookups; restoring
 unconditional private save validation fails 9/53 and denies MW autosaves.
+Traffic-only MW profile/create/autosave: 53/53, zero private lookups; restoring
+the total-type-count guard fails 9/53 with three private lookups.
+Traffic-only retail CRC: 21/21; accommodating the pilot type count fails 4/21.
 WO3 production serializer/file/completion/load: 23/23; omitted metadata staging
 and omitted own-slot dependency mutants each fail 4/23. Swap-only saves are
 marked while retail payload bytes [16:] remain identical.
@@ -86,6 +89,11 @@ static int denied_linkat(int a,const char *b,int c,const char *d,int flags) {
 
 PROOF = r'''
 #include <CommonCrypto/CommonDigest.h>
+#include "underglow.h"
+void underglow_profile_default(uint32_t p) { }
+void underglow_profile_load(uint32_t p,uint32_t b,uint32_t n) { }
+void underglow_save_begin(void) { }
+void underglow_profile_save(uint32_t p,uint32_t b,uint32_t n) { }
 static unsigned dialogs, retail_hashes;
 #define SAVE_SIZE 0xF848u
 static void digest(uint32_t buffer) {
@@ -204,11 +212,13 @@ int main(int argc,char **argv) {
         CHECK(WIFEXITED(status) && WEXITSTATUS(status)==90);
     }
     configured=1; enabled=0; nadditions=0;
+    if(getenv("SHIP_RETAIL_CRC_PILOT")) traffic_active=enabled=1;
     Cpu c={0}; c.esp=0x800000;
     uint32_t fe=gmalloc(0x300),self=gmalloc(0xA000),second=gmalloc(0xA000),buf=gmalloc(SAVE_SIZE+64),out=gmalloc(SAVE_SIZE+64);
     M32(FEDB)=fe; M32(fe+8)=0x10203040; M32(fe+16)=self; M32(fe+20)=second;
     uint32_t db=self+0x414; originals(db);
     if(getenv("SHIP_NEW_PROFILE_ONLY")) {
+        if(getenv("SHIP_NEW_PROFILE_PILOT")) { traffic_active=enabled=1; CHECK(car85_count()==161); CHECK(car85_player_count()==0); }
         unsigned start=checks,failed=failures,total_private_lookups=0;
         unsigned char expected[SAVE_SIZE+64],profile_before[0xA000];
         strcpy((char *)G+self,"TEST");
@@ -633,7 +643,7 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
         pointer=json.loads((stale/'current.json').read_bytes())
         pack=stale/pointer['generation']/'additions/240SX/GEOMETRY.BIN'
         pack.write_bytes(pack.read_bytes()+b'stale')
-        for variant in ("good","activation_off","activation_ids","activation_capacity","activation_dependent_capacity","activation_backup","activation_hardlink","activation_repeat_backup","activation_overwrite","activation_zero_crc","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save"):
+        for variant in ("good","activation_off","activation_ids","activation_capacity","activation_dependent_capacity","activation_backup","activation_hardlink","activation_repeat_backup","activation_overwrite","activation_zero_crc","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save","pilot_mw_save","pilot_crc"):
             mutant=variant!="good"
             actual=source
             if variant=="skip_admission":
@@ -649,7 +659,13 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
                 actual=actual.replace('if (!reason) reason = private_cars_metadata_stage(G + buffer, size, used);','/* deliberately omit metadata at the real serializer */')
                 assert actual!=source
             if variant=='unguarded_mw_save':
-                actual=actual.replace('if (private_cars_count() || car85_count() > 84) {','if (1) { /* restore the broken unconditional MW validation */')
+                actual=actual.replace('if (private_cars_count() || car85_player_count()) {','if (1) { /* restore the broken unconditional MW validation */')
+                assert actual!=source
+            if variant=='pilot_mw_save':
+                actual=actual.replace('if (private_cars_count() || car85_player_count()) {','if (private_cars_count() || car85_count() > 84) {')
+                assert actual!=source
+            if variant=='pilot_crc':
+                actual=actual.replace('int private_crc = private_cars_count() != 0;', 'int private_crc = private_cars_count() != 0 || car85_count() > 84;')
                 assert actual!=source
             if variant=='activation_zero_crc':
                 actual=actual.replace('int private_crc = private_cars_count() != 0;','int private_crc = private_cars_generation()[0] != \'\\0\';')
@@ -682,10 +698,21 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
             (root/'car85.c').write_text(car_source)
             (root/'test.c').write_text(actual)
             exe=root/variant
-            build=subprocess.run(['clang','-O1','-g','-fsanitize=address',
+            build=subprocess.run(['clang',str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address',
                 '-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                 str(root/'test.c'),str(root/'files.c'),'-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3000:]
+            if variant in ('good','pilot_crc'):
+                case=subprocess.run([str(exe),str(catalog_root)],env=dict(env,SHIP_RETAIL_CRC_ONLY='1',SHIP_RETAIL_CRC_PILOT='1'),capture_output=True,text=True)
+                print('pilot-retail-crc',variant,case.stdout.strip())
+                assert case.returncode==int(mutant),case.stderr[-2200:]
+                if mutant: continue
+            if variant in ('good','pilot_mw_save'):
+                user=root/('pilot-new-profile-'+variant); user.mkdir()
+                case=subprocess.run([str(exe),str(catalog_root)],env=dict(env,BOOT_USERDATA=str(user),SHIP_NEW_PROFILE_ONLY='1',SHIP_NEW_PROFILE_PILOT='1'),capture_output=True,text=True)
+                print('pilot-new-profile',variant,case.stdout.strip())
+                assert case.returncode==int(mutant),case.stderr[-2200:]
+                if mutant: continue
             if variant=='good' or variant.startswith('activation_'):
                 cases=[(0,empty_root),(1,sparse_root),(2,catalog_root)] if variant=='good' else [(0,empty_root)] if variant=='activation_zero_crc' else [(1,sparse_root)] if variant=='activation_ids' else [(2,catalog_root)]
                 for number,path in cases:

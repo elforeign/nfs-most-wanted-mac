@@ -33,6 +33,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hdr_output.h"
+#include "render_upscale_route.h"
+#include "rt_native.h"
+// The HDR fixture uses direct buffers; spatial recording has a separate fixture.
+void rt_native_encode(id<MTLCommandBuffer> b,RTNativeEncode encode,const void *p,size_t n,NSArray *r) {encode(b,p,n,r);}
 
 static id<MTLDevice> mtl;
 static unsigned pipeline_edr_builds;
@@ -87,19 +91,25 @@ static float gamma_lut[768];
 static int x_edr_processing;
 static float render_hdr_composition_headroom(void);
 static void ensure_cmd(void) {}
+static int upscale_copy_active(void);
 static int gamma_active, present_graded;
 #include "presenter.inc"
 #include "probe.inc"
 #include "quad.inc"
 #include "legacy.inc"
 typedef struct { id<MTLTexture> tex,ms; int stale; } RenderTex;
-static RenderTex bb_rt,fs_world_rt,fs_display_rt,fs_composite_rt;
+static RenderTex bb_rt,ad_rt,fs_native_depth,fs_world_rt,fs_display_rt,fs_composite_rt;
+static id<MTLTexture> autodepth_tex;
+static NFSUpscaleRoute *fs_upscale;
+static NSMutableSet<NSNumber *> *fs_screen_copies;
+static void upscale_finish(void) { abort(); } // Default-Off HDR isolation fixture.
+static void drop_ms_texture(RenderTex *r) {r->ms=nil;r->stale=0;}
 static int fs_active,fs_composing,fs_hud,fs_toned;
 static float fs_headroom=1;
 static uint64_t frame_serial=1,fs_serial;
 static void end_pass(void) {}
 static int pass_dirty;
-static struct {uint32_t backbuffer;} dev={1};
+static struct {uint32_t backbuffer,rt[4],ds,autodepth;} dev={.backbuffer=1};
 static int postfx_look_variant(const char *name){(void)name;return 0;}
 static id<MTLTexture> new_ms_texture(MTLPixelFormat pf,NSUInteger w,NSUInteger h,uint32_t samples) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];

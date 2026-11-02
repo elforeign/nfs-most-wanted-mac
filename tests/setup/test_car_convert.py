@@ -252,7 +252,8 @@ class CarConversion(unittest.TestCase):
         (self.shared / 'GLOBALB.LZC').write_bytes(pack(0, b''))
         (self.shared / 'attributes.bin').write_bytes(attributes())
         material = bytearray(168)
-        struct.pack_into('<I', material, 12, nh('HOSES'))
+        struct.pack_into('<II', material, 8, 3, nh('HOSES'))
+        material[20:26] = b'HOSES\0'
         (self.root / 'mw/GLOBAL/GLOBALA.BUN').write_bytes(pack(0x135200, material))
 
     def tearDown(self):
@@ -481,7 +482,7 @@ class CarConversion(unittest.TestCase):
 
     def test_material_record_integrity(self):
         row = bytearray(236)
-        struct.pack_into('<I', row, 12, nh('DAMAGE'))
+        struct.pack_into('<II', row, 8, 3, nh('DAMAGE'))
         row[20:27] = b'DAMAGE\0'
         source = bytearray((self.car / 'GEOMETRY.BIN').read_bytes())
         for cid, off, _ in cc.walk(source):
@@ -879,7 +880,10 @@ class InstalledCarParity(unittest.TestCase):
                     with mock.patch.dict(os.environ, {'NFS_GAME': str(mw_root), 'NFS_CARBON_LAMPGLASS': 'off'}):
                         baseline = names.convert(car, donor, work / 'baseline', revision=2)
                     self.assertFalse(baseline.get('missing_stock'), baseline)
-                    result = cc.convert(car, donor, source_root / 'GLOBAL', work / 'public')
+                    # Pin the pre-policy PC writer behavior separately from the
+                    # common default lamp policy's standalone MW-derived rows.
+                    result = cc.convert(car, donor, source_root / 'GLOBAL', work / 'public',
+                                        lighting={'lamps': False})
                 assert_written_hashes(self, work / 'public', result['outputs'])
                 classifications = {}
                 for name in result['outputs']:

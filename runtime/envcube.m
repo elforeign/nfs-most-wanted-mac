@@ -200,6 +200,14 @@ static void envcube_configure(void) {
 static uint32_t envcube_creation_levels(uint32_t edge, uint32_t levels, uint32_t usage, uint32_t fmt) {
     return envcube_sharp && edge == 1024 && usage == 1 && fmt == 21 ? envcube_level_count(edge) : levels;
 }
+static uint32_t envcube_creation_edge(uint32_t edge, uint32_t usage, uint32_t fmt, uint32_t pool, uint32_t caller) {
+    // The native environment allocator also uses the capture-size constant for
+    // its managed, CPU-filled fallback. Its loader copies native 256-square
+    // faces flat, ignoring LockRect pitch. Identify that creation path, leaving
+    // unrelated managed cubes (which may really contain 1024-square data) alone.
+    return envcube_sharp && caller == 0x006BD529u && edge == 1024 &&
+        usage == 0 && fmt == 21 && pool == 1 ? 256 : edge;
+}
 static void envcube_created(Obj *t, uint32_t caller, uint32_t output) {
     if (diag_on) diag_event("envcube: create cube=%08X caller=%08X output=%08X edge=%u levels=%u usage=%X fmt=%u", t->guest, caller, output, t->w, t->levels, t->usage, t->fmt);
     if ((!envcube_sharp && !diag_on) || t->usage != 1 || t->fmt != 21 || t->w != M32(0x008F8FF4u)) return;

@@ -11,6 +11,8 @@
 
 #include "d3d9_internal.h"
 #include "envcube.m"
+#include "realworld_materials.h"
+#include "materials.h"
 
 void *user32_metal_layer(uint32_t hwnd);
 void user32_client_size(uint32_t hwnd, int *cw, int *ch);
@@ -158,7 +160,8 @@ static uint32_t obj_addref(Obj *o) { o = ref_owner(o); return o ? (uint32_t)++o-
 static uint32_t obj_release(Obj *o) {
     o = ref_owner(o);
     if (!o) return 0;
-    if (--o->refs == 0 && o != dev.self && (o->kind == K_TEXTURE || o->kind == K_CUBE || o->kind == K_VOLUME || o->kind == K_VB ||
+    if (--o->refs == 0 && o == dev.self) mat_bone_reset();
+    if (o->refs == 0 && o != dev.self && (o->kind == K_TEXTURE || o->kind == K_CUBE || o->kind == K_VOLUME || o->kind == K_VB ||
                                             o->kind == K_IB || (o->kind == K_SURFACE && !o->parent))) {
         if (o->guest != dev.backbuffer && o->guest != dev.autodepth) {
             if (diag_on) diag_event("d3d free %08X kind %d fmt %X %ux%u", o->guest, o->kind, o->fmt, o->w, o->h);
@@ -177,6 +180,9 @@ static void dev_bind(uint32_t *slot, uint32_t g) {
     *slot = g;
     if (old) obj_release(obj(old));
 }
+// The same counts for host code holding a guest resource (d3dx_effect.c: textures set on effect parameters).
+void d3d9_addref_guest(uint32_t g) { Obj *o = obj(g); if (o) obj_addref(o); }
+void d3d9_release_guest(uint32_t g) { Obj *o = obj(g); if (o) obj_release(o); }
 static int m_AddRef(Cpu *c) { Obj *o = THIS; RET(o ? obj_addref(o) : 1, 1); }
 static int m_Release(Cpu *c) { Obj *o = THIS; RET(o ? obj_release(o) : 0, 1); }
 static int m_GetDevice(Cpu *c) { M32(arg(c, 1)) = dev.self ? dev.self->guest : 0; if (dev.self) ++dev.self->refs; RET(D3D_OK, 2); }
@@ -319,10 +325,18 @@ static int vol_GetLevelDesc(Cpu *c) {  // D3DVOLUME_DESC: Format, Type, Usage, P
 // ---------------- buffers ----------------
 static int b_Lock(Cpu *c) {            // (this, offset, size, ppData, flags)
     Obj *b = THIS;
+    b->buffer_lock_write = !(arg(c, 4) & 0x10); // D3DLOCK_READONLY
+    if (b->buffer_lock_write) { ++b->buffer_generation; render_panes_changed(b); }
     M32(arg(c, 3)) = b->mem[0] + arg(c, 1);
     RET(D3D_OK, 5);
 }
-static int b_Unlock(Cpu *c) { THIS->dirty = 1; RET(D3D_OK, 1); }
+static int b_Unlock(Cpu *c) {
+    Obj *b = THIS;
+    if (b->buffer_lock_write) { ++b->buffer_generation; render_panes_changed(b); }
+    b->buffer_lock_write = 0;
+    b->dirty = 1;
+    RET(D3D_OK, 1);
+}
 static int vb_GetDesc(Cpu *c) {        // Format, Type, Usage, Pool, Size, FVF
     Obj *b = THIS;
     uint32_t p = arg(c, 1);
@@ -627,6 +641,7 @@ static int v_SetCursorPosition(Cpu *c) { RET(0, 4); }
 static int v_ShowCursor(Cpu *c) { RET(0, 2); }
 static int v_GetNumberOfSwapChains(Cpu *c) { RET(1, 1); }
 static int v_Reset(Cpu *c) {
+    mat_bone_reset();
     memcpy(dev.pp, G + arg(c, 1), sizeof dev.pp);
     setup_swapchain();
     render_resize();
@@ -669,6 +684,8 @@ static int v_Present(Cpu *c) {
     x360_frame();                                           // X360 feature patches (x360.m)
     void gameplay_frame(Cpu *c);
     gameplay_frame(c);                                      // Gameplay options: heat action and lock (gameplay_opts.c)
+    void cash_cheat_frame(Cpu *c);
+    cash_cheat_frame(c);
     // BOOT_AUTODRIVE=1: the game's own AI drives the player's car (Game_ForceAIControl(0), 006123B0), so a
     // scripted run covers the whole course. It returns early when no player exists (front end).
     static int autodrive = -1;
@@ -818,8 +835,9 @@ static int v_CreateVolumeTexture(Cpu *c) {     // (this, w, h, d, levels, usage,
     RET(D3D_OK, 10);
 }
 static int v_CreateCubeTexture(Cpu *c) {       // (this, edge, levels, usage, fmt, pool, pp, shared)
-    uint32_t levels = envcube_creation_levels(arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
-    Obj *t = make_texture(K_CUBE, vt_cube, arg(c, 1), arg(c, 1), 1, levels, arg(c, 3), arg(c, 4), arg(c, 5));
+    uint32_t edge = envcube_creation_edge(arg(c, 1), arg(c, 3), arg(c, 4), arg(c, 5), M32(c->esp));
+    uint32_t levels = envcube_creation_levels(edge, arg(c, 2), arg(c, 3), arg(c, 4));
+    Obj *t = make_texture(K_CUBE, vt_cube, edge, edge, 1, levels, arg(c, 3), arg(c, 4), arg(c, 5));
     envcube_created(t, M32(c->esp), arg(c, 6));
     M32(arg(c, 6)) = t->guest;
     RET(D3D_OK, 8);
@@ -1168,6 +1186,7 @@ static const Impl i_query[] = {{"QueryInterface", m_QueryInterface}, {"AddRef", 
 #define N(a) (int)(sizeof a / sizeof *a)
 
 static void d3d9_init(void) {
+    realworld_materials_set_hold(d3d9_addref_guest, d3d9_release_guest);
     static int done;
     if (done) return;
     done = 1;

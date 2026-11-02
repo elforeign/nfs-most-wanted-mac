@@ -11,6 +11,7 @@
 #include "pub_update_core.h"
 #include "pub_update_rehearsal.h"
 #include "pub_update_write.h"
+#include "bundle_roots.h"
 
 static NSDictionary *PURead(NSString *path) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
@@ -349,6 +350,7 @@ static int mac_fetch(void) {
 }
 static void PULocalError(const char *message) { pu_error(message); pu_local_error = YES; }
 static int mac_start(const char *version) {
+    if (roots_exported()) { PULocalError(BUNDLE_UPDATE_MESSAGE); return 0; }
     if (pu_job && PUAlive()) return 1;
     pu_local_error = NO;
     if (!pu_asset || !pu_checksum || !pu_size || pu_size > 4ULL * 1024 * 1024 * 1024) {
@@ -395,16 +397,19 @@ static int mac_cancel(void) {
     return 1;
 }
 static void update_press(int unused) {
+    if (roots_exported()) return;
     (void)unused; PULoad();
     if (pu_local_error && (!pu_asset || !pu_checksum || !pu_size)) { pu_local_error = NO; pu_job = nil; pu_state = PU_IDLE; }
     pu_press(mac_version, mac_fetch, mac_start);
 }
-static void cancel_press(int unused) { (void)unused; PULoad(); pu_cancel(mac_cancel); }
+static void cancel_press(int unused) { (void)unused; if (roots_exported()) return; PULoad(); pu_cancel(mac_cancel); }
 static void retry_press(int unused) {
+    if (roots_exported()) return;
     (void)unused; PULoad();
     if (pu_state == PU_UPDATE_FAILED || pu_state == PU_CANCELLED || pu_state == PU_FAILED) update_press(0);
 }
 static void log_press(int unused) {
+    if (roots_exported()) return;
     (void)unused; PULoad();
     if (pu_job) [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:[pu_job stringByAppendingPathComponent:@"helper.log"]]];
 }
@@ -418,10 +423,23 @@ static Setting s_retry = {.id="online.retry_update", .category=SET_DISPLAY, .ord
 static Setting s_log = {.id="online.update_log", .category=SET_DISPLAY, .order=64, .label="Open log", .type=SET_ACTION,
     .help="Open the local update log for details and corrective steps.", .apply=log_press};
 static void update_text(char *buf, int n) {
+    if (roots_exported()) {
+        snprintf(buf, n, "%s", BUNDLE_UPDATE_MESSAGE);
+        s_update.label = "Re-export from Setup to update";
+        s_update.help = BUNDLE_UPDATE_MESSAGE;
+        s_cancel.hidden = s_retry.hidden = s_log.hidden = 1;
+        return;
+    }
     PULoad(); pu_status(buf, n); pu_status(pu_help, sizeof pu_help); s_update.help = pu_help;
     s_update.label = pu_state == PU_NEWER ? "Update now" : (pu_state == PU_UPDATE_FAILED || pu_state == PU_CANCELLED) ? "Retry update" : (pu_busy() || pu_state == PU_READY) ? "Update status" : "Check for updates";
 }
 __attribute__((constructor)) static void pub_update_register(void) {
+    if (roots_exported()) {
+        s_update.label = "Re-export from Setup to update";
+        s_update.help = BUNDLE_UPDATE_MESSAGE;
+        settings_add(&s_update);
+        return;
+    }
     settings_add(&s_update); settings_add(&s_cancel); settings_add(&s_retry); settings_add(&s_log);
 }
 #endif

@@ -1,27 +1,39 @@
-"""Online join-code, router wire fixtures and embedded relay, with production-source mutants.
+"""
 
-Proof (normal failures / deliberate broken failures): code 0/256003 (530441 good checks); checksum omitted 18355 failures (530441 checks),
-NAT-PMP 0/1 (9), PCP 0/1 (9), UPnP 0/1 (14), relay 0/1 (2 pure checks).
-Relay pure transmissions 8/4; socket lifecycle passes in the trusted whole offline suite.
-No router calls; relay lifecycle binds only 127.0.0.1. EPERM/EACCES = PENDING host run (3).
-RFC 6886 sections 3/3.1/3.3 and RFC 6887 sections 7.1/11.1 specify the byte fixture layouts.
+
+
+
+
+
+
+
+
+
+
 """
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 RT = Path(__file__).resolve().parent
-SOURCES = ['roam_online_test.c', 'roam_code.c', 'natpmp.c', 'pcp.c', 'upnp.c', 'roam_server.c', 'roam_core.c', 'roam_relay.c']
+SOURCES = ['roam_online_test.c', 'roam_code.c', 'natpmp.c', 'pcp.c', 'upnp.c', 'roam_server.c', 'roam_core.c', 'roam_relay.c', 'roam_auth.c', 'roam_moderation.c']
 MUTANTS = {
-    'code': ('roam_code.c', '((uint64_t)ip << 8)', '((uint64_t)ip << 7)'),
+    'code': ('roam_code.c', '((uint64_t)ROAM_CODE_VERSION << 32) | room', '((uint64_t)room << 8)' ),
     'natpmp': ('natpmp.c', 'b[1] = 1;', 'b[1] = 2;'),
     'pcp': ('pcp.c', 'b[36] = 17;', 'b[36] = 6;'),
     'upnp': ('upnp.c', '!strncasecmp(p, key, k)', '!strncmp(p, key, k)'),
     'checksum': ('roam_code.c', 'count != 9 || check ||', 'count != 9 ||'),
+    'prefix': ('roam_code.c', "toupper((unsigned char)code[0]) != 'R'", '0'),
+    'version': ('roam_code.c', '(v >> 32) != ROAM_CODE_VERSION', '0'),
     'relay': ('roam_relay.c', 'k->has_state = 1;', 'k->has_state = 0;'),
 }
-CF = ['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
+# Guarantee a scheduling gap longer than one receive poll, even on an idle host.
+DELAYED_RELAY = ('roam_server.c', 'poll(&p, 1, 10);',
+                 'poll(&p, 1, 10); struct timespec delay = {.tv_nsec = 150000000}; nanosleep(&delay, NULL);')
+CF = ['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
       '-fsanitize=address,undefined', '-pthread', '-I', str(RT)]
+LINK = ['-framework','Security','-framework','CoreFoundation'] if sys.platform == 'darwin' else ['-lcrypto', '-lm']
 
 
 def build(td, label, replace=None):
@@ -34,7 +46,7 @@ def build(td, label, replace=None):
         mutant.write_text(text.replace(old, new))
         src[SOURCES.index(filename)] = str(mutant)
     exe = td / label
-    p = subprocess.run(CF + src + ['-o', str(exe)], capture_output=True, text=True)
+    p = subprocess.run(CF + src + ['-o', str(exe)] + LINK, capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-3000:]
     return exe
 
@@ -45,7 +57,7 @@ def main():
         td = Path(tmp)
         normal = build(td, 'normal')
         for case, mutant in MUTANTS.items():
-            test_case = "code" if case == "checksum" else case
+            test_case = "code" if case in ("checksum", "prefix", "version") else case
             p = subprocess.run([str(normal), test_case], capture_output=True, text=True, timeout=30)
             print('normal:', p.stdout.strip(), flush=True)
             if p.returncode == 3 and 'PENDING host run' in p.stdout:
@@ -56,7 +68,14 @@ def main():
             q = subprocess.run([str(broken), test_case], capture_output=True, text=True, timeout=30)
             print('broken:', q.stdout.strip(), flush=True)
             assert q.returncode == 1 and 'FAIL line' in q.stdout, (case, q.returncode, q.stderr[-2000:])
-    print('ONLINE CODECS PASS; all 6 deliberate mutants rejected' + ('; sockets PENDING host run' if pending else '; embedded relay PASS'))
+        delayed = build(td, 'delayed_relay', DELAYED_RELAY)
+        p = subprocess.run([str(delayed), 'relay'], capture_output=True, text=True, timeout=30)
+        print('delayed relay:', p.stdout.strip(), flush=True)
+        if p.returncode == 3 and 'PENDING host run' in p.stdout:
+            pending = True
+        else:
+            assert p.returncode == 0, (p.returncode, p.stdout[-2000:], p.stderr[-2000:])
+    print('ONLINE CODECS PASS; all 8 deliberate mutants rejected' + ('; sockets PENDING host run' if pending else '; embedded relay PASS'))
     return 3 if pending else 0
 
 

@@ -38,3 +38,72 @@ The main display can change under a running game (a TV waking, mirroring). `NSAp
 | Internal switch | Default | Behavior |
 |---|---|---|
 | `NFS_POST_CUTS` | `0` | `1`: discard the final treatment load for complete non-split targets; use 25 weighted bilinear curve taps at 3840×2160 only. Discard ordinary coverage D16 after use; resolve R8 without storing MS samples only for empty coverage, resetting it to Clear for any continuation. Nonempty MS masks retain their samples for incremental reuse; split/partial-source, proof and nonempty reuse paths retain all stores. Off retains the legacy shader source and attachment actions. |
+
+## Traffic detail
+
+F10 Cars > Traffic detail (`NFS_TRAFFIC_DETAIL=off|on`) starts Off and applies live. On applies only to AI traffic (PVehicle driver class 2); player Challenge Series GARB/TAXI and front-end cars keep their original glass and LOD. CarRenderInfo reads its vehicle at +0x88 and the driver class at vehicle +0x94, then carries traffic role in render flag 0x80000. On aliases TRAFFICWINDOWS (`1FF8C329`) to the existing WINDSHIELD selection for both physical car materials and X360 car glass. It reuses the windshield's measured optics or generated alpha/reflection values; the Car glass and Physical car materials choices still determine the treatment. Off preserves the original traffic material. No textures or meshes are replaced.
+
+On routes the traffic branch of CarRenderInfo::Render through its existing racer LOD selection, including the first comparison: 120/25/20/10 projected pixels instead of 80/40/20/10. Loaded minimum/maximum LOD clamps, traffic flags and environment-map cutoff remain original. This retains LOD B in the 25–40 pixel band, but selects B earlier in the 80–120 pixel band; it is the racer table rather than a uniform distance multiplier. PC and X360 retail look presets set this optional choice Off; My picks can save On.
+
+`traffic_detail_test.py` compiles the production glass filters and translated x87 selection/clamp instructions. Across 16,657 assertions it checks both modes, glass selection/car gating, every integer pixel size 1–130, racer/traffic paths, loaded bounds and preserved flags/stack. The original paths produce 603 failures; the enabled implementation produces zero. `traffic_role_test.py` also executes the translated role decoder and LOD instructions for absent vehicles and driver classes 0–4, both settings, loaded base LODs 0/2, and all integer pixel sizes 1–130: 21,840 assertions, zero failures; the reviewed pre-fix glass alias fails 2,600. Both glass consumers receive the per-draw traffic flag. Instruction drift is rejected. Glass values in this bare fixture are deliberately distinct synthetic values to prove that the existing row is reused, rather than introducing new optical constants.
+
+For traffic captures, `BOOT_RACE_TRAFFIC=0..100` overrides the original SkipFE traffic enable/density globals during `BOOT_RACE` setup; absent leaves startup defaults unchanged. Values clamp to that percentage range. This diagnostic does not add a player setting.
+
+`BOOT_DIAG_TRAFFIC_AB=1` with `BOOT_DIAG_SIMSHOTS` saves each baseline and a `_traffic_on.png` (or `_traffic_off.png`) held redraw, then restores the original setting before simulation resumes. Use this diagnostic alone, without another held A/B mode. Its capture/hold calls are guarded by `diag_on`. The 18-case state test passes; a wrong-restore control fails twice. Six environment/default cases also pass.
+
+Visual proof: [Off](../../run_shots/traffic_detail_off.jpg) and [On](../../run_shots/traffic_detail_on.jpg) are labelled 1920×1130 JPEGs, 273,822/273,786 bytes, from the same held scene at sim 66 s. The highlighted car is TRAF4DSEDA (type 25); the preceding render sample is frame 4245, radius 2.23989, projected size 99 px, body/tyres LOD 0/0. The captures are frames 4246/4247, both at absolute simtime 66.0330; no simulation advances between them. Range is visually estimated around 20–30 m, not position-instrumented. Compare the sedan's pale windshield Off with its visible dark cabin On, and check whether the earlier racer A→B transition is acceptable. The inset is a 4× nearest-neighbour crop. Motion blur and native low-resolution textures remain visible.
+
+The capture used race 15.1.1, no opponents, traffic density 100, autodrive, lockstep at 60 Hz, 1920×1080/4×MSAA, shadows 2, rain setting 0, X360 car glass, physical materials All. Two separate 120-second busy runs used the same settings with `BOOT_DIAG_CHASE_CRUISE=200` and traffic detail Off/On. Across absolute simtime 20–60, each has 2,400 frame samples: mean draws 1841.279 / 1803.234; median draws 1814 / 1790. GPU counter medians are 6.115 / 6.235 ms (means 6.075 / 6.172, 40 one-second samples each). These are observed diagnostic counters: traffic spawns differed between launches, so the deltas do not isolate feature cost or support a frame-rate claim. The held visual run used `BOOT_DIAG_CHASE_CRUISE=80`.
+
+On-screen application is supported by TRAFFICWINDOWS blended-draw records and the On material log's “X360 glass row applied”. The separate busy runs also show traffic projected sizes 29/32 using body/tyre LOD 2/2 Off, versus 25/34 using 1/1 On. Four game tool calls requested 490 seconds total; no game crash/hang/stall report was produced. Recompiler and runtime builds pass with zero compile errors; the complete offline suite passed 203 tests in 376 seconds, with five input/environment skips. The synthetic look-preset table's reviewed publication waiver was updated for the additional Off/On row.
+
+
+## Traffic sedan pilot
+
+Windows does not support the pilot setting or registration; retail fallback bodies retain retail traffic even when On is requested.
+
+Private F10 Cars > Traffic sedan pilot (`cars.traffic_pilot`,
+`NFS_TRAFFIC_PILOT=off|on`) starts **Off** and takes effect after restart.
+The later-car master and Traffic detail do not enable it. PC and Xbox 360 retail
+look presets select Off; My picks can retain On. An explicit environment value
+has the normal settings override priority. The public build has no row or
+activation, including with saved preferences or an environment override.
+
+`traffic_pilot.h` freezes the generic alias TRAFFICSEDAN, type 160, and native
+donor TRAF4DSEDA, type 25. `private_cars_boot` pins the startup setting after the
+private catalog initializes. Availability requires the catalog's approved,
+verified optional sedan, with the later-car master enabled. Off never queries
+that optional getter; the policy module opens no source or asset files. Public
+startup does not inspect the diagnostic environment, guard or inventory.
+
+`BOOT_DIAG_TRAFFIC_CAR=traf4dseda|trafficsedan` requests a diagnostic subject only
+with nonempty `BOOT_DIAG` and the existing guarded scratch userdata approval.
+An empty, misspelled, unguarded or unavailable pilot request fails explicitly at
+startup (exit 2); it never silently uses a different car. The native baseline may
+be requested with the pilot Off. The spawn adapter must also surface
+`TRAFFIC_PILOT_DIAGNOSTIC_FAILURE` if a requested subject lacks a decoded key or
+registered assets. A successful zero/refusal stays zero, including diagnostics.
+
+The pure choice helper accepts decoded keys, asset availability, existing
+selection ordinal, counts and limits. Normal policy widens only an already eligible
+sedan opportunity: even/odd ordinals select native/pilot when both are available;
+a sole available choice remains eligible. It consumes no RNG. Forced choices
+may use any successful traffic opportunity, with the same shared sedan quotas. Native
+and pilot counts add together for the fixed cap and percentage cap; zero caps
+are unlimited. Percentage allowance is the original minimum-one floor of
+`population * percentage / 100`. The adapter supplies NextSpawn's decoded
+population, including its existing reserve, and must count both identities
+before retail quota refusal. The helper never revives a retail refusal.
+
+Runtime integration is **incomplete**: type registration and asset routing, the
+NextSpawn shared count/choice hook (00426230), and available-vehicle pool handling
+(00426380) remain unconnected. Enabling this setting alone does not spawn the
+pilot. Offline tests exercise the production setting declarations, boot pinning,
+public exclusion, guarded requests and bounded exhaustive choice/quota inputs,
+including zero keys, unavailable assets and wide count arithmetic. Broken
+controls must fail alongside passing production checks.
+
+Paint, glass, stance and LOD appearance await visual acceptance. Reuse current
+car-glass optics; the existing measured reference is glass n=1.52, F0 approximately
+0.043 ([material reference](https://api.physicallybased.info/materials)). This
+policy adds no tint or roughness constants. Sound remains donor-inherited.

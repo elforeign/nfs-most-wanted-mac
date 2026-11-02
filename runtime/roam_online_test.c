@@ -1,7 +1,13 @@
 // Pure code/NAT fixtures and loopback embedded-relay proof; driven by roam_online_test.py.
+// Receive proof: 20 runs/version under 18 nice-19 CPU busy loops.
+// Original/fixed failed runs: 0/20 -> 0/20 without injected delay;
+                                                                                
+// Poll gaps must not end an exchange; only the requested response or the 5 s
+// monotonic deadline does. Handshake calls wait for welcome, state calls for entries.
 #include "roam_online.h"
 #include "natmap.h"
 #include "roam_core.h"
+#include "roam_test_peer.h"
 #include <inttypes.h>
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -16,42 +22,42 @@
 static int checks, failures;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; if (failures < 5) printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
 static void code_test(void) {
-    for (uint32_t i = 1; i < 1001; ++i) for (int p = 0; p < 256; ++p) {
-        uint32_t ip = i * 2654435761u, decoded = 0; uint16_t port = 0; char s[ROAM_CODE_SIZE];
-        CHECK(!roam_code_encode(ip, (uint16_t)(47800 + p), s));
-        CHECK(!roam_code_decode(s, &decoded, &port) && decoded == ip && port == 47800 + p);
-    }
-    char s[ROAM_CODE_SIZE]; uint32_t ip; uint16_t p;
-    CHECK(!roam_code_encode(0xcb007105u, 47800, s));
-    printf("code vector: %s\n", s); CHECK(!strcmp(s, "TE29-43A2W"));
-    char lower[ROAM_CODE_SIZE]; for (int i = 0; i < ROAM_CODE_SIZE; ++i) lower[i] = (char)tolower((unsigned char)s[i]);
-    CHECK(!roam_code_decode(lower, &ip, &p) && ip == 0xcb007105u && p == 47800);
-    char compact[10]; memcpy(compact, s, 4); memcpy(compact + 4, s + 5, 6);
-    CHECK(!roam_code_decode(compact, &ip, &p));
-    CHECK(roam_code_room(ip, p) == roam_code_room(0xcb007105u, 47800));
-    CHECK(roam_code_room(ip, p) != roam_code_room(ip, p + 1));
-    const char *bad[] = {"", "2345", "2345-67899", "I234-5678", "O234-5678", "1234-5678", "0234-5678", "2222-2222", "23456-789", "2345_6789", "2345 6789", " 23456789", "23456789 ", "2345-67/9"};
-    for (unsigned i = 0; i < sizeof bad / sizeof *bad; ++i) CHECK(roam_code_decode(bad[i], &ip, &p) < 0);
     const char *alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-    for (uint32_t sample = 1; sample <= 64; ++sample) {
-        char original[ROAM_CODE_SIZE], compact_code[10];
-        CHECK(!roam_code_encode(sample * 2654435761u, (uint16_t)(47800 + sample), original));
-        memcpy(compact_code, original, 4); memcpy(compact_code + 4, original + 5, 6);
-        for (int i = 0; i < 9; ++i) {
-            char saved = compact_code[i];
-            for (int j = 0; j < 32; ++j) if (alphabet[j] != saved) {
-                compact_code[i] = alphabet[j];
-                CHECK(roam_code_decode(compact_code, &ip, &p) < 0);
-            }
-            compact_code[i] = saved;
-        }
-        for (int i = 0; i < 8; ++i) if (compact_code[i] != compact_code[i+1]) {
-            char swapped[10]; memcpy(swapped, compact_code, sizeof swapped);
-            swapped[i] = compact_code[i+1]; swapped[i+1] = compact_code[i];
-            CHECK(roam_code_decode(swapped, &ip, &p) < 0);
-        }
+    char code[ROAM_CODE_SIZE]; uint32_t decoded;
+    for (uint32_t i=1;i<=10000;++i) {
+        uint32_t room=i*2654435761u;
+        CHECK(!roam_code_encode(room,code));
+        CHECK(!strncmp(code,"R-",2) && strlen(code)==12 && code[6]=='-');
+        CHECK(!roam_code_decode(code,&decoded) && decoded==room);
     }
-    CHECK(roam_code_encode(0, 47800, s) < 0); CHECK(roam_code_encode(1, 47799, s) < 0); CHECK(roam_code_encode(1, 48056, s) < 0);
+    CHECK(!roam_code_encode(0xffffffffu,code));
+    CHECK(!roam_code_decode(code,&decoded) && decoded==0xffffffffu);
+    CHECK(roam_code_encode(0,code)<0);
+    CHECK(!roam_code_encode(1,code));
+    printf("room vector: %s\n",code);
+    CHECK(!strcmp(code,"R-2622-2223S"));
+    const char *bad[]={"TE29-43A2W","TE2943A2W","te2943a2w","ABCDEFGAU","", "R-2222-22222", "R-2622-2222U", "R-2A22-2223M", "R-2222-22234", "R-ZW22-22233", "Q-2622-2223S", "R26222223N", "R-26222223N", " R-2622-2223S", "R-2622-2223S ", "R-2622_2223N", "R-2622-2221N", "R-2622-222ON"};
+    for (unsigned i=0;i<sizeof bad/sizeof *bad;++i) CHECK(roam_code_decode(bad[i],&decoded)<0);
+    CHECK(roam_code_decode(NULL,&decoded)<0 && roam_code_decode(code,NULL)<0);
+    // All payload/check symbols, every substitution, adjacent swaps and required prefix.
+    for (uint32_t sample=1;sample<=64;++sample) {
+        char original[ROAM_CODE_SIZE]; CHECK(!roam_code_encode(sample*2654435761u,original));
+        for (int i=0;i<ROAM_CODE_SIZE;++i) code[i]=(char)tolower((unsigned char)original[i]);
+        CHECK(!roam_code_decode(code,&decoded) && decoded==sample*2654435761u);
+        for (int i=2;i<12;++i) {
+            if(i==6) continue;
+            for(int j=0;j<32;++j) if(alphabet[j]!=original[i]) {
+                memcpy(code,original,sizeof code);code[i]=alphabet[j];
+                CHECK(roam_code_decode(code,&decoded)<0);
+            }
+        }
+        for (int i=2;i<11;++i) {
+            int j=i+1; if(j==6) j++; if(i==6 || original[i]==original[j]) continue;
+            memcpy(code,original,sizeof code); code[i]=original[j];code[j]=original[i];
+            CHECK(roam_code_decode(code,&decoded)<0);
+        }
+        memcpy(code,original,sizeof code);code[0]='S';CHECK(roam_code_decode(code,&decoded)<0);
+    }
 }
 static void pmp_test(void) {
     uint8_t b[12]; NatReply r = {0};
@@ -111,12 +117,25 @@ static void upnp_test(void) {
     CHECK(upnp_soap(b, 10, "x", "x", "") < 0);
     CHECK(upnp_soap(b, sizeof b, "x\"<", "x", "") < 0);
 }
-static int receive_client(int fd, RoamClient *c) {
+static int receive_client(int fd, RoamClient *c, int wait_for_entries) {
     struct pollfd p = {.fd = fd, .events = POLLIN}; int packets = 0;
-    while (poll(&p, 1, 100) > 0) {
-        uint8_t b[2048]; int n = (int)recv(fd, b, sizeof b, 0); if (n <= 0) break;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) return packets;
+    int64_t deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + 5000;
+    for (;;) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now)) break;
+        int64_t remaining = deadline - ((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+        if (remaining <= 0) break;
+        int ready = poll(&p, 1, remaining < 100 ? (int)remaining : 100);
+        if (ready < 0) { if (errno == EINTR) continue; break; }
+        if (!ready) continue;
+        if (!(p.revents & POLLIN)) break;
+        uint8_t b[2048]; int n = (int)recv(fd, b, sizeof b, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
         roam_client_input(c, b, n, 1000); ++packets;
-        if (c->rx_entries) break;
+        if (!c->welcomed && c->has_cookie) { n = roam_client_hello(c, b); (void)send(fd, b, (size_t)n, 0); }
+        if (wait_for_entries ? c->rx_entries > 0 : c->welcomed && !c->last_err) break;
     }
     return packets;
 }
@@ -126,13 +145,13 @@ static int relay_test(void) {
     struct sockaddr_in from[2] = {{.sin_family=AF_INET, .sin_port=htons(10001), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)},
                                 {.sin_family=AF_INET, .sin_port=htons(10002), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)}};
     for (int i = 0; i < 2; ++i) {
-        roam_client_init(&c[i], 42, "test"); int n = roam_client_hello(&c[i], b); roam_relay_input(r, b, n, &from[i], 1000); c[i].id = (uint16_t)(i + 1);
+        roam_client_init(&c[i], 42, "test"); int n; CHECK(roam_test_join(r, &c[i], &from[i], 1000));
         RoamState st = {.t=1000, .pos={1,2,3}, .q={0,0,0,32767}, .flags=ROAM_FLAG_CAR};
         n = roam_client_state(&c[i], &st, b); roam_relay_input(r, b, n, &from[i], 1000);
     }
     roam_relay_tick(r, 1000); RoamRelayStats stats = roam_relay_stats(r);
-    printf("relay pure: clients=%" PRIu64 " tx=%" PRIu64 " (expected 2,8 incl. two names)\n", stats.clients, stats.tx);
-    CHECK(stats.clients == 2 && stats.tx == 8); roam_relay_free(r);
+    printf("relay pure: clients=%" PRIu64 " tx=%" PRIu64 " (expected 2,10 incl. challenges and names)\n", stats.clients, stats.tx);
+    CHECK(stats.clients == 2 && stats.tx == 10); roam_relay_free(r);
     if (failures) return 1;
     // No test ever requests INADDR_ANY. No router calls, multicast or public traffic.
     for (int pass = 0; pass < 2; ++pass) {
@@ -149,20 +168,31 @@ static int relay_test(void) {
             struct sockaddr_in to = {.sin_family=AF_INET, .sin_port=htons(roam_server_port(s)), .sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
             NET_CHECK(!connect(fds[i], (struct sockaddr *)&to, sizeof to));
             roam_client_init(&c[i], 42, "test"); int n = roam_client_hello(&c[i], b); NET_CHECK(send(fds[i], b, (size_t)n, 0) == n);
-            receive_client(fds[i], &c[i]); CHECK(c[i].welcomed);
+            receive_client(fds[i], &c[i], 0); CHECK(c[i].welcomed);
         }
         for (int i = 0; i < 2; ++i) {
             RoamState st = {.t=1000, .pos={10,20,30}, .q={0,0,0,32767}, .flags=ROAM_FLAG_CAR};
             st.pos[0] += i;
             int n = roam_client_state(&c[i], &st, b); NET_CHECK(send(fds[i], b, (size_t)n, 0) == n);
         }
-        for (int i = 0; i < 2; ++i) { receive_client(fds[i], &c[i]); CHECK(c[i].rx_entries > 0);
+        for (int i = 0; i < 2; ++i) { receive_client(fds[i], &c[i], 1); CHECK(c[i].rx_entries > 0);
             RoamRemote *remote = roam_view_find(&c[i].view, c[1-i].id);
             CHECK(remote && remote->n && remote->s[0].pos[0] == 11 - i);
-            if (fds[i] >= 0) { close(fds[i]); fds[i] = -1; } }
+            }
         uint16_t port = roam_server_port(s); roam_server_stop(s);
         // Stopping releases the socket; restart on the exact port.
-        s = roam_server_start(INADDR_LOOPBACK, port); CHECK(s != NULL); roam_server_stop(s);
+        s = roam_server_start(INADDR_LOOPBACK, port); CHECK(s != NULL);
+        if (s) {
+            // Keep the original endpoint and stale cookie across a real relay restart.
+            for (int i=0;i<2;++i) {
+                c[i].rx_entries=0; c[i].last_err=ROAM_ERR_FULL;
+                int n=roam_client_hello(&c[i],b); NET_CHECK(send(fds[i],b,(size_t)n,0)==n);
+                receive_client(fds[i],&c[i],0);
+                CHECK(c[i].welcomed && !c[i].last_err);
+            }
+        }
+        for (int i=0;i<2;++i) { close(fds[i]); fds[i]=-1; }
+        roam_server_stop(s);
         continue;
 socket_pending:
         for (int i = 0; i < 2; ++i) if (fds[i] >= 0) close(fds[i]);

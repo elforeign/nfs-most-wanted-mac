@@ -103,3 +103,19 @@ void query_stats_log(void);
 extern float q_bb[4];                        // diag: the last counted fan's x/y range (render.m writes it)
 
 void render_post_prewarm(void);
+
+// Optional independent near shadow resources; surface remapping is scoped to
+// the replay and never replaces the guest's retail texture objects.
+id<MTLTexture> shadow_near_surface(uint32_t surface);
+uint64_t shadow_near_draw_begin(void);
+void shadow_near_draw_end(uint64_t before, uint32_t primitives);
+void shadow_near_draw_note(int shader_kill);
+void render_shadow_near_restore(void);
+void render_shadow_near_suspend(void);
+enum { SHADOW_NEAR_VARIANT = 0x40000000u, SHADOW_NEAR_BUFFER = 28, SHADOW_NEAR_TEXTURE = 30 };
+typedef struct ShadowNearUniforms {
+    float rows[4][4], usable[4], blend[4];
+    uint32_t mode, taps, pad[2];
+} ShadowNearUniforms;
+char *shadow_near_shader(const char *source, const SmResult *reflection, const uint32_t *tokens, uint32_t n);
+id<MTLTexture> shadow_near_receiver(uint32_t source, ShadowNearUniforms *uniforms);

@@ -380,6 +380,7 @@ static struct { uint32_t from, to; const char *text; int x360_only; uint32_t gue
     {0x50D23EBDu, 0xA71ED258u, NULL, 0, 0},
 };
 void f_0056BB80_orig(Cpu *c);
+uint32_t prompts_action_text(uint32_t hash);
 void fe_console_search(Cpu *c) {                           // SearchForString: hash in edx, text pointer in eax
     uint32_t hash = c->edx;
     for (size_t i = 0; i < sizeof k_text / sizeof *k_text; ++i) {
@@ -397,4 +398,7 @@ void fe_console_search(Cpu *c) {                           // SearchForString: h
         break;
     }
     f_0056BB80_orig(c);
+    // Keep supplied game labels in every language; authored text is a fallback.
+    // The original lookup already consumed the guest return address.
+    if (!c->eax) c->eax = prompts_action_text(hash);
 }

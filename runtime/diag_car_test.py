@@ -15,6 +15,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'recomp'))
 from car_render_diag import car_render_diagnostics
+from traffic_detail import traffic_detail_lod
 
 HARNESS = r'''
 #include "host.h"
@@ -23,6 +24,7 @@ HARNESS = r'''
 #include <stdlib.h>
 #include <stdarg.h>
 uint8_t *G;
+int traffic_detail_on(void) { return 0; }
 int diag_on = 1;
 static uint64_t frame_now;
 static unsigned entries, queries, logs, failures, checks, original_calls;
@@ -54,6 +56,7 @@ void diag_car_end(Cpu *c, DiagCarRender *s) { ++entries; real_diag_car_end(c,s);
 typedef struct { uint32_t type, solid_count, *solid_map; } Addition;
 static Addition additions[2];
 static unsigned nadditions=1;
+static int traffic_active;
 static _Thread_local Addition *model_namespace;
 static int on(void) { return 1; }
 static Addition *addition_for_type(unsigned type) { return type==102 ? &additions[0] : NULL; }
@@ -185,7 +188,8 @@ def decoder():
     original = re.sub(r'    if \(diag_on\) diag_car_observe\(c, 0x[0-9A-F]+u\);\n', '', code)
     original = re.sub(r'if \((!?zf)\) \{ if \(diag_on\) diag_car_reject\(0x[0-9A-F]+u\); goto L_0075052A; \}',
                       r'if (\1) goto L_0075052A;', original)
-    assert car_render_diagnostics(0x0074E160, original) == code, 'stale diagnostic instrumentation'
+    original = original.replace('traffic_racer_lod:\n', '').replace('    if (traffic_detail_on()) goto traffic_racer_lod;\n', '')
+    assert traffic_detail_lod(0x0074E160, car_render_diagnostics(0x0074E160, original)) == code, 'stale diagnostic instrumentation'
     try:
         car_render_diagnostics(0x0074E160, original.replace('0074E694: test eax, eax', '0074E694: test ebx, ebx'))
     except AssertionError:
@@ -216,7 +220,7 @@ def main():
         tmp = Path(td)
         mutant = source.replace('case 0x0074E223: return "pixel-size";', 'case 0x0074E223: return "visibility";')
         assert mutant != source
-        no_scope = hashes.replace('model_namespace = nadditions ? solid_context(ride) : NULL;', 'model_namespace = NULL;')
+        no_scope = hashes.replace('model_namespace = (nadditions || traffic_active) ? solid_context(ride) : NULL;', 'model_namespace = NULL;')
         no_guard = wrapper.replace('if (!diag_on) { f_0074E160_orig(c); return; }', '')
         assert no_scope != hashes and no_guard != wrapper
         variants = [('normal', source, hashes, wrapper), ('swapped-reason', mutant, hashes, wrapper),

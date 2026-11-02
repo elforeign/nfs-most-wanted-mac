@@ -147,7 +147,8 @@ def checks(r):
 
 
 MUTANTS = [
-    ('opt_in', ('source', 'settings_add(&s_update);', 'mac_fetch(); settings_add(&s_update);')),
+    ('opt_in', ('source', 'settings_add(&s_update); settings_add(&s_cancel);',
+                'mac_fetch(); settings_add(&s_update); settings_add(&s_cancel);')),
     ('single_job', ('header', '|| pu_busy() || pu_state == PU_READY', '|| pu_state == PU_READY')),
     ('download', ('header', 'pu_received / 1000000', 'pu_received / 1000')),
     ('cancel', ('header', 'if (!cancel())', 'if (1)')),

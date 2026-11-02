@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "sign_diag.h"
 
 #define VIEW_P1 0x00919650u
 #define VIEW_P2 0x009196C0u
@@ -119,24 +120,6 @@ uint32_t split_shadow_rain(void) {
 uint32_t split_shadow_section_camera(uint32_t original) {
     return shadow_source && shadow_split() && original == M32(VIEW_P1 + 0x40)
         ? M32(shadow_source + 0x40) : original;
-}
-
-// Called at 006E50C8, after view 15's caster matrix is complete. DoCulling owns
-// a shared draw table, so rebuild all entries, not just a shadow list whose new
-// allocation could overwrite live receiver lists. No animation/frame prep here.
-void split_shadow_casters(Cpu *c) {
-    if (!shadow_cull || !shadow_source || !shadow_split()) return;
-    Cpu saved = *c;
-    uint32_t n = M32(shadow_cull + 0x9C0);
-    for (uint32_t i = 0; i < n; ++i) {
-        uint32_t entry = shadow_cull + i * 0xD0;
-        if (M32(entry + 0x80) != 0x00919C70u) continue;
-        uint32_t a[3] = {0x00919C70u, entry, 0x4100};
-        call_guest(c, 0x004FAE40u, 3, a);
-        c->ecx = shadow_cull; call_guest(c, 0x00731B80u, 0, NULL);
-        break;
-    }
-    *c = saved;
 }
 
 static uint32_t devcall(Cpu *c, uint32_t off, int n, const uint32_t *a) {   // a[0] is the device
@@ -387,6 +370,7 @@ static void split_world(Cpu *c, const uint32_t r[2][4]) {
 
 void f_006DE300_orig(Cpu *c);
 void f_006DE300(Cpu *c) {                // ___eDisplayFrame: the world body
+    if (diag_on && sign_diag_on) sign_diag_world(c);
     uint32_t r[2][4];
     if (!split_view_rect(VIEW_P1, r[0]) || !split_view_rect(VIEW_P2, r[1])) {
         Cpu saved = *c; sun_mode(c, 0); *c = saved;

@@ -7,6 +7,7 @@
 
 
 
+
 """
 from pathlib import Path
 import importlib.util
@@ -31,16 +32,27 @@ def function(s, name):
 
 EXTRA = r'''
 #include "gen/x360_engine.inc"
+#include <math.h>
 #define F32(a) MF32(a)
 #define SHADOW_FOCUS_FAR 0x901AB0u
 #define TIME_OF_DAY_PTR 0x9B392Cu
 static void put_float(uint32_t a,float v) { MF32(a)=v; }
-static int fit=2, shadow_size=2048, x360_vp_set, nculled;
+static int fit=2, shadow_size=2048, shadow_stable=0, x360_vp_set, nculled;
+uint32_t gmalloc_try(uint32_t n) { (void)n;return 0xD00000; }
 static uint32_t shadow_source_view, culled[64][2];
 static float x360_vp[16];
 void x360_shadow_fit(const float *,float,float,const float *,float,float,float *);
+void x360_shadow_stable_fit(const float *,float,float,const float *,float,int,int,float *);
 int render_dump_active(void) { return 0; }
 static void test_sun(void) {}
+void shadow_pan_environment(void) {}
+void shadow_pan_matrix(uint32_t matrix) { (void)matrix; }
+static unsigned near_begins, near_replays, near_cameras;
+void shadow_near_begin(void) { ++near_begins; }
+void shadow_near_pose_render(Cpu *c,uint32_t v,uint32_t u) { (void)c;(void)v;(void)u; }
+void shadow_near_replay(Cpu *c,uint32_t v,uint32_t u) { (void)c;(void)v;(void)u;++near_replays; }
+void shadow_near_far_rendered(uint32_t s,uint32_t p) { (void)s;(void)p; }
+void shadow_near_far_camera(uint32_t s,uint32_t v,uint32_t p,int clamp) { (void)s;(void)v;(void)p;(void)clamp;++near_cameras; }
 void guest_divide_error(Cpu *c,uint32_t pc) { (void)c;(void)pc; abort(); }
 static int ambient[2], textures[2], cartextures[2], sections[2], refreshes, distance_calls[2], skip_fit;
 static uint32_t expected_view, expected_plat;
@@ -118,6 +130,7 @@ static Cpu cpu(void) { return (Cpu){.esp=0x800000,.ebx=7,.esi=8,.edi=9,.ebp=10,.
 static void identity(uint32_t a) { memset(G+a,0,64); for(unsigned k=0;k<4;k++) MF32(a+20*k)=1; }
 static void shadow_setup(void) {
  setup();
+ M32(0x919C70)=0x985990;
  for(unsigned i=0;i<2;i++) {
   uint32_t v=0x919650+i*0x70, plat=0x310000+i*0x1000,cam=M32(v+0x40),rain=M32(v+0x68);
   M32(v)=plat;
@@ -149,13 +162,17 @@ void f_006E44C0_orig(Cpu *c) { // fake caster draw driver; use the actual hook a
  uint32_t view=arg(c,0),cull=arg(c,1),ret=M32(c->esp),sp=c->esp;
  unsigned i=view==0x9196C0; expected_view=view; expected_plat=M32(view);
  float light[3]; memcpy(light,G+0x560180,12);
- x360_shadow_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
-                 X360E_SHADOW_NEAR,MF32(SHADOW_FOCUS_FAR),expected_map[i]);
+ if(shadow_stable)
+  x360_shadow_stable_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
+                         MF32(SHADOW_FOCUS_FAR),shadow_size,i+1,expected_map[i]);
+ else x360_shadow_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
+                       X360E_SHADOW_NEAR,MF32(SHADOW_FOCUS_FAR),expected_map[i]);
  M32(c->esp)=0x006E50C8; x360_shadow_camera(c,0x985990,0x9859D0);
  mul(0x985A10,0x985990,0x9859D0);
  for(unsigned k=0;k<16;k++) CHECK(nearf(MF32(0x985A10+4*k),expected_map[i][k]));
  CHECK(!rs174); CHECK(cull==shadow_cull);
  // The actual translated 006E50C8 refresh instruction, after matrix multiply.
+ c->ebp=0x7F0000; M32(c->ebp+0xC)=cull; c->ebx=0x919C70;
  caster_refresh(c);
  CHECK(sections[i]==1);
  identity(0x5B0000); MF32(0x5B0000)=0.5; MF32(0x5B0014)=-0.5;
@@ -192,11 +209,21 @@ static void receiver(uint32_t view) {
 int main(void) {
  G=calloc(1,MEMSIZE); shadow_setup(); split_on=1;
  Cpu c=cpu(); c.esp-=4; f_006DE300(&c);
- CHECK(maps==2 && refreshes==2); CHECK(ambient[0]==6 && ambient[1]==6);
+ CHECK(maps==2 && refreshes==2); CHECK(near_begins==2 && near_replays==2 && near_cameras==2); CHECK(ambient[0]==6 && ambient[1]==6);
  CHECK(sections[0]==1 && sections[1]==1); CHECK(nworld==12);
  for(unsigned k=0;k<12;k++) CHECK(world_ok[k]);
  CHECK(rs174==0 && sc[0]==1 && sc[1]==2 && sc[2]==3 && sc[3]==4);
  CHECK(shadow_source==0 && shadow_cull==0); CHECK(c.esp==0x800000);
+ // The opt-in stable fit also uses each player's exact caster matrix for the
+ // biased world/car receivers, for both PC and X360 preset ranges.
+ for(unsigned preset=0;preset<2;++preset) {
+  shadow_setup(); split_on=1; shadow_stable=1; fit=preset?2:0;
+  MF32(SHADOW_FOCUS_FAR)=preset?70:50;
+  c=cpu(); c.esp-=4; f_006DE300(&c);
+  CHECK(maps==2 && refreshes==2);
+  CHECK(shadow_source==0 && shadow_cull==0 && x360_vp_set==0);
+ }
+ shadow_stable=0; fit=2;
  // Split off: compare every memory byte and CPU for the three complete translated gates,
  // weather, section lookup and the ambient block against their unmodified translations.
  for(unsigned i=0;i<2;i++) {
@@ -251,7 +278,7 @@ def main():
     x360 = (ROOT/'runtime/x360.m').read_text()
     camera = function(x360, 'x360_shadow_camera')
     retail_camera = camera.replace('x360_shadow_camera(', 'retail_camera(').replace('M32(shadow_source_view)', '0x009842D0u')
-    wrapper = function(x360, 'f_006E44C0')
+    wrapper = function(x360, 'shadow_cull_restore')+'\n'+function(x360, 'f_006E44C0')+'\n'+function(x360, 'x360_shadow_casters')
     gate_names = [('speed_40.c', n) for n in ['006C5B80','006C7030','006D6AA0','006C83D0']]
     gates = '\n'.join(translated(f,n) for f,n in gate_names)
     section = translated('speed_45.c','00731870').replace('f_00731870_orig(', 'f_00731870(')
@@ -277,7 +304,7 @@ def main():
  case 0x006C83D0u: guest_run(c,f_006C83D0,0,NULL); break;
  case 0x006BFDD0u: M32(a[0]+0x9C0)=1; M32(a[0]+0x80)=0x919C70; break;
  case 0x004FAE40u: CHECK(a[0]==0x919C70 && a[2]==0x4100); M32(a[1]+0x80)=a[0]; ++refreshes; break;
- case 0x00731B80u: { uint32_t e=c->ecx; guest_run(c,f_00731B10,1,&e); break; }
+ case 0x00731B10u: guest_run(c,f_00731B10,n,a); break;
  case 0x006E54E0u:''')
     old = '''  CHECK(n==2 && a[0]==(maps?0x9196C0u:0x919650u)); CHECK(rs174==0);
   CHECK(nworld==(maps?6:0)); map_owner=a[0]; ++maps;

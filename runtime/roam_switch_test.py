@@ -1,5 +1,5 @@
 """Production game-hook session reset, legacy env switches and zero-work Off path; fake sockets/guest calls.
-Proof: normal 71 checks, 0 failures; broken Off 2, front-end cleanup 6, timeout 1,
+Proof: normal 78 checks, 0 failures; broken Off 2, front-end cleanup 6, timeout 1,
 pre-distance pose guard 33, diagnostic guard 1 failures; sockets 4/4, guest calls 0.
 Restored connect/input error loggers each leak one IPv4 and are rejected; normal zero leaks.
 Broken Off path polls the session controller every frame.
@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import re
 RT = Path(__file__).resolve().parent
-CF = ['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
+CF = ['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
       '-fsanitize=address,undefined', '-I', str(RT), '-I', str(RT.parent / 'recomp')]
 
 
@@ -30,16 +30,18 @@ def main():
         front_end = 'void f_00663D30(Cpu *c) {\n    roam_session(c);'
         assert source.count(front_end) == 1
         for label, text in [('normal', source), ('broken_off', source.replace(old, 'if (state < 0) atomic_store(&roam_state, 2);')),
+                            ('broken_off_key', source.replace('if (!v || !*v) return -1;', 'RoamAuth unused_key; roam_auth_generate(&unused_key); roam_auth_clear(&unused_key); if (!v || !*v) return -1;')),
+                            ('broken_off_file', source.replace('if (!v || !*v) return -1;', '(void)userdata_dir(); if (!v || !*v) return -1;')),
                             ('broken_front_end', source.replace(front_end, 'void f_00663D30(Cpu *c) {')),
                             ('broken_log', source.replace('"roam: bind/connect: %s\\n", strerror(errno)', '"roam: bind/connect %s: %s\\n", v, strerror(errno)')),
                             ('broken_input_log', source.replace('"roam: NFS_ROAM is not ip:port; online free roam off\\n"', '"roam: NFS_ROAM=%s is not ip:port; online free roam off\\n", v')),
-                            ('broken_diag', source.replace('if (diag_on) diag_event("roam: on, relay', 'diag_event("roam: on, relay')),
+                            ('broken_diag', source.replace('if (diag_on) diag_event("roam: online (wire v%d)", ROAM_VERSION)', 'diag_event("roam: online %s (wire v%d)", host, ROAM_VERSION)')),
                             ('broken_timeout', source.replace(timeout, 'if (0)')),
                             ('broken_pose', source.replace('if (!roam_pose_valid(pos, vel)) continue;', ''))]:
             src = td / (label + '.c'); src.write_text(text)
             test = td / (label + '_harness.c'); test.write_text(harness.replace('"roam_game.c"', '"' + str(src) + '"'))
             exe = td / label
-            p = subprocess.run(CF + [str(test), str(RT / 'roam_core.c'), '-o', str(exe)], capture_output=True, text=True)
+            p = subprocess.run(CF + [str(RT / 'roam_auth.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if __import__('sys').platform == 'darwin' else ['-lcrypto', '-lm']) + [str(test), str(RT / 'roam_core.c'), '-o', str(exe)], capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-3000:]
             p = subprocess.run([str(exe)], capture_output=True, text=True, timeout=15)
             print(label + ':', p.stdout.strip(), flush=True)

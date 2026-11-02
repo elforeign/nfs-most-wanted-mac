@@ -2,19 +2,26 @@
 """Controller text entry against translated manager/filter/accept/cancel bodies.
 ASan/UBSan, no game or GPU. Fixtures replace string packing (Latin-1), drawing,
 allocation, FE flush and notifications; manager editing/validation are real.
-PASS: 248 checks, 0 failures. Broken controls: limit 29/248 failures,
+PASS: 255 checks, 0 failures (256-character note, hold-repeat delete, R3 clear-all). Broken controls: limit 29/248 failures,
 filter 5/248, backspace 21/248, empty 12/248, rollback 14/248,
 stale 18/250, ownership 4/248, mapping 3/246, opening press 14/248,
-held input 1/248, device switch 2/248, Note rollback 1/248.
+held input 1/248, device switch 2/248, Note rollback 1/248,
+hold repeat 1/255, clear all 1/255.
 Physical-device tracker: 6/0 checks/failures; broken connection tracking 6/2.
+R3 review proof: original press-to-clear 350 checks/25 failures; release-to-clear 350/0.
 """
 from pathlib import Path
+import hashlib
 import re
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 R = ROOT / 'runtime'
+
+# Authentic reviewed press-to-clear fragment; only this action changes in the baseline.
+R3_PRESS_BASELINE = '            if (edge & 512) osk_queue(s->generation, OSK_CLEAR, 0);          // R3: the whole field\n'
+assert hashlib.sha256(R3_PRESS_BASELINE.encode()).hexdigest() == 'abb773d64d8162ee143319b2084ad9908924e2339189f94996e196a215ed2371'
 
 PRE = r'''
 #include "funcs.h"
@@ -141,6 +148,38 @@ int main(int argc,char **argv) {
  old=osk_capture()->generation; osk_queue(old,OSK_TYPE,'X'); osk_note_end(0);
  osk_note_begin(text,sizeof text,0); pass(); CHECK(strlen(text)==94);
  event(OSK_ACCEPT,0); CHECK(!osk_note_active()); CHECK(strlen(text)==94); menu_open=0;
+ // A 256-character note: holding Circle repeats delete (once at the press, then after 0.4 s at 20 per second); R3 clears the field.
+ char big[257]=""; osk_pad(0,0,0,0,0,0,0,0,1,0); osk_note_begin(big,sizeof big,0); pass(); CHECK(osk_capture()->limit==256);
+ for(unsigned i=0;i<240;++i) event(OSK_TYPE,'A');
+ CHECK(strlen(big)==240);
+ for(unsigned i=0;i<20;++i) { ticks+=16666667; osk_pad(0,0,0,0,0,0,0,0,1,0); pass(); }
+ ticks+=16666667; osk_pad(0,2,0,0,0,0,0,0,1,0); pass(); CHECK(strlen(big)==239);
+ for(unsigned i=0;i<18;++i) { ticks+=16666667; osk_pad(0,2,0,0,0,0,0,0,1,0); pass(); }   // 0.30 s held
+ CHECK(strlen(big)==239);
+ for(unsigned i=0;i<42;++i) { ticks+=16666667; osk_pad(0,2,0,0,0,0,0,0,1,0); pass(); }   // 1.0 s held
+ CHECK(strlen(big)<=239-11 && strlen(big)>=239-15);
+ ticks+=16666667; osk_pad(0,0,0,0,0,0,0,0,1,0); pass(); size_t kept=strlen(big);
+ for(unsigned i=0;i<10;++i) { ticks+=16666667; osk_pad(0,0,0,0,0,0,0,0,1,0); pass(); }
+ CHECK(strlen(big)==kept);                                                                   // released: no more deleting
+ ticks+=16666667; osk_pad(0,512,0,0,0,0,0,0,1,0); pass(); CHECK(strlen(big)==kept);
+ ticks+=16666667; osk_pad(0,0,0,0,0,0,0,0,1,0); pass(); CHECK(big[0]==0);
+ event(OSK_CANCEL,0); menu_open=0;
+ // R3 clear is committed on release, and cancelled if L3 joins the menu chord.
+ // Exercise both adapters, both press orders, simultaneous presses and both release orders.
+ for(int adapter=0;adapter<2;++adapter) for(int order=0;order<3;++order) for(int release=0;release<2;++release) {
+  osk_pad(0,0,0,0,0,0,0,0,1,0);
+  if(adapter) { strcpy(big,"KEEP"); menu_open=1; osk_note_begin(big,sizeof big,0); pass(); }
+  else begin(6,7,"KEEP");
+  osk_pad(0,0,0,0,0,0,0,0,1,0);
+  if(order<2) { osk_pad(0,order?256:512,0,0,0,0,0,0,1,0); pass(); assert_text("KEEP"); }
+  CHECK(!osk_pad(0,256|512|OSK_MENU_SHORTCUT,0,0,0,0,0,0,1,0)); pass(); assert_text("KEEP");
+  // Also test while the menu suspends the guest capture.
+  if(!adapter) menu_open=1;
+  osk_pad(0,release?256:512,0,0,0,0,0,0,1,0); pass();
+  osk_pad(0,0,0,0,0,0,0,0,1,0); pass();
+  if(!adapter) menu_open=0;
+  pass(); assert_text("KEEP"); event(OSK_CANCEL,0); menu_open=0;
+ }
  // Guest suspension resumes only the still-live generation.
  begin(6,7,"P"); old=osk_capture()->generation; menu_open=1;
  osk_note_begin(text,sizeof text,0); event(OSK_TYPE,'B'); CHECK(M32(KM+0x300)==1);
@@ -219,7 +258,7 @@ def main():
         'good': (core, bodies),
         'limit': (core, bodies.replace('if ((sf == of)) goto L_005A37D1;', 'if (0) goto L_005A37D1;')),
         'filter': (core, bodies.replace('f_0056C820(c);', 'c->eax=1; c->esp+=8;')),
-        'backspace': (core.replace('e.action == OSK_DELETE ? 8 : e.ch', 'e.action == OSK_DELETE ? 0 : e.ch'), bodies),
+        'backspace': (core.replace('e.action == OSK_DELETE || e.action == OSK_CLEAR ? 8 : e.ch', 'e.action == OSK_DELETE || e.action == OSK_CLEAR ? 0 : e.ch'), bodies),
         'empty': (core, bodies.replace('if (zf) goto L_005991A1;', 'if (0) goto L_005991A1;')),
         'rollback': (core, bodies.replace('f_004611C0(c);', 'c->esp+=4;')),
         'stale': (core.replace('e.generation != s->generation', '0'), bodies),
@@ -228,8 +267,13 @@ def main():
         'opening': (core.replace('armed[port] = 0; }', 'armed[port] = 1; }'), bodies),
         'held': (core.replace('else if (held[port]) taking = 1;', 'else if (held[port]) taking = 0;'), bodies),
         'device switch': (core.replace('prompts_last_input() != 1) continue;', '0) continue;'), bodies),
+        'hold repeat': (core.replace('text_delete_repeat(&delete_at[port], (buttons & 2) != 0, now)', '(edge & 2) != 0'), bodies),
+        'clear all': (core.replace('edge & 512', 'edge & 1024'), bodies),
         'note rollback': (core.replace('if (cancel) memcpy(note_text, note_original, note_capacity);', '(void)cancel;'), bodies),
     }
+    start = core.index('            // R3 alone clears on release;')
+    end = core.index('            if (edge & 4)', start)
+    variants['r3 press baseline'] = (core[:start] + R3_PRESS_BASELINE + core[end:], bodies)
     with tempfile.TemporaryDirectory(prefix='osk-test-') as d:
         for name, (bridge, guest) in variants.items():
             if name != 'good' and bridge == core and guest == bodies:
@@ -237,7 +281,7 @@ def main():
             source = Path(d) / 'test.c'; exe = Path(d) / 'test'
             source.write_text(PRE + guest + bridge + MAIN)
             result = subprocess.run(['clang', '-std=c11', '-O1', '-g', '-fsanitize=address,undefined',
-                '-I', str(R), '-I', str(ROOT/'recomp'), '-I', str(ROOT/'recomp/out'), str(source), '-o', str(exe)], capture_output=True, text=True)
+                '-I', str(R), '-I', str(ROOT/'recomp'), '-I', str(ROOT/'recomp/out'), str(source), str(R/'text_fit.c'), '-o', str(exe)], capture_output=True, text=True)
             if result.returncode:
                 print(result.stderr[-5000:]); raise SystemExit(1)
             result = subprocess.run([str(exe)], capture_output=True, text=True)

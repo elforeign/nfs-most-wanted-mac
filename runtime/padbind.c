@@ -1,3 +1,4 @@
+#include "save_timing.h"
 // padbind.c - the game's own controller bindings for every controller type.
 //
 // The PC game (v1.3) binds input through one table, GameAction (0091F418, 76 actions of 0x34 bytes: the action's name,
@@ -18,7 +19,7 @@
 //   brake, R3 speedbreaker, R2 / L2 shift up / down; in menus Square, Create and Options for the keys 2 / 3 / 4).
 //   Menus: Cross accepts, Triangle goes back (FE_ACTION_ACCEPT / CANCEL), as the PS2. The PS button and the touchpad
 //   click are bindable but bound to nothing (the touchpad click opens the port menu). Other pads use separate PS2/Xbox layout variants, with independent Z/Rz trigger axes.
-// - Each controller type (the joystick's name) keeps its own set per profile: the game saves the active one in the
+// - Each controller type/layout keeps Default and Drag joystick sets per profile: the game saves Default in the
 //   profile, this file all of them in USERDATA/pad_bindings.txt (published after a career commit; type changes stay
 //   dirty in memory until that save), so
 //   loading a profile with another pad, or changing pads while playing, brings that pad's own set back.
@@ -47,7 +48,7 @@ enum { T_KEY = 1, T_BUTTON, T_POV, T_AXIS_LO, T_AXIS_HI, T_ROT_LO, T_ROT_HI, T_S
 // user32.m's P_* (the PlayStation pad's DirectInput buttons)
 enum { P_CROSS, P_CIRCLE, P_SQUARE, P_TRIANGLE, P_L1, P_R1, P_CREATE, P_OPTIONS, P_L3, P_R3, P_L2, P_R2, P_PS, P_TOUCHPAD,
        P_LPADDLE, P_RPADDLE };
-enum { A_GAS, A_BRAKE, A_GAMEBREAKER = 5, A_SHIFTDOWN = 7, A_SHIFTUP = 8, A_NEXTSONG = 24, A_FE_B0 = 37, A_FE_B3 = 39, A_FE_B4 = 40 };
+enum { A_GAS, A_BRAKE, A_GAMEBREAKER = 5, A_N2O = 6, A_SHIFTDOWN = 7, A_SHIFTUP = 8, A_NEXTSONG = 24, A_FE_B0 = 37, A_FE_B3 = 39, A_FE_B4 = 40 };
 
 static uint32_t rec(int a, int slot) { return GA + 0x34u * (uint32_t)a + 4 + 12u * (uint32_t)slot; }
 static void set_rec(uint32_t r, uint32_t t, uint32_t d, uint32_t o) { M32(r) = t; M32(r + 4) = d; M32(r + 8) = o; }
@@ -68,14 +69,10 @@ static int layout_for(const char *name) {
 static uint32_t legacy_defaults[GA_PAGE][2][3], nonps_defaults_page[GA_PAGE][2][3];
 static int legacy_defaults_valid;
 static int active_layout;
+static int defaults_installing;
+static int edited_set = PADBIND_DEFAULT;
 static uint32_t joy(void) { uint32_t d = M32(JOY); return d && d != 0xFFFFFFFCu ? d : 0; }
 static char *joy_name(uint32_t dev) { return (char *)G + dev + 0x114; }
-int padbind_pedals(int port) {
-    if (!pedals_selected()) return 0;
-    if (port == 1) { char name[64]; pad_identity_n(1, name, sizeof name); return name_ps(name); }
-    uint32_t d = joy();
-    return d && name_ps(joy_name(d));
-}
 static const char *action_name(int a) { const char *n = gptr(M32(GA + 0x34u * (uint32_t)a)); return n ? n : "?"; }
 static const char *profile_name(void) {
     uint32_t db = M32(FEDB), up = db ? M32(db + 0x10) : 0;
@@ -240,6 +237,7 @@ void f_0063CD80_orig(Cpu *c);
 void f_0063CD80(Cpu *c) {                      // cdecl (void): the joystick's defaults, by its name
     uint32_t dev = joy();
     if (!dev) { f_0063CD80_orig(c); return; }
+    ++defaults_installing;
     char name[64];
     snprintf(name, sizeof name, "%s", joy_name(dev));
     int ps = name_ps(name);
@@ -262,13 +260,15 @@ void f_0063CD80(Cpu *c) {                      // cdecl (void): the joystick's d
                 nonps_defaults_page[a][k][i] = M32(rec(a, k + 2) + 4u * (uint32_t)i);
     }
     active_layout = layout_for(name);
+    --defaults_installing;
     char why[96];
     snprintf(why, sizeof why, "defaults for %s", name);
     dump(why);
 }
 
 // ---------------- the sets per controller type (USERDATA/pad_bindings.txt) ----------------
-typedef struct { char profile[33], name[64]; uint32_t hash, r[GA_PAGE][2][3]; int layout; } Set;
+typedef struct { char profile[33], name[64]; uint32_t hash, r[GA_PAGE][2][3]; int layout, binding_set; } Set;
+static const char *const binding_set_names[] = {"default", "drag"};
 static Set *sets;
 static int nsets, sets_loaded, sets_dirty, migration_backup_needed;
 static void sets_path(char *p, size_t n) { snprintf(p, n, "%s/pad_bindings.txt", userdata_dir()); }
@@ -283,9 +283,10 @@ static void sets_load(void) {
     sets_path(p, sizeof p);
     FILE *f = fopen(p, "r");
     if (!f) return;
-    int v2 = 0;
+    int version = 1;
     while (fgets(line, sizeof line, f)) {
-        if (!strncmp(line, "# NFSMW pad bindings v2", 22)) v2 = 1;
+        if (!strncmp(line, "# NFSMW pad bindings v2", 23)) version = 2;
+        if (!strncmp(line, "# NFSMW pad bindings v3", 23)) version = 3;
         if (line[0] == '#' || line[0] == '\n') continue;
         Set row = {0};
         char *tab1 = strchr(line, '\t'), *tab2 = tab1 ? strchr(tab1 + 1, '\t') : NULL;
@@ -295,7 +296,7 @@ static void sets_load(void) {
         row.hash = (uint32_t)strtoul(tab1 + 1, NULL, 16);
         snprintf(row.name, sizeof row.name, "%.*s", (int)(tab3 - tab2 - 1), tab2 + 1);
         char *q = tab3 + 1;
-        if (v2) {
+        if (version >= 2) {
             char *tab4 = strchr(q, '\t');
             if (!tab4) continue;
             *tab4 = 0;
@@ -305,6 +306,14 @@ static void sets_load(void) {
             row.layout = layout;
             q = tab4 + 1;
         } else row.layout = name_ps(row.name) || ps_hash(row.hash) ? L_NATIVE_PS : L_LEGACY;
+        if (version >= 3) {
+            char *tab = strchr(q, '\t');
+            if (!tab) continue;
+            *tab = 0;
+            if (!strcmp(q, "drag")) row.binding_set = PADBIND_DRAG;
+            else if (strcmp(q, "default")) continue;
+            q = tab + 1;
+        }
         int ok = 1;
         for (int a = 0; a < GA_PAGE && ok; ++a)
             for (int k = 0; k < 2 && ok; ++k) {
@@ -313,12 +322,13 @@ static void sets_load(void) {
                 q += used;
             }
         if (!ok) continue;
+        if (version < 3) migration_backup_needed = 1;
         sets = realloc(sets, (size_t)(nsets + 1) * sizeof *sets);
         sets[nsets++] = row;
     }
     fclose(f);
 }
-// Keep the original text file byte-for-byte, once, before a migration writes v2. Legacy rows also stay in v2.
+// Keep the original text file byte-for-byte, once, before a migration writes v3. Legacy rows stay as Default.
 static int migration_backup(void) {
     char p[1100], backup[1110];
     sets_path(p, sizeof p); snprintf(backup, sizeof backup, "%s.v1", p);
@@ -344,37 +354,45 @@ static void sets_save(void) {
     sets_path(p, sizeof p); snprintf(tmp, sizeof tmp, "%s.tmp", p);
     FILE *f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "# NFSMW pad bindings v2\n# profile, name hash, name, layout, 19 primary/secondary type,device,object triples\n"
+    fprintf(f, "# NFSMW pad bindings v3\n# profile, name hash, name, layout, set, 19 primary/secondary type,device,object triples\n"
                "# legacy rows are rollback copies; native_ps values and hashes are never migrated.\n");
     for (int i = 0; i < nsets; ++i) {
-        fprintf(f, "%s\t%08X\t%s\t%s\t", sets[i].profile, sets[i].hash, sets[i].name, layout_names[sets[i].layout]);
+        fprintf(f, "%s\t%08X\t%s\t%s\t%s\t", sets[i].profile, sets[i].hash, sets[i].name,
+                layout_names[sets[i].layout], binding_set_names[sets[i].binding_set]);
         for (int a = 0; a < GA_PAGE; ++a)
             for (int k = 0; k < 2; ++k) fprintf(f, " %u,%u,%u", sets[i].r[a][k][0], sets[i].r[a][k][1], sets[i].r[a][k][2]);
         fputc('\n', f);
     }
     int ok = !ferror(f);
-    if (fclose(f)) ok = 0;
-    if (ok && !rename(tmp, p)) sets_dirty = migration_backup_needed = 0;
+    if (SAVE_TIME("stream.close", fclose(f))) ok = 0;
+    if (ok && !SAVE_TIME("rename", rename(tmp, p))) sets_dirty = migration_backup_needed = 0;
     else remove(tmp);
 }
-static Set *set_find(const char *profile, uint32_t hash, int layout) {
+static Set *set_find_kind(const char *profile, uint32_t hash, int layout, int binding_set) {
     sets_load();
     for (int i = 0; i < nsets; ++i)
-        if (sets[i].hash == hash && sets[i].layout == layout && !strcmp(sets[i].profile, profile)) return &sets[i];
+        if (sets[i].hash == hash && sets[i].layout == layout && sets[i].binding_set == binding_set &&
+            !strcmp(sets[i].profile, profile)) return &sets[i];
     return NULL;
 }
-static Set *set_put(const char *profile, uint32_t hash, const char *name, int layout) {
-    Set *row = set_find(profile, hash, layout);
+static Set *set_find(const char *profile, uint32_t hash, int layout) {
+    return set_find_kind(profile, hash, layout, PADBIND_DEFAULT);
+}
+static Set *set_put_kind(const char *profile, uint32_t hash, const char *name, int layout, int binding_set) {
+    Set *row = set_find_kind(profile, hash, layout, binding_set);
     if (!row) {
         sets = realloc(sets, (size_t)(nsets + 1) * sizeof *sets);
         row = &sets[nsets++];
         memset(row, 0, sizeof *row);
         snprintf(row->profile, sizeof row->profile, "%s", profile);
-        row->hash = hash; row->layout = layout;
+        row->hash = hash; row->layout = layout; row->binding_set = binding_set;
         sets_dirty = 1;
     }
     if (name && *name && strcmp(row->name, name)) { snprintf(row->name, sizeof row->name, "%s", name); sets_dirty = 1; }
     return row;
+}
+static Set *set_put(const char *profile, uint32_t hash, const char *name, int layout) {
+    return set_put_kind(profile, hash, name, layout, PADBIND_DEFAULT);
 }
 static void set_from_table(Set *row) {
     for (int a = 0; a < GA_PAGE; ++a)
@@ -427,40 +445,243 @@ static Set *set_for(const char *profile, const char *name, int layout) {
     if (diag_on) diag_event("padbind: migrated legacy %08X to %s (rollback retained)", hash, layout_names[layout]);
     return row;
 }
+// Seed only a missing Drag row. Rebinding either page later never reseeds the other.
+static void seed_drag(Set *row, const Set *base) {
+    *row = *base;
+    row->binding_set = PADBIND_DRAG;
+    // Default's non-PS objects name layout outputs; Drag names physical controls.
+    // Translate before clearing conflicts so, for example, Xbox X keeps Speedbreaker.
+    const int xbox_map[12] = {-1, P_CROSS, -1, P_SQUARE, P_TRIANGLE, P_CREATE, P_CIRCLE, P_OPTIONS,
+                              -1, -1, P_R1, P_L3};
+    for (int a = 0; a < GA_PAGE; ++a)
+        for (int k = 0; k < 2; ++k) {
+            uint32_t *r = row->r[a][k];
+            if (!r[1] && r[0] == T_BUTTON && base->layout != L_NATIVE_PS) {
+                uint32_t o = r[2];
+                int xbox = base->layout == L_NONPS_XBOX;
+                int m = xbox ? (o < 12 ? xbox_map[o] : -1) :
+                    (o < 11 ? drive_map[o] : o == XBOX_L3 ? P_L3 : -1);
+                if (xbox && (o == 8 || o == 9)) {
+                    r[0] = o == 8 ? T_ROT_LO : T_ROT_HI; r[2] = 1;
+                } else if (m == L2_AXIS || m == R2_AXIS) {
+                    r[0] = m == L2_AXIS ? T_AXIS_HI : T_ROT_HI; r[2] = 2;
+                } else if (m >= 0) r[2] = (uint32_t)m;
+                else memset(r, 0, 12);
+            }
+            if (!r[1] && ((r[2] == 2 && (r[0] == T_AXIS_HI || r[0] == T_ROT_HI)) ||
+                (r[0] == T_BUTTON && (r[2] == P_R1 || r[2] == P_L1 || r[2] == P_R2 || r[2] == P_L2 || r[2] == P_CROSS || r[2] == P_SQUARE))))
+                memset(r, 0, 12);
+        }
+    const int actions[] = {A_GAS, A_BRAKE, A_SHIFTUP, A_SHIFTDOWN, A_N2O, A_GAMEBREAKER};
+    const uint32_t bindings[][3] = {{T_ROT_HI, 0, 2}, {T_AXIS_HI, 0, 2},
+                                   {T_BUTTON, 0, P_R1}, {T_BUTTON, 0, P_L1}, {T_BUTTON, 0, P_CROSS}, {T_BUTTON, 0, P_SQUARE}};
+    for (int i = 0; i < 6; ++i) memcpy(row->r[actions[i]][0], bindings[i], 12);
+}
+static Set *drag_for(const char *profile, const char *name, int layout) {
+    uint32_t hash = name_hash(name);
+    Set *row = set_find_kind(profile, hash, layout, PADBIND_DRAG);
+    if (row) return row;
+    Set *base = set_find(profile, hash, layout);
+    if (!base) return NULL;
+    Set copy = *base;                         // set_put_kind can realloc
+    row = set_put_kind(profile, hash, name, layout, PADBIND_DRAG);
+    seed_drag(row, &copy);
+    sets_dirty = 1;
+    return row;
+}
+static void remember_page(void) {
+    uint32_t dev = joy();
+    if (!dev) return;
+    const char *name = joy_name(dev);
+    int layout = active_layout ? active_layout : layout_for(name);
+    set_from_table(set_put_kind(profile_name(), name_hash(name), name, layout, edited_set));
+}
+static void seed_active_pages(void) {
+    remember_page();
+    uint32_t dev = joy();
+    if (dev) drag_for(profile_name(), joy_name(dev), active_layout ? active_layout : layout_for(joy_name(dev)));
+}
+int padbind_edit_set(int binding_set) {
+    if ((binding_set != PADBIND_DEFAULT && binding_set != PADBIND_DRAG) || !joy()) return 0;
+    remember_page();
+    const char *name = joy_name(joy()), *profile = profile_name();
+    int layout = active_layout ? active_layout : layout_for(name);
+    Set *row = binding_set == PADBIND_DRAG ? drag_for(profile, name, layout) : set_find(profile, name_hash(name), layout);
+    if (!row) return 0;
+    set_to_table(row);
+    edited_set = binding_set;
+    return 1;
+}
+int padbind_edited_set(void) { return edited_set; }
+int portmenu_is_open(void);
+static uint32_t input_race_params;
+static int input_race_drag;
+void f_004D6150(Cpu *c);
+void padbind_race_update(Cpu *c) {
+    uint32_t race = M32(0x0091E000u), params = race ? M32(race + 0x1968) : 0;
+    input_race_params = 0; input_race_drag = 0;
+    if (M32(0x00925E90u) != 6 || !params) return;
+    // IsDragRace also handles SkipFE parameters without a generated index,
+    // using GetRaceType's attribute lookup. Preserve the caller's complete CPU.
+    Cpu q = *c;
+    q.esp -= 4; M32(q.esp) = 0;
+    f_004D6150(&q);
+    input_race_params = params; input_race_drag = (q.eax & 0xFF) != 0;
+    if (diag_on) {
+        static uint32_t last_params;
+        static int last_drag = -1;
+        if (last_params != params || last_drag != input_race_drag) {
+            last_params = params; last_drag = input_race_drag;
+            diag_event("padbind: race parameters %08X indexed %08X drag %d", params, M32(params + 4), input_race_drag);
+        }
+    }
+}
+int padbind_input_set(void) {
+    // Match the driving/menu decision in user32.m. Read live state rather than
+    // latching the last race: pause, restart, quit and roaming can all replace it.
+    if (!G || M32(0x00925E90u) != 6 || portmenu_is_open()) return PADBIND_DEFAULT;
+    uint32_t sim = M32(0x009885E0u), io = M32(IOMOD_DEVS);
+    if ((sim && M32(sim + 0x2C) == 4) || (io && M8(io + 0x183C))) return PADBIND_DEFAULT;
+    uint32_t fe = M32(0x0091CADCu) ? M32(M32(0x0091CADCu)) : 0;
+    if (fe && fe != 0xFFFFFF28u)
+        for (uint32_t p = M32(fe + 0xE4); p; p = M32(p + 8)) {
+            const char *name = gptr(M32(p + 0xC));
+            if (M32(p + 0x20) && name && strncasecmp(name, "HUD_", 4)) return PADBIND_DEFAULT;
+        }
+    uint32_t race = M32(0x0091E000u), params = race ? M32(race + 0x1968) : 0;
+    // Indexed races can be resolved immediately, including diagram/role reads
+    // before the next input update. SkipFE uses the refreshed retail getter.
+    uint32_t event = params ? M32(params + 4) : 0;
+    int drag = event ? M8(event + 0x2B) == 2 : params && params == input_race_params && input_race_drag;
+    return drag ? PADBIND_DRAG : PADBIND_DEFAULT;
+}
+int padbind_effective_binding(int binding_set, int action, uint32_t out[6]) {
+    if (!out || action < 0 || action >= GA_PAGE ||
+        (binding_set != PADBIND_DEFAULT && binding_set != PADBIND_DRAG)) return 0;
+    if (binding_set == edited_set) { memcpy(out, G + rec(action, 2), 24); return 1; }
+    uint32_t dev = joy();
+    if (!dev) return 0;
+    // Capture the live Default page before creating Drag; only joystick records are copied.
+    if (edited_set == PADBIND_DEFAULT) remember_page();
+    const char *name = joy_name(dev), *profile = profile_name();
+    int layout = active_layout ? active_layout : layout_for(name);
+    Set *row = binding_set == PADBIND_DRAG ? drag_for(profile, name, layout) : set_find(profile, name_hash(name), layout);
+    if (!row) return 0;
+    memcpy(out, row->r[action], 24);
+    return 1;
+}
+static uint32_t input_saved[GA_PAGE][6];
+static int input_installed, input_previous_set;
+int padbind_input_begin(int binding_set) {
+    if (input_installed || !joy()) return 0;
+    int swapped = binding_set != edited_set;
+    if (!swapped) goto diagnostic;
+    uint32_t page[GA_PAGE][6];
+    for (int a = 0; a < GA_PAGE; ++a)
+        if (!padbind_effective_binding(binding_set, a, page[a])) return 0;
+    for (int a = 0; a < GA_PAGE; ++a) {
+        memcpy(input_saved[a], G + rec(a, 2), 24);
+        memcpy(G + rec(a, 2), page[a], 24);
+    }
+    input_previous_set = edited_set; edited_set = binding_set; input_installed = 1;
+diagnostic:
+    if (diag_on) {
+        static int last = -1;
+        if (last != binding_set) {
+            last = binding_set;
+            dump(binding_set == PADBIND_DRAG ? "input set drag" : "input set default");
+        }
+    }
+    return swapped;
+}
+void padbind_input_end(int swapped) {
+    if (!swapped) return;
+    for (int a = 0; a < GA_PAGE; ++a) memcpy(G + rec(a, 2), input_saved[a], 24);
+    edited_set = input_previous_set; input_installed = 0;
+}
 static void install_defaults(Cpu *c) {
     uint32_t esp = c->esp, eax = c->eax, ecx = c->ecx, edx = c->edx;
     call_guest(c, 0x0063CD80u, 0, NULL);
     c->esp = esp; c->eax = eax; c->ecx = ecx; c->edx = edx;
 }
+void padbind_drag_defaults(Cpu *c) {
+    if (edited_set != PADBIND_DRAG || !joy()) return;
+    // Generate true layout defaults without modifying Default, shared keyboard
+    // bindings or menu actions. Only the Drag joystick page is replaced.
+    uint8_t saved[GA_N * 0x34];
+    memcpy(saved, G + GA, sizeof saved);
+    install_defaults(c);
+    Set base = {.layout = active_layout}, drag;
+    set_from_table(&base);
+    seed_drag(&drag, &base);
+    memcpy(G + GA, saved, sizeof saved);
+    set_to_table(&drag);
+    remember_page();
+    dump("Drag defaults");
+}
+void padbind_controls_dump(const char *why) { dump(why); }
 
-uint32_t f_0056E180_orig(Cpu *c);
+void f_0056E180_orig(Cpu *c);
 // BEGIN offline bindings transaction: no disk writes until the career save task publishes its file.
-static Set pending_bindings;
+static Set pending_bindings[2];
+static uint32_t pending_before[2][GA_PAGE][2][3];
+static int pending_before_valid[2];
 static int pending_bindings_valid;
 static void bindings_stage(const char *profile, const char *name, int layout) {
-    memset(&pending_bindings, 0, sizeof pending_bindings);
-    snprintf(pending_bindings.profile, sizeof pending_bindings.profile, "%s", profile);
-    snprintf(pending_bindings.name, sizeof pending_bindings.name, "%s", name);
-    pending_bindings.hash = name_hash(name); pending_bindings.layout = layout;
+    Set *base = &pending_bindings[PADBIND_DEFAULT];
+    memset(base, 0, sizeof *base);
+    snprintf(base->profile, sizeof base->profile, "%s", profile);
+    snprintf(base->name, sizeof base->name, "%s", name);
+    base->hash = name_hash(name); base->layout = layout;
     int dirty = sets_dirty;
-    set_from_table(&pending_bindings);
+    if (edited_set == PADBIND_DEFAULT) set_from_table(base);
+    else {
+        Set *stored = set_find(profile, base->hash, layout);
+        if (!stored) return;
+        *base = *stored;
+    }
+    Set *drag = set_find_kind(profile, base->hash, layout, PADBIND_DRAG);
+    if (drag) pending_bindings[PADBIND_DRAG] = *drag;
+    else seed_drag(&pending_bindings[PADBIND_DRAG], base);
+    if (edited_set == PADBIND_DRAG) set_from_table(&pending_bindings[PADBIND_DRAG]);
     sets_dirty = dirty;
+    for (int i = PADBIND_DEFAULT; i <= PADBIND_DRAG; ++i) {
+        Set *stored = set_find_kind(profile, base->hash, layout, i);
+        pending_before_valid[i] = stored != NULL;
+        if (stored) memcpy(pending_before[i], stored->r, sizeof stored->r);
+    }
     pending_bindings_valid = 1;
 }
 void padbind_save_complete(int committed) {
     if (committed) {
+        Set newer[2];
+        int restore[2] = {0};
         if (pending_bindings_valid) {
-            Set *row = set_put(pending_bindings.profile, pending_bindings.hash, pending_bindings.name, pending_bindings.layout);
-            *row = pending_bindings; sets_dirty = 1;
+            for (int i = PADBIND_DEFAULT; i <= PADBIND_DRAG; ++i) {
+                Set *snapshot = &pending_bindings[i];
+                Set *row = set_find_kind(snapshot->profile, snapshot->hash, snapshot->layout, i);
+                // Page changes can store newer edits while the save task is in flight.
+                if (row && (!pending_before_valid[i] || memcmp(row->r, pending_before[i], sizeof row->r))) {
+                    newer[i] = *row; restore[i] = 1;
+                }
+                row = set_put_kind(snapshot->profile, snapshot->hash, snapshot->name, snapshot->layout, i);
+                *row = *snapshot; sets_dirty = 1;
+            }
         }
         sets_save();
+        for (int i = PADBIND_DEFAULT; i <= PADBIND_DRAG; ++i) if (restore[i]) {
+            Set *row = set_find_kind(newer[i].profile, newer[i].hash, newer[i].layout, i);
+            *row = newer[i]; sets_dirty = 1;
+        }
     }
     pending_bindings_valid = 0;
 }
 // END offline bindings transaction
 void f_0056E180(Cpu *c) {
     pending_bindings_valid = 0;
+    int swapped = padbind_input_begin(PADBIND_DEFAULT);
     f_0056E180_orig(c);
+    padbind_input_end(swapped);
     uint32_t dev = joy();
     if (!dev) return;
     const char *name = joy_name(dev);
@@ -469,6 +690,7 @@ void f_0056E180(Cpu *c) {
 }
 void f_0056E200_orig(Cpu *c);
 void f_0056E200(Cpu *c) {
+    edited_set = PADBIND_DEFAULT;
     uint32_t buf = arg(c, 0), end = arg(c, 1), dev = joy();
     char cur[64] = "";
     if (dev) snprintf(cur, sizeof cur, "%s", joy_name(dev));
@@ -482,6 +704,7 @@ void f_0056E200(Cpu *c) {
     // A stale sidecar must never override or migrate a DualSense profile loaded with that same pad.
     if (name_ps(cur) && saved == cur_hash) {
         active_layout = L_NATIVE_PS;
+        seed_active_pages();
         dump("profile loaded (native PS unchanged)");
         return;
     }
@@ -496,6 +719,7 @@ void f_0056E200(Cpu *c) {
     install_defaults(c);                     // menus/defaults for this identity and layout, joystick slots only
     Set *mine = set_for(prof, cur, layout_for(cur));
     if (mine) set_to_table(mine);
+    seed_active_pages();
     // Migration stays dirty in memory until a career commit succeeds.
     dump("profile loaded (layout variant)");
 }
@@ -554,7 +778,7 @@ static int controls_screen_open(void) {       // the Controls screen keeps its o
     if (!fe || fe == 0xFFFFFF28u) return 0;
     for (uint32_t p = M32(fe + 0xE4); p; p = M32(p + 8)) {
         const char *n = gptr(M32(p + 0xC));
-        if (n && strcasestr(n, "Options_PC_Controller")) return 1;
+        if (n && (strcasestr(n, "Options_PC_Controller") || strcasestr(n, "Pause_PC_Controller"))) return 1;
     }
     return 0;
 }
@@ -607,6 +831,9 @@ void f_004F6EA0(Cpu *c) {                      // thiscall (SFXObj_PFEATrax this
 static int swap_on;
 void padbind_swap(int on) { swap_on = on; }
 static void follow_pad(Cpu *c) {
+    // Defaults may poll DI while the action table is still empty. Remembering
+    // it then would seed Drag permanently from an unfinished Default page.
+    if (!active_layout || defaults_installing) return;
     uint32_t dev = joy();
     char want[64];
     if (!dev || pad_identity(want, sizeof want) == PAD_KIND_NONE || !want[0]) return;
@@ -616,11 +843,13 @@ static void follow_pad(Cpu *c) {
     const char *prof = profile_name();
     char old[64];
     snprintf(old, sizeof old, "%s", joy_name(dev));
-    set_from_table(set_put(prof, name_hash(old), old, active_layout ? active_layout : layout_for(old)));
+    remember_page();
+    edited_set = PADBIND_DEFAULT;
     snprintf(joy_name(dev), 64, "%s", want);
     install_defaults(c);
     Set *row = set_for(prof, want, layout);
     if (row) set_to_table(row);
+    seed_active_pages();
     // Controller variants stay dirty in memory until a career commit succeeds.
     fprintf(stderr, "boot: controller bindings: %s -> %s / %s (%s set)\n", old, want, layout_names[layout], row ? "its own" : "default");
     char why[224];
@@ -685,11 +914,11 @@ uint32_t padbind_ps_label(int slot, uint32_t fallback) {
     uint32_t dev = joy();
     if (slot < 1 || slot > 17 || !ctl[slot].t || !dev || !name_ps(joy_name(dev))) return fallback;
     for (int a = 0; a < GA_PAGE; ++a) {
-        uint32_t effective[6];
-        int preset = pedals_binding(a, effective);
+        uint32_t bindings[6];
+        if (!padbind_effective_binding(padbind_input_set(), a, bindings)) continue;
         for (int s = 2; s < 4; ++s)
-            if ((preset ? effective[3*(s-2)] : M32(rec(a, s))) == ctl[slot].t &&
-                (preset ? effective[3*(s-2)+2] : M32(rec(a, s) + 8)) == ctl[slot].o) return label[a];
+            if (bindings[(s - 2) * 3] == ctl[slot].t &&
+                bindings[(s - 2) * 3 + 2] == ctl[slot].o) return label[a];
     }
     return 0;
 }
@@ -704,11 +933,11 @@ int padbind_trigger_role(int right) {
     uint32_t axis = right ? T_ROT_HI : T_AXIS_HI, button = right ? P_R2 : P_L2;
     int best = PADBIND_ROLE_NONE;
     for (int a = 0; a < GA_PAGE; ++a) {
-        uint32_t effective[6];
-        int preset = pedals_binding(a, effective);
+        uint32_t bindings[6];
+        if (!padbind_effective_binding(padbind_input_set(), a, bindings)) continue;
         for (int s = 2; s < 4; ++s) {
-            uint32_t t = preset ? effective[3*(s-2)] : M32(rec(a, s));
-            uint32_t o = preset ? effective[3*(s-2)+2] : M32(rec(a, s) + 8);
+            uint32_t t = bindings[(s - 2) * 3];
+            uint32_t o = bindings[(s - 2) * 3 + 2];
             if (!((t == axis && o == 2) || (t == T_BUTTON && o == button))) continue;
             int role = a == A_GAS ? PADBIND_ROLE_GAS : a == A_BRAKE ? PADBIND_ROLE_BRAKE :
                        a == A_SHIFTUP || a == A_SHIFTDOWN ? PADBIND_ROLE_SHIFT : PADBIND_ROLE_OTHER;

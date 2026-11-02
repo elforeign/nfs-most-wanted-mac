@@ -546,6 +546,35 @@ static void test_manual_stream() {
     ds_device_release(d);
 }
 
+// Snapshot while the source is still playing. Stop may immediately schedule a silent tap block.
+template<class AfterStop>
+static std::vector<float> capture_stream(DsBuffer *b, std::vector<float> &out, std::mutex &om, AfterStop after_stop) {
+    std::vector<float> o;
+    auto snapshot = [&] { std::lock_guard<std::mutex> g(om); o = out; };
+#ifndef DSTEST_STOP_BEFORE_SNAPSHOT
+    snapshot();
+#endif
+    OK(ds_buffer_stop(b));
+    after_stop();
+#ifdef DSTEST_STOP_BEFORE_SNAPSHOT
+    snapshot();  // negative control: original ordering
+#endif
+    return o;
+}
+
+// The first refill starts at zero, behind any advancing write cursor. Complete it before Play so the
+// mixer cannot read half-written startup samples. Subsequent refills stay ahead of the write cursor.
+template<class Fill>
+static void start_snd_stream(DsBuffer *b, Fill fill) {
+#ifdef DSTEST_PLAY_BEFORE_REFILL
+    OK(ds_buffer_play(b, DSBPLAY_LOOPING));  // negative control: original ordering
+#endif
+    fill();
+#ifndef DSTEST_PLAY_BEFORE_REFILL
+    OK(ds_buffer_play(b, DSBPLAY_LOOPING));
+#endif
+}
+
 // Real-time streaming: the game polls the cursors from its own thread; the mixer runs on its own clock.
 static void realtime_stream(DsDevice *d, std::vector<float> &out, std::mutex &om, double seconds, const char *label) {
     const uint32_t frames = 24000, bytes = frames * 12;  // 0.5 s, like a typical streaming buffer
@@ -578,7 +607,7 @@ static void realtime_stream(DsDevice *d, std::vector<float> &out, std::mutex &om
         CHECK(s.step(), "streamer");
         std::this_thread::sleep_for(std::chrono::microseconds(1000 + rng() % 9000));  // 1-10 ms, like a game frame
     }
-    OK(ds_buffer_stop(b));
+    std::vector<float> o = capture_stream(b, out, om, [] {});
     DsStats st;
     OK(ds_device_get_stats(d, &st));
     // play cursor rate: least squares over the run, skipping the first 0.2 s (latency fill)
@@ -594,11 +623,9 @@ static void realtime_stream(DsDevice *d, std::vector<float> &out, std::mutex &om
     uint64_t underruns = st.underruns - st0.underruns;
     CHECK(underruns == 0, "%s: %llu underruns", label, (unsigned long long)underruns);
     // output: the stream starts somewhere (the mixer was already running), then must be continuous
-    std::vector<float> o;
-    { std::lock_guard<std::mutex> g(om); o = out; }
     size_t k0 = 0, frames_out = o.size() / 6;
     while (k0 < frames_out && o[k0 * 6 + 1] != sig(1, 0) / 32768.0f) ++k0;  // ch 0 starts at 0, like silence
-    // the tail after Stop is the last chunk; verify up to the frames the streamer kept ahead of
+    // Verify only frames the streamer has supplied; the snapshot contains no post-Stop blocks.
     size_t limit = std::min<size_t>(frames_out, k0 + (size_t)s.next);
     o.resize(limit * 6);
     size_t checked = 0, bad = verify_stream(o, k0, &checked);
@@ -615,6 +642,59 @@ static void tap_collect(void *user, const float *pcm, size_t frames) {
     auto *ctx = (std::pair<std::vector<float> *, std::mutex *> *)user;
     std::lock_guard<std::mutex> g(*ctx->second);
     ctx->first->insert(ctx->first->end(), pcm, pcm + frames * 6);
+}
+
+// Forced interleavings, manual clock and real mixer/tap: no sleeps or scheduling luck.
+// Stop-before-snapshot control: 256/768 bad; fixed: 0/512. Play-before-refill control:
+// 64/512 bad; fixed: 0/256. Both retain the original exact sample comparison.
+static void test_stream_timing() {
+    for (bool startup : {false, true}) {
+        std::vector<float> out;
+        std::mutex om;
+        std::pair<std::vector<float> *, std::mutex *> ctx{&out, &om};
+        DsConfig c;
+        ds_config_default(&c);
+        c.sink = DS_SINK_MANUAL;
+        c.mix_rate = 48000;
+        c.tap = tap_collect;
+        c.tap_user = &ctx;
+        DsDevice *d = nullptr;
+        OK(ds_device_create(&c, &d));
+        auto w = wfx(6, 48000, 16, 0x3F);
+        std::vector<uint8_t> mem(2048 * 12);
+        std::vector<float> block(512 * 6);
+        DsBuffer *b = nullptr;
+        OK(ds_device_create_buffer(d, 0, (uint32_t)mem.size(), w.data(), mem.data(), &b));
+        auto render = [&](size_t n) { OK(ds_device_render(d, block.data(), n)); };
+        std::vector<float> o;
+        if (startup) {
+            start_snd_stream(b, [&] {
+                // Force the mixer to read when only 192 of its next 256 source frames are written.
+                for (uint32_t f = 0; f < 192; ++f) put6(mem.data(), f, f);
+                render(256);
+                for (uint32_t f = 192; f < 2048; ++f) put6(mem.data(), f, f);
+            });
+            render(256);
+            o = capture_stream(b, out, om, [] {});
+        } else {
+            for (uint32_t f = 0; f < 2048; ++f) put6(mem.data(), f, f);
+            OK(ds_buffer_play(b, DSBPLAY_LOOPING));
+            render(512);
+            o = capture_stream(b, out, om, [&] { render(256); });
+        }
+        size_t k0 = 0, checked = 0;
+        while (k0 < o.size() / 6 && o[k0 * 6 + 1] != sig(1, 0) / 32768.0f) ++k0;
+        size_t bad = verify_stream(o, k0, &checked);
+        CHECK(bad == 0 && checked >= 256, "forced %s: %zu bad of %zu",
+              startup ? "startup refill" : "post-stop tap", bad, checked);
+        DsStats st;
+        OK(ds_device_get_stats(d, &st));
+        CHECK(st.underruns == 0, "forced timing underruns");
+        printf("  forced %s: %zu bad of %zu, %llu underruns\n", startup ? "startup refill" : "post-stop tap",
+               bad, checked, (unsigned long long)st.underruns);
+        ds_buffer_release(b);
+        ds_device_release(d);
+    }
 }
 
 static void test_realtime(DsSink sink, DsOutputMode mode, const char *label, double seconds) {
@@ -1009,7 +1089,8 @@ static void test_auto_rate() {
 // looping; a thread every 10 ms reads only the write cursor and fills from its last position up to
 // (write + (30 ms + max interval) * rate) & ~15 frames, with locks split at the end (no second region). The game
 // restarts DirectSound if the write cursor doesn't move for 100 polls; that must never get close (max_stuck: the limit
-// checked; 10 on a healthy output, 60 while the output stalls, see test_fake_snd_drop).
+// checked; 10 on a healthy output, 60 while the output stalls, see test_fake_snd_drop). The fixture completes
+// the first refill before Play: unlike a live game, it must compare every captured sample bit-exactly.
 static int g_snd_max_stuck;   // the last run's longest unchanged-write-cursor streak
 static void test_snd_like(DsSink sink, const char *label, double seconds, int stuck_limit = 10, bool exact = true) {
     std::vector<float> out;
@@ -1043,23 +1124,10 @@ static void test_snd_like(DsSink sink, const char *label, double seconds, int st
     OK(ds_buffer_lock(b, 0, bytes, 0, &o1, &l1, nullptr, nullptr));
     memset(mem.data() + o1, 0, l1);
     OK(ds_buffer_unlock(b, o1, l1, 0, 0));
-    OK(ds_buffer_play(b, DSBPLAY_LOOPING));
     uint32_t last_pos = 0, last_wc = 0xFFFFFFFF;
     uint64_t next = 0, polls = 0;
     int stuck = 0, max_stuck = 0;
-    double t0 = now_s(), prev = t0, max_iv_ms = 15;
-    while (now_s() - t0 < seconds) {
-        double t = now_s();
-        max_iv_ms = std::max(max_iv_ms, std::min(300.0, (t - prev) * 1000));
-        prev = t;
-        uint32_t st = 0, wc = 0;
-        OK(ds_buffer_get_status(b, &st));
-        CHECK(st & DSBSTATUS_PLAYING, "%s: status %x", label, st);
-        OK(ds_buffer_get_current_position(b, nullptr, &wc));
-        ++polls;
-        if (wc == last_wc) max_stuck = std::max(max_stuck, ++stuck);
-        else stuck = 0;
-        last_wc = wc;
+    auto refill = [&](uint32_t wc, double max_iv_ms) {
         uint32_t target = (uint32_t)(wc / 12 + (int)((30 + max_iv_ms) * 0.001 * rate)) & 0xffffff0;
         if (target >= frames) target -= frames;
         int diff = (int)target - (int)last_pos;
@@ -1078,6 +1146,22 @@ static void test_snd_like(DsSink sink, const char *label, double seconds, int st
             }
             last_pos = target;
         }
+    };
+    start_snd_stream(b, [&] { refill(0, 15); });
+    double t0 = now_s(), prev = t0, max_iv_ms = 15;
+    while (now_s() - t0 < seconds) {
+        double t = now_s();
+        max_iv_ms = std::max(max_iv_ms, std::min(300.0, (t - prev) * 1000));
+        prev = t;
+        uint32_t st = 0, wc = 0;
+        OK(ds_buffer_get_status(b, &st));
+        CHECK(st & DSBSTATUS_PLAYING, "%s: status %x", label, st);
+        OK(ds_buffer_get_current_position(b, nullptr, &wc));
+        ++polls;
+        if (wc == last_wc) max_stuck = std::max(max_stuck, ++stuck);
+        else stuck = 0;
+        last_wc = wc;
+        refill(wc, max_iv_ms);
         // Sleep until 10 ms after this poll started, like StartAddress
         double wake = t + 0.010, rest = wake - now_s();
         if (rest > 0) std::this_thread::sleep_for(std::chrono::duration<double>(rest));
@@ -1358,6 +1442,11 @@ int main(int argc, char **argv) {
         return g_fail ? 1 : 0;
     }
     ds_set_peak_limiter(0); // Existing cursor/sample expectations have no look-ahead; fake above exercises default On.
+    test_stream_timing();
+    if (argc > 1 && std::string(argv[1]) == "timing") {
+        printf("%d checks, %d failed\n", g_checks, g_fail);
+        return g_fail ? 1 : 0;
+    }
     test_formats();
     test_locks();
     test_manual_stream();

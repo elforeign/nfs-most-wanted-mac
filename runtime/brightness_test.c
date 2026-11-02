@@ -45,6 +45,7 @@ void report_note(const char *fmt, ...) { (void)fmt; }
 void diag_event(const char *fmt, ...) { (void)fmt; }
 int x360_post_chain_on(void) { return 0; }
 int prompts_pad_lost(void) { return 0; }
+uint32_t prompts_action_text(uint32_t hash) { (void)hash; return 0; } // action labels tested by test_pad_metadata.py
 uint32_t gstr(const char *s) { (void)s; abort(); }
 #define UNUSED_ORIG(name) void name(Cpu *c) { (void)c; }
 UNUSED_ORIG(f_00573960_orig)

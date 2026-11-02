@@ -1,13 +1,15 @@
-"""State ingress proof, ASan/UBSan, no network I/O. Proof: normal 152 checks, 0 failures; unchecked relay 48 failures; unchecked client 90.
+"""State ingress proof, ASan/UBSan, no network I/O. Proof: normal 153 checks, 0 failures; unchecked relay 48 failures; unchecked client 90.
 Relay guard removed = original unchecked STATE storage; view guard removed = original
 malicious-relay path. Invalid replacement must preserve a previously valid snapshot.
 """
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 RT = Path(__file__).resolve().parent
-CF = ['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
+CF = ['clang', '-std=c11', '-D_DEFAULT_SOURCE', '-D_DARWIN_C_SOURCE', '-Wall', '-Wextra', '-Werror', '-g',
       '-fsanitize=address,undefined', '-I', str(RT)]
+LINK = [] if sys.platform == 'darwin' else ['-lcrypto', '-lm']
 
 
 def main():
@@ -23,7 +25,7 @@ def main():
                 file, old, new = mutants[name]; src = sources[file].read_text(); assert src.count(old) == 1
                 out = td / file; out.write_text(src.replace(old, new)); sources[file] = out
             exe = td / name
-            p = subprocess.run(CF + [str(RT / 'roam_state_test.c'), *map(str, sources.values()), '-o', str(exe)], capture_output=True, text=True)
+            p = subprocess.run(CF + [str(RT / 'roam_auth.c'), str(RT / 'roam_moderation.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if __import__('sys').platform == 'darwin' else []) + [str(RT / 'roam_state_test.c'), *map(str, sources.values()), '-o', str(exe)], capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-2500:]
             p = subprocess.run([str(exe)], capture_output=True, text=True, timeout=20)
             print(name + ': ' + p.stdout.strip(), flush=True)

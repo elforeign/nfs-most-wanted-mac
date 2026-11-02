@@ -3,6 +3,9 @@
 // Random alloc/free/realloc mixes (small, large, in-place-only) on a heap over a mapped range: every live block
 // is filled with its own pattern and checked when it's freed or moved, so overlaps show up; blocks must be
 // aligned and zeroed; the allocator's structures are checked against each other as it goes.
+// Realloc bounds proof (48 cases, both granularities and in-place modes): original production heap.c
+// rejected/preserved 36/48, attempted 12 oversized writes (largest 4,294,917,295 bytes), exit 1;
+// fixed production heap.c rejects/preserves 48/48, attempts 0 oversized writes, exit 0.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +16,18 @@
 #include "heap.h"
 
 uint8_t *G;
+// HEAP_TEST routes only the production allocator's writes through this guard.
+// Suppressing an oversized write lets the assertions inspect the failed realloc's state safely.
+static unsigned oversized_writes;
+static size_t largest_write;
+void *heap_test_memset(void *dst, int value, size_t n) {
+    if (n > (1u << 30)) {
+        ++oversized_writes;
+        if (n > largest_write) largest_write = n;
+        return dst;
+    }
+    return memset(dst, value, n);
+}
 static int fails;
 #define CHECK(x, ...) do { if (!(x)) { if (fails++ < 20) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
 
@@ -36,6 +51,63 @@ static int intact(Live *l) {
 static int zeroed(uint32_t a, uint32_t n) {
     for (uint32_t k = 0; k < n; ++k) if (G[a + k]) return 0;
     return 1;
+}
+
+static void realloc_bounds_test(void) {
+    const uint32_t capacity = 4u << 20;
+    const uint32_t requests[] = {capacity + 1, 8u << 20, 0xFFFFF000u,
+                                0xFFFFF001u, 0xFFFFFFE0u, 0xFFFFFFFFu};
+    unsigned cases = 0, rejected = 0, preserved = 0;
+    for (uint32_t gran = 16; gran <= 64; gran *= 4) {
+        Heap *h = heap_create("bounds", 0x20000000u, 0x20000000u + capacity, gran);
+        Live boundary = {heap_alloc(h, 50000), 50000, 0x5A};
+        CHECK(boundary.a, "boundary fixture allocation");
+        if (!boundary.a) return;
+        fill(&boundary);
+        for (uint32_t n = capacity - 1; n <= capacity; ++n) {
+            CHECK(heap_realloc(h, boundary.a, n, 1) == boundary.a, "valid heap capacity %u rejected", n);
+            CHECK(heap_size(h, boundary.a) == n && intact(&boundary)
+                  && zeroed(boundary.a + boundary.n, n - boundary.n) && heap_check(h),
+                  "valid heap capacity contents/consistency %u", n);
+        }
+        CHECK(heap_free(h, boundary.a) && heap_check(h), "boundary free/consistency");
+        for (int large = 0; large < 2; ++large) {
+            Live l = {0, large ? 50000u : 48u, 0xA5};
+            for (int inplace = 0; inplace < 2; ++inplace) {
+                for (unsigned k = 0; k < sizeof requests / sizeof *requests; ++k) {
+                    l.a = heap_alloc(h, l.n);
+                    CHECK(l.a, "bounds fixture allocation");
+                    if (!l.a) return;
+                    fill(&l);
+                    HeapStats before = heap_stats(h);
+                    unsigned writes_before = oversized_writes;
+                    uint32_t r = heap_realloc(h, l.a, requests[k], inplace);
+                    HeapStats after = heap_stats(h);
+                    ++cases;
+                    rejected += r == 0;
+                    int kept = heap_owns(h, l.a) && heap_size(h, l.a) == l.n && intact(&l)
+                        && after.live_bytes == before.live_bytes && after.live_peak == before.live_peak
+                        && after.live_blocks == before.live_blocks && after.pages_used == before.pages_used
+                        && after.pages_peak == before.pages_peak && after.hwm_bytes == before.hwm_bytes
+                        && after.allocs == before.allocs && after.frees == before.frees
+                        && after.slabs == before.slabs && after.large == before.large
+                        && after.bad_frees == before.bad_frees && heap_check(h);
+                    preserved += kept;
+                    CHECK(!r && oversized_writes == writes_before && kept,
+                          "realloc bounds n=%08X old=%u gran=%u inplace=%d: result=%08X size=%u writes=%u preserved=%d",
+                          requests[k], l.n, gran, inplace, r, heap_size(h, l.a),
+                          oversized_writes - writes_before, kept);
+                    CHECK(heap_free(h, l.a) && heap_check(h), "bounds free/consistency");
+                    // The allocation must remain usable after a failed resize, including its free extent.
+                    uint32_t probe = heap_alloc(h, capacity - 65536);
+                    CHECK(probe && heap_check(h), "bounds reuse after failure");
+                    if (probe) CHECK(heap_free(h, probe), "bounds reuse free");
+                }
+            }
+        }
+    }
+    printf("realloc bounds: %u cases, %u rejected, %u preserved, %u oversized writes, largest %zu bytes\n",
+           cases, rejected, preserved, oversized_writes, largest_write);
 }
 
 static void random_test(uint32_t gran, int steps, int max_live) {
@@ -145,6 +217,7 @@ static void bench(void) {
 int main(void) {
     G = mmap(0, 1ull << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     if (G == MAP_FAILED) { perror("mmap"); return 1; }
+    realloc_bounds_test();
     edge_tests();
     random_test(16, 300000, 4000);
     random_test(64, 300000, 4000);

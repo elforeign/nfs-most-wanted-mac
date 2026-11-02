@@ -27,6 +27,10 @@
 #include "funcs.h"
 #include "host.h"
 #include "private_cars.h"
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+#include "carsave_public.h"
+#endif
+#include "traffic_pilot.h"
 #include "settings.h"
 #include "server_loader.h"
 #include "x360audio.h"
@@ -281,7 +285,9 @@ void dispatch(Cpu *c, uint32_t t) {
 }
 
 // ---------------- Win32 subset ----------------
-uint32_t last_error;
+// Guest threads stay on their own pthread across GIL handovers (threads.c).
+// Windows keeps its separate TEB-backed error path in runtime/win/kernel.c.
+__thread uint32_t last_error;
 const char *game_dir;
 int boot_trace;
 
@@ -472,10 +478,10 @@ static int find_handle(uint32_t h) { uint32_t k = (h - FIND_BASE) / 4; return h 
 // One resolver, always using the requested identity. Donor fallback from an
 // addition returns immediately, so a donor's own-slot swap cannot leak into it.
 static int private_car_path(const char *guest, char *host, size_t n) {
+    if (car85_path(guest,host,n)) return 1;
 #if defined(NFS_PUBLIC) && NFS_PUBLIC
     return 0;
 #else
-    if (car85_path(guest,host,n)) return 1;
     char rel[1024];
     if (!guest || snprintf(rel,sizeof rel,"%s",guest)>=(int)sizeof rel) return 0;
     for (char *p=rel;*p;++p) if (*p=='\\') *p='/';
@@ -504,6 +510,11 @@ static int private_car_path(const char *guest, char *host, size_t n) {
 
 #define HANDLE_BASE 0x1000u
 // BEGIN offline file layer: auditfix_test.py compiles these exact helpers in a scratch-only C harness.
+// Extracted shim fixtures omit the diagnostic runtime.
+#ifndef SAVE_TIME
+#define SAVE_TIME(stage, expression) (expression)
+#define SAVE_VOID(stage, expression) do { expression; } while (0)
+#endif
 // Interrupted replacement: old 8 bytes survive; in-place negative: old bytes lost. Completed close replaces.
 static int fds[256];
 static int handle_fd(uint32_t h) { uint32_t k = (h - HANDLE_BASE) / 4; return (h >= HANDLE_BASE && k < 256 && fds[k] > 0) ? fds[k] - 1 : -1; }   // -1: an in-memory X360 audio handle
@@ -516,7 +527,7 @@ typedef struct {
 // result and clears its own error state right after the writes, so the hook below reads this to report the failure.
 static unsigned save_fail_seq;
 static unsigned save_commit_seq;
-static struct { char *path; uint32_t access, share; SaveFile *save; } file_info[256];
+static struct { char *path; uint32_t access, share; SaveFile *save; int snapshot; off_t position; } file_info[256];
 
 static int file_is_save(const char *path) {
     const char *root = userdata_dir();
@@ -580,7 +591,7 @@ bad:;
     free(s); errno = err;
     return NULL;
 }
-// Private extratrax supplies the strong admission latch; public defaults to allow.
+// Full builds supply strong admission barriers; isolated file-layer tests use these fallbacks.
 __attribute__((weak)) int private_cars_save_allowed(void) { return 1; }
 __attribute__((weak)) int private_cars_save_prepare(const char *path) { (void)path; return 1; }
 __attribute__((weak)) void private_cars_save_complete(int committed) { (void)committed; }
@@ -644,6 +655,12 @@ static uint32_t file_open(const char *win, const char *host, uint32_t access, ui
     }
     fds[k] = fd + 1;
     file_info[k].path = path; file_info[k].access = access; file_info[k].share = share; file_info[k].save = s;
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    /* Verified descriptor paths share a kernel offset. Each guest handle owns
+     * its logical position, so overlapping/repeated pack reads stay independent. */
+    file_info[k].snapshot=!s && fl==O_RDONLY && !strncmp(host,"/dev/fd/",8);
+    file_info[k].position=0;
+#endif
     if (s) { ++s->refs; if (access & 0x40000000) ++s->writers; }
     return HANDLE_BASE + 4 * k;
 cleanup:;
@@ -663,18 +680,44 @@ static void file_failed(uint32_t h) {
     }
     file_error();
 }
+static ssize_t file_read(uint32_t h,void *buf,size_t n) {
+    int fd=handle_fd(h);
+    if (fd<0) { errno=EBADF; return -1; }
+    unsigned k=(h-HANDLE_BASE)/4;
+    if ((file_info[k].access & 0xC0000000u)==0x40000000u) { errno=EACCES; return -1; }   // write-only handle: ERROR_ACCESS_DENIED
+    if (!file_info[k].snapshot) return read(fd,buf,n);
+    ssize_t got=pread(fd,buf,n,file_info[k].position);
+    if (got>0) file_info[k].position+=got;
+    return got;
+}
+static off_t file_seek(uint32_t h,off_t distance,int method) {
+    int fd=handle_fd(h);
+    if (fd<0) { errno=EBADF; return -1; }
+    unsigned k=(h-HANDLE_BASE)/4;
+    if (!file_info[k].snapshot) return lseek(fd,distance,method);
+    off_t base=0,position;
+    if (method==SEEK_CUR) base=file_info[k].position;
+    else if (method==SEEK_END) {
+        struct stat st; if (fstat(fd,&st)) return -1; base=st.st_size;
+    } else if (method!=SEEK_SET) { errno=EINVAL; return -1; }
+    if (__builtin_add_overflow(base,distance,&position) || position<0) { errno=EINVAL; return -1; }
+    return file_info[k].position=position;
+}
 static ssize_t file_write(uint32_t h, const void *buf, size_t n) {
     int fd = h >= 0x100 && h < 0x110 ? 2 : handle_fd(h);
     if (h >= HANDLE_BASE && (h - HANDLE_BASE) / 4 < 256 &&
         file_info[(h - HANDLE_BASE) / 4].path && profile_write_denied(file_info[(h - HANDLE_BASE) / 4].path)) {
         errno = EACCES; file_failed(h); return -1;
     }
-    ssize_t r = write(fd, buf, n);
+    if (h >= HANDLE_BASE && fd >= 0 && (h - HANDLE_BASE) / 4 < 256 && !(file_info[(h - HANDLE_BASE) / 4].access & 0x40000000)) {
+        errno = EACCES; file_failed(h); return -1;       // read-only handle: ERROR_ACCESS_DENIED
+    }
+    ssize_t r = SAVE_TIME("write", write(fd, buf, n));
     if (r < 0 || (size_t)r != n) { if (r >= 0) errno = EIO; file_failed(h); }
     return r;
 }
 static int file_flush(uint32_t h) {
-    int r = fsync(handle_fd(h));
+    int r = SAVE_TIME("flush_file_buffers", fsync(handle_fd(h)));
     if (r) file_failed(h);
     return r == 0;
 }
@@ -701,14 +744,14 @@ static int file_close(uint32_t h) {
     int commit = s && (file_info[k].access & 0x40000000) && !--s->writers;
     if (s && profile_write_denied(file_info[k].path)) s->failed = 1;
     int ok = 1;
-    if (commit && !s->failed && !private_cars_save_prepare(s->temp)) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
-    if (commit && !s->failed && !private_cars_backup_before_write(s->dest,s->temp)) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+    if (commit && !s->failed && !SAVE_TIME("provenance.prepare", private_cars_save_prepare(s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+    if (commit && !s->failed && !SAVE_TIME("provenance.backup", private_cars_backup_before_write(s->dest,s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
     if (commit && !s->failed && durable_sync(fd)) { s->failed = 1; ok = 0; file_error(); }
-    if (close(fd)) { if (s) s->failed = 1; ok = 0; file_error(); }
+    if (SAVE_TIME("close", close(fd))) { if (s) s->failed = 1; ok = 0; file_error(); }
     if (commit) {
         if (s->failed) ok = 0;
-        else if (rename(s->temp, s->dest)) { ok = 0; file_error(); }
-        else { durable_dir_sync(s->dest); ++save_commit_seq; } // published career generation
+        else if (SAVE_TIME("rename", rename(s->temp, s->dest))) { ok = 0; file_error(); }
+        else { SAVE_TIME("directory.sync", durable_dir_sync(s->dest)); ++save_commit_seq; } // published career generation
         if (!ok) unlink(s->temp);                  // failed save never replaces the previous destination
         s->temp[0] = 0;
     }
@@ -722,12 +765,14 @@ static int file_close(uint32_t h) {
 // during that step, report the failure the game itself uses for a failed open, so state 0xc shows its save-error dialog.
 void extratrax_save_complete(int committed);
 void padbind_save_complete(int committed);
+void underglow_save_complete(int committed);
 static void save_sidecars_complete(uint32_t self, uint32_t state_before, unsigned seq_before, unsigned commits_before) {
     if (state_before != 0xb || !M32(self + 0x300)) return;
     int ok = save_fail_seq == seq_before && save_commit_seq != commits_before && !M32(self + 0x2f4);
-    extratrax_save_complete(ok);
-    padbind_save_complete(ok);
-    private_cars_save_complete(ok);
+    SAVE_VOID("trax.publication", { extratrax_save_complete(ok); });
+    SAVE_VOID("sidecar.padbind", { padbind_save_complete(ok); });
+    SAVE_VOID("sidecar.underglow", { underglow_save_complete(ok); });
+    SAVE_VOID("sidecar.provenance", { private_cars_save_complete(ok); });
 }
 static void save_task_fixup(uint32_t self, uint32_t state_before, unsigned seq_before) {
     if (state_before != 0xb || !M32(self + 0x300) || save_fail_seq == seq_before) return;
@@ -737,6 +782,15 @@ static void save_task_fixup(uint32_t self, uint32_t state_before, unsigned seq_b
 void f_007F4F11(Cpu *c) {                       // the career save task (see save_task_fixup)
     uint32_t self = c->ecx, state = M32(self + 0x70);
     unsigned seq = save_fail_seq, commits = save_commit_seq;
+    // One predicted branch when diagnostics are off: the timed copy runs only under BOOT_DIAG.
+    if (__builtin_expect(diag_on, 0) && state == 0xb) {
+        save_timing_task_begin(self);
+        f_007F4F11_orig(c);
+        save_task_fixup(self, state, seq);
+        save_sidecars_complete(self, state, seq, commits);
+        save_timing_task_end();
+        return;
+    }
     f_007F4F11_orig(c);
     save_task_fixup(self, state, seq);
     save_sidecars_complete(self, state, seq, commits);
@@ -1179,9 +1233,9 @@ static int win32(Cpu *c, const char *fn) {
         RET(h, 7);
     }
     if (!strcmp(fn, "ReadFile")) {                // (h, buf, n, read*, overlapped)
-        int fd = handle_fd(arg(c, 0));
         X360MusicHandle *music = handle_music(arg(c, 0));
-        ssize_t r = music ? (ssize_t)x360music_read(music, G + arg(c, 1), arg(c, 2)) : fd < 0 ? -1 : read(fd, G + arg(c, 1), arg(c, 2));
+        ssize_t r = music ? (ssize_t)x360music_read(music, G + arg(c, 1), arg(c, 2)) : file_read(arg(c,0), G + arg(c, 1), arg(c, 2));
+        if (r < 0) file_error();                 // includes EBADF for invalid guest handles
         if (arg(c, 3)) M32(arg(c, 3)) = r < 0 ? 0 : (uint32_t)r;
         void threads_note_io(void);
         threads_note_io();                        // wakes the game thread's loading poll (threads.c, SleepEx)
@@ -1204,7 +1258,7 @@ static int win32(Cpu *c, const char *fn) {
             RET(pos < 0 ? 0xFFFFFFFF : (uint32_t)pos, 4);
         }
         int fd = handle_fd(arg(c, 0));
-        off_t o = lseek(fd, (int32_t)arg(c, 1), (int)arg(c, 3));
+        off_t o = file_seek(arg(c,0), (int32_t)arg(c, 1), (int)arg(c, 3));
         RET(o < 0 ? 0xFFFFFFFF : (uint32_t)o, 4);
     }
     if (!strcmp(fn, "GetFileTime")) {
@@ -1514,6 +1568,16 @@ static void race_setup(void) {
     M32(0x008F86BC) = getenv("BOOT_RACE_LAPS") ? (uint32_t)atoi(getenv("BOOT_RACE_LAPS")) : 10;   // SkipFENumLaps
     if (getenv("BOOT_RACE_COPS")) M32(0x008F86C0) = 0;                         // SkipFEDisableCops (test: cops spawn in the race, for BOOT_PURSUIT)
     M32(0x00926080) = getenv("BOOT_RACE_AI") ? (uint32_t)atoi(getenv("BOOT_RACE_AI")) : 3;        // SkipFENumAICars
+    // Diagnostic traffic capture: leave retail SkipFE defaults unchanged when absent.
+    const char *traffic = getenv("BOOT_RACE_TRAFFIC");
+    if (traffic) {
+        int density = atoi(traffic);
+        if (density < 0) density = 0;
+        if (density > 100) density = 100;
+        M32(0x00926094) = density == 0;  // SkipFEDisableTraffic
+        M32(0x00926090) = (uint32_t)density; // SkipFETrafficDensity, percent
+        printf("boot: SkipFE traffic density %d%%\n", density);
+    }
     printf("boot: SkipFE race %s, car %s, %u laps, %u opponents\n", race, car, M32(0x008F86BC), M32(0x00926080));
 }
 
@@ -1607,10 +1671,16 @@ static void deadline_start(void) {
     pthread_detach(t);
 }
 
-#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 // Restart-only values are pinned before guest registration or file I/O.
 static void private_cars_boot(void) {
     char root[4096];
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    const char *car85_public_reconcile(Cpu *, unsigned);
+    carsave_public_init(userdata_dir(),car85_public_reconcile);
+    snprintf(root,sizeof root,"%s/car-catalog",userdata_dir());
+    Setting *master=settings_find("cars.later_games");
+    private_cars_init(root,master?master->boot_value:0,NULL,0);
+#else
     private_cars_metadata_userdata(userdata_dir());
     const char *override = getenv("NFS_TEST_PRIVATE_CARS_ROOT");
     if (override && *override) snprintf(root, sizeof root, "%s", override);
@@ -1624,20 +1694,23 @@ static void private_cars_boot(void) {
     }
     Setting *master=settings_find("cars.later_games");
     private_cars_init(root, master?master->boot_value:1, originals, count);
+#endif
     if (private_cars_error()[0]) {
         fprintf(stderr,"cars: %s\n",private_cars_error());
     }
+    Setting *pilot=settings_find("cars.traffic_pilot");
+    if (traffic_pilot_boot(pilot ? pilot->boot_value : 0) < 0) {
+        fprintf(stderr,"traffic pilot: diagnostic failure: %s\n",traffic_pilot_error());
+        exit(2);
+    }
 }
-#endif
 
 // ---------------- loader ----------------
 int main(int argc, char **argv) {
     game_dir = app_start(argc, argv);
     void settings_init(void), settings_dump(const char *), report_init(void);
     settings_init();                       // settings.c: the F10 menu's saved values, before anything reads its switch
-#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     private_cars_boot();
-#endif
     void settings_language_setup(const char *);
     settings_language_setup(game_dir);     // settings_port.c: the language packs present; the Language row when > 1
     if (getenv("BOOT_DIAG")) { char p[1100]; snprintf(p, sizeof p, "%s/settings_rows.txt", getenv("BOOT_DIAG")); settings_dump(p); }

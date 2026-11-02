@@ -38,18 +38,18 @@ int main(int argc, char **argv) {
     settings_add(&s_fullscreen);settings_init();
     int initial=settings_get("display.fullscreen");
     const char *wanted=strcmp(argv[2],"-")?argv[2]:argv[1];
-    CHECK(initial==!strcasecmp(wanted,"native"));
+    CHECK(initial==(!strcasecmp(wanted,"native")?1:!strcasecmp(wanted,"auto")?2:0));
     CHECK(s_fullscreen.category==SET_DISPLAY && !strcmp(s_fullscreen.label,"Full screen"));
     CHECK(s_fullscreen.def==0 && s_fullscreen.restart==1 && !s_fullscreen.apply);
-    CHECK(s_fullscreen.nchoices==2 && !strcmp(s_fullscreen.choices[0],"Borderless") && !strcmp(s_fullscreen.choices[1],"Native"));
+    CHECK(s_fullscreen.nchoices==3 && !strcmp(s_fullscreen.choices[2],"Auto") && !strcmp(s_fullscreen.choices[0],"Borderless") && !strcmp(s_fullscreen.choices[1],"Native"));
     char boot_mode[32];snprintf(boot_mode,sizeof boot_mode,"%s",getenv("NFS_FULLSCREEN_MODE")?:"");
-    if(initial)CHECK(!strcasecmp(boot_mode,"native"));
+    if(initial)CHECK(!strcasecmp(boot_mode,initial==2?"auto":"native"));
     else CHECK(!*boot_mode || !strcasecmp(boot_mode,"borderless"));
     if(s_fullscreen.locked)CHECK(!settings_set(&s_fullscreen,!initial));
     else for(int i=0;i<3;++i) {
-        int v=i!=1;settings_set(&s_fullscreen,v);
+        int v=i!=1;if(i==2)v=2;settings_set(&s_fullscreen,v);
         CHECK(settings_get("display.fullscreen")==v);
-        CHECK(!strcmp(app_pref("display.fullscreen"),v?"native":"borderless"));
+        CHECK(!strcmp(app_pref("display.fullscreen"),v==2?"auto":v?"native":"borderless"));
         CHECK(!strcmp(getenv("NFS_FULLSCREEN_MODE")?:"",boot_mode));
     }
     printf("row failures=%d\n",failures);return failures?1:0;
@@ -130,6 +130,7 @@ static void gpuclients_cached_stub(GPUClientsSample *s) {++samples;snprintf(s->m
 static void report_note(const char *fmt,...) {++notes;va_list ap;va_start(ap,fmt);vsnprintf(note,sizeof note,fmt,ap);va_end(ap);}
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"FAIL: %s\n",#x);++failures;}}while(0)
 static const NSWindowStyleMask windowed_style=NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable;
+int app_screen_is_builtin(void) { return 0; }
 @POLICY@
 @MODE@
 @RESIZE@
@@ -223,9 +224,9 @@ def main():
             return p.stdout.strip()
 
         exe = build(stubs + ROW_MAIN.replace('@ROW@', row))
-        for saved, override in (('-', '-'), ('native', '-'), ('borderless', '-'), ('native', 'borderless'), ('borderless', 'native'), ('-', 'NATIVE')):
+        for saved, override in (('-', '-'), ('native', '-'), ('borderless', '-'), ('native', 'borderless'), ('borderless', 'native'), ('-', 'NATIVE'), ('auto', '-'), ('-', 'AUTO')):
             run(exe, saved, override)
-        print('PASS fullscreen row: 6 default/saved/override boots, 3-choice round trips, restart boundary')
+        print('PASS fullscreen row: 8 default/saved/override boots, 3-choice round trips, restart boundary')
         exe = build(stubs + ROW_MAIN.replace('@ROW@', row.replace('.restart = 1', '.restart = 0')))
         print('PASS restart-disabled mutant rejected:', run(exe, '-', '-', expected=1))
         source = WINDOW.replace('@POLICY@', policy).replace('@MODE@', mode).replace('@RESIZE@', resize).replace('@CALLBACKS@', callbacks).replace('@PRESENTER@', presenter).replace('@PRESENTATION_TYPE@', presentation_type)

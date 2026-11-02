@@ -71,9 +71,11 @@ HARNESS = r'''
 #include <stdio.h>
 #include "car85.c"
 #ifndef CAR85_VERIFIED_CATALOG
+const PrivateCar *private_cars_traffic_get(void) { return NULL; }
 size_t private_cars_count(void) { return 0; }
 const PrivateCar *private_cars_get(size_t i) { (void)i; return NULL; }
 #endif
+int traffic_pilot_enabled(void) { return 0; }
 #define donor_record additions[0].record
 #define donor_hash additions[0].hash
 #define pv_key additions[0].pv
@@ -117,6 +119,8 @@ void f_0045C380_orig(Cpu *c) { c->esp += 4; }
 void f_0045C090_orig(Cpu *c) { c->esp += 4; }
 void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }
 void f_00581790_orig(Cpu *c) { c->eax=0; c->esp+=4; }
+void f_00591160_orig(Cpu *c) { c->eax=0; c->esp+=4; }
+void f_00591330_orig(Cpu *c) { c->eax=0; c->esp+=4; }
 void f_00751540_orig(Cpu *c) { c->eax=0; c->esp+=12; }
 void f_00751860_orig(Cpu *c) { c->esp+=4; }
 void f_00752940_orig(Cpu *c) { c->esp+=12; }
@@ -428,7 +432,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
             assert variant == "good" or old or modified != actual, variant
             (tmp / "car85.c").write_text(modified)
             binary = tmp / variant
-            command = ["clang", "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
+            command = ["clang",str(ROOT/"runtime/car_physics.c"), "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
                        "-I", str(ROOT / "recomp"), "-I", str(ROOT / "recomp/out"), str(tmp / "test.c"),
                        "-framework", "CoreGraphics", "-framework", "CoreText", "-framework", "CoreFoundation", "-o", str(binary)]
             build = subprocess.run(command, text=True, capture_output=True)
