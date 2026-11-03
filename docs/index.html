@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFS Most Wanted Native for Mac</title>
+<meta name="description" content="Need for Speed: Most Wanted (2005), rebuilt for Apple Silicon Macs by static recompilation. For people who own the PC game.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#051217">
+<!-- One static page: inline CSS, no scripts, no analytics. The only external request is the web fonts. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=IBM+Plex+Sans:wght@400;600&family=Martian+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* Rockport at night: blue-green dark, sodium-lamp amber, police red/blue only on the rap sheet light bar. */
+  --night: #051217;
+  --night-2: #0a1d23;
+  --panel: #0d242b;
+  --line: #1b3a42;
+  --text: #dbe7e6;
+  --muted: #8ea8a9;
+  --amber: #ffab2e;
+  --amber-ink: #1c1100;
+  --siren-red: #ff2b3d;
+  --siren-blue: #2f7dff;
+  --gutter: 16px;
+  --display: "Big Shoulders Display", "Arial Narrow", Impact, sans-serif;
+  --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Martian Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html {
+  /* 16px on a phone, about 26px on a 4K TV-sized monitor. */
+  font-size: clamp(16px, 0.42vw + 11px, 26px);
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  background: var(--night);
+  color: var(--text);
+  font-family: var(--body);
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+a { color: var(--amber); text-underline-offset: 0.18em; }
+a:hover { color: #ffc56b; }
+img { max-width: 100%; height: auto; display: block; }
+h1, h2, h3 { font-family: var(--display); font-weight: 900; text-transform: uppercase; letter-spacing: 0.01em; line-height: 0.95; margin: 0 0 0.5em; }
+h2 { font-size: clamp(2.2rem, 4vw, 3.2rem); }
+h3 { font-family: var(--body); text-transform: none; font-weight: 600; font-size: 1.05rem; line-height: 1.3; letter-spacing: 0; margin-bottom: 0.25em; }
+p { margin: 0 0 1em; }
+code { font-family: var(--mono); font-size: 0.82em; background: var(--night-2); padding: 0.1em 0.35em; border-radius: 2px; }
+.wrap { width: 100%; max-width: 72rem; margin: 0 auto; padding: 0 var(--gutter); }
+.stamp { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+section { padding: 4rem 0; }
+
+/* Hero: the real game on the right, cut on a diagonal. */
+.hero { position: relative; background: var(--night); overflow: hidden; }
+.hero-shot { position: relative; }
+.hero-shot img { width: 100%; aspect-ratio: 1600 / 1004; object-fit: cover; clip-path: polygon(0 0, 100% 0, 100% 88%, 0 100%); }
+.hero-shot .stamp { position: absolute; right: var(--gutter); bottom: 14%; background: rgba(5,18,23,0.75); padding: 0.3em 0.6em; color: var(--text); }
+.hero-copy { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: clamp(3rem, 9vw, 6.2rem); margin-bottom: 0.35em; }
+.hero h1 span { color: var(--amber); display: block; }
+.lede { font-size: 1.1rem; max-width: 36rem; }
+.kicker { font-family: var(--display); font-weight: 700; font-size: 1.6rem; text-transform: uppercase; letter-spacing: 0.02em; margin: 0 0 1rem; }
+@media (min-width: 60rem) {
+  .hero { min-height: 40rem; }
+  .hero-shot { position: absolute; inset: 0 0 0 38%; }
+  .hero-shot img { height: 100%; aspect-ratio: auto; clip-path: polygon(18% 0, 100% 0, 100% 100%, 0 100%); }
+  .hero-shot::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, var(--night) 0%, rgba(5,18,23,0) 30%); pointer-events: none; }
+  .hero-shot .stamp { bottom: 1.25rem; }
+  .hero-copy { position: relative; z-index: 1; max-width: 34rem; padding: 4.5rem 0 4rem; }
+}
+.buttons { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1.5rem 0 0; }
+.btn {
+  display: inline-block; padding: 0.75em 1.2em; text-decoration: none;
+  font-weight: 600; color: var(--text); border: 1px solid var(--line); background: var(--night-2);
+  border-radius: 2px;
+}
+.btn:hover { color: var(--text); border-color: var(--muted); }
+.btn.go { background: var(--amber); color: var(--amber-ink); border-color: var(--amber); }
+.btn.go:hover { background: #ffc56b; color: var(--amber-ink); }
+
+/* Skewed band: motion line under the hero. */
+.band { position: relative; z-index: 2; background: var(--amber); color: var(--amber-ink); transform: skewY(-2deg); margin: 0 0 1rem; padding: 1rem 0; }
+.band .wrap { transform: skewY(2deg); display: flex; flex-wrap: wrap; gap: 0.3rem 1.6rem; }
+.band span { font-family: var(--mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* Legal notices: plain. */
+.notices { display: grid; gap: 1rem 2.5rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); padding-top: 2.5rem; }
+.notice { border-left: 3px solid var(--line); padding-left: 1rem; }
+.notice.own { border-left-color: var(--amber); }
+.notice p:last-child { margin: 0; }
+
+/* Rap sheet */
+.sheet { position: relative; background: var(--night-2); border: 1px solid var(--line); padding: 2rem var(--gutter) 1.5rem; }
+@media (min-width: 40rem) { .sheet { padding: 2.25rem 2rem 2rem; } }
+.lightbar { position: absolute; left: -1px; right: -1px; top: -1px; height: 4px;
+  background: linear-gradient(90deg, var(--siren-red) 0 50%, var(--siren-blue) 50% 100%); background-size: 200% 100%; }
+@media (prefers-reduced-motion: no-preference) {
+  .lightbar { animation: sweep 1.6s steps(2, jump-none) 4; }
+  @keyframes sweep { from { background-position: 0 0; } to { background-position: 100% 0; } }
+}
+.sheet-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.5rem 2rem; border-bottom: 1px dashed var(--line); margin-bottom: 1.5rem; padding-bottom: 1rem; }
+.sheet-head h2 { margin: 0; }
+.sheet-body { display: grid; gap: 2rem 3rem; }
+@media (min-width: 60rem) { .sheet-body { grid-template-columns: 1.25fr 1fr; } }
+.charges { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.1rem; }
+.charges li { padding-left: 1rem; border-left: 2px solid var(--amber); }
+.charges p { margin: 0; color: var(--muted); }
+dl.fields { margin: 0; display: grid; grid-template-columns: minmax(7.5rem, auto) 1fr; gap: 0.5rem 1rem; font-size: 0.95rem; }
+dl.fields dt { font-family: var(--mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding-top: 0.3em; }
+dl.fields dd { margin: 0; }
+.heat { display: flex; gap: 4px; margin: 0.35rem 0 0.25rem; }
+.heat i { display: block; width: 1.4rem; height: 0.5rem; background: var(--amber); transform: skewX(-20deg); }
+.open { margin-top: 1.75rem; padding-top: 1rem; border-top: 1px dashed var(--line); }
+.open p { margin: 0; }
+
+/* Screenshots: one big, the rest in a strip. */
+.shots { display: grid; gap: 0.6rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.shots figure { margin: 0; }
+.shots figure.big { grid-column: 1 / -1; }
+.shots img { width: 100%; aspect-ratio: 1600 / 1004; object-fit: cover; background: var(--night-2); }
+.shots figcaption { margin-top: 0.3rem; }
+@media (min-width: 60rem) {
+  .shots { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .shots figure.big { grid-column: 1 / span 3; grid-row: span 3; }
+  .shots figure.big img { height: 100%; }
+}
+
+/* Setup + requirements */
+.split { display: grid; gap: 3rem; }
+@media (min-width: 60rem) { .split { grid-template-columns: 1.3fr 1fr; } }
+ol.steps { counter-reset: step; list-style: none; margin: 0; padding: 0; display: grid; gap: 1.1rem; }
+ol.steps li { counter-increment: step; display: grid; grid-template-columns: 2.4rem 1fr; gap: 0.75rem; }
+ol.steps li::before { content: counter(step); font-family: var(--display); font-weight: 900; font-size: 2.4rem; line-height: 0.9; color: var(--amber); }
+ul.plain { margin: 0; padding: 0 0 0 1.1em; display: grid; gap: 0.5rem; }
+ul.plain li::marker { color: var(--amber); }
+.links { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.5rem; }
+
+/* New in 4.4 and the garage list */
+.cols { display: grid; gap: 1.25rem 3rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
+.cols div p { margin: 0; color: var(--muted); }
+.tinted { background: var(--night-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+/* Support. Ko-fi is live; the GitHub Sponsors button stays hidden (class sponsors-off on <body>) until GitHub approves the listing. */
+.sponsors-off .gh-sponsors { display: none; }
+#support .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem 3rem; }
+#support p { max-width: 38rem; margin: 0; }
+
+footer { border-top: 1px solid var(--line); padding: 2.5rem 0 3rem; color: var(--muted); font-size: 0.85rem; }
+footer p { max-width: 62rem; }
+</style>
+</head>
+<!-- class="sponsors-off": hides the GitHub Sponsors button until GitHub approves the listing; remove it then. -->
+<body class="sponsors-off">
+
+<header class="hero">
+  <div class="hero-shot">
+    <img src="img/hero-m3gtr-vs-razor.jpg" width="1600" height="1004" alt="The BMW M3 GTR beside Razor's Mustang, running on a Mac">
+    <div class="stamp">In game on a Mac &middot; 4.3.0</div>
+  </div>
+  <div class="wrap">
+    <div class="hero-copy">
+      <div class="stamp">Need for Speed: Most Wanted (2005) &middot; Native for Apple Silicon Macs</div>
+      <h1>Rockport, <span>on your Mac.</span></h1>
+      <p class="kicker">No emulator. No Wine. No Windows.</p>
+      <p class="lede">The real PC game, rebuilt for Apple Silicon by static recompilation. The game's own x86 code is translated to C and compiled for your Mac, with a Metal renderer, native audio and native controller support.</p>
+      <p class="lede">For people who own the PC game. Bring your copy. Setup handles the rest.</p>
+      <div class="buttons">
+        <a class="btn go" href="https://github.com/elforeign/nfs-most-wanted-mac/releases/latest">Download Setup (4.4.0)</a>
+        <a class="btn" href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/GETTING_STARTED.md">Read the setup guide</a>
+        <a class="btn" href="https://discord.gg/d6HfMwdM9v">Join the Discord</a>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="band" aria-hidden="true">
+  <div class="wrap">
+    <span>Apple Silicon (M1 or later)</span><span>macOS 14.5+</span><span>Built on your Mac</span><span>Free, MIT licence</span><span>v4.4.0</span>
+  </div>
+</div>
+
+<main>
+
+<div class="wrap notices">
+  <div class="notice own">
+    <p><strong>You need your own copy of the game.</strong> This project contains no game code, executables, artwork, sound, movies, tracks or textures. The Setup app builds the game on your Mac from your game files (the PC game, version 1.3). Nothing it builds is meant to be shared, and nothing is uploaded.</p>
+  </div>
+  <div class="notice">
+    <p><strong>This project is unofficial.</strong> It is not affiliated with or endorsed by Electronic Arts, Criterion Games or Black Box. <em>Need for Speed</em> and <em>Most Wanted</em> are trademarks of Electronic Arts Inc.; all other names belong to their owners. Details: <a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/NOTICE">NOTICE</a>.</p>
+  </div>
+</div>
+
+<section id="why">
+  <div class="wrap">
+    <div class="sheet">
+      <div class="lightbar" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2>Rap sheet: NFS Most Wanted Native</h2>
+        <span class="stamp">File 4.4.0 &middot; Rockport PD</span>
+      </div>
+      <div class="sheet-body">
+        <ul class="charges">
+          <li><h3>Built from the original code.</h3><p>The game's own 53,664 functions, recompiled for Apple Silicon. Metal, CoreAudio and macOS controller support do the rest.</p></li>
+          <li><h3>Your copy. Your Mac.</h3><p>We never hand out the game. You bring yours, and Setup builds it on your Mac. Nothing is uploaded.</p></li>
+          <li><h3>PC and Xbox 360 in one build.</h3><p>Add your own Xbox 360 copy (USA or PAL disc) and Setup brings in its world, textures, vinyls, music, cutscenes and movies.</p></li>
+          <li><h3>Wired for the living room.</h3><p>HDR with SDR fallback. The game's 5.1 mix, with optional Dolby Digital, Dolby Digital Plus or TrueHD output.</p></li>
+          <li><h3>Plays like a console.</h3><p>DualSense, DualShock 4 or Xbox controller. PS2 or Xbox layout, analog trigger pedals, rumble, DualSense adaptive triggers and button prompts that match your pad.</p></li>
+          <li><h3>Checked against the original.</h3><p>Differential tests run translated code and the original code on the same input and compare the results. Every update lists its fixes in the changelog.</p></li>
+        </ul>
+        <dl class="fields">
+          <dt>Platform</dt><dd>Apple Silicon Mac, native</dd>
+          <dt>Engine</dt><dd>Original PC 1.3 code, recompiled to C</dd>
+          <dt>Renderer</dt><dd>Metal, widescreen, HDR Auto</dd>
+          <dt>Emulator</dt><dd>None</dd>
+          <dt>Files given out</dt><dd>None. You bring your own.</dd>
+          <dt>Look</dt><dd>PC, or PC + Xbox 360 with your own 360 copy</dd>
+          <dt>Controllers</dt><dd>DualSense, DualShock 4, Xbox and other pads macOS supports</dd>
+          <dt>Licence</dt><dd>MIT (the game is not relicensed)</dd>
+          <dt>Prior offences</dt><dd><span style="font-family:var(--mono);font-size:0.85em">4.4.0 &middot; 4.3.0 &middot; 4.2.0 &middot; 4.1.0 &middot; 4.0.1 &middot; 4.0.0</span></dd>
+          <dt>Heat</dt><dd><div class="heat" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>6 releases in 7 days (27 Oct to 2 Nov 2026)</dd>
+        </dl>
+      </div>
+      <div class="open">
+        <p><strong>Still open:</strong> online free roam is off in 4.4. It comes back with a shared server in a later update. The app is not notarized by Apple, so macOS asks you once to Open Anyway.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots" aria-label="Screenshots" style="padding-top:0">
+  <div class="wrap">
+    <h2>Rockport, rendered in Metal.</h2>
+    <div class="shots">
+      <figure class="big"><img src="img/hero-m3gtr-155mph.jpg" width="1600" height="1004" loading="lazy" alt="The BMW M3 GTR at 155 mph"><figcaption class="stamp">M3 GTR at 155 mph</figcaption></figure>
+      <figure><img src="img/razor-mustang.jpg" width="1600" height="1004" loading="lazy" alt="Razor's Mustang"><figcaption class="stamp">Razor's Mustang</figcaption></figure>
+      <figure><img src="img/porsche-997s-docks.jpg" width="1600" height="1004" loading="lazy" alt="Porsche 997 S at the docks"><figcaption class="stamp">Porsche 997 S, the docks</figcaption></figure>
+      <figure><img src="img/ford-gt-skyline.jpg" width="1600" height="1004" loading="lazy" alt="Ford GT and the Rockport skyline"><figcaption class="stamp">Ford GT, Rockport skyline</figcaption></figure>
+      <figure><img src="img/lexus-is300-mountains.jpg" width="1600" height="1004" loading="lazy" alt="Lexus IS300 under the mountains"><figcaption class="stamp">Lexus IS300, the mountains</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="setup" class="tinted">
+  <div class="wrap split">
+    <div>
+      <h2>Four steps to Rockport.</h2>
+      <ol class="steps">
+        <li><div>Have your own PC game, <strong>version 1.3</strong>, on your Mac: the installed game folder or a <code>.zip</code> of it, or your PC game discs as <code>.iso</code> images with the game's 1.3 update. No Windows needed.</div></li>
+        <li><div>Download the <strong>Setup app</strong> (the disk image) from the <a href="https://github.com/elforeign/nfs-most-wanted-mac/releases/latest">latest release</a> and open it.</div></li>
+        <li><div>Choose your game folder (or a <code>.zip</code> of it, or your disc images), optionally your Xbox 360 copy, and click <strong>Build</strong>. Setup compiles the game on your Mac and puts <strong>NFS Most Wanted Native.app</strong> in Applications.</div></li>
+        <li><div>Questions and help: the <a href="https://discord.gg/d6HfMwdM9v">Discord</a>.</div></li>
+      </ol>
+    </div>
+    <div>
+      <h2>What you need.</h2>
+      <ul class="plain">
+        <li>An Apple Silicon Mac (M1 or later) with macOS 14.5 or later.</li>
+        <li>Xcode Command Line Tools. They're free, and Setup offers to install them.</li>
+        <li>About 12 GB free while Setup builds. The installed game uses about 9 GB, or 3.5 GB without the Xbox 360 copy.</li>
+        <li>Your own PC game, version 1.3. If you start from the discs, you also need the official 1.3 update and a <code>speed.exe</code> that has the 1.3 code.</li>
+        <li>Optional: your own Xbox 360 copy, as a folder or an <code>.iso</code>. The USA and European (PAL) retail discs work.</li>
+      </ul>
+      <div class="links">
+        <a class="btn" href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/GETTING_STARTED.md">Read the setup guide</a>
+        <a class="btn" href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/TROUBLESHOOTING.md">Troubleshooting</a>
+        <a class="btn" href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/CHANGELOG.md">Changelog</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="new">
+  <div class="wrap">
+    <h2>New in 4.4.</h2>
+    <div class="cols">
+      <div><h3>Video clips with sound</h3><p>F10 &gt; Display &gt; Video clip saves the picture and sound to Movies/NFSMW. HEVC or H.264, at 1080p, 1440p or 4K. Works with HDR on.</p></div>
+      <div><h3>Physical car materials</h3><p>Tinted glass and chrome from measured real-world values, Off by default. Physical particles give smoke and dust soft edges and scene lighting.</p></div>
+      <div><h3>Build from your PC discs</h3><p>Setup takes the discs as <code>.iso</code> images with the official 1.3 update, and installs and updates the game without Windows.</p></div>
+      <div><h3>PAL Xbox 360 disc</h3><p>The European retail Xbox 360 copy now works for the Xbox 360 features, as well as the USA one.</p></div>
+      <div><h3>Full screen: Auto</h3><p>Native full screen on the Mac's own screen, Borderless on other displays.</p></div>
+      <div><h3>Junkman and cash</h3><p>Junkman parts after the career, Unlimited by default. Add cash for a started career.</p></div>
+    </div>
+    <p style="margin-top:1.5rem">Also: an all-in-one app export in Setup, and problem reports you can post as a GitHub issue after you check the text. <a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/CHANGELOG.md">Full changelog</a>.</p>
+  </div>
+</section>
+
+<section id="garage" class="tinted">
+  <div class="wrap">
+    <h2>In the garage.</h2>
+    <div class="cols">
+      <div><h3>F10 settings menu</h3><p>Opens over the game. Fn+F10 on a Mac keyboard, or the touchpad click on a DualSense or DualShock 4.</p></div>
+      <div><h3>Guide and look presets</h3><p>F10 &gt; Help &gt; Guide explains every setting. Picture presets: Port, PC retail, Xbox 360 retail and My picks.</p></div>
+      <div><h3>Updates on your terms</h3><p>Check for updates runs only when you press it. Update now prepares the next version for your next launch.</p></div>
+      <div><h3>Discord status</h3><p>Shows what you're playing on Discord. Off until you turn it on.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- The GitHub Sponsors button is hidden by class="sponsors-off" on <body> until GitHub approves the listing. -->
+<section id="support">
+  <div class="wrap">
+    <div>
+      <h2>Back the port.</h2>
+      <p>The port is free and stays free. If you want to support its development, you can chip in on Ko-fi.</p>
+    </div>
+    <a class="btn go" href="https://ko-fi.com/elforeign">Support on Ko-fi</a>
+    <a class="btn gh-sponsors" href="https://github.com/sponsors/elforeign">GitHub Sponsors</a>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>This project is unofficial. It is not affiliated with, authorized by or endorsed by Electronic Arts Inc., Criterion Games or Black Box. "Need for Speed", "Most Wanted" and related names, logos and artwork are trademarks or property of Electronic Arts Inc. and their respective owners. All other trademarks belong to their owners.</p>
+    <p>No game files are included. You need your own copy of the game (the PC game version 1.3, and optionally your own Xbox 360 copy). Setup builds the app on your Mac from your files; nothing it builds is meant to be shared, and nothing is uploaded. This project does not provide, link to, or explain how to obtain game files.</p>
+    <p>The project's own code is under the <a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/LICENSE">MIT license</a>; it does not relicense the game. Credits and third-party licenses: <a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/NOTICE">NOTICE</a>. Screenshots show the game running on a Mac with this port.</p>
+    <p class="stamp"><a href="https://github.com/elforeign/nfs-most-wanted-mac">Source on GitHub</a> &middot; <a href="https://github.com/elforeign/nfs-most-wanted-mac/releases/latest">Latest release</a> &middot; <a href="https://discord.gg/d6HfMwdM9v">Discord</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
