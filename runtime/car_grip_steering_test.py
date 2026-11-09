@@ -9,6 +9,10 @@ Synthetic 37/37 pass; 19/19 compiled omitted-term controls fail;
 differs on 14/30 fixtures. Private input comparisons exit 3 when inputs are absent,
 after the self-contained proofs. No guest process runs.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[1] / "tools"))
+from setup_kit.input_paths import input_path
 import ctypes as ct
 import hashlib
 import math
@@ -240,7 +244,7 @@ def admission(dll):
 
 
 def private(dll, original):
-    source = Path(os.environ.get('NFS_CARBON', Path.home() / 'Downloads/NFSC')) / 'GLOBAL/attributes.bin'
+    source = input_path('NFSC') / 'GLOBAL/attributes.bin'
     donor = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')) / 'GLOBAL/ATTRIBUTES.BIN'
     if not source.is_file() or not donor.is_file():
         print('SKIP: authored yaw comparisons require both pinned attribute vaults')

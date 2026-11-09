@@ -26,8 +26,8 @@ MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = None
-POLICY_PATH = Path(__file__).with_name('car_catalog.approvals.json')
+PACKAGED_POLICY_SHA256 = '0013819859369c2102d6379256fd5394563a024402f32c50d36cee9d4f18a7c9'
+POLICY_PATH = Path(__file__).with_name('car_approvals.json')
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Z0-9_]{1,31}\Z')
 _OUTPUT = re.compile(r'[A-Z0-9_]{1,31}\.BIN\Z')

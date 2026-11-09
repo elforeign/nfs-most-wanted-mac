@@ -1,6 +1,7 @@
 #include "underglow_photometry.h"
 #include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 const UGPrimary ug_primaries[3] = {
     {51.857, .694641, .304843},
@@ -15,6 +16,36 @@ int ug_preset_rgb(unsigned preset, double rgb[3]) {
     rgb[0] = rgb[1] = rgb[2] = 0;
     if (preset > 7) return 0;
     for (unsigned i = 0; i < 3; ++i) rgb[i] = (preset >> i) & 1;
+    return 1;
+}
+/* Unclipped linear Rec.709 of each measured primary at full duty (column i). */
+static void primary_rec709(double m[3][3]) {
+    static const double t[3][3] = {{3.2404542,-1.5371385,-.4985314},{-.9692660,1.8760108,.0415560},{.0556434,-.2040259,1.0572252}};
+    for (unsigned i = 0; i < 3; ++i) {
+        const UGPrimary *p = &ug_primaries[i];
+        double xyz[3] = {p->flux*p->x/p->y, p->flux, p->flux*(1-p->x-p->y)/p->y};
+        for (unsigned r = 0; r < 3; ++r) m[r][i] = t[r][0]*xyz[0] + t[r][1]*xyz[1] + t[r][2]*xyz[2];
+    }
+}
+int ug_preset_duties(unsigned preset, double duties[3]) {
+    if (!ug_preset_rgb(preset, duties)) return 0;
+    double m[3][3]; primary_rec709(m);
+    if (preset == 7) {              /* Cramer: m * d = (1,1,1) */
+        double det = m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0])
+                   + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
+        for (unsigned k = 0; k < 3; ++k) {
+            double a[3][3]; memcpy(a, m, sizeof a);
+            for (unsigned r = 0; r < 3; ++r) a[r][k] = 1;
+            duties[k] = (a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1]) - a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0])
+                       + a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0])) / det;
+        }
+    } else if (preset == 3 || preset == 5 || preset == 6) {
+        unsigned i = preset == 6 ? 1 : 0, j = preset == 3 ? 1 : 2;
+        /* Equal output channels i and j: d_i (m_ii - m_ji) = d_j (m_jj - m_ij). */
+        duties[i] = m[j][j] - m[i][j]; duties[j] = m[i][i] - m[j][i];
+    }
+    double top = fmax(duties[0], fmax(duties[1], duties[2]));
+    for (unsigned k = 0; k < 3; ++k) duties[k] = top > 0 ? duties[k]/top : 0;
     return 1;
 }
 int ug_mix_xyz(const double rgb[3], double xyz[3]) {

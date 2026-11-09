@@ -59,6 +59,8 @@ extern int diag_on;
 extern int diag_fixed_step;             // BOOT_DIAG_FIXED_STEP: capture animation/script time at 60 Hz
 extern const char *diag_dir;
 void diag_init(void);
+void diag_begin_exit(void);             // stand down watchdogs before exit/atexit work
+int diag_is_idle(void);
 void breaker_diag_load(Cpu *c);
 void diag_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void diag_event_ring(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -69,6 +71,7 @@ void diag_frame(uint64_t frame, uint64_t draws);
 int diag_shot_due(uint64_t frame);
 void diag_shot_request(uint64_t frame);  // a full-size shot of that frame (test switches)
 int diag_frame_wanted(uint64_t frame, const char *list_env);
+int diag_draw_frame_wanted(uint64_t frame);
 const char *diag_symbol(uint32_t addr, uint32_t *off);
 const char *userdata_dir(void);
 // app.m: the Mac app (logs, the game folder, NSApp and its menus)
@@ -111,6 +114,17 @@ void feedback_poll_pause(void);         // main-loop pass / pad read: Sim::GetSt
 void rumble_suppress(int on);           // also gates queued HID reports; never opens the device
 void rumble_stop(void);
 void rumble_close(void);                // quitting: motors off for good
+// padlink.c: the first controller's connect / disconnect notes (session log): duration, transport, battery, outputs sent
+enum { PADLINK_RUMBLE = 0, PADLINK_FX = 1 };
+// Tokens identify an exact connection; GC and HID are separate, explicitly labeled trails.
+uint64_t padlink_token(void *controller);
+void padlink_output(uint64_t token, int kind, int ok);
+void padlink_select(void *controller, const char *what);
+void padlink_detach(void *controller);
+void padlink_hid(void *device, int transport);
+void padlink_battery(void *controller, float level, int state);
+void padlink_idle(int force);
+void user32_pad_report(char *text, size_t n);
 // padfx.m: built-in triggers, lightbar, road loading and player indicators (all default on)
 int padfx_wanted(void);                 // any output is on, or BOOT_DIAG (the logic runs and logs what it would send)
 void padfx_game_tick(Cpu *c, uint32_t local_player);   // feedback.c, each LocalPlayer::DoFFB: heat, pursuit, speedbreaker
@@ -135,6 +149,7 @@ void feedback_trigger_state(float slip[2], float hz[2], int *nos);   // feedback
 void widescreen_setup(void);
 float widescreen_fe_scale(void);
 float movies_picture_aspect(void);
+void movies_check_install(void);
 void widescreen_mode(int i, uint32_t *w, uint32_t *h);
 void widescreen_projection(Cpu *c, uint32_t proj);
 void widescreen_drop_offset(Cpu *c, uint32_t vec);

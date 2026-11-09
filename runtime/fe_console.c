@@ -72,9 +72,11 @@ static int online_items(void) {
     if (v < 0) { const char *e = getenv("NFS_FE_ONLINE_ITEMS"); v = e && *e == '1'; }
     return v;
 }
+void underglow_menu_option_added(uint32_t opt);
 void f_00573960_orig(Cpu *c);
 void f_00573960(Cpu *c) {                                  // IconScrollerMenu::AddOption(this = ecx, IconOption *)
     uint32_t opt = M32(c->esp + 4);
+    underglow_menu_option_added(opt);
     if (opt) {
         uint32_t name = M32(opt + 0x2C);
         int hidden = name == 0xD6DB74DEu ? !lan_items() && !online_items() :
@@ -309,14 +311,17 @@ void f_0051B870(Cpu *c) {                                   // VOLevelOfDetail::
     c->esp += 12;                                         // ret 8
 }
 
+void music_balance_options(Cpu *c, int event);
 void f_00510450_orig(Cpu *c);
 void f_00510450(Cpu *c) {                                   // UIOptionsScreen::RestoreOriginals (incl. display rejection)
+    music_balance_options(c, 0);
     if (c->ecx == bright.screen) brightness_restore(c);
     if (c->ecx == tod.screen) tod_restore(c);
     f_00510450_orig(c);
 }
 void f_00545750_orig(Cpu *c);
 void f_00545750(Cpu *c) {                                   // UIOptionsScreen::NotificationMessage
+    music_balance_options(c, 1);
     if (c->ecx == bright.screen) {
         uint32_t message = M32(c->esp + 4);
         if (message == 0x911AB364u) brightness_restore(c);
@@ -333,6 +338,7 @@ void f_00545750(Cpu *c) {                                   // UIOptionsScreen::
 }
 void f_00529280_orig(Cpu *c);
 void f_00529280(Cpu *c) {                                   // UIOptionsScreen destructor: also cover unpause/other exits
+    music_balance_options(c, 2);
     if (c->ecx == bright.screen) {
         if (!bright.accepted) brightness_restore(c);
         else if (bright.changed) {
@@ -381,6 +387,7 @@ static struct { uint32_t from, to; const char *text; int x360_only; uint32_t gue
 };
 void f_0056BB80_orig(Cpu *c);
 uint32_t prompts_action_text(uint32_t hash);
+uint32_t underglow_menu_text(uint32_t hash);
 void fe_console_search(Cpu *c) {                           // SearchForString: hash in edx, text pointer in eax
     uint32_t hash = c->edx;
     for (size_t i = 0; i < sizeof k_text / sizeof *k_text; ++i) {
@@ -401,4 +408,5 @@ void fe_console_search(Cpu *c) {                           // SearchForString: h
     // Keep supplied game labels in every language; authored text is a fallback.
     // The original lookup already consumed the guest return address.
     if (!c->eax) c->eax = prompts_action_text(hash);
+    if (!c->eax) c->eax = underglow_menu_text(hash);
 }

@@ -8,6 +8,8 @@
 
 
 
+
+
 """
 from pathlib import Path
 import importlib.util
@@ -37,22 +39,13 @@ EXTRA = r'''
 #define SHADOW_FOCUS_FAR 0x901AB0u
 #define TIME_OF_DAY_PTR 0x9B392Cu
 static void put_float(uint32_t a,float v) { MF32(a)=v; }
-static int fit=2, shadow_size=2048, shadow_stable=0, x360_vp_set, nculled;
+static int fit=2, shadow_size=2048, x360_vp_set, nculled;
 uint32_t gmalloc_try(uint32_t n) { (void)n;return 0xD00000; }
 static uint32_t shadow_source_view, culled[64][2];
 static float x360_vp[16];
 void x360_shadow_fit(const float *,float,float,const float *,float,float,float *);
-void x360_shadow_stable_fit(const float *,float,float,const float *,float,int,int,float *);
 int render_dump_active(void) { return 0; }
 static void test_sun(void) {}
-void shadow_pan_environment(void) {}
-void shadow_pan_matrix(uint32_t matrix) { (void)matrix; }
-static unsigned near_begins, near_replays, near_cameras;
-void shadow_near_begin(void) { ++near_begins; }
-void shadow_near_pose_render(Cpu *c,uint32_t v,uint32_t u) { (void)c;(void)v;(void)u; }
-void shadow_near_replay(Cpu *c,uint32_t v,uint32_t u) { (void)c;(void)v;(void)u;++near_replays; }
-void shadow_near_far_rendered(uint32_t s,uint32_t p) { (void)s;(void)p; }
-void shadow_near_far_camera(uint32_t s,uint32_t v,uint32_t p,int clamp) { (void)s;(void)v;(void)p;(void)clamp;++near_cameras; }
 void guest_divide_error(Cpu *c,uint32_t pc) { (void)c;(void)pc; abort(); }
 static int ambient[2], textures[2], cartextures[2], sections[2], refreshes, distance_calls[2], skip_fit;
 static uint32_t expected_view, expected_plat;
@@ -60,6 +53,7 @@ static float expected_map[2][16], biased_map[2][16];
 static int nearf(float a,float b) { return isfinite(a)&&fabsf(a-b)<0.002f*fmaxf(1,fabsf(b)); }
 static Cpu cpu(void);
 static void receiver(uint32_t view);
+static void queued_flush(void);
 static void shadow_map(Cpu *c,uint32_t view,uint32_t cull);
 static void guest_run(Cpu *c,void (*fn)(Cpu *),int n,const uint32_t *a) {
  uint32_t sp=c->esp;
@@ -162,11 +156,8 @@ void f_006E44C0_orig(Cpu *c) { // fake caster draw driver; use the actual hook a
  uint32_t view=arg(c,0),cull=arg(c,1),ret=M32(c->esp),sp=c->esp;
  unsigned i=view==0x9196C0; expected_view=view; expected_plat=M32(view);
  float light[3]; memcpy(light,G+0x560180,12);
- if(shadow_stable)
-  x360_shadow_stable_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
-                         MF32(SHADOW_FOCUS_FAR),shadow_size,i+1,expected_map[i]);
- else x360_shadow_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
-                       X360E_SHADOW_NEAR,MF32(SHADOW_FOCUS_FAR),expected_map[i]);
+ x360_shadow_fit((float *)(G+expected_plat),MF32(expected_plat+0x40),-MF32(expected_plat+0x54),light,
+                       X360E_SHADOW_FOCUS_NEAR,MF32(SHADOW_FOCUS_FAR),expected_map[i]);
  M32(c->esp)=0x006E50C8; x360_shadow_camera(c,0x985990,0x9859D0);
  mul(0x985A10,0x985990,0x9859D0);
  for(unsigned k=0;k<16;k++) CHECK(nearf(MF32(0x985A10+4*k),expected_map[i][k]));
@@ -209,21 +200,11 @@ static void receiver(uint32_t view) {
 int main(void) {
  G=calloc(1,MEMSIZE); shadow_setup(); split_on=1;
  Cpu c=cpu(); c.esp-=4; f_006DE300(&c);
- CHECK(maps==2 && refreshes==2); CHECK(near_begins==2 && near_replays==2 && near_cameras==2); CHECK(ambient[0]==6 && ambient[1]==6);
+ CHECK(maps==2 && refreshes==2); CHECK(ambient[0]==6 && ambient[1]==6);
  CHECK(sections[0]==1 && sections[1]==1); CHECK(nworld==12);
  for(unsigned k=0;k<12;k++) CHECK(world_ok[k]);
  CHECK(rs174==0 && sc[0]==1 && sc[1]==2 && sc[2]==3 && sc[3]==4);
  CHECK(shadow_source==0 && shadow_cull==0); CHECK(c.esp==0x800000);
- // The opt-in stable fit also uses each player's exact caster matrix for the
- // biased world/car receivers, for both PC and X360 preset ranges.
- for(unsigned preset=0;preset<2;++preset) {
-  shadow_setup(); split_on=1; shadow_stable=1; fit=preset?2:0;
-  MF32(SHADOW_FOCUS_FAR)=preset?70:50;
-  c=cpu(); c.esp-=4; f_006DE300(&c);
-  CHECK(maps==2 && refreshes==2);
-  CHECK(shadow_source==0 && shadow_cull==0 && x360_vp_set==0);
- }
- shadow_stable=0; fit=2;
  // Split off: compare every memory byte and CPU for the three complete translated gates,
  // weather, section lookup and the ambient block against their unmodified translations.
  for(unsigned i=0;i<2;i++) {
@@ -311,17 +292,37 @@ def main():
   bound_rt=0xBAD; bound_ds=0xBAD; vp[0]=vp[1]=0; vp[2]=vp[3]=2048; break;'''
     assert old in pre
     pre = pre.replace(old, '  shadow_map(c,a[0],a[1]); break;')
+    pre = pre.replace(' switch (fn) {', ' if(fn==0x006E2F50u)queued_flush();\n switch (fn) {')
+    pre = pre.replace('void split_capture_end(Cpu *c) { (void)c; }',
+                      'void split_capture_end(Cpu *c) { (void)c; CHECK(!queued_owner); }')
+    pre = pre.replace('void split_post_view(Cpu*c,uint32_t v,const uint32_t r[4]){(void)c;(void)v;(void)r;}',
+                      'static uint32_t queued_owner;\nvoid split_post_view(Cpu*c,uint32_t v,const uint32_t r[4]){(void)c;(void)r;queued_owner=v;}')
     # Declarations before the recording harness; definitions after its globals.
     insertion = pre.index('int split_view_rect(')
     pre = pre[:insertion]+EXTRA+pre[insertion:]
     setup = world.POST[world.POST.index('static void setup('):world.POST.index('int main(')]
-    source = pre+body+camera+retail_camera+wrapper+gates+section+ambient+retail+refresh+setup+POST
+    # Execute the exact ownership-boundary blocks separately with an actual
+    # pending receiver. A closed capture scope supplies no implicit flush.
+    entry=body[body.index('static void world_pass('):body.index('    uint32_t desc = M32(view + 0x60)',body.index('static void world_pass('))]
+    entry=entry.replace('world_pass(', 'queued_begin(')+'    (void)c;(void)r;(void)scratch;(void)i;\n}\n'
+    ending=re.search(r'    call_guest\(c, 0x006E2F50u, 0, NULL\);[^\n]*always drain receivers\n.*?shadow_source = shadow_cull = 0;',body,re.S)[0]
+    boundary='static void queued_flush(void) { CHECK(!queued_owner || queued_owner==shadow_source);queued_owner=0; }\n'
+    boundary+=entry+'static void queued_end(Cpu *c) {\n'+ending+'\n}\n'
+    post=POST.replace(' G=calloc(1,MEMSIZE); shadow_setup(); split_on=1;', ''' G=calloc(1,MEMSIZE); shadow_setup(); split_on=1;
+ Cpu q=cpu();shadow_source=0x9196C0;queued_owner=shadow_source;
+ queued_begin(&q,0x919650,rects[0],0x700000,0x710000,0);
+ CHECK(!queued_owner && shadow_source==0x919650 && shadow_cull==0x700000);
+ queued_owner=shadow_source;queued_end(&q);CHECK(!queued_owner && !shadow_source && !shadow_cull);
+ shadow_setup();split_on=1;''')
+    source = pre+body+boundary+camera+retail_camera+wrapper+gates+section+ambient+retail+refresh+setup+post
     # Retail functions are used only after all per-view checks; unused helpers in harness are harmless.
     mutants = {
       'original ambient guard': ('split_shadow_id(c->edi)', 'M32(c->edi+4)'),
       'fixed P1 fit': ('uint32_t source_plat = M32(shadow_source_view);', 'uint32_t source_plat = M32(0x919650);'),
       'P1 section lookup': ('split_shadow_section_camera(M32((uint32_t)(c->eax + 0x919620u)))', 'M32((uint32_t)(c->eax + 0x919620u))'),
       'split map scissor': ('render_state(c, 174, 0);                                    // the whole map', 'render_state(c, 174, 1);                                    // the whole map'),
+      'entry flush omitted': ('call_guest(c, 0x006E2F50u, 0, NULL);                             // drain the previous source before changing ownership', '(void)0;'),
+      'exit flush omitted': ('call_guest(c, 0x006E2F50u, 0, NULL);                             // capture scope can already be closed; always drain receivers', '(void)0;'),
     }
     with tempfile.TemporaryDirectory(prefix='nfs-splitshadow-') as tmp:
         tmp = Path(tmp)
@@ -340,10 +341,10 @@ def main():
             return r
         if run('baseline',source).returncode: raise SystemExit(1)
         for label,(old,new) in mutants.items():
-            assert source.count(old)==1,(label,source.count(old))
+            assert source.count(old)==(2 if 'flush omitted' in label else 1),(label,source.count(old))
             r=run(label,source.replace(old,new))
             if r.returncode!=1 or 'failures' not in r.stdout: raise SystemExit('mutant not rejected: '+label)
-    print('SPLIT SHADOW PASS (4/4 mutants rejected)')
+    print('SPLIT SHADOW PASS (6/6 mutants rejected, closed-capture ownership boundaries included)')
 
 
 if __name__=='__main__': main()

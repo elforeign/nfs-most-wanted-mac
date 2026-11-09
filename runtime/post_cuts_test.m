@@ -8,7 +8,6 @@
 // Split/partial: all channels identical; nonempty reuse/proof retain stores.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#import "render_upscale_route.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,9 +111,6 @@ static id<MTLDevice> mtl;
 static id<MTLCommandBuffer> cmd;
 static id<MTLRenderCommandEncoder> enc;
 typedef struct {id<MTLTexture> tex,ms;} RenderTex;
-// This fixture exercises native coverage; the spatial alias stays inactive.
-static NFSUpscaleRoute *fs_upscale;
-static RenderTex fs_native_depth;
 static RenderTex ssao_mask,ssao_reference_mask,ssao_cpu_reference_mask;
 static id<MTLTexture> ssao_half_depth,ssao_depth;
 static int ssao_reference_record,ssao_cpu_reference_record,proof_mode;
@@ -155,6 +151,7 @@ static void ensure_cmd(void){}
 #define gpt_render_auto(...) ((void)0)
 #define gpt_name(...) ((void)0)
 static id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d,const char *name,NSError **error){(void)name;return [mtl newRenderPipelineStateWithDescriptor:d error:error];}
+static id<MTLLibrary> pipeline_library_source(NSString *source,const char *name,NSError **error){(void)name;return [mtl newLibraryWithSource:source options:nil error:error];}
 static void observe_coverage(MTLRenderPassDescriptor *rp,int allow_cuts){
     unsigned cuts=allow_cuts?post_cuts_ao(proof_mode,ssao_target()==&ssao_mask,ssao_cleared==frame_serial,pending_ops==0):0;
     CHECK(rp.depthAttachment.storeAction==((cuts&POST_CUTS_AO_DEPTH)?MTLStoreActionDontCare:MTLStoreActionStore));

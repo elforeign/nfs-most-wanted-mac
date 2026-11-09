@@ -13,6 +13,7 @@ const uint32_t guest_func_addr[] = {0}, speed_entry = 0;
 void (*const guest_func_ptr[])(Cpu *) = {NULL};
 const unsigned guest_func_count = 0, speed_import_count = 0;
 const struct ImportSlot speed_imports[] = {{0, NULL}};
+void diag_begin_exit(void) {}
 void diag_event(const char *fmt, ...) { (void)fmt; }
 void diag_call_ring(const char *fn, int n, const uint32_t *a, uint32_t v, uint32_t ra) { (void)fn; (void)n; (void)a; (void)v; (void)ra; }
 const char *diag_symbol(uint32_t a, uint32_t *off) { (void)a; if (off) *off = 0; return ""; }

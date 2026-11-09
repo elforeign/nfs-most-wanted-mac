@@ -20,7 +20,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "bundle_roots.h"
-// The X360 shader constants (ZZDATA0.BIN) and engine constants (default.xex) the build generated, if any
+// The X360 shader constants (retained ZZDATA0 window or legacy archive) and engine constants (default.xex) the build generated, if any
 // (tools/gen_tables.py): X360_SHADER_LITS / X360_ENGINE_CONSTS are 1 when the player's files were found and identified.
 #if defined(__has_include)
 #if __has_include("gen/x360_shader_lits.inc")
@@ -171,14 +171,18 @@ static inline const char *roots_x360_root_(void) {
 #endif
 }
 static inline int roots_x360_has(const char *feature) {
-    // "shaders": the X360 NFS/ZZDATA0.BIN under the X360 root, identified at build (the shader constants); "engine": the
+    // "shaders": NFS/zzdata0_09bb7000.bin (413696 bytes), or legacy NFS/ZZDATA0.BIN, identified at build; "engine": the
     // X360 default.xex in or beside it, identified at build (the post chain's constants). Legacy layout: the build's.
     if (!strcmp(feature, "shaders") || !strcmp(feature, "engine")) {
         int shaders = !strcmp(feature, "shaders"), built = shaders ? X360_SHADER_LITS : X360_ENGINE_CONSTS;
         if (!built || !roots_active()) return built;
         const char *r = roots_x360_root_();
         if (!r) return 0;
-        return shaders ? roots_file_ok_(r, "NFS/ZZDATA0.BIN") : roots_file_ok_(r, "default.xex") || roots_file_ok_(r, "../default.xex");
+        if (!shaders) return roots_file_ok_(r, "default.xex") || roots_file_ok_(r, "../default.xex");
+        char p[1300];
+        struct stat st;
+        snprintf(p, sizeof p, "%s/NFS/zzdata0_09bb7000.bin", r);
+        return (!stat(p, &st) && S_ISREG(st.st_mode) && st.st_size == 413696) || roots_file_ok_(r, "NFS/ZZDATA0.BIN");
     }
     if (!roots_active()) return 1;
     const char *x = roots_x360_root_(), *a = roots_get("assets_root"), *m = roots_get("movies");

@@ -10,7 +10,9 @@
 
 #include "host.h"
 #include "settings.h"
+#include "live_picture.h"
 #include "cliprec.h"
+#include "stream_key.h"
 #include "roadfilm.h"
 #include "realworld_materials.h"
 #include "particles_physical.h"
@@ -24,8 +26,6 @@ void app_quit_game(int unused);            // app.m: confirmation, then the norm
 void x360_set_tone_curve(int x360);
 void x360_set_reflection(int x360);
 void x360_set_shadow_fit(int preset);
-void x360_set_shadow_stable(int on);
-void shadow_near_set_enabled(int on);
 void mirror_set_size(int pct);
 void mirror_set_detail(int full);
 void mirror_set_msaa(int on);
@@ -78,7 +78,7 @@ static void look_apply(int v) {
 static Setting s_look = {.id = "graphics.look_preset", .category = SET_PICTURE, .order = 10, .label = "Look preset",
     .help = "Port restores recommended picture defaults; retail choices include the original colour filter, closest to retail. Xbox 360 files are needed for the full look. Changes may need Restart game.",
     .type = SET_CHOICE, .choices = kLook, .nchoices = 4, .def = PRESET_PORT, .pref = "", .own_pref = 1,
-    .apply = look_apply, .get = settings_look_state};
+    .apply = look_apply, .get = settings_look_state, .derived = 1};
 
 // Preset-owned, persisted startup overrides, deliberately absent from F10.
 // Existing switches carry these to the renderer just like visible restart rows.
@@ -86,9 +86,9 @@ static Setting s_look_data = {.id = "graphics.look_data", .type = SET_CHOICE, .h
     .choices = (const char *const[]){"PC", "X360"}, .values = (const char *const[]){"pc", "x360"},
     .nchoices = 2, .env = "NFS_VISUALLOOK", .restart = 1};
 static Setting s_look_contact = {.id = "graphics.look_contact_shadows", .type = SET_TOGGLE, .hidden = 1,
-    .def = 1, .env = "NFS_SSAO", .restart = 1};
+    .def = 1, .env = "NFS_SSAO", .live_env = 1, .apply = live_picture_apply_reload};
 static Setting s_look_smoke = {.id = "graphics.look_soft_smoke", .type = SET_TOGGLE, .hidden = 1,
-    .def = 1, .env = "NFS_SOFT_SMOKE", .restart = 1};
+    .def = 1, .env = "NFS_SOFT_SMOKE", .live_env = 1, .apply = live_picture_apply_reload};
 static Setting s_look_fog = {.id = "graphics.look_fog", .type = SET_CHOICE, .hidden = 1,
     .choices = (const char *const[]){"PC", "X360"}, .values = (const char *const[]){"pc", "x360"},
     .nchoices = 2, .def = 1, .env = "NFS_FOG", .restart = 1};
@@ -98,7 +98,7 @@ static Setting s_look_mirror_art = {.id = "graphics.look_mirror_art", .type = SE
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 static Setting s_look_reflections = {.id = "graphics.look_reflections", .type = SET_CHOICE, .hidden = 1,
     .choices = (const char *const[]){"Standard", "Sharp"}, .values = (const char *const[]){"pc", "sharp"},
-    .nchoices = 2, .def = 1, .env = "NFS_CAR_REFLECTION", .restart = 1};
+    .nchoices = 2, .def = 1, .env = "NFS_CAR_REFLECTION", .live_env = 1, .apply = live_picture_apply_reset};
 static Setting s_addcar_weight = {.id = "cars.added_weight", .category = SET_CARS, .order = 55,
     .label = "Added cars' weight", .help = "Real weight in collisions; driving uses the retail donor. CCX uses dry weight. Restart game to apply.",
     .type = SET_CHOICE, .choices = (const char *const[]){"Real in contact (default)", "Retail"},
@@ -149,9 +149,9 @@ static Setting s_window = {.id = "display.window", .category = SET_DISPLAY, .ord
 
 static const char *const kFullScreen[] = {"Borderless", "Native", "Auto"}, *const kFullScreenV[] = {"borderless", "native", "auto"};
 static Setting s_fullscreen = {.id = "display.fullscreen", .category = SET_DISPLAY, .order = 11, .label = "Full screen",
-    .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Auto picks Native on the Mac screen and Borderless on any other display. Restart game to apply.",
+    .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Auto picks Native on the Mac screen and Borderless on any other display. Applies at once.",
     .type = SET_CHOICE, .choices = kFullScreen, .values = kFullScreenV, .nchoices = 3, .def = 0,
-    .env = "NFS_FULLSCREEN_MODE", .restart = 1};
+    .env = "NFS_FULLSCREEN_MODE", .live_env = 1, .apply = live_picture_apply_fullscreen};
 
 static const char *const kOverlay[] = {"Off", "Compact", "Full"};
 static void overlay_apply(int v) { overlay_set_level(v); }
@@ -160,10 +160,27 @@ static Setting s_overlay = {.id = "display.overlay", .category = SET_DISPLAY, .o
     .type = SET_CHOICE, .choices = kOverlay, .nchoices = 3, .env = "NFS_OVERLAY", .pref = "overlay", .own_pref = 1,
     .apply = overlay_apply, .get = overlay_level};
 
+static Setting s_replay_arm = {.id="display.replay_arm", .category=SET_DISPLAY, .order=47,
+    .label="Replay buffer", .help="Arm or disarm the last 30 seconds of video and stereo sound. Always starts Off. Uses the clip resolution. Video clips and live streaming can share the capture. Disarm leaves other capture actions running.",
+    .type=SET_ACTION, .pref="", .apply=replay_arm_action, .value_text=replay_status};
+static Setting s_replay_save = {.id="display.replay_save", .category=SET_DISPLAY, .order=48,
+    .label="Save last 30 s", .help="Saves the 30 seconds ending when selected to Movies/NFSMW. Wait for warm-up; one save at a time. The buffer stays armed.",
+    .type=SET_ACTION, .pref="", .apply=replay_save_action, .value_text=replay_save_status};
+static const char *const kReplayKey[]={"F8", "F7", "F6"}, *const kReplayKeyV[]={"f8", "f7", "f6"};
+static Setting s_replay_key_enabled = {.id="controls.replay_key_enabled", .category=SET_CONTROLS, .order=12,
+    .label="Replay save key", .help="Enable the save shortcut. Off initially; arm replay separately in Display. A key assigned in the game's Controls keeps its career binding instead.",
+    .type=SET_TOGGLE, .def=0, .env="NFS_REPLAY_KEY_ENABLED"};
+static Setting s_replay_key = {.id="controls.replay_key", .category=SET_CONTROLS, .order=13,
+    .label="Replay key", .help="F8 by default. Used only when Replay save key is On and this menu is closed. Repeated presses while held save once.",
+    .type=SET_CHOICE, .choices=kReplayKey, .values=kReplayKeyV, .nchoices=3, .def=0, .env="NFS_REPLAY_KEY"};
+static const char *const kReplayPad[]={"Disabled", "L1 + R1 + L3", "L1 + R1 + R3"}, *const kReplayPadV[]={"off", "l1r1l3", "l1r1r3"};
+static Setting s_replay_pad = {.id="controls.replay_pad", .category=SET_CONTROLS, .order=14,
+    .label="Replay save chord", .help="Disabled initially. Press all three within 150 ms; hold saves once. Solo buttons retain career actions after a short recognition delay. Menu and Guide shortcuts take priority; release every button after focus loss or reconnect.",
+    .type=SET_CHOICE, .choices=kReplayPad, .values=kReplayPadV, .nchoices=3, .def=0, .env="NFS_REPLAY_PAD"};
 static const char *const kClipResolution[] = {"1080p", "1440p", "4K"};
 static Setting s_clip_resolution = {.id = "display.clip_resolution", .category = SET_DISPLAY, .order = 44,
     .label = "Clip resolution",
-    .help = "Next clip; keeps aspect, never upscales smaller pictures. Approx MB/min (HEVC / H.264): 1080p 75 / 113, 1440p 133 / 200, 4K 300 / 450 at 16:9; smaller pictures use less.",
+    .help = "Next clip; keeps aspect, never enlarges smaller pictures. Approx MB/min (HEVC / H.264): 1080p 75 / 113, 1440p 133 / 200, 4K 300 / 450 at 16:9; smaller pictures use less.",
     .type = SET_CHOICE, .choices = kClipResolution, .nchoices = 3, .def = CLIPREC_DEFAULT_RESOLUTION};
 
 static Setting s_cliprec = {.id = "display.cliprec", .category = SET_DISPLAY, .order = 45, .label = "Video clip",
@@ -172,6 +189,24 @@ static Setting s_cliprec = {.id = "display.cliprec", .category = SET_DISPLAY, .o
 static Setting s_clips_open = {.id = "display.clips_open", .category = SET_DISPLAY, .order = 46,
     .label = "Show clips in Finder", .help = "Opens Movies/NFSMW in Finder.",
     .type = SET_ACTION, .pref = "", .apply = cliprec_open_folder};
+
+// The key is never a Setting.text value: only constant action/status strings cross this UI.
+static Setting s_stream_heading = {.id="display.stream_heading", .category=SET_DISPLAY, .order=60,
+    .label="Live streaming", .type=SET_HEADING, .pref=""};
+static Setting s_stream_key = {.id="display.stream_key", .category=SET_DISPLAY, .order=61,
+    .label="Enter stream key", .help="Opens a secure entry sheet. Save keeps the key in memory until quit. Entering a key does not broadcast.",
+    .type=SET_ACTION, .pref="", .apply=stream_key_edit};
+static Setting s_stream_forget = {.id="display.stream_forget", .category=SET_DISPLAY, .order=62,
+    .label="Forget stream key", .help="Stops live streaming and clears the key from this session.",
+    .type=SET_ACTION, .pref="", .apply=stream_key_forget};
+static Setting s_stream_go = {.id="display.stream_go", .category=SET_DISPLAY, .order=63,
+    .label="Go live", .help="Starts sending video and stereo sound to YouTube using the entered key. Always starts Off; errors require another explicit Go live.",
+    .type=SET_ACTION, .pref="", .apply=stream_key_go};
+static Setting s_stream_stop = {.id="display.stream_stop", .category=SET_DISPLAY, .order=64,
+    .label="Stop live", .help="Stops uploads. Keeps the key until quit or Forget. Recording and replay continue.",
+    .type=SET_ACTION, .pref="", .apply=stream_key_stop};
+static Setting s_stream_status = {.id="display.stream_status", .category=SET_DISPLAY, .order=65,
+    .label="Stream status", .type=SET_INFO, .pref="", .value_text=stream_key_status};
 
 // ---------------- Graphics ----------------
 // Restart: hc_transform specializes world shaders for float_scene_on, while
@@ -254,7 +289,7 @@ static Setting s_paint = {.id = "graphics.car_paint", .category = SET_CARS, .ord
 static const char *const kTraffic[] = {"Off", "On"}, *const kTrafficV[] = {"off", "on"};
 static Setting s_traffic = {.id = "graphics.traffic_detail", .category = SET_CARS, .order = 25, .label = "Traffic detail",
     .help = "On applies your car glass treatment to traffic windows and uses racer model distances. Off keeps the original traffic materials and distances.",
-    .type = SET_CHOICE, .choices = kTraffic, .values = kTrafficV, .nchoices = 2, .def = 0,
+    .type = SET_CHOICE, .choices = kTraffic, .values = kTrafficV, .nchoices = 2, .def = 1,
     .env = "NFS_TRAFFIC_DETAIL", .apply = traffic_detail_set};
 static void glass_apply(int v) { materials_set_car_glass(v == 1); }
 static Setting s_glass = {.id = "graphics.car_glass", .category = SET_CARS, .order = 20, .label = "Car glass",
@@ -270,7 +305,7 @@ static const char *const kHeadlamp[] = {"Retail", "Clear"}, *const kHeadlampV[] 
 static void headlamp_apply(int v) { materials_set_headlamp_glass(v == 1); }
 static Setting s_headlamp = {.id = "graphics.headlamp_glass", .category = SET_PICTURE, .order = 65, .label = "Headlamp glass",
     .help = "Retail keeps the original lamp shading. Clear makes headlamp covers transparent over their reflectors; native PC glass stays unchanged.",
-    .type = SET_CHOICE, .choices = kHeadlamp, .values = kHeadlampV, .nchoices = 2, .def = 0, .env = "NFS_HEADLAMP_GLASS", .apply = headlamp_apply};
+    .type = SET_CHOICE, .choices = kHeadlamp, .values = kHeadlampV, .nchoices = 2, .def = 1, .env = "NFS_HEADLAMP_GLASS", .apply = headlamp_apply};
 static void carnm_apply(int v) { materials_set_car_normals(v == 1); }
 static Setting s_carnm = {.id = "graphics.car_normals", .category = SET_CARS, .order = 30, .label = "Tyre and badge detail",
     .help = "X360 adds the console's bump detail to tyre sidewalls, tread and badges (needs the X360 car paint on); PC keeps them flat.",
@@ -292,7 +327,7 @@ static void particles_apply(int v) {
 static Setting s_particles = {.id = "graphics.particles", .category = SET_WORLD, .order = 75, .label = "Particles",
     .help = "PC and X360 keep their original shading and particle sizes. Retail uses the X360 style. Physical adds surface fading and scene lighting to that style.",
     .type = SET_CHOICE, .choices = (const char *const[]){"Retail", "Physical", "PC", "X360"},
-    .values = (const char *const[]){"retail", "physical", "pc", "x360"}, .nchoices = 4, .def = 0,
+    .values = (const char *const[]){"retail", "physical", "pc", "x360"}, .nchoices = 4, .def = 1,
     .env = "NFS_PARTICLES", .apply = particles_apply};
 static void aux_apply(int v) { auxlights_set_enabled(v == 1); }
 static Setting s_aux = {.id = "graphics.scenery_lights", .category = SET_WORLD, .order = 45, .label = "Scenery lights",
@@ -423,17 +458,6 @@ static const char *const kFit[] = {"X360", "X360 range only", "PC"}, *const kFit
 static Setting s_fit = {.id = "graphics.shadow_fit", .category = SET_WORLD, .order = 40, .label = "Shadow fit",
     .help = "X360 uses the console's light camera with a 1600x1600 shadow map, white border and front-face casters; shadow quality itself is in Video options.",
     .type = SET_CHOICE, .choices = kFit, .values = kFitV, .nchoices = 3, .env = "NFS_SHADOW_FIT", .apply = x360_set_shadow_fit};
-
-static const char *const kSteadyV[] = {"off", "on"};
-static Setting s_steady = {.id = "graphics.shadow_stable", .category = SET_WORLD, .order = 45,
-    .label = "Steady shadow edges", .help = "Experimental stable shadow grid. Rejected baseline: loses thin shadow detail. Keep Off for normal play.",
-    .type = SET_TOGGLE, .values = kSteadyV, .nchoices = 2, .def = 0,
-    .env = "NFS_SHADOW_STABLE", .apply = x360_set_shadow_stable};
-
-static Setting s_near = {.id = "graphics.shadow_near", .category = SET_WORLD, .order = 46,
-    .label = "Dense near shadows", .help = "Experimental extra shadow map near the camera. Uses additional video memory. Appearance is under review.",
-    .type = SET_TOGGLE, .values = kSteadyV, .nchoices = 2, .def = 0,
-    .env = "NFS_SHADOW_NEAR", .apply = shadow_near_set_enabled};
 
 // ---------------- Audio ----------------
 static Setting s_limiter = {.id = "audio.peak_limiter", .category = SET_AUDIO, .order = 40, .label = "Peak limiter",
@@ -688,9 +712,11 @@ __attribute__((constructor)) static void settings_port_register(void) {
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
     REG(s_window); REG(s_fullscreen); REG(s_overlay); REG(s_clip_resolution); REG(s_cliprec); REG(s_clips_open); REG(s_lan);
+    REG(s_stream_heading); REG(s_stream_key); REG(s_stream_forget); REG(s_stream_go); REG(s_stream_stop); REG(s_stream_status);
+    REG(s_replay_arm); REG(s_replay_save); REG(s_replay_key_enabled); REG(s_replay_key); REG(s_replay_pad);
     REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);
     REG(s_vrr);
-    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_traffic); REG(s_headlamp); REG(s_real_materials); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit); REG(s_steady); REG(s_near);
+    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_traffic); REG(s_headlamp); REG(s_real_materials); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
     REG(s_look_data); REG(s_look_contact); REG(s_look_smoke); REG(s_look_fog); REG(s_look_mirror_art);
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     REG(s_look_reflections); REG(s_look_later_textures); REG(s_addcar_weight);

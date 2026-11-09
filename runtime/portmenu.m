@@ -34,7 +34,10 @@
 #include "d3d9_internal.h"
 #include "settings.h"
 #include "text_fit.h"
+#include "stream_key.h"
 #include "guide.h"
+#include "replay_input.h"
+#include "cliprec.h"
 #include "report_github.h"
 #include "onscreen_keyboard.h"
 void osk_pass(Cpu *c);
@@ -42,7 +45,6 @@ void osk_pass(Cpu *c);
 #define GAMEFLOW_STATE 0x00925E90u       // 3 front end, 6 racing
 #define SND_CTL_STATES 0x00911FE8u       // g_ActiveCtlStates (SetSoundControlState 004B9080)
 const char *port_build_id(void);
-void report_request_shot(void);
 void report_note(const char *fmt, ...);
 void user32_menu_opening(void);          // user32.m: release held keys and buttons to the game
 void user32_menu_cursor(void);           // user32.m: the system cursor over the game while the menu is open
@@ -166,7 +168,7 @@ static void paste_text(void) {
     dirty = 1;
 }
 static void activate(Setting *s) {
-    if (!s) return;
+    if (!s || stream_key_editing()) return;
     if (s->type == SET_ACTION) { if (s->apply) s->apply(0); if (diag_on) diag_event("menu: run %s", s->id); dirty = 1; }
     else if (s->type == SET_TEXT) {
         editing = !editing; dirty = 1;
@@ -188,9 +190,9 @@ static void set_open(int o) {
             return event;
         }];
         user32_menu_opening();           // keys and buttons held now are released to the game first
-        report_request_shot();           // the frame as it is, for a problem report
         clamp_sel();
     }
+    if (!o) stream_key_close();
     if (!o) guide_close();
     if (!o) report_github_close();
     is_open = o;
@@ -223,7 +225,35 @@ void portmenu_pass(Cpu *c) {
 
 // ---------------- keyboard ----------------
 // user32.m key_event, every key (scripted ones too): 1 = the menu took it.
+// Match the game's driving/menu decision in user32's pad mapping. Any input
+// capture belongs to Controls, including keyboard capture before it is bound.
+static int replay_game_blocked(void) {
+    if(is_open || M32(GAMEFLOW_STATE)!=6) return 1;
+    uint32_t sim=M32(0x009885E0u), io=M32(0x00920DE8u);
+    if((sim && M32(sim+0x2C)==4) || (io && M8(io+0x183C))) return 1;
+    uint32_t fe=M32(0x0091CADCu)?M32(M32(0x0091CADCu)):0;
+    if(fe && fe!=0xFFFFFF28u)
+        for(uint32_t p=M32(fe+0xE4);p;p=M32(p+8))
+            if(M32(p+0x20)) {
+                const char *ctl=gptr(M32(p+0xC));
+                return ctl && strncasecmp(ctl,"HUD_",4)!=0;
+            }
+    return 0;
+}
+static ReplayInput replayInput;
+void replay_controls_cancel(void) { replay_input_cancel(&replayInput); }
+void replay_controls_disconnect(void) { replay_input_disconnect(&replayInput); }
 int portmenu_key(uint8_t vk, int down, int repeat) {
+    if(stream_key_editing()) { swallowed[vk]=(uint8_t)down; return 1; }
+    int replaySave=0;
+    int enabled=settings_get("controls.replay_key_enabled")==1;
+    int pick=enabled?settings_get("controls.replay_key"):0;
+    unsigned key=pick==1?0x76:pick==2?0x75:0x77;
+    int blocked=replay_game_blocked() || (enabled && vk==key && replay_key_in_use(key==0x77?0x42:key==0x76?0x41:0x40));
+    if(replay_input_key(&replayInput,vk,down,repeat,enabled,key,blocked,&replaySave)) {
+        if(replaySave) replay_save_action(0);
+        return 1;
+    }
     if (vk == 0x79) {                    // F10: also Fn-F10 on Mac keyboards (plain F10 is Mute there)
         if (down && !repeat) set_open(!is_open);
         swallowed[vk] = (uint8_t)down;
@@ -233,6 +263,7 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
         if (!down && swallowed[vk]) { swallowed[vk] = 0; return 1; }
         return 0;
     }
+    int was_down=swallowed[vk];
     swallowed[vk] = (uint8_t)down;
     if (report_github_active()) { report_github_key_event(vk, down, repeat); dirty = 1; return 1; }
     if (!down) return 1;
@@ -272,7 +303,9 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
     case 0x28: move(1); break;                              // Down
     case 0x25: change(s, -1); break;                        // Left
     case 0x27: change(s, 1); break;                         // Right
-    case 0x0D: case 0x20: activate(s); break;               // Enter, Space
+    case 0x0D: case 0x20:                                // Enter, Space
+        if(!s || strncmp(s->id,"display.stream_",15) || (!repeat && !was_down)) activate(s);
+        break;
     case 0x09: set_tab(tab + (shift ? -1 : 1)); break;      // Tab
     case 'Q': set_tab(tab - 1); break;
     case 'E': set_tab(tab + 1); break;
@@ -390,11 +423,17 @@ uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, floa
     *inject = 0;
     double now = host_ticks() / 1e9;
     static uint32_t last_phys, hold_after_close;
+    if(stream_key_editing()) { last_phys=phys; hold_after_close=phys; return ~0u; }
     static GuideShortcut shortcut;
+    ReplayPad replayPad=replay_input_pad(&replayInput,now,phys,settings_get("controls.replay_pad"),
+        replay_game_blocked() || home || touchpad);
+    if(replayPad.save) replay_save_action(0);
+    // Consume the chord before menu/guide recognition and career remapping.
+    phys &= ~replayPad.hide;
     GuideShortcutResult input = guide_shortcut(&shortcut, now, phys, home, touchpad, has_touchpad,
         settings_get("controls.menu_button"), settings_get("controls.guide_button") == 0, is_open);
-    uint32_t hide = input.hide;
-    *inject = input.inject;
+    uint32_t hide = input.hide | replayPad.hide;
+    *inject = input.inject | replayPad.inject;
     int trig = input.action != 0;
     if (trig && diag_on) diag_event("pad: %s shortcut", input.action == 2 ? "guide" : "menu");
     if (input.action == 2) {

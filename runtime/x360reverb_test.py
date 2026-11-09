@@ -3,9 +3,19 @@
 Run: $TOOLS_PY -I runtime/x360reverb_test.py
 Scratch (including ten-second WAVs, float responses and failure logs) is retained and printed.
 The three deliberately broken production merges must exit nonzero. See README for measured results.
+Environment-switch proof: Off -16.901/-15.401 dB swap blocks (PC/X360), On
+-1.206..+0.149/-0.686..+0.277 dB against the authored steady-level fade envelope.
+Fade removed: continuity FAIL -16.933 dB. Each source survives 100 swaps with all
+retiring allocations freed at 0.5 s and two infrastructure allocations after Reset.
+Stopped-send tail RMS 0 -> 0.021949668 (active-tail oracle identical).
+DC endpoint max sample steps: 44.1k 0.000905618 -> 0.000053272 (steady 0.000000015);
+48k 0.000830889 -> 0.000048876 (steady 0.000000060). Idle/block-gain mutants fail.
+Crossfade default proof: original Off exits 1 with 2 failures (default and loaded value);
+On exits 0: 7 default/saved/environment cases pass, including saved Off and both overrides.
 """
 from pathlib import Path
 import os
+import hashlib
 import re
 import struct
 import subprocess
@@ -67,13 +77,20 @@ def translated(scratch):
         image[at:at + size] = pe.data[raw:raw + size]
     (scratch / 'image.bin').write_bytes(image)
     # Hooked functions (recomp/hooks.txt) are emitted as f_XXXXXXXX_orig plus a weak f_XXXXXXXX wrapper; the test wants the
-    # original under its plain name (here 00820DA3, wrapped for diagnostics by x360audio.c).
+    # original bodies below; Reset/renderer keep _orig names to exercise the production feature.
     source = re.sub(r'\bf_([A-F0-9]{8})_orig\b', r'f_\1', (ROOT / 'recomp/out/speed_55.c').read_text())
     bodies = dict(re.findall(r'void f_([A-F0-9]{8})\(Cpu \*restrict c\) (\{.*?\n})', source, re.S))
+    # Pin only the retail function bodies used by the Off oracle, including their
+    # stack/allocator behavior; no history or whole-file baseline.
+    for address, digest in {
+        '0081D93A': '68ca1f3ac8c9d39682ed5287d669a18058d6d22fb88350f3d042aa128fe1fc56',
+        '00820DA3': '12a0318333850bcd4a2eb4c26332b462d6766cfbd91f72bfea394b8ed7507a53',
+    }.items():
+        assert hashlib.sha256(bodies[address].encode()).hexdigest() == digest, address
     # Include node processors called indirectly through graph objects, plus direct dependency closure.
-    pending = ['00821537', '008215FC', '00820DA3', '008251F0'] + [
+    pending = ['00821537', '008215FC', '0082175F', '0081D93A', '0081DA87', '00820DA3', '008251F0'] + [
         a for a in bodies if 0x82444F <= int(a, 16) <= 0x824F60]
-    used, stubs = set(), {'0081E9E7', '0081EAE9'}
+    used, stubs = set(), {'0081E9E7', '0081EAE9', '0081BCCB', '0081BCD9'}
     while pending:
         a = pending.pop()
         if a in used or a in stubs:
@@ -84,7 +101,9 @@ def translated(scratch):
     assert {'008215FC', '00821108', '00820DA3'} <= used
     generated = '#include "runtime.h"\n#include <stdio.h>\n#include <stdlib.h>\n'
     generated += '\n'.join(f'void f_{a}(Cpu *c);' for a in sorted(used | stubs))
-    generated += '\n' + '\n'.join(f'void f_{a}(Cpu *restrict c) {bodies[a]}' for a in sorted(used))
+    hooked = {'0081D93A', '00820DA3'}
+    generated += '\n' + '\n'.join(f'void f_{a}_orig(Cpu *c);' for a in sorted(hooked))
+    generated += '\n' + '\n'.join(f'void f_{a}{"_orig" if a in hooked else ""}(Cpu *restrict c) {bodies[a]}' for a in sorted(used))
     generated += '\nvoid dispatch(Cpu *c, uint32_t target) { switch(target) {\n'
     generated += '\n'.join(f'case 0x{a}: f_{a}(c); return;' for a in sorted(used | stubs))
     generated += '\ndefault: fprintf(stderr,"unexpected DSP dispatch %08X\\n",target); exit(1); }}\n'
@@ -94,10 +113,14 @@ def translated(scratch):
     return original
 
 
-def build(scratch, original, label='good', source=None):
+def build(scratch, original, label='good', source=None, fade_source=None):
     # Include the production loader in the harness, as x360music_test.c does. Mutations
     # change that same source at the actual merge point, leaving reference assets intact.
     harness = (ROOT / 'runtime/x360reverb_test.c').read_text()
+    if fade_source is not None:
+        fade = scratch / f'{label}_fade.c'
+        fade.write_text(fade_source)
+        harness = harness.replace('"reverbfade.c"', f'"{fade}"')
     if source is not None:
         loader = scratch / f'{label}_loader.c'
         loader.write_text(source)
@@ -141,18 +164,158 @@ def response(binary, scratch, label, fx, rate, channels):
     return a, (float(total), t60, first), p.stdout.strip()
 
 
+def swap_proof(binary, scratch, original, pc, merged, env):
+    city = scratch / 'city.fx'; city.write_bytes(pc[0x2A8F7F1A][0])  # SOUND\\FXEDIT\\CITY_OPEN.FX
+
+    def response(label, executable, fx, switch, mode='hook', cycles=1):
+        tunnel = scratch / f'{label}.fx'; tunnel.write_bytes(fx)
+        raw = scratch / f'{label}.f32'
+        p = run([executable, 'swap', scratch / 'image.bin', city, tunnel, raw, mode, cycles],
+                env=dict(env, NFS_REVERB_XFADE=switch))
+        (scratch / f'{label}.log').write_text(p.stdout + p.stderr)
+        a = np.fromfile(raw, dtype='<f4').reshape(188, 1024, 6)
+        rms = np.sqrt(np.mean(a.astype('float64') ** 2, axis=(1, 2)))
+        return a, rms
+
+    def continuity(rms):
+        # The presets have different authored wet levels. Compare the fade with
+        # the equal-power envelope of the independently measured steady endpoints.
+        before = np.sqrt(np.mean(rms[70:94] ** 2))
+        after = np.sqrt(np.mean(rms[164:188] ** 2))
+        t = np.minimum((np.arange(24) * 1024 + 512) / 24000, 1)
+        envelope = np.hypot(before * np.cos(t * np.pi / 2), after * np.sin(t * np.pi / 2))
+        db = 20 * np.log10(rms[94:118] / envelope)
+        assert np.max(np.abs(db)) < 3, f'crossfade continuity {db.min():.3f}..{db.max():.3f} dB'
+        return float(db.min()), float(db.max())
+
+    for name, fx in [('PC', pc[KEYS[2]][0]), ('X360', merged[KEYS[2]][0])]:
+        reference, _ = response(name + '_retail', binary, fx, 'off', 'retail')
+        default, off = response(name + '_off', binary, fx, 'off')
+        assert np.array_equal(reference, default), f'{name}: Off differs from retail'
+        # Every sample, including steady state and the swap, is byte-identical.
+        assert reference.tobytes() == default.tobytes()
+        _, on = response(name + '_on', binary, fx, 'on', cycles=100)
+        low, high = continuity(on)
+        step = 20 * np.log10(off[94] / off[93])
+        assert step < -12, f'premise no longer holds: {step:.3f} dB'
+        print(f'{name} swap: Off {off[93]:.9f}->{off[94]:.9f} ({step:.3f} dB), '
+              f'On {on[93]:.9f}->{on[94]:.9f}; fade envelope {low:.3f}..{high:.3f} dB; '
+              '100 swaps freed, Off sample-identical to retail', flush=True)
+    for rate in [44100, 48000]:
+        for channels in [1, 2, 4, 6]:
+            for mode, cycles in [('hook', 1), ('release', 1), ('rapid', 100)]:
+                label = f'lifetime_{rate}_{channels}_{mode}'
+                fx, raw = scratch / f'{label}.fx', scratch / f'{label}.f32'
+                fx.write_bytes(merged[KEYS[2]][0])
+                p = run([binary, 'swap', scratch / 'image.bin', city, fx, raw, mode, cycles, rate, channels],
+                        env=dict(env, NFS_REVERB_XFADE='on'))
+                (scratch / f'{label}.log').write_text(p.stdout + p.stderr)
+                raw.unlink()
+    print('lifetime: 44.1/48 kHz, 1/2/4/6ch, exact fade deadline, release during fade, '
+          '100 rapid swaps including bounded-tail eviction passed', flush=True)
+    fade = (ROOT / 'runtime/reverbfade.c').read_text()
+    old = 'float target = reverbfade_gain(at + frames, length, retiring);'
+    assert old in fade
+    broken = build(scratch, original, 'no_fade', fade_source=fade.replace(old, 'float target = retiring ? 0 : 1; previous = target;'))
+    _, rms = response('broken_no_fade', broken, pc[KEYS[2]][0], 'on')
+    try:
+        continuity(rms)
+    except AssertionError as e:
+        print(f'broken fade removed: required FAIL ({e})', flush=True)
+    else:
+        raise AssertionError('fade-removed mutation passed continuity')
+    for label, old, replacement, checks in [
+        ('idle_cutoff', 'if (force_tail) M32(0x9C22F8) = 0;', 'if (0) M32(0x9C22F8) = 0;', ('idle',)),
+        ('block_gains', 'float target = reverbfade_gain(at + frames, length, retiring);',
+         'float target = previous;', ('sample',)),
+    ]:
+        assert old in fade
+        broken = build(scratch, original, label, fade_source=fade.replace(old, replacement))
+        try:
+            review_proof(broken, scratch, pc, env, checks)
+        except AssertionError as e:
+            assert 'review regression' in str(e), e
+            print(f'broken {label}: required FAIL ({e})', flush=True)
+        else:
+            raise AssertionError(f'{label} mutation passed review regression')
+
+
+def review_proof(binary, scratch, pc, env, checks=('idle', 'sample')):
+    city, tunnel = scratch / 'review_city.fx', scratch / 'review_tunnel.fx'
+    city.write_bytes(pc[0x2A8F7F1A][0]); tunnel.write_bytes(pc[KEYS[2]][0])
+    def render(mode, rate=48000, switch='on'):
+        raw = scratch / f'review_{mode}_{rate}_{switch}.f32'
+        p = run([binary, 'swap', scratch / 'image.bin', city, city if mode == 'continuity' else tunnel,
+                 raw, mode, 1, rate, 6], env=dict(env, NFS_REVERB_XFADE=switch))
+        (raw.with_suffix('.log')).write_text(p.stdout + p.stderr)
+        return np.fromfile(raw, dtype='<f4').reshape(-1, 6).astype('float64')
+    idle, reference = render('idle'), render('idle_reference')
+    off, retail = render('idle', switch='off'), render('idle_retail', switch='off')
+    assert off.tobytes() == retail.tobytes(), 'Off stopped-send path differs from retail'
+    at = 94 * 1024
+    wet = np.sqrt(np.mean(idle[at:at + 1024] ** 2))
+    expected = np.sqrt(np.mean(reference[at:at + 1024] ** 2))
+    end = at + ((24000 + 127) // 128) * 128
+    # After retirement the reference keeps rendering the silent new graph's
+    # denormal floor; the real idle path correctly skips it. Compare the tail.
+    error = np.max(np.abs(idle[at:end] - reference[at:end]))
+    print(f'idle tail: swap RMS {wet:.9f}, active-render reference {expected:.9f}; '
+          f'max retiring-tail sample error {error:.9f}', flush=True)
+    bad = 'idle' in checks and (error != 0 or wet < 0.001)
+    for rate in [44100, 48000]:
+        a = render('continuity', rate)
+        steady = np.max(np.abs(np.diff(a[70 * 1024:at], axis=0)))
+        end = at + ((rate // 2 + 127) // 128) * 128
+        # Measure every sample around both fade endpoints, including the first
+        # rising block and the final retiring block. Interior graph startup
+        # reflections are authored DSP transients, not fade endpoint steps.
+        samples = np.r_[np.arange(at, at + 256), np.arange(end - 256, end + 256)]
+        steps = np.abs(a[samples] - a[samples - 1])
+        step = steps.max()
+        # DC makes the steady derivative nearly zero. The allowed added step
+        # follows the decoded /17 retail slope, half-second equal-power curve
+        # and measured steady amplitude of each of the two equal presets.
+        amplitude = np.max(np.abs(a[70 * 1024:at]))
+        limit = 2 * steady + 2 * amplitude * (np.pi / 2 * 128 / (rate / 2)) / 17
+        print(f'sample continuity {rate}: boundary step {step:.9f}, steady step {steady:.9f}, '
+              f'ratio {step / max(steady, 1e-12):.3f}, decoded ramp bound {limit:.9f}', flush=True)
+        bad |= 'sample' in checks and step > limit
+    assert not bad, 'review regression: idle tail or sample continuity failed'
+
+
 def main():
     scratch = Path(tempfile.mkdtemp(prefix='nfsmw_reverb_'))
     print(f'scratch retained: {scratch}', flush=True)
     original = translated(scratch)
     binary = build(scratch, original)
+    if '--review-proof' in sys.argv:
+        pc = entries((PC / 'GLOBAL/InGameMemoryFile.bin').read_bytes())
+        review_proof(binary, scratch, pc, os.environ)
+        return
+    if '--swap-premise' in sys.argv:
+        pc = entries((PC / 'GLOBAL/InGameMemoryFile.bin').read_bytes())
+        city, tunnel = scratch / 'city.fx', scratch / 'tunnel.fx'
+        h = 0xffffffff
+        for c in 'SOUND\\FXEDIT\\CITY_OPEN.FX':
+            h = (h * 33 + ord(c)) & 0xffffffff
+        city.write_bytes(pc[h][0]); tunnel.write_bytes(pc[KEYS[2]][0])
+        print(run([binary, 'swap', scratch / 'image.bin', city, tunnel, scratch / 'swap.f32', 'retail', 1]).stdout)
+        return
     env = {k: v for k, v in os.environ.items() if k not in
-           ['NFS_X360_AUDIO', 'NFS_X360_REVERB', 'NFS_X360_MUSIC', 'REVERB_TEST_PREF']}
+           ['NFS_X360_AUDIO', 'NFS_X360_REVERB', 'NFS_X360_MUSIC', 'NFS_REVERB_XFADE',
+            'REVERB_TEST_PREF', 'REVERB_TEST_FADE_PREF']}
     for extra, expected in [({}, 1), ({'NFS_X360_REVERB': 'pc'}, 0), ({'REVERB_TEST_PREF': 'pc'}, 0),
                             ({'NFS_X360_REVERB': 'x360'}, 1), ({'REVERB_TEST_PREF': 'x360'}, 1),
                             ({'NFS_X360_REVERB': 'pc', 'REVERB_TEST_PREF': 'x360'}, 0)]:
-        run([binary, 'settings', expected], env=dict(env, **extra))
+        run([binary, 'settings', expected, 1], env=dict(env, **extra))
     print('settings: X360 default, pc/x360 env, saved value, env precedence, Audio order 65, restart passed', flush=True)
+    for extra, expected in [({}, 1), ({'REVERB_TEST_FADE_PREF': 'off'}, 0),
+                            ({'REVERB_TEST_FADE_PREF': 'on'}, 1),
+                            ({'NFS_REVERB_XFADE': 'off'}, 0), ({'NFS_REVERB_XFADE': 'on'}, 1),
+                            ({'NFS_REVERB_XFADE': 'on', 'REVERB_TEST_FADE_PREF': 'off'}, 1),
+                            ({'NFS_REVERB_XFADE': 'off', 'REVERB_TEST_FADE_PREF': 'on'}, 0)]:
+        run([binary, 'settings', 1, expected], env=dict(env, **extra))
+    print('settings: crossfade On default, saved Off/On, env Off/On and precedence: 7 cases passed', flush=True)
     pcpath, xpath = PC / 'GLOBAL/InGameMemoryFile.bin', X / 'GLOBAL/INGAMEMEMORYFILE.BIN'
     pb, xb = pcpath.read_bytes(), xpath.read_bytes()
     pc, ref = entries(pb), entries(xb)
@@ -177,6 +340,8 @@ def main():
             env=dict(env, NFS_X360_AUDIO='on' if mix else 'off',
                      NFS_X360_REVERB='x360' if reverb else 'pc', NFS_X360_FILES=str(X)))
     merged = entries(merged_paths[0, 1].read_bytes())
+    review_proof(binary, scratch, pc, env)
+    swap_proof(binary, scratch, original, pc, merged, env)
     count = 0
     for key in KEYS[:3]:
         for channels in [1, 2, 4, 6]:

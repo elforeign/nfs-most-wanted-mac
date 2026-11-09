@@ -21,6 +21,8 @@ typedef struct Obj {
     uint8_t buffer_lock_write, pane_cached;
     uint8_t hd_swap, hd_tinted;  // an X360 HD texture (x360_textures.m); uploaded with the probe's signature (probe.m)
                                  // (hd_swap 2: an X360 arrest-scene character texture, its draws counted)
+    uint8_t decal_back;          // decal_depth.m: a listed glow layer drawn behind a coplanar sign
+    uint8_t ground_decal;        // decal_depth.m: the car ground shadow (never soft-particle faded)
     // shaders / declarations
     uint32_t *tokens, ntokens;
     uint64_t tokens_hash;        // render.m: FNV of the bytecode (0 = not computed yet)

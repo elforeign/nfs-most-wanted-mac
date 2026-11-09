@@ -279,7 +279,8 @@ class _Code:
 def _code(platform, absent):
     code = _Code()
     policy, _ = converter._converter_policy(platform, None, code)
-    for path in (Path(__file__), sources.MANIFEST):
+    for path in (Path(__file__), sources.MANIFEST,
+                 Path(__file__).resolve().parents[2] / 'runtime/huff.h'):
         code.read(path)
     code.read_catalog(Path(catalog.__file__))
     environment = catalog.encoded(dict(engine=REVISION, python=list(sys.version_info[:3]),

@@ -15,6 +15,10 @@ Fragment pin regression: before repair, 1 setup error / 0 checks; after,
 7/7 checks pass. A BNKl-to-S10A fragment mutation fails its SHA-256 check.
 No complete executable ABK or runtime admission is claimed by these envelopes.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 from dataclasses import replace
 import hashlib
 import os
@@ -389,7 +393,7 @@ class BankProof(unittest.TestCase):
 
 def private_proof(exe, folder, *, original=False):
     from setup_kit import car_audio as graph
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     roster = ROOT / 'tools_snapshot/private_cars.py'
     attributes = source / 'GLOBAL/attributes.bin'
     if not attributes.is_file() or not roster.is_file() or exe is None:

@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 static Setting *registered;
+int x360_shadow_edge(void) { return 0; } // the pipeline fixture selects the PC fade
 void settings_add(Setting *s) { registered = s; }
 static int failures, checks;
 #define CHECK(c) do { ++checks; if (!(c)) { ++failures; printf("FAIL %s\n", #c); } } while (0)

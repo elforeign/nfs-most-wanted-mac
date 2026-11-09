@@ -6,6 +6,9 @@ the 80-byte mesh header. The adapter must resolve that exact bundle.
 Use --assets for independent PC/ISO/extracted logical comparisons; without
 NFS_CARBON_PC, NFS_CARBON_X360 and NFS_CARBON_CARS that mode exits 3.
 No source data is embedded. Fixtures use non-symmetric typed components.
+Dangling normal regression: pinned original rejects 1/1; current rejects 0/1.
+Original-function swap: 1/1 regression test fails (exit 1); current 1/1 passes (exit 0);
+unknown identity, absent fallback, and four wrong-role controls still reject.
 Good: 17 synthetic tests. Broken endian projection: 9 errors, exit 1;
 broken packed-top origin: 12 subcase failures, exit 1. The real shared proof
 compares 11 selected logical files (72,388,472 bytes), 162 material identities,
@@ -42,6 +45,96 @@ from setup_kit import car_x360_inputs as ci, car_paint, car_physics
 from setup_kit.x360 import Source
 import test_car_x360 as fixtures
 import test_car_sources as source_fixtures
+
+
+# Original function fragments; dependencies use the module namespace.
+ORIGINAL_RESOLVE = r'''def resolve(source, car, donor=None, *, recognition=None):
+    """Resolve one selected car from an approved ISO/archive/logical source.
+
+    The Source stays owned by the caller. An optional recognition result avoids
+    re-inventorying other catalog cars; it never bypasses selected file hashes.
+    No PC paths, donor assets, disc extraction or complete importer are used.
+    """
+    require(re.fullmatch('[A-Za-z0-9_]{1,15}', car) is not None, 'X360 car identity')
+    car, donor = car.upper(), (donor or car).upper()
+    require(re.fullmatch('[A-Z0-9_]{1,15}', donor) is not None, 'X360 donor identity')
+    recognition = cs.recognise(source.path) if recognition is None else recognition
+    require(recognition.get('platform') == 'x360' and recognition.get('game', 'carbon') == 'carbon',
+            'X360 bundle needs recognized source platform')
+    cars = [c for c in recognition['cars'] if c['car_hash'] == cs.path_hash('CARS/' + car)]
+    require(len(cars) == 1 and cars[0]['status'] == 'importable', 'X360 selected car is not importable')
+    read = LogicalReader(source, recognition['shared'] + cars[0]['files'])
+    geometry = read.read(f'CARS/{car}/GEOMETRY.BIN')
+    models = cx.source_models(geometry)
+    for m in models.values():
+        require(not any(cid in EXCLUDED_STREAMS for cid, _ in m['extras']), 'X360 opaque stream in output extras')
+        m.pop('x360_opaque', None)
+    textures = cx.source_textures(read.read(f'CARS/{car}/TEXTURES.BIN'))
+    global_data = cc.unpack_file(read.read('GLOBAL/GLOBALB.LZC'))
+    require(read.read('GLOBAL/GLOBALB.BUN') == global_data, 'X360 compressed/shared companion differs')
+    attributes = normalize_attributes(read.read('GLOBAL/ATTRIBUTES.BIN'), car)
+    shared_pack = read.read('CARS/TEXTURES.BIN')
+    array = array_entries(global_data)
+    shared_blobs = dict(cc.texture_blobs(shared_pack))
+    wanted = {h for m in models.values() for h in m['textures']} - textures.keys()
+    # The common writer's normal/resource policy also requests these images.
+    wanted |= set(map(cc.name_hash, ('TIRE_STYLE01', 'TIRE_STYLE02', 'TIRE_STYLE01_N', 'DOORLINE_N')))
+    # Runtime replacement tables bind these logical identities to paint,
+    # damage, windows, lights and decals. They are not missing static pixels.
+    names = {'DAMAGE0_N'} | {f'{car}_{r}' for r in cc.MW_PAINT_BINDINGS}
+    names |= {f'WINDOW_{side}' for side in ('FRONT', 'REAR', 'LEFT_FRONT', 'RIGHT_FRONT', 'LEFT_REAR', 'RIGHT_REAR')}
+    for kind in ('HEADLIGHT', 'HEADLIGHT_GLASS', 'BRAKELIGHT', 'BRAKELIGHT_GLASS'):
+        names |= {f'{kind}_{s}' for s in ('LEFT', 'RIGHT', 'CENTRE')}
+    names |= {f'DUMMY_DECAL{i}' for i in range(1, 7)} | {'DUMMY_NUMBER_LEFT', 'DUMMY_NUMBER_RIGHT'}
+    runtime = {cc.name_hash(n): n for n in names if cc.name_hash(n) in wanted}
+    aliases = {}
+    for kit in range(6):
+        name = f'{car}_KIT{kit:02d}_HEADLIGHT_GLASS_OFF'
+        hs = cc.name_hash(name)
+        if hs in wanted and hs not in shared_blobs and hs not in array:
+            aliases[hs] = cc.name_hash('WINDOW_MASK'), 'WINDOW_MASK'
+            wanted.add(cc.name_hash('WINDOW_MASK'))
+    static = wanted - runtime.keys() - aliases.keys()
+    absent = static - array.keys() - shared_blobs.keys()
+    if absent:
+        # Driver/plate art lives in INGAMEA rather than GLOBALB on this platform.
+        extra = array_entries(cc.unpack_file(read.snapshot_dependency('GLOBAL/INGAMEA.BUN')))
+        for hs in absent & extra.keys():
+            array[hs] = extra[hs]
+    shared = {}
+    for hs in sorted(static):
+        if hs in shared_blobs:
+            shared[hs] = cx.texture_entry(hs, shared_blobs[hs])
+        elif hs in array:
+            shared[hs] = shared_texture_entry(*array[hs])
+    unresolved = static - shared.keys()
+    require(not unresolved, 'X360 unresolved source texture identities: ' +
+            ','.join(f'{h:08x}' for h in sorted(unresolved)))
+    normalized, materials, palette = shared_chunks(global_data)
+    used = {h for m in models.values() for h in m['lights']}
+    # The public writer already admits these runtime paint/rim replacements.
+    runtime_materials = frozenset(used & {0xD6D6080A, 0x22719FA9})
+    require(used <= materials.keys() | runtime_materials, 'X360 unresolved source material identities')
+    wheels = cc.wheel_fields(attributes, car)
+    fit = cc.render_fit(attributes, car)
+    wheel_fit = cc.wheel_sidecar(attributes, car, donor, fit=True)
+    paint = car_paint.stock_customization(normalized, attributes, car)
+    collision = cc.collision_sidecar(normalized, car, donor)
+    physics = car_physics.metadata(attributes, car, donor)
+    require(physics is not None, 'X360 physics dependencies missing')
+    read.check_unchanged()
+    return Bundle(car, geometry, models, textures, shared, runtime, aliases, normalized, materials,
+                  cc.material_role_map(normalized), runtime_materials, attributes, wheels, fit, wheel_fit,
+                  paint, palette, collision, physics, dict(read.inputs), read)
+'''
+ORIGINAL_RESOLVE_SHA = '19b56173955fca212813013dcdcdebcad75dd16df53f241139edb9dc1695286d'
+
+
+def original_resolve():
+    assert hashlib.sha256(ORIGINAL_RESOLVE.encode()).hexdigest() == ORIGINAL_RESOLVE_SHA
+    namespace = dict(vars(ci))
+    exec(ORIGINAL_RESOLVE, namespace)
+    return namespace['resolve']
 
 
 def chunk(kind, value):
@@ -381,10 +474,15 @@ class BundleTests(unittest.TestCase):
             if row['path_hash'] == cs.path_hash(name):
                 row.update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
 
-    def second_texture(self, name):
+    def second_texture(self, name, *, normal_only=False):
         geometry = bytearray(self.files['CARS/SYNTH/GEOMETRY.BIN'])
         off, _ = cc.find(geometry, 0x134012)
         struct.pack_into('<I', geometry, off + 16, cc.name_hash(name))
+        if normal_only:
+            _, off, size, _, _, _ = cc.index(geometry)[0]
+            draw = off + ((cc.find(geometry[off:off + size], 0x134B02)[0] + 135) & ~127)
+            for i in range(4):
+                geometry[draw + i * 128 + 19:draw + i * 128 + 24] = bytes((0, 1, 0, 0, 0))
         self.replace_input('CARS/SYNTH/GEOMETRY.BIN', bytes(geometry))
 
     def test_full_dependency_contract(self):
@@ -472,6 +570,51 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(bundle.texture_aliases, {cc.name_hash('SYNTH_KIT00_HEADLIGHT_GLASS_OFF'):
                                                 (cc.name_hash('WINDOW_MASK'), 'WINDOW_MASK')})
         self.assertIn(cc.name_hash('WINDOW_MASK'), bundle.shared_textures)
+
+    def test_dangling_grill_normal_alias(self):
+        self.second_texture('GRILL_05_N', normal_only=True)
+        geometry = self.files['CARS/SYNTH/GEOMETRY.BIN']
+        _, off, size, _, _, _ = cc.index(geometry)[0]
+        draw = off + ((cc.find(geometry[off:off + size], 0x134B02)[0] + 135) & ~127)
+        self.replace_input('GLOBAL/INGAMEA.BUN', array_pack('DEFAULTALPHA')[1])
+        self.source = Source(self.root)
+        self.addCleanup(self.source.close)
+        with self.assertRaisesRegex(cc.FormatError, 'unresolved source texture'):
+            original_resolve()(self.source, 'SYNTH', 'DONOR', recognition=self.recognition)
+        bundle = self.resolve()
+        grill, fallback = map(cc.name_hash, ('GRILL_05_N', 'DEFAULTALPHA'))
+        self.assertEqual(bundle.texture_aliases, {grill: (fallback, 'DEFAULTALPHA')})
+        self.assertIn(fallback, bundle.shared_textures)
+        self.assertNotIn(grill, bundle.shared_textures)
+        self.assertIn(cs.path_hash('GLOBAL/INGAMEA.BUN'), bundle.inputs)
+        self.second_texture('UNKNOWN_NORMAL')
+        with self.assertRaisesRegex(cc.FormatError, 'unresolved source texture'):
+            self.resolve()
+        self.second_texture('GRILL_05_N')
+        original = self.files['CARS/SYNTH/GEOMETRY.BIN']
+        for slot in (24, 26, 27, 28):
+            data = bytearray(original)
+            data[draw + 19 + slot - 24] = 1
+            self.replace_input('CARS/SYNTH/GEOMETRY.BIN', bytes(data))
+            with self.subTest(slot=slot), self.assertRaisesRegex(cc.FormatError, 'unresolved source texture'):
+                self.resolve()
+
+    def test_dangling_grill_requires_source_fallback(self):
+        self.second_texture('GRILL_05_N', normal_only=True)
+        self.replace_input('GLOBAL/INGAMEA.BUN', cc.chunk(0, b''))
+        self.source = Source(self.root)
+        self.addCleanup(self.source.close)
+        with self.assertRaisesRegex(cc.FormatError, 'unresolved source texture'):
+            self.resolve()
+
+    def test_authored_grill_normal_is_preserved(self):
+        self.second_texture('GRILL_05_N', normal_only=True)
+        data = global_chunks() + array_pack('GRILL_05_N')[1] + array_pack('DEFAULTALPHA')[1]
+        for name in ('GLOBAL/GLOBALB.LZC', 'GLOBAL/GLOBALB.BUN'):
+            self.replace_input(name, data)
+        bundle = self.resolve()
+        self.assertEqual(bundle.texture_aliases, {})
+        self.assertIn(cc.name_hash('GRILL_05_N'), bundle.shared_textures)
 
     def test_shared_metadata_corruptions(self):
         data = global_chunks()

@@ -27,6 +27,9 @@ typedef struct Cpu {
 } Cpu;
 
 extern uint8_t *G;    // guest memory base
+// Live picture shading switches: invalidate after exporting the new environment value.
+void render_soft_smoke_reload(void);
+void x360_post_ssao_reload(void);
 uint32_t car85_count(void);                       // private NFS_TEST_CAR85 proof; 84 when off
 uint32_t car85_asset_name(uint32_t address);        // exact asset operands only; identity stays CAR85
 int car85_path(const char *guest, char *host, size_t n);

@@ -34,6 +34,7 @@
 #include "x360_internal.h"
 #include "roots.h"
 #include "materials.h"
+#include "underglow_render.h"
 #include "roadfilm.h"
 #include "realworld_materials.h"
 #include "particles_physical.h"
@@ -59,7 +60,7 @@ static int carbon_lampglass_on(void) {
 // Live Picture choice; Retail preserves the existing platform equations.
 static int headlamp_glass = -1;
 static int headlamp_glass_on(void) {
-    if (headlamp_glass < 0) { const char *e = getenv("NFS_HEADLAMP_GLASS"); headlamp_glass = e && !strcmp(e, "clear"); }
+    if (headlamp_glass < 0) { const char *e = getenv("NFS_HEADLAMP_GLASS"); headlamp_glass = !(e && *e) || !strcmp(e, "clear"); }   // unset: Clear
     return headlamp_glass;
 }
 void materials_set_headlamp_glass(int clear) {
@@ -607,7 +608,9 @@ static int car_paint = -1, car_paint_live = 1;
 #include "carpaint_nan_test.m"
 #undef CARPAINT_TEST_IN_RUNTIME
 static int car_paint_on(void) {
-    if (diag_on && getenv("BOOT_DIAG_CARPAINT_NAN_TEST")) {
+    static int nan_test = -1;
+    if (diag_on && nan_test < 0) nan_test = getenv("BOOT_DIAG_CARPAINT_NAN_TEST") != NULL;
+    if (diag_on && nan_test) {
         static int tested;
         if (!tested) {
             tested = 1;
@@ -1577,6 +1580,7 @@ void f_006E0AB0(Cpu *c) {
     }
 }
 void materials_aux_record(uint32_t q) {
+    if (diag_on) underglow_render_receiver_record(q);
     materials_aux_clear();
     if (!auxlights_enabled() || q < 0x0093E878u || (q-0x0093E878u)%0x44) return;
     uint32_t index = (q-0x0093E878u)/0x44;
@@ -1620,6 +1624,7 @@ void materials_glass_clear(void);
 void f_006D7660(Cpu *c) {
     materials_aux_record(c->ecx);
     f_006D7660_orig(c);
+    if (diag_on) underglow_render_receiver_clear();
     materials_aux_clear();
     materials_glass_clear();              // R19: a record that skipped its draw must not mark the next unrelated draw
     materials_trees_clear();              // R28, same reason
@@ -2267,6 +2272,7 @@ X360B_WATER_PS_BODY_1
 ;
 
 char *mat_water_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint) {
+    if (!X360_SHADER_BODIES) return NULL;
     char *result = NULL;
     if (stage == SM_VERTEX) {
         int position = -1;
@@ -2369,6 +2375,7 @@ X360B_AUX_PS_BODY_3
 ;
 
 char *mat_aux_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint) {
+    if (!X360_SHADER_BODIES) return NULL;
     char *result = NULL;
     if (stage == SM_VERTEX) {
         int reg[4] = {-1,-1,-1,-1};

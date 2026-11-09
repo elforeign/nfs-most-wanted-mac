@@ -1,256 +1,203 @@
 #!/usr/bin/env python3
-"""Production A/V recording proof; fixtures stay in injected worktree scratch.
-Pinned original 13984ab7: audio_tracks=0 required=1 video_frames=36 (exit 1),
-32,896 actual DirectSound fixture frames. PCM control: 600 video frames / 480,000
-stereo samples over 10 s, marker offsets 0 ms, normalized RMS 0.001458,
-container end error 0; SDR/HDR, HEVC/H.264, drop gaps, transitions and lifecycle pass.
-PCM controls rejected: removed audio 0/1 tracks; skew +100 ms; swap RMS 1.237052;
-wrong rate 44,100/48,000 Hz; lost drain 22.021 ms, tail RMS 0.653658 (all exit 1).
-Startup control: future PCM rejects the early video (accepted=0, epoch_set=0);
-removing the coverage guard gives accepted=1, epoch_set=1 and exit 1.
-Jittered device stamps (contiguous sample_position, stamps moved -5..+5 ms per
-block): pinned pre-fix receive() normalized RMS 1.339511 after best alignment,
-marker offsets up to 147 ms (exit 1) -> fixed 0.012352 (PCM) / 0.013138 (AAC),
-0 ms markers after a -0.160 ms constant alignment; threshold RMS <=0.05, <=10 ms.
-Video pause 8 s with sound flowing: pinned pre-fix pump() overflows the ring
-after 5.467 s (exit 1) -> fixed records on, queue peak 132,096/262,144, markers
-after the pause 0 ms, resumed RMS 0.001445 (threshold <=0.05, <=10 ms).
-AAC passes where the codec is available (verified outside the sandbox); the test
-exits 3 only where the codec factory is restricted (it returns 1718449215), after
-the baseline and PCM proofs. Results/logs remain in worktree scratch. No game,
-real audio device or listening claim.
+"""Mandatory decoded PCM proof through the production capture and packet paths.
+600 video frames / 480000 stereo samples in 10 s; markers 0 ms, drift 0 ms,
+normalized RMS 0.001459, exact endpoint. Five final-drain controls pass and five
+removed-drain mutants fail (46880/48000 frames, tail RMS 0.667342 vs 0.002014).
+Other rejected controls: zero audio tracks; +100 ms; swapped channels RMS
+1.237052; 44.1 kHz clock fault 44240/48000 frames; truncated tail 46960/48000;
+removed startup gate accepted/epoch 1/1 vs 0/0. All broken runs exit 1.
+Jitter +-5 ms: RMS 0.012352, aligned markers 0 ms. Eight-second presentation
+pause: resumed RMS 0.001445, markers 0 ms. Raw queue peak 95744/96000 frames.
+File stall >=5 s: healthy 360/360 video, same audio packet count as file,
+zero missing, file marker offset/drift 0/0 ms. Failed file: healthy 60/60,
+file prefix 10 frames, explicit error. Delayed file append leaves capture's
+endpoint at 48000 samples while the file packet waits.
+Drain regression: original Saving=1, completed=0 at deadline+0.252 s;
+fixed Saving=0, completed=1 at +0.009 s, immediate restart accepted=1.
+Blocked file append also completes at +0.004 s and safely cleans up on return.
+Failed-file requested endpoint: original 1.000000 s, fixed 0.166667 s for
+10 frames. MOV decoded duration is 0.166667 s on both; endpoint mutant fails.
+Callback fold mutant 12673 ns >9260 ns budget; shared-queue mutant 0/300 vs
+healthy 300/300 (clip_packets_test.py). Numbers are measured controls.
+PCM coverage never skips. cliprec_aac_test separately checks actual host AAC;
+codec factory denial 1718449215 exits 3, never an AAC content pass.
+Live focus gap (AAC coverage; 12 s without frames through the real ClipAudio path): the file recorded with
+live equals the same run without live (864000 samples, 480128 zero samples); live cuts 6 segments from 346 held
+frames with 0 pool drops. Controls: old shared target (file sound to the held frames' end) 0 zero samples;
+live sound stopped at the video end 0 gap segments; leaked held surface 120 pool drops, capture overloaded.
+Results remain in worktree scratch. No game, device or listening claim.
+Load: old startup/clock exit1 -> fixed0 (2.1 s / 20 ms delays); 1 s stall pause old file270/270 exit1 -> fixed0/270 exit0.
+Twelve background suite tests, three runs each: median total 292.099 ->
+184.597 s; compile/link 164.501 -> 55.359 s; execution 127.422 -> 129.018 s.
+All controls and pinned mutants retained; support compilations 133 -> 8.
 """
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 RT=Path(__file__).resolve().parent
 ROOT=RT.parent
 CACHE=ROOT/'.metal-cache'/'cliprec-audio'
 CACHE.mkdir(parents=True,exist_ok=True)
-# Relevant original 13984ab7 methods are pinned individually. The remaining
-# conversion, VT submission, presentation and shutdown code is shared; no
-# repository history, external fixture file, or encoder mock is needed.
-ORIGINAL_METHODS = [
-    ('- (instancetype)init {', '- (void)dealloc {', 'ac18e9c8105be5408199311072bf7e95be7bb8d29e620233bf7ab7fb9b1903d5', r'''
-- (instancetype)init {
-    if ((self = [super init])) {
-        work = dispatch_queue_create("nfsmw.cliprec", DISPATCH_QUEUE_SERIAL);
-        finished = dispatch_group_create();
-        dispatch_group_enter(finished);
-        frames = [NSMutableSet new]; packets = [NSMutableArray new];
-        outstanding=0; poolDrops=0; writerDrops=0; unshown=0; cadenceDrops=0; accepted=0; streak=0;
-        ready=false; stopping=false; packetOverflow=false; ended=false; queuedPackets=0;
-        resolution = CLIPREC_DEFAULT_RESOLUTION;
-        started = NSProcessInfo.processInfo.systemUptime;
-    }
-    return self;
-}
-'''),
-    ('- (void)packet:(CMSampleBufferRef)sample status:(OSStatus)status {', '- (void)pump {', '518321578a33c798460188fefd0967fcdba84274483c57558509928b984ab462', r'''
-- (void)packet:(CMSampleBufferRef)sample status:(OSStatus)status {
-    if (writer.status == AVAssetWriterStatusCancelled) { --queuedPackets; return; }
-    if (writer.status == AVAssetWriterStatusFailed) {
-        --queuedPackets; [self fail:writer.error.localizedDescription ?: @"MP4 writer failed"]; return;
-    }
-    if (status || !sample || !CMSampleBufferDataIsReady(sample)) {
-        --queuedPackets;
-        [self fail:[NSString stringWithFormat:@"Video encoder error %d", (int)status]]; return;
-    }
-    if (!writing) {
-        input = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:nil
-            sourceFormatHint:CMSampleBufferGetFormatDescription(sample)];
-        input.expectsMediaDataInRealTime = YES;
-        if (![writer canAddInput:input]) { --queuedPackets; [self fail:@"MP4 video format rejected"]; return; }
-        [writer addInput:input];
-        if (![writer startWriting]) { --queuedPackets; [self fail:writer.error.localizedDescription ?: @"MP4 start failed"]; return; }
-        [writer startSessionAtSourceTime:kCMTimeZero]; writing = true;
-    }
-    ClipPacket *p = [ClipPacket new]; p->sample = sample; CFRetain(sample);
-    [packets addObject:p];
-    [self pump];
-}
-'''),
-    ('- (void)pump {', '- (void)consume:', 'd8834a66f3ae1b7eefaf83aaf4ed99f3c30a7fe4d5983b2f2f65078be438bd84', r'''
-- (void)pump {
-    while (packets.count && input.readyForMoreMediaData) {
-        ClipPacket *p = packets.firstObject;
-        if (![input appendSampleBuffer:p->sample]) {
-            writerDrops += (unsigned)packets.count; queuedPackets -= (unsigned)packets.count;
-            [packets removeAllObjects];
-            [self fail:writer.error.localizedDescription ?: @"MP4 write failed"]; return;
-        }
-        ++accepted; --queuedPackets; streak=0;
-        [packets removeObjectAtIndex:0]; blockedSince=0;
-    }
-    if (!packets.count) return;
-    double now = NSProcessInfo.processInfo.systemUptime;
-    if (!blockedSince) blockedSince=now;
-    if (now-blockedSince >= 2 || writer.status == AVAssetWriterStatusFailed) {
-        writerDrops += (unsigned)packets.count; queuedPackets -= (unsigned)packets.count;
-        [packets removeAllObjects]; packetOverflow=true;
-        [self fail:writer.error.localizedDescription ?: @"Recording stopped: writer stalled"]; return;
-    }
-    if (!pumpScheduled) {
-        pumpScheduled=true;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_MSEC),work,^{
-            self->pumpScheduled=false; [self pump];
-        });
-    }
-}
-
-'''),
-    ('- (void)finishWhenDrained {', '- (void)finish {', 'a0061502d6522b30cb2ad0d49e9df6149704dc18d687ff4bcacc926fe8297be0', r'''
-- (void)finishWhenDrained {
-    if (packets.count) {
-        [self pump];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_MSEC),work,^{ [self finishWhenDrained]; });
-        return;
-    }
-    if (writing && writer.status == AVAssetWriterStatusWriting) {
-        [input markAsFinished];
-        [writer finishWritingWithCompletionHandler:^{ dispatch_async(self->work, ^{ [self finish]; }); }];
-    } else {
-        if (!error) error = @"No presented video frames";
-        [writer cancelWriting]; [self finish];
-    }
-}
-
-'''),
-    ('- (void)finish {', '@end', 'ee15707400c532d3738b5fb110b55da1708073e8b43bd32cdcb1dd72c08260d6', r'''
-- (void)finish {
-    if (writer.status == AVAssetWriterStatusCompleted) {
-        NSError *e = nil;
-        // moveItem refuses an existing destination; temporary is on the same volume.
-        if (![NSFileManager.defaultManager moveItemAtPath:temporary toPath:destination error:&e])
-            error = e.localizedDescription ?: @"Could not publish clip";
-        else published=true;
-    } else if (!error) error = writer.error.localizedDescription ?: @"MP4 finalization failed";
-    if (writer.status != AVAssetWriterStatusCompleted && temporary)
-        [NSFileManager.defaultManager removeItemAtPath:temporary error:nil];
-    // CompleteFrames and the packet barrier have retired all encoder callbacks.
-    // Keep terminal metadata for the menu, but no idle capture/encoding resources.
-    if (encoder) { VTCompressionSessionInvalidate(encoder); CFRelease(encoder); encoder=NULL; }
-    if (cache) { CVMetalTextureCacheFlush(cache,0); CFRelease(cache); cache=NULL; }
-    if (pool) { CFRelease(pool); pool=NULL; }
-    pipeline=nil; device=nil; input=nil; writer=nil;
-    [frames removeAllObjects]; [packets removeAllObjects];
-    ready = false; ended=true;
-    dispatch_group_leave(finished);
-}
-'''),
- ]
-def original_source(source):
-    import hashlib
-    for start,end,digest,body in ORIGINAL_METHODS:
-        body=body.lstrip('\n')
-        assert hashlib.sha256(body.encode()).hexdigest()==digest
-        a=source.index(start); b=source.index(end,a)
-        source=source[:a]+body+source[b:]
-    return source.replace('- (void)audioTick;\n','')
-
-# Pre-fix ClipAudio fragments for the jittered-stamp (case 1) and video-pause
-# (case 2) proofs, each pinned by SHA-256 and swapped into the PCM control.
-OLD_FRAGMENTS = {
-    1: ('    static void receive(void *context', '    bool start() {', 'a3a74e8d77b5398783fd2cf95a496e25246ecc4575ce24fc81ca483c69ff7613', r'''
-    static void receive(void *context, const DsTimedMixBlock *block) {
-        auto &a=*(ClipAudio *)context;
-        if (!block->pcm51 || !block->sample_rate || !block->first_sample_host_time) { a.fault=true; return; }
-        uint64_t w=a.write.load(std::memory_order_relaxed), r=a.read.load(std::memory_order_acquire);
-        if (block->frames>capacity-(w-r)) { a.fault=true; return; }
-        bool changed=a.stream!=block->stream_id || a.generation!=block->clock_generation || (block->flags&DS_CAPTURE_DISCONTINUITY);
-        if(changed) { a.stream=block->stream_id; a.generation=block->clock_generation; ++a.segment; }
-        for (size_t i=0;i<block->frames;i++) {
-            float stereo[2]; media::fold_to_stereo(block->pcm51+i*6,stereo,1);
-            a.points[(w+i)%capacity]={block->first_sample_host_time*a.tickSeconds+(double)i/block->sample_rate,stereo[0],stereo[1],a.segment};
-        }
-        a.maximumQueued.store(std::max(a.maximumQueued.load(),w-r+block->frames));
-        // Publish the segment boundary before exposing its points to the consumer.
-        if(changed) a.latestStart.store(w,std::memory_order_release);
-        a.write.store(w+block->frames,std::memory_order_release);
-    }
-'''),
-    2: ('        if(forcePressure) return true;', '        int64_t target=', '1b9349284dedc147230459eb64bd3625160b54c7b9e21197eb1a61d1bd6f082f', r'''
-        if(forcePressure) return true;
-#endif
-'''),
-}
-def old_fragment(source,case):
-    import hashlib
-    start,end,digest,body=OLD_FRAGMENTS[case]
-    body=body.lstrip('\n')
-    assert hashlib.sha256(body.encode()).hexdigest()==digest
-    a=source.index(start); b=source.index(end,a)
-    return source[:a]+body+source[b:]
-
+# The old writer-coupled method snapshots cannot link to the extracted sink
+# transport. Keep a mandatory video-only control through the current transport;
+# it must still fail the independent decoder's one-audio-track requirement.
 results=[]
-def run(name,source,d,defines=()):
+support_objects={}
+def run(name,source,d,defines=(),repeats=1):
     exe=d/name
-    cmd=['clang++','-std=c++17','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-fobjc-arc','-Wno-deprecated-declarations','-I'+str(RT),
-         '-DCLIPREC_SOURCE="'+str(source)+'"',*defines,str(RT/'cliprec_audio_test.mm'),
-         str(ROOT/'media/media.cpp'),'-I'+str(ROOT/'third_party/ffmpeg/include')]
+    flags=['clang++','-std=c++17','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-fobjc-arc','-Wno-deprecated-declarations','-I'+str(RT),'-I'+str(ROOT/'third_party/ffmpeg/include')]
+    # Only the packet encoder depends on the codec define. Other fixture defines
+    # affect the harness/source include; no support source reads them.
+    codec=tuple(flag for flag in defines if flag.startswith('-DCLIPREC_PCM_CONTROL='))
+    objects=[]
+    started=time.monotonic()
+    compiled=0
+    for src in [ROOT/'media/media.cpp',*(RT/(n+'.mm') for n in ('clip_packets','replay','replay_export','live_encode','live_seg','livestream'))]:
+        mode=codec if src.stem=='clip_packets' else ()
+        key=(d,src,mode)
+        if key not in support_objects:
+            obj=d/(src.stem+('-pcm' if mode else '-aac')+'.o')
+            built=subprocess.run(flags+list(mode)+['-c',str(src),'-o',str(obj)],capture_output=True,text=True)
+            assert built.returncode==0,built.stderr[-4000:]
+            support_objects[key]=str(obj)
+            compiled+=1
+        objects.append(support_objects[key])
+    if compiled:
+        print('phase support '+name+': %.3fs (%d objects)'%(time.monotonic()-started,compiled),flush=True)
+    cmd=flags+['-DCLIPREC_SOURCE="'+str(source)+'"',*defines,str(RT/'cliprec_audio_test.mm'),*objects]
     for lib in ('avformat','avcodec','swscale','swresample','avutil'):
         cmd+=[str(ROOT/'third_party/ffmpeg/lib'/('lib'+lib+'.a'))]
     cmd+=['-lz']
     for framework in ('AudioToolbox','CoreAudio','CoreFoundation','Cocoa','Metal','QuartzCore','AVFoundation','VideoToolbox','CoreVideo','CoreMedia'):
         cmd+=['-framework',framework]
+    started=time.monotonic()
     built=subprocess.run(cmd+['-o',str(exe)],capture_output=True,text=True)
+    print('phase compile '+name+': %.3fs'%(time.monotonic()-started),flush=True)
     assert built.returncode==0,built.stderr[-4000:]
-    with (CACHE/(name+'-run.log')).open('w') as log:
-        p=subprocess.run([str(exe),str(d/(name+'-output'))],stdout=log,stderr=subprocess.STDOUT,text=True,timeout=120)
-    output=(CACHE/(name+'-run.log')).read_text()
-    results.append(name+': '+output.strip())
-    (CACHE/'results.log').write_text('\n\n'.join(results))
-    print(name+': '+output.strip(),flush=True)
-    return p.returncode,output
+    runs=[]
+    for attempt in range(repeats):
+        label=name+('-run%d'%(attempt+1) if repeats>1 else '')
+        logpath=CACHE/(label+'-run.log')
+        with logpath.open('w') as log:
+            started=time.monotonic()
+            p=subprocess.run([str(exe),str(d/(label+'-output'))],stdout=log,stderr=subprocess.STDOUT,text=True,timeout=120)
+        print('phase run '+label+': %.3fs'%(time.monotonic()-started),flush=True)
+        output=logpath.read_text()
+        results.append(label+': '+output.strip())
+        (CACHE/('aac-results.log' if name.startswith('aac-') else 'results.log')).write_text('\n\n'.join(results))
+        print(label+': '+output.strip(),flush=True)
+        runs.append((p.returncode,output))
+    return runs if repeats>1 else runs[0]
 
 def mutant_source(source,name):
     mutations={
+        'file-endpoint': [('[writer endSessionAtSourceTime:CMTimeMakeWithSeconds(file->videoEnd,60000)];',
+                           '[writer endSessionAtSourceTime:CMTimeMakeWithSeconds(videoEnd,60000)];')],
+        'drain-deadline': [('        outputs.cancel();',
+                           '        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_MSEC),work,^{ [self finishWhenDrained]; }); return;')],
         'startup-gate': [('if(audio && !audio->covers(f->time))', 'if(false)')],
-        'removed-audio': [('bool ok=!rc && [input appendSampleBuffer:sample];','bool ok=!rc;')],
+        'removed-audio': [('if(destinationFile->audioFormat) {\n            audioInput=', 'if(false) {\n            audioInput='), ('if(audio && ![self pumpAudio:epoch final:false])', 'if(false)'), ('bool drainedOK=!writing || [self pumpAudio:epoch final:true];','bool drainedOK=true;')],
         'skew-100ms': [('double t=epoch+(double)(emitted+n)/48000;', 'double t=epoch+(double)(emitted+n)/48000-0.1;')],
         'channel-swap': [('stereo[0],stereo[1]','stereo[1],stereo[0]')],
-        'wrong-rate': [('AVSampleRateKey:@48000','AVSampleRateKey:@44100'),('asbd.mSampleRate=48000','asbd.mSampleRate=44100')],
-        'lost-final-drain': [('audio->pump(epoch,videoEnd,true)','true'),
+        'wrong-rate': [('(double)(emitted+n)/48000;', '(double)(emitted+n)/44100;')],
+        'lost-final-drain': [('[self pumpAudio:epoch final:true]','true'),
              ('writing && drainedOK && !audio->drained(videoEnd)','false')],
+        # Silently ends the audio track 1024 samples before the video end.
+        'truncated-tail': [('int64_t target=(int64_t)llround(end*48000);','int64_t target=(int64_t)llround(end*48000)-1024;'),
+             ('return emitted>=(int64_t)llround(end*48000);','return emitted>=(int64_t)llround(end*48000)-1024;')],
     }
     for before,after in mutations[name]:
         assert source.count(before)==1,(name,before)
         source=source.replace(before,after)
     return source
 
-with tempfile.TemporaryDirectory(dir=CACHE,prefix='proof-') as scratch:
-    d=Path(scratch)
-    production=(RT/'cliprec.mm').read_text()
-    original=d/'original.mm'
-    original.write_text(original_source(production))
-    rc,output=run('original',original,d,['-DCLIPREC_AUDIO_BASELINE=1'])
-    assert rc==1 and 'audio_tracks=0 required=1 video_frames=36 generated_pcm_frames=32896' in output,(rc,output[-2000:])
-    # Diagnostic control only: MOV/float PCM exercises the actual capture,
-    # conversion, VT, timeline and drain when the sandbox denies AAC services.
-    pcm_source=production.replace('fileType:AVFileTypeMPEG4','fileType:AVFileTypeQuickTimeMovie')
-    pcm_source=pcm_source.replace('AVFormatIDKey:@(kAudioFormatMPEG4AAC)','AVFormatIDKey:@(kAudioFormatLinearPCM)')
-    pcm_source=pcm_source.replace('AVNumberOfChannelsKey:@2, AVEncoderBitRateKey:@192000',
-        'AVNumberOfChannelsKey:@2, AVLinearPCMBitDepthKey:@32, AVLinearPCMIsFloatKey:@YES, AVLinearPCMIsNonInterleaved:@NO, AVLinearPCMIsBigEndianKey:@NO')
-    pcm=d/'pcm.mm'; pcm.write_text(pcm_source)
-    rc,output=run('pcm-control',pcm,d,['-DCLIPREC_PCM_CONTROL=1'])
+PUMP_AUDIO='- (bool)pumpAudio:(double)from final:(bool)final { return audio->pump(from,videoEnd,final,liveAudioEnd); }'
+HOLD='if(liveHold!=pixel) { CVPixelBufferRetain(pixel); if(liveHold) CVPixelBufferRelease(liveHold); liveHold=pixel; }'
+def live_gap(source,d):
+    """Live across a 12 s focus gap: the file's sound is unchanged by live, live keeps cutting segments (AAC only:
+    the live TS muxer takes no PCM)."""
+    def gap_lines(output):
+        return [line for line in output.splitlines() if line.startswith('live_gap_file:')]
+    paths={}
+    for name,before,after in (('',None,None),
+            ('shared-target',PUMP_AUDIO,PUMP_AUDIO.replace('pump(from,videoEnd,','pump(from,fmax(videoEnd,liveAudioEnd),')),
+            ('live-video-end',PUMP_AUDIO,PUMP_AUDIO.replace(',liveAudioEnd); }',',videoEnd); }')),
+            ('leaked-hold',HOLD,'if(liveHold!=pixel) { CVPixelBufferRetain(pixel); liveHold=pixel; }')):
+        text=source
+        if before:
+            assert text.count(before)==1,(name,before)
+            text=text.replace(before,after)
+        path=d/('live-gap-'+(name or 'fixed')+'.mm'); path.write_text(text); paths[name]=path
+    rc,without=run('aac-live-gap-without',paths[''],d,['-DCLIPREC_CASE=8','-DCLIPREC_LIVE_GAP=0'])
+    assert rc==0 and len(gap_lines(without))==1,(rc,without[-2000:])
+    rc,withlive=run('aac-live-gap-with',paths[''],d,['-DCLIPREC_CASE=8'])
+    assert rc==0 and gap_lines(withlive)==gap_lines(without),(rc,gap_lines(withlive),gap_lines(without))
+    rc,output=run('aac-live-gap-only',paths[''],d,['-DCLIPREC_CASE=9'])
     assert rc==0,(rc,output[-2000:])
-    # Both cases must fail on the pre-fix fragments (numbers in the docstring).
-    for case,needle in ((1,'jitter: stamps=+-5ms'),(2,'pause: seconds=8.000')):
-        source=d/('old-case%d.mm'%case); source.write_text(old_fragment(pcm_source,case))
-        rc,output=run('pcm-old-case%d'%case,source,d,['-DCLIPREC_PCM_CONTROL=1','-DCLIPREC_CASE=%d'%case])
-        assert rc==1 and 'FAIL cliprec:' in output and needle in output,(case,rc,output[-2000:])
-    mutants=('removed-audio','skew-100ms','channel-swap','wrong-rate','lost-final-drain','startup-gate')
-    for name in mutants:
-        source=d/(name+'.mm'); source.write_text(mutant_source(pcm_source,name))
-        rc,output=run('pcm-'+name,source,d,['-DCLIPREC_PCM_CONTROL=1','-DCLIPREC_MUTANT=1'])
-        assert rc==1 and 'FAIL cliprec:' in output,(name,rc,output[-2000:])
-    rc,output=run('fixed',RT/'cliprec.mm',d)
-    if rc==3 and 'SKIP: AAC encoder unavailable' in output:
-        print('SKIP: AAC encoding/decoding and AAC mutants remain unverified; PCM controls passed')
-        raise SystemExit(3)
-    assert rc==0,(rc,output[-2000:])
-    for name in mutants:
-        source=d/('aac-'+name+'.mm'); source.write_text(mutant_source(production,name))
-        rc,output=run('aac-'+name,source,d,['-DCLIPREC_MUTANT=1'])
-        assert rc==1 and 'FAIL cliprec:' in output,(name,rc,output[-2000:])
-    print('cliprec_audio_test PASS: original silent clip rejected; AAC content, A/V markers and all five requested mutants and the startup control checked')
+    rc,output=run('aac-live-gap-shared-target',paths['shared-target'],d,['-DCLIPREC_CASE=8'])
+    assert rc==0 and gap_lines(output) and gap_lines(output)!=gap_lines(without),(rc,gap_lines(output))
+    rc,output=run('aac-live-gap-live-video-end',paths['live-video-end'],d,['-DCLIPREC_CASE=9'])
+    assert rc==1 and 'FAIL cliprec: live keeps cutting segments through the gap' in output,(rc,output[-2000:])
+    rc,output=run('aac-live-gap-leaked-hold',paths['leaked-hold'],d,['-DCLIPREC_CASE=9'])
+    assert rc==1 and 'FAIL cliprec:' in output and 'pool_drops=0' not in output,(rc,output[-2000:])
+
+def main(coverage='pcm'):
+    with tempfile.TemporaryDirectory(dir=CACHE,prefix=coverage+'-proof-') as scratch:
+        d=Path(scratch)
+        production=(RT/'cliprec.mm').read_text()
+        production=production.replace('NSProcessInfo.processInfo.systemUptime-started', 'fixtureUptime()-started').replace('started = NSProcessInfo.processInfo.systemUptime;', 'started = fixtureUptime();')
+        mutants=('removed-audio','skew-100ms','channel-swap','wrong-rate','lost-final-drain','startup-gate','truncated-tail')
+        if coverage=='pcm':
+            original=d/'original.mm'
+            original.write_text(production)
+            rc,output=run('video-only',original,d,['-DCLIPREC_AUDIO_BASELINE=1'])
+            assert rc==1 and 'audio_tracks=0 required=1 video_frames=36 generated_pcm_frames=32896' in output,(rc,output[-2000:])
+            # MOV/float PCM exercises capture, conversion, VT, timeline and drain
+            # without the host AAC codec service. This coverage must never skip.
+            source=production.replace('fileType:AVFileTypeMPEG4','fileType:AVFileTypeQuickTimeMovie')
+            fixed=d/'pcm.mm'; fixed.write_text(source)
+            defines=['-DCLIPREC_PCM_CONTROL=1']
+        else:
+            source=production; fixed=d/'aac.mm'; fixed.write_text(source); defines=[]
+        rc,output=run(coverage+'-control',fixed,d,defines)
+        if coverage=='aac' and rc==3 and 'SKIP: AAC encoder unavailable' in output:
+            print('SKIP: host AAC coverage unavailable; see codec factory status above; mandatory PCM is a separate test')
+            return 3
+        assert rc==0,(rc,output[-2000:])
+        # Five fresh sessions on each path prove the final drain independently
+        # of packet/tick scheduling. Compile once, then execute five times.
+        for rc,output in run(coverage+'-final-drain',fixed,d,defines+['-DCLIPREC_MUTANT=1'],repeats=5):
+            assert rc==0,(rc,output[-2000:])
+        if coverage=='pcm':
+            for case in (1,2,3,4,5,6,7):
+                rc,output=run('pcm-case%d'%case,fixed,d,defines+['-DCLIPREC_CASE=%d'%case])
+                assert rc==0,(case,rc,output[-2000:])
+            for name,case in (('file-endpoint',5),('drain-deadline',6)):
+                mutant=d/(name+'.mm'); mutant.write_text(mutant_source(source,name))
+                rc,output=run('pcm-'+name,mutant,d,defines+['-DCLIPREC_CASE=%d'%case])
+                failure=('failed file ends at its last written frame' if case==5 else
+                         'blocked I/O cannot extend drain deadline')
+                assert rc==1 and 'FAIL cliprec: '+failure in output,(name,rc,output[-2000:])
+                expected=('requested=1.000000 expected=0.166667' if case==5 else 'completed=0')
+                assert expected in output,(name,output[-2000:])
+        if coverage=='aac':
+            for case in (4,5):
+                rc,output=run('aac-file-case%d'%case,fixed,d,['-DCLIPREC_CASE=%d'%case])
+                assert rc==0,(rc,output[-2000:])
+            live_gap(source,d)
+        for name in mutants:
+            mutant=d/(name+'.mm'); mutant.write_text(mutant_source(source,name))
+            repeats=5 if name=='lost-final-drain' else 1
+            runs=run(coverage+'-'+name,mutant,d,defines+['-DCLIPREC_MUTANT=1'],repeats=repeats)
+            for rc,output in runs if repeats>1 else [runs]:
+                assert rc==1 and 'FAIL cliprec:' in output,(name,rc,output[-2000:])
+                if name=='lost-final-drain':
+                    assert 'video_end_samples=48000 expected=48000 audio_drained=0' in output,output[-2000:]
+                    assert 'decoded:' in output and 'final_drain: tail_normalized_RMS=' in output,output[-2000:]
+        name='cliprec_audio_test' if coverage=='pcm' else 'cliprec_aac_test'
+        print(name+' PASS: content, A/V markers, mutants and startup checked; final drain real 5/5 PASS, removed drain 5/5 rejected')
+        return 0
+
+if __name__=='__main__':
+    raise SystemExit(main())

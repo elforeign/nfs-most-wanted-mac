@@ -437,7 +437,7 @@ class Bundle:
     supplies requested global images, ``global_data`` only compatible shared
     chunks, ``attributes`` only typed conversion fields in canonical LE VPAK.
     ``runtime_bindings`` names generated paint/window/light/decal identities;
-    ``texture_aliases`` records the common writer's missing-glass-mask fallback.
+    ``texture_aliases`` records missing-glass-mask and dangling-normal fallbacks.
     ``runtime_materials`` identifies runtime paint/rim replacements. Source
     material coefficients are input evidence, never a ready-to-emit MW row.
     Sidecar values are source-derived; paint remains a selection until the MW
@@ -575,6 +575,7 @@ def resolve(source, car, donor=None, *, recognition=None):
             wanted.add(cc.name_hash('WINDOW_MASK'))
     static = wanted - runtime.keys() - aliases.keys()
     absent = static - array.keys() - shared_blobs.keys()
+    extra = {}
     if absent:
         # Driver/plate art lives in INGAMEA rather than GLOBALB on this platform.
         extra = array_entries(cc.unpack_file(read.snapshot_dependency('GLOBAL/INGAMEA.BUN')))
@@ -587,6 +588,21 @@ def resolve(source, car, donor=None, *, recognition=None):
         elif hs in array:
             shared[hs] = shared_texture_entry(*array[hs])
     unresolved = static - shared.keys()
+    # This dangling retail normal uses the source engine's zero-alpha fallback.
+    grill, fallback = map(cc.name_hash, ('GRILL_05_N', 'DEFAULTALPHA'))
+    if grill in unresolved:
+        roles = {slot for m in models.values() for record in m['records']
+                 for slot in range(24, 29) if m['textures'][record[slot]] == grill}
+        if roles == {25}:
+            if fallback in shared_blobs:
+                shared[fallback] = cx.texture_entry(fallback, shared_blobs[fallback])
+            elif fallback in array:
+                shared[fallback] = shared_texture_entry(*array[fallback])
+            elif fallback in extra:
+                shared[fallback] = shared_texture_entry(*extra[fallback])
+            if fallback in textures or fallback in shared:
+                aliases[grill] = fallback, 'DEFAULTALPHA'
+                unresolved.remove(grill)
     require(not unresolved, 'X360 unresolved source texture identities: ' +
             ','.join(f'{h:08x}' for h in sorted(unresolved)))
     normalized, materials, palette = shared_chunks(global_data)

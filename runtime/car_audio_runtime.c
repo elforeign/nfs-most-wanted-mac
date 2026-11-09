@@ -88,6 +88,11 @@ int car_audio_runtime_load(CarAudioRuntimeBank *b,const uint8_t *s,uint8_t *imag
         if(!ref || !same(&ref->interface,&m->interface)) goto fail;
         for(size_t j=0;j<m->player_count;j++) {
             const CarAudioRuntimePlayerPlan *p=m->players+j;
+            for(size_t k=0;k<j;k++) {
+                const CarAudioRuntimePlayerPlan *q=m->players+k;
+                if((uint64_t)p->offset < (uint64_t)q->offset+q->size &&
+                   (uint64_t)q->offset < (uint64_t)p->offset+p->size) goto fail;
+            }
             if(rd(s+table+60+4*j)!=p->offset || !span(m->size,p->offset,p->size) ||
                p->size<28 || !span(end,p->selector,4) ||
                rd(s+m->state+p->offset+4)!=p->selector ||
@@ -184,7 +189,11 @@ int car_audio_runtime_import(CarAudioRuntimeInstance *p,unsigned ordinal,uint32_
     uint32_t off=address-p->address; *result=0;
     if(ordinal==4) {
         if(off!=p->module->destroy_offset) return -1;
-        if(rd(p->state+off+12)) detach(p);
+        if(p->destroying) return 0;
+        if(rd(p->state+off+12)) {
+            detach(p);
+            if(!p->executing) car_audio_runtime_destroy(p);
+        }
         return 0;
     }
     if(p->destroying) return -1;
@@ -221,14 +230,16 @@ int car_audio_runtime_import(CarAudioRuntimeInstance *p,unsigned ordinal,uint32_
     return -1;
 }
 int car_audio_runtime_tick(CarAudioRuntimeInstance *p,CarAudioRuntimeExecute execute,void *context) {
-    if(!p || !p->bank || p->destroying || !execute) return -1;
+    if(!p || !p->bank || p->destroying || p->executing || !execute) return -1;
+    p->executing=1;
     int rc=execute(context,p->bank->base+p->module->entry,p->address+24);
+    p->executing=0;
     if(rc || p->destroying) car_audio_runtime_destroy(p);
     return rc;
 }
 void car_audio_runtime_destroy(CarAudioRuntimeInstance *p) {
     if(!p || !p->bank) return;
-    detach(p);
+    if(!p->destroying) detach(p);
     CarAudioRuntimeInstance **link=&p->bank->instances;
     while(*link && *link!=p) link=&(*link)->next;
     if(*link) *link=p->next;

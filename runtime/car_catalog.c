@@ -14,6 +14,8 @@
 #include <unistd.h>
 #ifdef CAR_CATALOG_APPROVAL_HEADER
 #include CAR_CATALOG_APPROVAL_HEADER
+#elif defined(NFS_PUBLIC)
+#include "car_approvals_public.h"
 #endif
 #ifndef CAR_CATALOG_POLICY_JSON
 #define CAR_CATALOG_POLICY_JSON ""

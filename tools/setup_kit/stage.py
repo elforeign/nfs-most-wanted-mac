@@ -11,6 +11,8 @@ from pathlib import Path
 import shutil
 import uuid
 
+from . import x360_extras
+
 from .install import (InstallError, defer_interrupts, digest_tree, ident, is_current_app,
                       real_dir, sync_dir, write_synced)
 
@@ -28,6 +30,10 @@ def load_choices(state, required=False):
                 or not isinstance(discs, list) or not all(v is not None and absolute(v) for v in discs)
                 or not Path(value["pc"]).is_absolute() or not Path(value["destination"]).is_absolute()):
             raise ValueError("invalid choices")
+        if "x360_extras" in value:
+            if not isinstance(value["x360_extras"], list):
+                raise ValueError("invalid extra choices")
+            x360_extras.selection(value["x360_extras"])
         return value
     except FileNotFoundError:
         if not required:
@@ -39,7 +45,7 @@ def load_choices(state, required=False):
                            "Run Setup again to select your original sources.") from e
 
 
-def save_choices(state, pc, x360, destination, pc_update=None, pc_exe=None, pc_discs=()):
+def save_choices(state, pc, x360, destination, pc_update=None, pc_exe=None, pc_discs=(), extra_choices=None):
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     temporary = state / (".source-choices-" + uuid.uuid4().hex)
@@ -47,6 +53,7 @@ def save_choices(state, pc, x360, destination, pc_update=None, pc_exe=None, pc_d
         extras = {k: str(v) for k, v in (("pc_update", pc_update), ("pc_exe", pc_exe)) if v}  # disc images only
         if pc_discs:
             extras["pc_discs"] = [str(p) for p in pc_discs]
+        extras.update(x360_extras.identity(extra_choices))
         write_synced(temporary, json.dumps(dict(format_version=1, pc=str(pc),
                      x360=str(x360) if x360 else None, destination=str(destination), **extras), sort_keys=True).encode(), 0o600)
         os.replace(temporary, state / "source-choices.json")

@@ -2,7 +2,7 @@
 
 A 650 ms export models slow filesystem/privacy work. Maximum permitted write gap: 200 ms.
 Pinned original: request 1069.00 ms / sound gap 1070.54 ms (40 checks / 2 failures).
-Queued writer: request 1.17 ms / sound gap 8.76 ms (80 checks / 0 failures).
+Queued writer with report capture: request 0.92 ms / sound gap 45.02 ms (84 checks / 0 failures).
 Log budget: unbounded 11 checks / 1 failure; bounded 11 / 0.
 Regex resource error: unchecked 1 / 1 failure; fail-closed 1 / 0.
 The same fixture compares every bundle attachment byte for byte; no game or audio device needed.
@@ -194,7 +194,7 @@ def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, re
     writer_start = source.index('// ---------------- writing a report ----------------')
     writer_end = source.index('// diag.c diag_report:', writer_start)
     writer = ORIGINAL if baseline else source[writer_start:writer_end]
-    (work / 'report_writer.inc').write_text(source[shot_start:writer_start] + writer)
+    (work / 'report_writer.inc').write_text(('static double shot_at;\n' if baseline else '') + source[shot_start:writer_start] + writer)
     sec = next(line for line in source.splitlines() if line.startswith('typedef struct { double t;'))
     (work / 'report_sec.inc').write_text(sec + '\n')
     a = source.index('static void print_render(')
@@ -249,7 +249,7 @@ def shot_hook(source):
     block=source[start:end]
     assert 'report_shot_ready(p);' in block, 'encoded screenshot must reach report snapshot cache'
     ready=block.index('report_shot_ready(p);')
-    for producer in ('diag_png(p,', 'shadow_near_ab_write_bmp(p,'):
+    for producer in ('diag_png(p,',):
         assert block.index(producer)<ready, 'every encoded format must precede report readiness'
 
 

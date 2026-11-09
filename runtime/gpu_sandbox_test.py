@@ -3,7 +3,12 @@
 hard link whose original lies outside the writable paths (a writable alias of an outside file).
 Good profile: 2 checks pass. Broken copies: link allow block removed -> the inside link fails (1 failure); file
 writes allowed everywhere (with links allowed) -> the outside link succeeds (1 failure). Exit 3 without sandbox-exec
-or when an enclosing sandbox refuses nested profiles (exit 71, sandbox_apply EPERM)."""
+or when an enclosing sandbox refuses nested profiles (exit 71, sandbox_apply EPERM).
+AAC proof: the in-memory encoder exits 0 with the current profile; restoring the
+old AudioComponentRegistrar denial exits 3 (codec factory unavailable). Both
+children start fresh to avoid a cached registrar connection. No audio devices.
+The test fails unless the exact exit-0/exit-3 pair is observed on a capable host.
+"""
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
@@ -15,17 +20,21 @@ class SandboxUnavailable(RuntimeError):
     pass
 
 
+def sandbox(profile, workdir, command):
+    r = subprocess.run(["sandbox-exec", "-f", str(profile), "-D", f"WORKDIR={workdir}", *command],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode == 71 and 'sandbox_apply: Operation not permitted' in r.stderr:
+        raise SandboxUnavailable(r.stderr.strip())
+    return r
+
+
 def run(profile, workdir, outside):
     inside = Path(tempfile.mkdtemp(prefix="sbtest."))
     try:
         (inside / "a").write_text("x")
         script = (f'ln "{inside}/a" "{inside}/b" && echo IN_OK || echo IN_NO; '
                   f'ln "{outside}/secret" "{inside}/s" 2>/dev/null && echo OUT_LINKED || echo OUT_NO')
-        r = subprocess.run(["sandbox-exec", "-f", str(profile), "-D", f"WORKDIR={workdir}", "/bin/sh", "-c", script],
-                           capture_output=True, text=True)
-        if (os.environ.get('NFS_GPU_SANDBOX') == '1' and r.returncode == 71
-                and 'sandbox_apply: Operation not permitted' in r.stderr):
-            raise SandboxUnavailable(r.stderr.strip())
+        r = sandbox(profile, workdir, ["/bin/sh", "-c", script])
         return r.stdout.split()
     finally:
         shutil.rmtree(inside, ignore_errors=True)
@@ -38,6 +47,27 @@ def check(profile, workdir, outside):
         print(("PASS " if ok else "FAIL ") + msg)
         fails += not ok
     return fails
+
+
+def check_aac(src, work):
+    exe = work / 'aac'
+    build = subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                            str(ROOT / 'runtime/gpu_sandbox_test.c'), '-framework', 'AudioToolbox',
+                            '-o', str(exe)], capture_output=True, text=True, timeout=60)
+    if build.returncode:
+        print('FAIL AAC build: ' + build.stderr[-2000:])
+        return 1
+    old = work / 'old-aac.sb'
+    old.write_text(src + '\n(deny mach-lookup (global-name "com.apple.audio.AudioComponentRegistrar"))\n')
+    current = sandbox(PROFILE, work, [str(exe)])
+    previous = sandbox(old, work, [str(exe)])
+    ok = (current.returncode == 0 and 'PASS AAC encode:' in current.stdout
+          and previous.returncode == 3 and 'SKIP: AAC encoder unavailable:' in previous.stdout)
+    print(('PASS ' if ok else 'FAIL ') +
+          f'AAC profile pair: current exit={current.returncode}, old exit={previous.returncode} (expected 0/3)')
+    for name, result in (('current', current), ('old', previous)):
+        print(f'AAC {name}: ' + (result.stdout + result.stderr).strip()[-1200:])
+    return int(not ok)
 
 
 def main():
@@ -69,7 +99,8 @@ def main():
             broken += n == 0
         if broken:
             print("FAIL self-check: a broken copy passed"); fails += 1
-        print("PASS gpu_sandbox links" if not fails else f"FAIL gpu_sandbox links ({fails})")
+        fails += check_aac(src, work)
+        print("PASS gpu_sandbox links + AAC" if not fails else f"FAIL gpu_sandbox ({fails})")
         return 1 if fails else 0
     finally:
         shutil.rmtree(outside, ignore_errors=True); shutil.rmtree(work, ignore_errors=True)

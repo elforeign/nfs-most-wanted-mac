@@ -40,7 +40,6 @@
 
 #include "x360_internal.h"
 #include "materials.h"
-#include "shadow_near.h"
 #include "gen/x360_engine.inc"   // X360E_SHADOW_*: the X360 shadow map size, focus and near plane (default.xex)
 
 #define SHADOW_FOCUS_FAR   0x00901AB0u
@@ -50,8 +49,6 @@
 static int fit = -1;                     // 0 PC, 1 X360 range, 2 X360 range + light camera and the rest (default)
 static int shadow_size = 1024, shadow_border, shadow_cull_front;
 static int pending_fit = -1;
-static int shadow_stable = -1;
-void x360_set_shadow_stable(int on) { shadow_stable = !!on; }
 static float pc_shadow[3];
 static int pc_shadow_saved;
 // Only queue the game's own device reset. eDisplayFrame consumes it before drawing, after Present ended encoding.
@@ -61,10 +58,6 @@ void graphics_reset_request(void) {
 }
 void x360_set_shadow_fit(int v) { pending_fit = v; graphics_reset_request(); }
 static void shadow_options(void) {
-    if (shadow_stable < 0) {
-        const char *e = getenv("NFS_SHADOW_STABLE");
-        shadow_stable = e && (!strcmp(e, "on") || !strcmp(e, "1"));
-    }
     if (fit >= 0) return;
     const char *e = getenv("NFS_SHADOW_FIT");
     fit = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "x360range") ? 1 : 2;
@@ -84,6 +77,17 @@ static void shadow_options(void) {
                             shadow_size, shadow_size, shadow_border ? "white" : "clamp", shadow_cull_front ? "front" : "none");
 }
 int x360_shadow_border(void) { shadow_options(); return shadow_border; }
+// The decoded X360 far-quarter fade, saturate(1-4v), defaults on with the full X360 fit.
+// NFS_SHADOW_X360_FADE=off restores PC's saturate(1-5v).
+static int shadow_x360_fade = -1;
+int x360_shadow_edge(void) {
+    shadow_options();
+    if (shadow_x360_fade < 0) {
+        const char *e = getenv("NFS_SHADOW_X360_FADE");
+        shadow_x360_fade = !e || !strcmp(e, "on") || !strcmp(e, "1");
+    }
+    return fit == 2 && shadow_x360_fade;
+}
 
 void f_006C86B0(Cpu *c) { shadow_options(); c->eax = (uint32_t)shadow_size; c->esp += 4; }   // GetShadowWidth
 int x360_shadow_map_size(void) { shadow_options(); return shadow_size; }                    // the overlay
@@ -97,7 +101,6 @@ void f_006C8770(Cpu *c) {                // creates the shadow colour target and
     if (!fit) {
         put_float(SHADOW_FOCUS_FAR, pc_shadow[0]); put_float(SHADOW_FOCUS_ANGLE, pc_shadow[1]); put_float(SHADOW_WIDTH, pc_shadow[2]);
     }
-    shadow_near_reset();
     creating_shadow_maps = 1;
     f_006C8770_orig(c);
     creating_shadow_maps = 0;
@@ -131,8 +134,6 @@ void f_006C68B0(Cpu *c) {                // per-material effect states, includin
 // Draws reuse an effect's cull mode when their material doesn't change, so after the shadow pass every cull mode set
 // above goes back to D3DCULL_NONE, the value the PC shadow pass leaves (else main-pass car parts lose front faces).
 void f_006E44C0_orig(Cpu *c);
-void shadow_pan_environment(void);
-void shadow_pan_matrix(uint32_t matrix);
 static void shadow_cull_restore(Cpu *c) {
     for (int i = 0; i < nculled; ++i) {
         uint32_t a[3] = {culled[i][0], culled[i][1], 1}, esp = c->esp;
@@ -144,18 +145,10 @@ static void shadow_cull_restore(Cpu *c) {
     nculled = 0;
 }
 void f_006E44C0(Cpu *c) {                // shadow light camera + caster pass
-    if (diag_on) shadow_pan_environment();
     shadow_source_view = M32(c->esp + 4);
-    uint32_t source = shadow_source_view, cull = M32(c->esp + 8);
     x360_vp_set = 0;
-    shadow_near_begin();
-    if (diag_on) shadow_near_pose_render(c, source, cull);
     f_006E44C0_orig(c);
     shadow_cull_restore(c);
-    Cpu retail_return = *c;
-    shadow_near_replay(c, source, cull);
-    if (nculled) shadow_cull_restore(c);
-    *c = retail_return;
 }
 
 // Test only (NFS_TEST_SUN_ELEVATION=<deg>): the time-of-day sun direction with its elevation replaced, azimuth
@@ -237,8 +230,6 @@ void x360_frame(void) {
 
 void x360_shadow_fit(const float player_view[16], float focus_x, float focus_y, const float light_dir[3],
                      float focus_near, float focus_far, float proj_out[16]);
-void x360_shadow_stable_fit(const float view[16], float sx, float sy, const float light[3],
-                            float far_plane, int resolution, int player, float out[16]);
 int render_dump_active(void);
 // The receivers' matrix is not view 15's projection: FUN_006e44c0 keeps its fit M1 (playerView x LiSPSM) in a stack
 // local, copies it into view 15's projection for the casters (006E4FEF), and after the casters multiplies that same
@@ -250,7 +241,7 @@ static float x360_vp[16];
 // The frame's scenery lists were culled before this light camera was fitted.
 // Refresh only the shadow entry; its lists and matrices use reusable guest storage.
 void x360_shadow_casters(Cpu *c, uint32_t cull, uint32_t light_view) {
-    if (fit != 2 && !shadow_stable) return;
+    if (fit != 2) return;
     uint32_t plat = M32(light_view);
     if (!cull || !plat) return;
     // Match the retail 5,000-entry draw-table limit. The separate matrix arena
@@ -304,11 +295,9 @@ void x360_shadow_casters(Cpu *c, uint32_t cull, uint32_t light_view) {
 
 void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c's D3DXMatrixMultiply
     if (M32(c->esp) == 0x006E542Du) {                              // shadow view-projection x texel-centre bias
-        shadow_near_far_rendered(shadow_source_view, M32(0x00919C70u));
         float centre = 0.5f + 0.5f / (float)shadow_size;
         if (M32(proj + 48) == 0x3F002000u && M32(proj + 52) == 0x3F002000u) { put_float(proj + 48, centre); put_float(proj + 52, centre); }
         if (x360_vp_set) { memcpy(G + view, x360_vp, 64); x360_vp_set = 0; }   // M1 := the casters' X360 projection
-        if (diag_on) shadow_pan_matrix(view);
         if (diag_on && render_dump_active()) {   // M1 x bias -> view 15 proj; the casters drew with view 15's viewProj (00985990+0x80)
             const uint32_t ms[5] = {view, proj, 0x00985990u, 0x00985990u + 0x40, 0x00985990u + 0x80};
             const char *nm[5] = {"M1", "bias", "v15 view", "v15 proj", "v15 viewproj"};
@@ -325,7 +314,6 @@ void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c
     uint32_t tod = M32(TIME_OF_DAY_PTR);
     if (!tod) return;
     float pv[16], pp[16], light[3], out[16], far;
-    if (diag_on) shadow_pan_environment();
     test_sun();
     memcpy(light, G + tod + 0x180, 12);
     static float logged_light[3];
@@ -336,22 +324,17 @@ void x360_shadow_camera(Cpu *c, uint32_t view, uint32_t proj) {   // from d3dx.c
                    z < 0.7f ? " (X360 fit raises it to z 0.7, 44.4 deg)" : "");
         memcpy(logged_light, light, 12);
     }
-    if (fit != 2 && !shadow_stable) {
-        shadow_near_far_camera(shadow_source_view, view, proj, 0);
+    if (fit != 2) {
         return;
     }
     uint32_t source_plat = M32(shadow_source_view);
     memcpy(pv, G + source_plat, 64); memcpy(pp, G + source_plat + 0x40, 64);
     memcpy(&far, G + SHADOW_FOCUS_FAR, 4);
-    if (shadow_stable)
-        x360_shadow_stable_fit(pv, pp[0], -pp[5], light, far, shadow_size,
-                               shadow_source_view == 0x009196C0u ? 2 : 1, out);
-    else x360_shadow_fit(pv, pp[0], -pp[5], light, X360E_SHADOW_NEAR, far, out);
+    x360_shadow_fit(pv, pp[0], -pp[5], light, X360E_SHADOW_FOCUS_NEAR, far, out);
     static const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     memcpy(G + view, id, 64);
     memcpy(G + proj, out, 64);
     memcpy(x360_vp, out, 64); x360_vp_set = 1;
-    shadow_near_far_camera(shadow_source_view, view, proj, fit == 2);
     static int logged;
     if (diag_on && !logged++) diag_event("x360: shadow light camera: light dir %.3f %.3f %.3f, focus far %.1f, proj m00 %.4f m11 %.4f",
                                           light[0], light[1], light[2], far, out[0], out[5]);

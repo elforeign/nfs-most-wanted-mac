@@ -194,9 +194,15 @@ static void envcube_configure(void) {
     envcube_blitmips=envcube_blit_option(blitmips);
     const char *phase=diag_on ? getenv("NFS_TEST_CUBEMIPS_PHASE"):NULL;
     envcube_test_phase=phase ? strtof(phase,NULL):-1;
-    if (envcube_sharp) M32(0x008F8FF4u) = 1024;
+    // Re-entrant (live_picture.c): the retail edge is kept the first time it is replaced and put back for Standard.
+    static uint32_t retail_edge; static int retail_saved;
+    if (envcube_sharp) {
+        if (!retail_saved) { retail_edge = M32(0x008F8FF4u); retail_saved = 1; }
+        M32(0x008F8FF4u) = 1024;
+    } else if (retail_saved) M32(0x008F8FF4u) = retail_edge;
     if (diag_on) diag_event("envcube: option=%s edge_constant=%u blitmips=%d", envcube_sharp ? "sharp" : "pc", M32(0x008F8FF4u), envcube_blitmips);
 }
+void envcube_live_reconfigure(void) { envcube_configure(); }   // live_picture.c, inside a device Reset
 static uint32_t envcube_creation_levels(uint32_t edge, uint32_t levels, uint32_t usage, uint32_t fmt) {
     return envcube_sharp && edge == 1024 && usage == 1 && fmt == 21 ? envcube_level_count(edge) : levels;
 }

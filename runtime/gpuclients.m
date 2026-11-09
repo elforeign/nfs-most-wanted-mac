@@ -23,6 +23,7 @@ struct GPUClients {
     int (*count)(CFDictionaryRef);
     CFStringRef (*name)(CFDictionaryRef, int);
     int64_t (*residency)(CFDictionaryRef, int);
+    char clock_status[96];
 };
 
 static double monotime(void) {
@@ -33,6 +34,7 @@ static double monotime(void) {
 static void empty_sample(GPUClientsSample *out) {
     *out = (GPUClientsSample){.dev_util=NAN, .self_ms=NAN, .other_ms=NAN};
     strcpy(out->top, "-"); strcpy(out->mhz, "-");
+    strcpy(out->states, "-"); strcpy(out->clock_status, "not_decoded_yet");
 }
 static NSString *safe_name(NSString *name) {
     // Keep TSV and the name:ms,other:ms grammar unambiguous even for unusual process names.
@@ -137,19 +139,22 @@ static void diff_clients(NSDictionary *before, NSDictionary *now, double elapsed
 GPUClients *gpuclients_create(void) {
     GPUClients *s = calloc(1, sizeof *s);
     if (!s) return NULL;
+    strcpy(s->clock_status, "not_decoded_yet:libIOReport");
     s->lib = dlopen("/usr/lib/libIOReport.dylib", RTLD_LAZY | RTLD_LOCAL);
     if (!s->lib) return s;
-#define LOAD(member, symbol) do { *(void **)(&s->member) = dlsym(s->lib, symbol); if (!s->member) return s; } while (0)
+#define LOAD(member, symbol) do { *(void **)(&s->member) = dlsym(s->lib, symbol); if (!s->member) { snprintf(s->clock_status, sizeof s->clock_status, "not_decoded_yet:%s", symbol); return s; } } while (0)
     LOAD(copy, "IOReportCopyChannelsInGroup"); LOAD(subscribe, "IOReportCreateSubscription");
     LOAD(samples, "IOReportCreateSamples"); LOAD(delta, "IOReportCreateSamplesDelta");
     LOAD(iterate, "IOReportIterate"); LOAD(count, "IOReportStateGetCount");
     LOAD(name, "IOReportStateGetNameForIndex"); LOAD(residency, "IOReportStateGetResidency");
 #undef LOAD
     s->channels = s->copy(CFSTR("GPU Stats"), CFSTR("GPU Performance States"), 0, 0, 0);
+    strcpy(s->clock_status, "not_decoded_yet:GPU_Stats_channels");
     if (!s->channels) return s;
     CFMutableDictionaryRef actual = NULL;
     s->subscription = s->subscribe(NULL, (CFMutableDictionaryRef)s->channels, &actual, 0, NULL);
     if (actual) { CFRelease(s->channels); s->channels = actual; }
+    strcpy(s->clock_status, s->subscription ? "baseline" : "not_decoded_yet:subscription");
     return s;
 }
 void gpuclients_destroy(GPUClients *s) {
@@ -162,22 +167,26 @@ void gpuclients_destroy(GPUClients *s) {
     free(s);
 }
 static void clock_sample(GPUClients *s, GPUClientsSample *out) {
+    if (s->clock_status[0]) strcpy(out->clock_status, s->clock_status);
     if (!s->subscription) return;
     CFDictionaryRef current = s->samples(s->subscription, s->channels, NULL);
-    if (!current) { if (s->before) CFRelease(s->before); s->before = NULL; return; }
+    if (!current) { if (s->before) CFRelease(s->before); s->before = NULL; strcpy(out->clock_status, "not_decoded_yet:samples"); return; }
     CFDictionaryRef delta = s->before ? s->delta(s->before, current, NULL) : NULL;
     if (s->before) CFRelease(s->before);
     s->before = current;
-    if (!delta) return;
+    if (!delta) { strcpy(out->clock_status, "baseline"); return; }
     __block double weighted = 0, total = 0, dominant = 0;
     __block BOOL decoded = YES;
     __block NSString *state = nil;
+    NSMutableDictionary<NSString *, NSNumber *> *residencies = [NSMutableDictionary dictionary];
     s->iterate(delta, ^int(CFDictionaryRef channel) {
         for (int i = 0, n = s->count(channel); i < n && i < 256; ++i) {
             double residency = s->residency(channel, i);
             if (residency <= 0) continue;
             NSString *name = (__bridge NSString *)s->name(channel, i);
             if (![name isKindOfClass:NSString.class]) { decoded = NO; continue; }
+            NSString *key = safe_name(name);
+            residencies[key] = @([residencies[key] doubleValue] + residency);
             NSString *lower = name.lowercaseString;
             if ([lower containsString:@"idle"] || [lower containsString:@"off"] || [lower containsString:@"down"]) continue;
             if (residency > dominant) { dominant = residency; state = name; }
@@ -194,6 +203,17 @@ static void clock_sample(GPUClients *s, GPUClientsSample *out) {
     if (decoded && total > 0) snprintf(out->mhz, sizeof out->mhz, "%.1f", weighted / total);
     // Prefix opaque labels: a numeric state ID must never masquerade as MHz in the reader.
     else if (state) snprintf(out->mhz, sizeof out->mhz, "state=%s", safe_name(state).UTF8String ?: "unknown");
+    double all = 0;
+    for (NSNumber *r in residencies.allValues) all += r.doubleValue;
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *key in [residencies.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        if (parts.count == 32) break;
+        [parts addObject:[NSString stringWithFormat:@"%@:%.2f", [key substringToIndex:MIN(key.length, 40)],
+                          100 * [residencies[key] doubleValue] / all]];
+    }
+    if (parts.count) snprintf(out->states, sizeof out->states, "%s", [parts componentsJoinedByString:@","].UTF8String);
+    strcpy(out->clock_status, decoded && total > 0 ? "decoded_mhz" :
+           state ? "decoded_residency" : parts.count ? "idle_residency" : "not_decoded_yet:empty_delta");
     CFRelease(delta);
 }
 void gpuclients_sample(GPUClients *s, GPUClientsSample *out) {
@@ -213,6 +233,11 @@ static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static GPUClientsSample cache;
 static double cache_time;
 static dispatch_source_t timer;
+void gpuclients_publish(const GPUClientsSample *s) {
+    pthread_mutex_lock(&cache_lock);
+    cache = *s; cache_time = monotime();
+    pthread_mutex_unlock(&cache_lock);
+}
 void gpuclients_start(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -226,9 +251,7 @@ void gpuclients_start(void) {
             dispatch_source_set_event_handler(timer, ^{
                 GPUClientsSample value;
                 gpuclients_sample(s, &value);
-                pthread_mutex_lock(&cache_lock);
-                cache = value; cache_time = monotime();
-                pthread_mutex_unlock(&cache_lock);
+                gpuclients_publish(&value);
             });
             dispatch_resume(timer);
         });

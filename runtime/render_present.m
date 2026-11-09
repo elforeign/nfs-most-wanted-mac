@@ -1,7 +1,6 @@
 // render_present.m - Present, frame timing and diag capture encoding (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 #include "sign_diag.h"
-#include "shadow_near.h"
 #include "brightness.h"
 #include "hdr_output.h"
 #import <Cocoa/Cocoa.h>
@@ -21,6 +20,27 @@ static void frame_pool_cycle(void) {
     static __thread void *pool;
     if (pool) objc_autoreleasePoolPop(pool);
     pool = objc_autoreleasePoolPush();
+}
+// Per-frame timing is diagnostic only; ordinary presentation reads no clocks here.
+static uint64_t present_timing_frame;
+typedef struct { uint64_t frame; double present; } PresentTiming;
+static PresentTiming present_timing_begin(uint64_t frame) {
+    PresentTiming timing = {.frame = frame};
+    if (!diag_on) return timing;
+    timing.present = host_ticks() / 1e9;
+    present_timing_frame = frame;
+    NSWindow *window = [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window : nil;
+    NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+    double update = 0;
+    if (@available(macOS 12.0, *)) update = screen.lastDisplayUpdateTimestamp;
+    diag_event("present-frame frame=%llu Present=%.9f screen_update=%.9f",
+               (unsigned long long)frame, timing.present, update);
+    return timing;
+}
+void present_timing_wait(uint64_t deadline, uint64_t woke, uint64_t acquired) {
+    if (diag_on)
+        diag_event("present-loop frame=%llu deadline=%.9f wake=%.9f acquired=%.9f",
+                   (unsigned long long)(present_timing_frame + 1), deadline / 1e9, woke / 1e9, acquired / 1e9);
 }
 // Per-frame GPU timing for stats.log: how long Present waits for the GPU (for the previous frame), and the GPU
 // time of each frame's last command buffer (from its completion handler).
@@ -94,6 +114,14 @@ static void presented(id<MTLDrawable> drawable) {
     }
     pthread_mutex_unlock(&presentation_mu);
 }
+// The game loop's frame duration under the limit (pacing.c, looppace.h), ms; 0 when Off. Online keeps its own cap in
+// render_present, so the loop isn't paced twice.
+double render_loop_limit_ms(void) {
+    if (!mtl || atomic_load_explicit(&roam_online_active, memory_order_relaxed)) return 0;
+    RenderPresentation p;
+    render_presentation_stats(&p);
+    return p.limit > 0 ? p.duration_ms : 0;
+}
 void render_frame_timing(double *wait_ms, double *gpu_ms) {
     uint64_t n = __atomic_exchange_n(&timed_frames, 0, __ATOMIC_RELAXED), g = __atomic_exchange_n(&gpu_ns, 0, __ATOMIC_RELAXED);
     *wait_ms = n ? wait_ns / 1e6 / n : 0;
@@ -127,9 +155,7 @@ static void png_after(id<MTLCommandBuffer> cb, id<MTLBuffer> buf, const char *pa
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
         (void)b;
         dispatch_async(png_q, ^{
-            size_t plen=strlen(p);
-            if(plen>4 && !strcmp(p+plen-4,".bmp"))shadow_near_ab_write_bmp(p,buf.contents,w,h);
-            else diag_png(p, buf.contents, w, h, w * 4, 0);
+            diag_png(p, buf.contents, w, h, w * 4, 0);
             void report_shot_ready(const char *path);
             report_shot_ready(p);
             free(p);
@@ -183,11 +209,16 @@ static const char *const gamma_src =
 "    float4 c = s.sample(pt, i.uv); uint3 n = uint3(clamp(c.rgb, 0.0, 1.0) * 255.0 + 0.5);\n"
 "    return float4(lut[n.r], lut[256 + n.g], lut[512 + n.b], c.a);\n"
 "}\n";
+static id<MTLLibrary> gamma_lib;   // compiled at load (render_present_warm): a ramp set in play must not compile
+static id<MTLLibrary> gamma_library(NSError **err) {
+    if (!gamma_lib) gamma_lib = pipeline_library_source([NSString stringWithUTF8String:gamma_src], "gamma", err);
+    return gamma_lib;
+}
 static void gamma_blit(void) {
     static id<MTLRenderPipelineState> pso;
     if (!pso) {
         NSError *err = nil;
-        id<MTLLibrary> lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:gamma_src] options:nil error:&err];
+        id<MTLLibrary> lib = gamma_library(&err);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"gamma_vs"];
         pd.fragmentFunction = [lib newFunctionWithName:@"gamma_fs"];
@@ -321,7 +352,7 @@ static id<MTLRenderPipelineState> hdr_output_pipeline_samples(MTLPixelFormat for
     id<MTLRenderPipelineState> pso = states[key];
     if (pso) return pso;
     NSError *error = nil;
-    if (!lib) lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:hdr_output_src] options:nil error:&error];
+    if (!lib) lib = pipeline_library_source([NSString stringWithUTF8String:hdr_output_src], "hdr_output", &error);
     if (!lib) { hdr_output_error("library", error); return nil; }
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = [lib newFunctionWithName:@"hdr_vs"];
@@ -451,7 +482,59 @@ static int present_copy(void) {
     presenting = 1;
     return 1;
 }
-static void present_show(void) {
+static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, id<MTLTexture> src, float clip_headroom,
+                                                             double duration, const PresentTiming *timing) {
+    @autoreleasepool {
+        PresentTiming ticket = timing ? *timing : (PresentTiming){0};
+        if(diag_on)pipeline_frame_scope(1);
+        id<CAMetalDrawable> d = [l nextDrawable];
+        double drawable_return = (timing && diag_on) ? host_ticks() / 1e9 : 0;
+        if (d) {
+            if (diag_on && hdr_output_requested) {
+                static uint64_t shown;
+                if (++shown == 1 || shown % 240 == 0) hdr_output_diag("drawable", d.texture.pixelFormat);
+                if (d.texture.pixelFormat != l.pixelFormat) hdr_output_error("drawable-format-mismatch", nil);
+            }
+            if (timing && diag_on) {
+                [d addPresentedHandler:^(id<MTLDrawable> dr) {
+                    presented(dr);
+                    if (diag_on) diag_event("present-shown frame=%llu presentedTime=%.9f",
+                                           (unsigned long long)ticket.frame, dr.presentedTime);
+                }];
+            } else [d addPresentedHandler:^(id<MTLDrawable> dr) { presented(dr); }];
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            quad_into(cb, src, MTLRegionMake2D(0, 0, src.width, src.height), d.texture, 0, 0,
+                      MTLRegionMake2D(0, 0, d.texture.width, d.texture.height), 1);
+            cliprec_present(cb, src, d, clip_headroom);
+            overlay_present(cb);         // the performance overlay, on its own layer above (overlay.m)
+            if (diag_on && hdr_output_requested) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                if (b.error) hdr_output_error("present-command-buffer", b.error);
+            }];
+            if (timing && diag_on) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                if (diag_on) diag_event("present-gpu frame=%llu stage=present GPUEndTime=%.9f",
+                                       (unsigned long long)ticket.frame, b.GPUEndTime);
+            }];
+            // Retain the minimum request. Actual versus scheduled refresh
+            // anchoring is measured by the per-frame timestamps, not assumed.
+            double present_call = (timing && diag_on) ? host_ticks() / 1e9 : 0;
+            if (duration > 0) {
+                [cb presentDrawable:d afterMinimumDuration:duration];
+            } else [cb presentDrawable:d];
+            double commit = (timing && diag_on) ? host_ticks() / 1e9 : 0;
+            [cb commit];
+            if (timing && diag_on) diag_event("present-submit frame=%llu nextDrawable=%.9f presentDrawable=%.9f commit=%.9f minimum=%.9f",
+                                   (unsigned long long)ticket.frame, drawable_return, present_call, commit, duration);
+        } else if (diag_on && hdr_output_requested) {
+            uint64_t n = __atomic_add_fetch(&hdr_nil_drawables, 1, __ATOMIC_RELAXED);
+            if (!(n & (n - 1))) hdr_output_diag("nil-drawable", MTLPixelFormatInvalid);
+        }
+        if (timing && diag_on && !d) diag_event("present-submit frame=%llu nextDrawable=%.9f drawable=missing minimum=%.9f",
+                                     (unsigned long long)ticket.frame, drawable_return, duration);
+        if(diag_on)pipeline_frame_scope(0);
+        presenting = 0;
+    }
+}
+static void present_show(PresentTiming timing) {
     float clip_headroom = render_hdr_headroom();
     id<MTLTexture> src = hdr_output_on ? hdr_present_tex : present_tex;
     CAMetalLayer *l = layer;
@@ -459,41 +542,16 @@ static void present_show(void) {
     render_presentation_stats(&policy);
     double duration = policy.duration_ms / 1000;
     dispatch_queue_t q = present_q;
-    rt_after_commit(cmd, ^{                  // behind the frame's commit (render_thread.m replays it later)
-        dispatch_async(q, ^{
-            @autoreleasepool {
-                if(diag_on)pipeline_frame_scope(1);
-                id<CAMetalDrawable> d = [l nextDrawable];
-                if (d) {
-                    if (diag_on && hdr_output_requested) {
-                        static uint64_t shown;
-                        if (++shown == 1 || shown % 240 == 0) hdr_output_diag("drawable", d.texture.pixelFormat);
-                        if (d.texture.pixelFormat != l.pixelFormat) hdr_output_error("drawable-format-mismatch", nil);
-                    }
-                    [d addPresentedHandler:^(id<MTLDrawable> dr) { presented(dr); }];
-                    id<MTLCommandBuffer> cb = [queue commandBuffer];
-                    quad_into(cb, src, MTLRegionMake2D(0, 0, src.width, src.height), d.texture, 0, 0,
-                              MTLRegionMake2D(0, 0, d.texture.width, d.texture.height), 1);
-                    cliprec_present(cb, src, d, clip_headroom);
-                    overlay_present(cb);         // the performance overlay, on its own layer above (overlay.m)
-                    if (diag_on && hdr_output_requested) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
-                        if (b.error) hdr_output_error("present-command-buffer", b.error);
-                    }];
-                    // Metal anchors this to the previous actual presentation, including
-                    // after a late frame. No CPU sleep/deadline and no change to pacing.c.
-                    if (duration > 0) {
-                        [cb presentDrawable:d afterMinimumDuration:duration];
-                    } else [cb presentDrawable:d];
-                    [cb commit];
-                } else if (diag_on && hdr_output_requested) {
-                    uint64_t n = __atomic_add_fetch(&hdr_nil_drawables, 1, __ATOMIC_RELAXED);
-                    if (!(n & (n - 1))) hdr_output_diag("nil-drawable", MTLPixelFormatInvalid);
-                }
-                if(diag_on)pipeline_frame_scope(0);
-                presenting = 0;
-            }
+    // Capture diagnostic timing only when enabled; the ordinary draw uses NULL.
+    if (diag_on) {
+        rt_after_commit(cmd, ^{
+            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, &timing); });
         });
-    });
+    } else {
+        rt_after_commit(cmd, ^{
+            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, NULL); });
+        });
+    }
 }
 
 void render_present(void) {
@@ -529,6 +587,7 @@ void render_present(void) {
         }
     } else { online_deadline = 0; online_limit = 0; }
     frame_pool_cycle();
+    PresentTiming timing = present_timing_begin(frame_serial);
     if (bb_rt.ms && (probe_sig & PROBE_MSAA)) bb_rt.stale = resolve_magenta = 1;   // BOOT_DIAG_PROBE msaa (probe.m)
     msaa_resolve(&bb_rt);                 // AA on: backbuffer_tex from the multisampled back buffer (see MSAA)
     resolve_magenta = 0;
@@ -561,12 +620,11 @@ void render_present(void) {
     detail_ab_shot(shot_path, sizeof shot_path);
     int envcube_ab_shot(char *path, size_t n);
     envcube_ab_shot(shot_path, sizeof shot_path);
-    int report_shot(char *path, size_t n);                                    // report.m: the frame when the F10 menu opened
+    int report_shot(char *path, size_t n);                                    // report.m: a capture requested by this report save
     report_shot(shot_path, sizeof shot_path);
     int due = shot_path[0] ? 0 : diag_shot_due(dev.frames);
     if (due) snprintf(shot_path, sizeof shot_path, "%s/frame_%05llu.%s", diag_dir, (unsigned long long)dev.frames, due == 2 ? "png" : "jpg");
     if (due == 2) { postfx_ab_shot(shot_path, sizeof shot_path); carpaint_ab_shot(shot_path, sizeof shot_path); } // full-size front-end A/B sets
-    if (diag_on) shadow_near_ab_shot(shot_path, sizeof shot_path);
     if (shot_path[0]) {
         id<MTLTexture> shot_src = hdr_shot_source(cmd, show); // SDR bytes for BOOT_DIAG and F10 reports
         shot = [mtl newBufferWithLength:backbuffer_tex.width * backbuffer_tex.height * 4 options:MTLResourceStorageModeShared];
@@ -587,7 +645,7 @@ void render_present(void) {
         seq_n = 0;
         const char *e = getenv("BOOT_DIAG_SEQ");
         const char *colon = e ? strchr(e, ':') : NULL;
-        if (colon && diag_on && !shadow_near_ab_enabled()) { seq_n = atoi(colon + 1); if (seq_n > 64) seq_n = 64; }
+        if (colon && diag_on) { seq_n = atoi(colon + 1); if (seq_n > 64) seq_n = 64; }
     }
     if (seq_n > 0 && seq_have < seq_n) {
         if (!seq_start && diag_frame_wanted(dev.frames, "BOOT_DIAG_SEQ")) seq_start = dev.frames;
@@ -619,6 +677,8 @@ void render_present(void) {
     gpt_frame(cmd, serial);
     gpt_phase = "game";
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> b) {
+        if (diag_on) diag_event("present-gpu frame=%llu stage=frame GPUEndTime=%.9f",
+                               (unsigned long long)serial, b.GPUEndTime);
         pthread_mutex_lock(&presentation_mu);
         double gpu_time = b.GPUEndTime - b.GPUStartTime;
         if (gpu_time > 0) gpu_average = gpu_average > 0 ? 0.25 * gpu_time + 0.75 * gpu_average : gpu_time;
@@ -640,8 +700,12 @@ void render_present(void) {
         pthread_mutex_unlock(&done_mu);
     }];
     [cmd commit];
+    if (diag_on) rt_after_commit(cmd, ^{
+        diag_event("present-commit frame=%llu stage=frame observed=%.9f",
+                   (unsigned long long)timing.frame, host_ticks() / 1e9);
+    });
     if (diag_on && sign_diag_on && sign_diag_active()) sign_diag_finish_present(cmd);
-    if (show) present_show();
+    if (show) present_show(timing);
     cmd = nil;
     render_float_scene_present_end();
     hdr_output_frame_boundary();             // latch display state for the next complete frame
@@ -676,4 +740,9 @@ void render_present(void) {
     query_stats_log();
     void rt_stats_log(void);
     rt_stats_log();                       // NFS_RENDER_THREAD latency (render_thread.m)
+}
+
+// Load-time half of gamma_blit: the library only; its pipeline follows the present texture's format.
+void render_present_warm(void) {
+    if (!gamma_library(NULL) && diag_on) diag_event("pipeline_prewarm: failed=gamma");
 }

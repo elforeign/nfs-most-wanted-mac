@@ -501,13 +501,17 @@ void f_0081F207(Cpu *c) {
     pan_site = saved; cur_voice = sv;
 }
 
+/* Standalone panner checks have no sidecar adapter. Full builds replace this. */
+__attribute__((weak)) void car_audio_tick(Cpu *c, uint32_t object) { (void)c; (void)object; }
 #define VOICE_HOOK(addr, cat) \
     void f_##addr##_orig(Cpu *c); \
     void f_##addr(Cpu *c) { \
-        if (!diag_on && !(cat != 3 && posaudio_engine_realistic())) { f_##addr##_orig(c); return; } \
+        uint32_t audio_object = c->ecx; \
+        if (!diag_on && !(cat != 3 && posaudio_engine_realistic())) { f_##addr##_orig(c); if ((cat == 0 || cat == 4) && car_audio_tick) car_audio_tick(c, audio_object); return; } \
         int saved = category; uint32_t saved_object = object; \
         category = cat; object = c->ecx; \
         f_##addr##_orig(c); \
+        if ((cat == 0 || cat == 4) && car_audio_tick) car_audio_tick(c, audio_object); \
         if (cat == 1 || cat == 2 || cat == 4) source_register(cat, object, M32(object + 0x10)); \
         category = saved; object = saved_object; \
     }

@@ -21,6 +21,13 @@
 
 
 
+
+
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -166,6 +173,98 @@ def checked(args, **kwargs):
     return result
 
 
+# Frozen lazy source sites: default prewarm returned before doing any work.
+POST_LAZY_EDR = ('d961d6fba8ab6afc753bad23d0476094de5e11b12575594cc4591c315a9faeea', r'''static id<MTLRenderPipelineState> x_edr_pipeline(NSString *fs, NSUInteger samples, int lamp) {
+    static id<MTLLibrary> libraries[2];
+    static NSMutableDictionary *states;
+    if(!states)states=[NSMutableDictionary new];
+    NSString *key=[NSString stringWithFormat:@"%@/%lu/%d",fs,(unsigned long)samples,lamp];
+    id<MTLRenderPipelineState> p=states[key];if(p)return p;
+    if(!libraries[lamp]) {
+        NSString *src=[NSString stringWithUTF8String:x360_src];
+        if(lamp) {
+            src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
+            src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin,uv).rgb;\n    if (patch) bl = 0;"];
+        }
+        NSError *error=nil;
+        libraries[lamp]=[mtl newLibraryWithSource:hdrclip_shader(x_edr_source(src)) options:nil error:&error];
+        if(!libraries[lamp]) { fprintf(stderr,"boot: EDR post: %s\n",error.localizedDescription.UTF8String);return nil; }
+    }
+    MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
+    d.vertexFunction=[libraries[lamp] newFunctionWithName:@"vs_full"];
+    d.fragmentFunction=[libraries[lamp] newFunctionWithName:fs];
+    d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;
+    if([fs isEqualToString:@"fs_downscale"])d.colorAttachments[1].pixelFormat=MTLPixelFormatRGBA16Float;
+    d.rasterSampleCount=samples;
+    p=pipeline_build(d, "edr", NULL);if(p)states[key]=p;
+    return p;
+}''')
+
+POST_LAZY_WARM = ('f840c7276ff94301a427945e3e112215d272e93bbd33ca6b67851af332835139', r'''void render_post_prewarm(void) {
+    const char *setting=getenv("NFS_PSO_PREWARM");
+    if (!setting || !atoi(setting)) return;
+    int failed=!x_pipeline_init(); // the EDR chain also uses the original post setup
+    failed+=!x_contact_smoke_multiply(MTLPixelFormatBGRA8Unorm);
+    failed+=!x_contact_smoke_multiply(MTLPixelFormatRGBA16Float);
+    for (int lamp=0;lamp<2;++lamp) {
+        for (NSString *fs in @[@"fs_downscale", @"fs_lum", @"fs_bright", @"fs_taps", @"fs_dofdown", @"fs_tdown"])
+            failed+=!x_edr_pipeline(fs,1,lamp);
+        for (NSUInteger samples=1;samples<=8;samples*=2)
+            if ([mtl supportsTextureSampleCount:samples]) failed+=!x_edr_pipeline(@"fs_vt",samples,lamp);
+    }
+    if(failed && diag_on)diag_event("pipeline_prewarm: failed=post count=%d",failed);
+}''')
+
+POST_LAZY_LAMP = ('06680e217a138a84cdad0b5323fa622226486e73e6807c8f6cf8c38518eef07d', r'''static int lamp_post_init(uint32_t w, uint32_t h, NSUInteger samples, int view) {
+    lp_lib=lp_libraries[view];
+    if (!lp_lib) {
+        NSString *src = [NSString stringWithUTF8String:x360_src];
+        if (view) src=x_view_source(src);
+        src = [src stringByReplacingOccurrencesOfString:@"fragment float4 fs_vt(" withString:@"fragment float4 fs_vt_lamp("];
+        src = [src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
+        src = [src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin, uv).rgb;\n    if (patch) bl = 0;"];
+        src = [src stringByAppendingString:[NSString stringWithUTF8String:lampglow_src]];
+        NSError *err = nil;
+        lp_lib = [mtl newLibraryWithSource:hdrclip_shader(src) options:nil error:&err];
+        if (!lp_lib) { fprintf(stderr, "boot: lampglow shader: %s\n", err.localizedDescription.UTF8String); return 0; }
+        lp_libraries[view]=lp_lib;
+        lp_source = x_pso(lp_lib, @"fs_lamp_source", MTLPixelFormatRGBA16Float, 0);
+        lp_taps = x_pso(lp_lib, @"fs_taps", MTLPixelFormatRGBA16Float, 0);
+    }
+    if (samples > 8 || !lp_source || !lp_taps) return 0;
+    if (!lp_vt[view][samples]) {
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = [lp_lib newFunctionWithName:@"vs_full"];
+        d.fragmentFunction = [lp_lib newFunctionWithName:@"fs_vt_lamp"];
+        d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm; d.rasterSampleCount = samples;
+        lp_vt[view][samples] = pipeline_build(d, __func__, NULL);
+    }
+    if (!lt_source || lt_source.width != w / 4 || lt_source.height != h / 4) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w / 4 height:h / 4 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate;
+        lt_source = [mtl newTextureWithDescriptor:d]; lt_blur = [mtl newTextureWithDescriptor:d];
+        d.width = w / 8; d.height = h / 8;
+        lt_a = [mtl newTextureWithDescriptor:d]; lt_b = [mtl newTextureWithDescriptor:d];
+    }
+    return lp_vt[view][samples] && lt_source && lt_blur && lt_a && lt_b;
+}''')
+
+POST_LAZY_BASELINE = {
+    'x_edr_pipeline': POST_LAZY_EDR,
+    'render_post_prewarm': POST_LAZY_WARM,
+    'lamp_post_init': POST_LAZY_LAMP,
+}
+
+def lazy_post_control(source):
+    for name, (digest, fragment) in POST_LAZY_BASELINE.items():
+        assert hashlib.sha256(fragment.encode()).hexdigest() == digest
+        prefix = fragment[:fragment.index(name)]
+        a = source.index(prefix + name + "(")
+        b = source.index("\n}", a) + 2
+        source = source[:a] + fragment + source[b:]
+    return source
+
+
 def main():
     if not (ROOT / 'gen/x360_shader_lits.inc').is_file():
         print('SKIP: HDR composition proof needs generated shader tables (runtime/build.sh)')
@@ -181,14 +280,14 @@ def main():
     blit = section(render, 'static const char *blit_src =', '// Startup-only hidden EDR')
     maps = section(render, 'typedef struct { uint64_t key; void *obj; } MapSlot;', '// ---------------- GPU-side objects')
     init = section(render[render.index('void render_init(void)'):], '    NSError *err = nil;', '    render_resize();')
-    production = section(presenter, 'void render_set_gamma(', 'static void present_show(')
+    # The routing fixture ends before the separately guarded dispatch/draw code.
+    production = section(presenter, 'void render_set_gamma(', 'static __attribute__((always_inline)) inline void present_draw(')
     legacy = ('static id<MTLLibrary> legacy_blit_lib;\n'
               'static id<MTLRenderPipelineState> legacy_blit_pso;\n'
               'static id<MTLSamplerState> legacy_blit_linear,legacy_blit_point;\n'
               'static Map legacy_blit_pipelines;\n' +
               legacy_names(LEGACY_BLIT + LEGACY_GAMMA + LEGACY_COPY + LEGACY_QUAD))
     env = dict(os.environ)
-    env['NFS_UPSCALE'] = 'off'
     env.pop('NFS_HDR_OUTPUT', None)
     env.pop('NFS_TEST_GAMMA', None)
     env.pop('NFS_PADS', None)
@@ -205,12 +304,20 @@ def main():
                      section(post, 'static NSString *x_edr_source(', '// END HDR output M post variant') +
                      section(post, 'static const char *ssao_src =', 'typedef struct { float proj[4],size[4],rect[4],bounds[4],tune[4]; } AOParams;') +
                      section(post, 'typedef struct { float off[16][4]', '// The visual treatment into a multisampled back buffer') +
+                     section(post, 'static NSString *x_view_source(', '// GaussBlur5x5') +
                      section(post, 'static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format) {', 'static struct { id<MTLRenderPipelineState> kernel,blur,apply'))
+        cache = (ROOT / 'pipeline_cache.m').read_text().replace('#include "d3d9_internal.h"', '')
+        cache = cache.replace('    int measure=on_frame_path();',
+                              '    if (!strcmp(pass,"edr")) ++pipeline_edr_builds;\n    int measure=on_frame_path();')
+        library_entry = '    if (!library || !d.vertexFunction || !d.fragmentFunction) return nil;'
+        assert cache.count(library_entry) == 1
+        cache = cache.replace(library_entry, '    ++post_cached_calls;\n' + library_entry)
+        (scratch / 'cache.inc').write_text(cache)
         (scratch / 'post.inc').write_text(post_code)
         (scratch / 'quad.inc').write_text(maps + '\nstatic Map blit_pipelines;\n' + blit + quad)
         (scratch / 'routing.inc').write_text(
             section(render, 'static MTLTextureDescriptor *texture_descriptor(', 'RenderTex *gpu_tex(') +
-            section(render, 'static int upscale_copy_active(void)', '// Only actual pre-post screen-copy destinations'))
+            section(render, 'void render_float_scene_begin(void)', '// Only actual pre-post screen-copy destinations'))
         (scratch / 'guard.inc').write_text(
             section(guard, 'enum { HC_FAMILIES=', 'static const char *hc_names') +
             section(guard, 'static NSString *hc_msl(', 'int hdrclip_test(') +
@@ -222,7 +329,6 @@ def main():
         exe = scratch / 'test'
         build = ['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                  '-Wno-unused-variable', '-fobjc-arc', '-I', scratch, '-I', ROOT, scratch / 'test.m',
-                 ROOT / 'render_upscale_route.m', ROOT / 'render_metalfx_spatial.m', '-weak_framework', 'MetalFX',
                  '-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal', '-o', exe]
         checked(build)
         checked([exe, '--cpu'], env=env)
@@ -325,6 +431,44 @@ def main():
         broken = subprocess.run([str(exe), '--broken'], capture_output=True, text=True, env=edr_env)
         print(broken.stdout + broken.stderr, end='', flush=True)
         assert broken.returncode == 1 and 'FAIL: PATCH above_one=0 lost=2 bad_channels=6' in broken.stderr, 'BGRA8 mutant escaped or failed for another reason'
+        default_proof = checked([exe, '--post-default'], env=edr_env).stdout
+        default_proof += checked([exe, '--post-disabled'], env=edr_env).stdout
+        old_default_cache = cache.replace('return !s || atoi(s);', 'return s && atoi(s);')
+        assert old_default_cache != cache
+        (scratch / 'cache.inc').write_text(old_default_cache)
+        checked(build)
+        old_default = subprocess.run([str(exe), '--post-default'], capture_output=True, text=True, env=edr_env)
+        assert old_default.returncode == 1 and 'scene prewarm default/override' in old_default.stderr, old_default.stdout + old_default.stderr
+        print('hdr_output_test: old scene default rejected: unset=0, expected 1 (exit 1)', flush=True)
+        (scratch / 'cache.inc').write_text(cache)
+        (scratch / 'post.inc').write_text(lazy_post_control(post_code))
+        checked(build)
+        lazy = subprocess.run([str(exe), '--post-default'], capture_output=True, text=True, env=edr_env)
+        print('hdr_output_test: frozen lazy default control:', lazy.stdout.strip(), flush=True)
+        assert lazy.returncode == 1 and 'frame_sync=4' in lazy.stdout, lazy.stdout + lazy.stderr
+        lazy_off = subprocess.run([str(exe), '--post-disabled'], capture_output=True, text=True, env=edr_env)
+        print('hdr_output_test: frozen lazy explicit-0 control:', lazy_off.stdout.strip(), flush=True)
+        assert lazy_off.returncode == 1 and 'frame_sync=4' in lazy_off.stdout, lazy_off.stdout + lazy_off.stderr
+        if os.environ.get('NFS_METAL_CACHE'):
+            (Path(os.environ['NFS_METAL_CACHE']) / 'post-default-proof.log').write_text(
+                default_proof + 'frozen lazy unset control: ' + lazy.stdout + 'frozen lazy 0 control: ' + lazy_off.stdout)
+        # Without the memo every steady post pass re-enters the pipeline cache.
+        unmemoized = post_code
+        for hit in ('    if (p) return p;\n    id<MTLLibrary> library=x_post_library(1+lamp);\n',
+                    '    if (lp_vt[view][samples]) return lp_vt[view][samples];   // memoized, as x_edr_states\n'):
+            assert unmemoized.count(hit) == 1, hit
+            unmemoized = unmemoized.replace(hit, hit[hit.index('    id<'):] if 'library=' in hit else '')
+        (scratch / 'post.inc').write_text(unmemoized)
+        checked(build)
+        for mode, failure in (('--post-default', 'FAIL: post repeated lookups made '),
+                              ('--prewarm', 'FAIL: steady post frames made ')):
+            bad = subprocess.run([str(exe), mode], capture_output=True, text=True, env=edr_env)
+            assert bad.returncode == 1 and failure in bad.stderr, bad.stdout + bad.stderr
+            calls = int(bad.stderr.split(failure)[1].split()[0])
+            assert calls > 0
+            print(f'hdr_output_test: unmemoized post {mode} control: {calls} steady pipeline cache calls vs 0 (exit 1) PASS', flush=True)
+        (scratch / 'post.inc').write_text(post_code)
+        checked(build)
         checked([exe, '--prewarm'], env=edr_env)
         checked([exe, '--prewarm-msaa'], env=edr_env)
         checked([exe, '--prewarm-lamps'], env=edr_env)

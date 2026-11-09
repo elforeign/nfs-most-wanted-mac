@@ -138,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix='traffic-detail-') as td:
         print(name, p.stdout.strip(), flush=True)
         assert p.returncode == (1 if name == 'original' else 0), p.stderr[-2000:]
         if name == 'fixed':
-            for value, expected in [(None,0),('off',0),('on',1),('',0),('ON',0),('garbage',0)]:
+            for value, expected in [(None,1),('off',0),('on',1),('',1),('ON',0),('garbage',0)]:
                 env = dict(os.environ)
                 env.pop('NFS_TRAFFIC_DETAIL', None)
                 if value is not None:

@@ -1,3 +1,8 @@
+// Quit proof: ORIGINAL replay-only 0.806214 s (FAIL), fixed 0.000000 s (PASS).
+// Requested writer: ORIGINAL 0.809907 s, fixed 0.810076 s; both complete.
+// Independent sink controls live in clip_packets_test.py: callback 2229 ns
+// vs fold mutant 12673 ns (>9260 ns budget); healthy 300/300 during a 5 s
+// stall vs shared-queue mutant 0/300. Both broken executables exit 1.
 // Offline proof through the production NV12/VT/MP4 path (no window or game).
 // Synthetic drawables deliver controlled host presentation times; actual Metal
 // completion still gates every encode. AVAssetReader verifies decoded output.
@@ -16,7 +21,7 @@
 // Resolution baseline: 6 decoded frames per codec at 1920x1080, 2560x1440,
 // 3840x2160; HEVC targets 10000000/17777778/40000000 b/s, H.264 targets
 // 15000000/26666667/60000000 b/s; hardware target error <0.00001% (limit 1%).
-// Wide 4000x2000 -> 2160x1080; small 320x180 stays 320x180 (no upscale).
+// Wide 4000x2000 -> 2160x1080; small 320x180 stays 320x180 (no enlargement).
 // Actual old-code negative run: 2 live pool/encoder handles after stop versus
 // fixed 0; original drop logic: streak 0 after 119 encoder drops versus 119.
 // Fixed: 120 drops, streak 120, inactive, valid prefix, 0 retained handles.
@@ -36,6 +41,19 @@
 #include <vector>
 #include <cmath>
 #include <functional>
+#include <cstdarg>
+
+static std::mutex sessionNotesLock;
+static std::vector<std::string> sessionNotes;
+static FILE *sessionNoteFile;
+extern "C" void report_note(const char *fmt, ...) {
+    char text[512]; va_list ap; va_start(ap,fmt);
+    vsnprintf(text,sizeof text,fmt,ap); va_end(ap);
+    std::lock_guard<std::mutex> guard(sessionNotesLock);
+    sessionNotes.emplace_back(text);
+    if(sessionNoteFile) { fprintf(sessionNoteFile,"%s\n",text); fflush(sessionNoteFile); }
+    printf("session: %s\n",text);
+}
 
 extern "C" void portmenu_open_folder(const char *path) { (void)path; }
 extern "C" void portmenu_status(const char *fmt, ...) { (void)fmt; }
@@ -49,6 +67,45 @@ static unsigned checks;
 static void require(bool ok, const char *what) {
     ++checks;
     if (!ok) { fprintf(stderr,"FAIL cliprec: %s\n",what); exit(1); }
+}
+
+// A slow file/encoder completion stub: flushing an unwanted replay capture
+// would run this just as flushing a requested recording would.
+@interface QuitWriterSession : ClipSession
+@end
+@implementation QuitWriterSession
+- (void)stop {
+    usleep(800000);
+    if(fileRequested || retiringFiles) published=true;
+    ended=true;
+    dispatch_group_leave(finished);
+}
+@end
+static void shutdownProof(void) {
+    for(unsigned scenario=0;scenario<3;++scenario) {
+        bool requested=scenario<2;
+        QuitWriterSession *s=[QuitWriterSession new];
+        s->replayOnly=scenario!=0; s->fileRequested=scenario==0;
+        s->retiringFiles=scenario==1; s->liveRequested=false;
+        if(s->replayOnly) {
+            s->replayRequested=true;
+            s->replayRing=std::make_shared<replay::Ring>(); s->replayRing->arm();
+        }
+        { std::lock_guard<std::mutex> lock(control); current=s; active=true; }
+        double begin=NSProcessInfo.processInfo.systemUptime;
+        cliprec_shutdown();
+        double elapsed=NSProcessInfo.processInfo.systemUptime-begin;
+        printf("shutdown requested=%d retiring=%u: %.6f s, writer completed=%d\n",requested,s->retiringFiles.load(),elapsed,(int)s->ended.load());
+        if(requested) require(s->published && s->ended,"requested save completes at quit");
+        else {
+            require(elapsed<0.5,"unrequested replay shutdown under 0.5 s");
+            require(!s->ended && !s->published,"discard never starts writer finalization");
+            // Retire the fixture only after observing the production discard.
+            s->ended=true; dispatch_group_leave(s->finished);
+        }
+        require(!active,"quit stops capture");
+        { std::lock_guard<std::mutex> lock(control); current=nil; }
+    }
 }
 
 @interface TestDrawable : NSObject <CAMetalDrawable> {
@@ -161,6 +218,14 @@ static void frame(ClipSession *s,unsigned n,double pts,bool shown=true,bool pres
         if(drain) {
             dispatch_sync(s->work, ^{ if(s->encoder) VTCompressionSessionCompleteFrames(s->encoder,kCMTimeInvalid); });
             syncWork(s);
+#if !defined(CLIPREC_CASE) || (CLIPREC_CASE!=3 && CLIPREC_CASE!=7)
+            // Only the test's accelerated fidelity producer waits for the file
+            // thread; the production presenter and the stall proof never wait.
+            if(s->fileSink && !s->stallFile) {
+                double deadline=NSProcessInfo.processInfo.systemUptime+1;
+                while(!s->fileSink->drained() && !s->fileSink->failed() && NSProcessInfo.processInfo.systemUptime<deadline) usleep(500);
+            }
+#endif
         }
     }
 }
@@ -223,7 +288,7 @@ static void finishedOK(ClipSession *s) {
     require(!dispatch_group_wait(s->finished,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)),"stop/quit finalizes within 10 s");
     syncWork(s);
     require(s->published,"MP4 finalized and published");
-    require(!s->encoder && !s->pool && !s->cache && !s->writer && !s->input && !s->pipeline && !s->device,
+    require(!s->encoder && !s->pool && !s->cache && !s->file && !s->pipeline && !s->device,
         "finalization releases encoder / pool / cache / writer / Metal resources before Finder");
     require([NSFileManager.defaultManager fileExistsAtPath:s->destination],"published clip exists");
     require(![NSFileManager.defaultManager fileExistsAtPath:s->temporary],"temporary atomically renamed");
@@ -354,9 +419,11 @@ static void resolutionProof(void) {
     resolutionChoice=CLIPREC_DEFAULT_RESOLUTION;
 }
 int main(int argc, char **argv) { @autoreleasepool {
+    if(argc>1 && !strcmp(argv[1],"--shutdown-proof")) { shutdownProof(); return 0; }
     require(!active && !current,"always Off at start");
     for(unsigned i=0;i<10000;i++) cliprec_present(nil,nil,nil,1);
     require(!current,"Off path allocates no session");
+    shutdownProof();
     char off[80]; cliprec_status(off,sizeof off);
     require(!strcmp(off,"Record clip"),"initial F10 action");
     gpu=MTLCreateSystemDefaultDevice(); if(!gpu) { puts("SKIP: Metal unavailable"); return 3; }
@@ -441,14 +508,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     cliprec_status(status,sizeof status); require(!strcmp(status,"Saving..."),"saving F10 state");
     cliprec_shutdown(); finishedOK(s);
     require(s->outstanding==0 && s->unshown==1,"stop retires missing presentation");
-    // Drop before compression under writer pressure; the already-written prefix
+    // Drop before compression under encoder transfer pressure; the already-written prefix
     // stays decodable and overload cannot produce an unbounded packet backlog.
     s=start(); for(unsigned i=0;i<6;i++) frame(s,i,500+i/60.0);
-    dispatch_sync(s->work,^{ s->forceBackpressure=true; });
+    dispatch_sync(s->work,^{ s->forceEncoderPressure=true; });
     for(unsigned i=0;i<kOverload;i++) frame(s,0,501+i/60.0);
     finishedOK(s);
-    require(s->writerDrops==kOverload && s->queuedPackets==0,"writer overload is bounded and counted");
-    require(decode(s->destination).valid,"writer overload saves valid prefix");
+    require(s->writerDrops==kOverload && s->queuedPackets==0,"encoder transfer overload is bounded and counted");
+    require(decode(s->destination).valid,"encoder transfer overload saves valid prefix");
     // Exercise the actual callback's frame-dropped flag with a valid prefix.
     s=start(); for(unsigned i=0;i<6;i++) frame(s,i,550+i/60.0);
     for(unsigned i=0;i<kOverload-1;i++) {
@@ -531,8 +598,8 @@ int main(int argc, char **argv) { @autoreleasepool {
             good.count,good.duration,good.spacingError,good.colourError,good.orientationError,good.markerError,good.counterError);
         fprintf(proof,"pool exhaustion: drops=1 recovered_frames=%u duration=%.6f PTS_error=%.6f\n",
             droppedClip.count,droppedClip.duration,droppedClip.spacingError);
-        fprintf(proof,"PASS: %u checks; deliberate failures rejected=%u/10; pool, encoder and writer overload=120 drops each; records=8; hardware H.264 fallback decoded\n",checks,rejected);
-        fprintf(proof,"resolution: 6 frames each at 1920x1080,2560x1440,3840x2160 in HEVC/H.264; hardware targets within 1%%; wide=2160x1080; no upscale=320x180; released encoder/pool/cache/writer/Metal resources after stop\n");
+        fprintf(proof,"PASS: %u checks; deliberate failures rejected=%u/10; pool, encoder and transfer overload=120 drops each; records=8; hardware H.264 fallback decoded\n",checks,rejected);
+        fprintf(proof,"resolution: 6 frames each at 1920x1080,2560x1440,3840x2160 in HEVC/H.264; hardware targets within 1%%; wide=2160x1080; no enlargement=320x180; released encoder/pool/cache/writer/Metal resources after stop\n");
         fprintf(proof,"HDR: H=1 pre-encode NV12 max_error=%u LSB (256 byte codes, native/up/downscale); H=7 shoulder_error=%u LSB, monotonic Y=16..%u; H=1 (36 frames) and H=7 (1 frame) clips decoded\n",hdrMaxError,hdrShoulderError,hdrWhite);
         fclose(proof);
     }

@@ -8,6 +8,7 @@
 #endif
 #include FE_CONSOLE_SOURCE
 
+void music_balance_options(Cpu *c, int event) { (void)c; (void)event; }
 uint8_t *G;
 int diag_on;
 static unsigned checks, writes, phase_writes, init_original, act_original, gamma_writes;

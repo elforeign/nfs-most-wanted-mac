@@ -15,6 +15,8 @@
 // - The limiter's sleep is skipped and Present waits until one tick period after the previous frame, so every pass
 //   runs exactly one tick and every frame is a new picture, evenly spaced. The period is nudged to keep the
 //   accumulator's leftover fraction near 0.5, so measurement jitter never produces a pass with zero or two ticks.
+// - An F10 frame rate limit longer than a tick (60 or 40 at 120 Hz) widens that slot to the limit's frame duration, so
+//   each frame runs the same whole number of ticks and every rendered frame is shown (looppace.h).
 // - A Mac that can't keep up renders fewer frames and runs several ticks in each; game time stays correct down to
 //   10 fps, as in the original.
 // - The pre-race NIS waits 31 OnTask calls (ticks) before playing: counted in 1/60 s here (NISActivity::OnTask).
@@ -31,6 +33,10 @@
 #include "funcs.h"
 #include "host.h"
 #include "sign_diag.h"
+#include "looppace.h"
+#include <stdint.h>
+void present_timing_wait(uint64_t deadline, uint64_t woke, uint64_t acquired);
+#include "pacewait.h"
 
 #define SCHEDULER 0x009203B0u              // Scheduler::fgScheduler
 #define RUN_SLEEP_RET 0x00642ED7u          // return address of Scheduler::Run's bThreadYield(ms) call
@@ -68,7 +74,7 @@ static int sim_hz;
 static uint32_t presents, presents_adv;    // Presents so far (pacing_present), and at the last AdvanceRealTime
 static int lock_tick;                      // NFS_LOCKSTEP: the last pass presented a frame and wasn't held, so the next
                                            // pass gets one tick of real time (decided at its AdvanceRealTime)
-static int catching_up;                    // Scheduler requested multiple ticks since the last Present
+static uint32_t catching_up;               // the most ticks the Scheduler requested in one pass since the last Present
 
 // PrepareRealTimestep(float seconds) (00661280, cdecl; the main loop passes the wall time since its last pass): with
 // NFS_LOCKSTEP one tick's worth after a pass that presented a frame and wasn't held (the probe's and the A/B
@@ -202,7 +208,7 @@ void f_0057CA60(Cpu *c) {
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 void f_00642DB0(Cpu *c) {
     uint32_t self = c->ecx, n = M32(c->esp + 4);
-    if (n > 1) catching_up = 1;
+    if (n > catching_up) catching_up = n;
     uint32_t cap = (M8(0x009203ACu) == 0) * 4 + 2;
     if (sim_hz > 60 && M32(0x009B0FA0u) != 5 && !(M8(self + 0x24) && n) && n > cap) {
         uint32_t want = n < cap * (uint32_t)sim_hz / 60 ? n : cap * (uint32_t)sim_hz / 60;
@@ -259,8 +265,7 @@ void f_0065C6D0(Cpu *c) {
     int carpaint_ab_hold(void);            // materials.m, BOOT_DIAG_CARPAINT_AB: same-frame X360 / PC car paint
     int detail_ab_hold(void);              // detail.c, BOOT_DIAG_DETAIL_AB: same-frame detail distances
     int envcube_ab_hold(void);
-    int shadow_near_ab_hold(void);
-    int held = (diag_on && sign_diag_on && sign_diag_hold()) | (diag_on && traffic_detail_ab_hold()) | postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold() | envcube_ab_hold() | (diag_on && shadow_near_ab_hold());   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
+    int held = (diag_on && sign_diag_on && sign_diag_hold()) | (diag_on && traffic_detail_ab_hold()) | postfx_ab_hold() | probe_hold() | carpaint_ab_hold() | portmenu_hold() | detail_ab_hold() | envcube_ab_hold();   // probe.m, BOOT_DIAG_PROBE: the same (base, signature, after)
     if (held) hold_real_time(c);
     uint32_t s = M32(SCHEDULER);
     int frame_pass = presents != presents_adv, lock = sim_hz && s && lockstep_now();
@@ -292,10 +297,17 @@ static uint64_t ns_to_abs(uint64_t ns) {
     return ns / tb.numer * tb.denom + ns % tb.numer * tb.denom / tb.numer;
 }
 
+static void pacing_no_slot(void) {
+    if (diag_on) {
+        uint64_t now = host_ticks();
+        present_timing_wait(0, now, now);
+    }
+}
+
 // After Present: wait for the next frame's slot, with the GIL released so other guest threads run meanwhile.
 void pacing_present(void) {
     ++presents;
-    int behind = catching_up;
+    uint32_t ticks_run = catching_up;
     catching_up = 0;
     static uint64_t deadline;
     static int slow = -1;                  // BOOT_DIAG_SLOWFRAME=<ms>: pad every frame (a slower Mac, for timing tests)
@@ -320,27 +332,30 @@ void pacing_present(void) {
             gil_release(); usleep((useconds_t)hitch_ms * 1000); gil_acquire();
         }
     }
-    if (!pace_on()) return;
+    if (!pace_on()) { pacing_no_slot(); return; }
     uint32_t s = M32(SCHEDULER);
-    if (!s) return;
+    if (!s) { pacing_no_slot(); return; }
     float step = MF32(s + 0x20), frac = MF32(s + 0x1C);
-    if (!(step > 0.001f && step < 0.1f) || !(frac >= 0.0f && frac <= 1.0f)) return;
-    uint64_t period = (uint64_t)(step * 1e9), now = host_ticks();
-    // The sim needed more than one tick: let it recover without a pacing sleep, even if the old slot is ahead.
-    // Lockstep's deterministic game/real-time clocks and its frame slots keep their existing policy.
-    if (behind && !lockstep_now()) { deadline = now; return; }
-    // keep the leftover fraction near the middle: a pass that measures slightly short or long still runs one tick
-    int64_t adjust = (int64_t)((0.5f - frac) * 0.1f * (float)period);
-    deadline += (uint64_t)((int64_t)period + adjust);
-    if (deadline + period < now || deadline > now + 2 * period) deadline = now;   // behind by a frame, or first call
-    if (deadline <= now) return;
+    if (!(step > 0.001f && step < 0.1f) || !(frac >= 0.0f && frac <= 1.0f)) { pacing_no_slot(); return; }
+    // The F10 frame rate limit's frame duration (render_present.m; 0 when Off or online, whose cap is in render_present).
+    // Lockstep's deterministic game/real-time clocks and its one-tick frame slots keep their existing policy.
+    double render_loop_limit_ms(void);
+    int lock = lockstep_now();
+    double limit_s = lock ? 0 : render_loop_limit_ms() / 1000;
+    uint64_t now = host_ticks(), period = (uint64_t)(step * 1e9) * (uint64_t)looppace_ticks(step, limit_s);
+    deadline = looppace_deadline(deadline, now, step, frac, limit_s, ticks_run, lock);
+    if (deadline <= now) {
+        if (diag_on) present_timing_wait(deadline, now, now);
+        return;
+    }
     gil_release();
     // Keep the original absolute deadline: releasing the GIL or being descheduled can already take us past it.
     // Adding (deadline - old_now) to a fresh Mach timestamp would sleep again even though we're now behind.
-    mach_wait_until(ns_to_abs(deadline));
+    pacewait_until(ns_to_abs(deadline));
     uint64_t woke = host_ticks();
     gil_acquire();
     uint64_t acquired = host_ticks();
+    if (diag_on) present_timing_wait(deadline, woke, acquired);
     diag_idle_ns[IDLE_SLEEP] += woke - now;
     diag_idle_ns[IDLE_GIL] += acquired - woke;
     if (acquired - now > 2 * period)

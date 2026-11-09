@@ -18,7 +18,9 @@ bundle identity hook, case-varied text extension, and nesting/read/write/regex f
 Quoted and unquoted fields, unfinished/multiline quotes and escaped quotes are covered. Unquoted
 personal paths/credentials conservatively consume to a field or line delimiter; opaque encodings
 such as base64 outside recognized authorization values are not decoded as arbitrary secret containers.
+Wall time (same load, back to back): 130 s with the broken controls in sequence, 43 s with four at a time; identical result lines.
 """
+import concurrent.futures
 import hashlib
 import os
 from pathlib import Path
@@ -419,7 +421,7 @@ def run(name, header, *, baseline=False, expected_failure=False, fixture=None, r
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-Wno-unused-variable', '-fsanitize=address,undefined', '-fobjc-arc', '-DNFS_PUBLIC=1',
                '-I' + str(ROOT / 'recomp'), '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME),
-               str(work / 'report_privacy_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'),
+               str(work / 'report_privacy_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'ImageIO', '-framework', 'QuartzCore', '-framework', 'Metal',
                '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
     if baseline:
@@ -518,18 +520,23 @@ def main():
     mutants['nesting_fail_closed'] = header.replace('return nil;\n}\n\n// Bundle', 'return text;\n}\n\n// Bundle')
     mutants['decode_fail_closed'] = header.replace('if (!bytes) return nil;', 'if (!bytes) return text;')
     mutants['write_fail_closed'] = header.replace('[fm removeItemAtPath:path error:NULL];', '(void)path;')
+    # The broken controls are independent (own scratch dir and binary each); compile them four at a time.
+    jobs = []
     for name, broken in mutants.items():
         assert broken != header, name + ' did not mutate production code'
-        run('broken_' + name, broken, expected_failure=True,
-            expected_counts=(893, 3) if name == 'mixed_encoding' else None)
+        jobs.append(('broken_' + name, broken, dict(expected_failure=True,
+                     expected_counts=(893, 3) if name == 'mixed_encoding' else None)))
     # Restore each partial-token rule independently without reverting other protections.
     for protection in ('github', 'bearer'):
         marker = '// privacy:' + protection
         fixed = next(line for line in header.splitlines() if line.endswith(marker))
         old = PREDECESSOR_RULES[protection]
         assert fixed != old
-        run('broken_encoded_' + protection, header.replace(fixed, old), expected_failure=True)
-    run('broken_log_copy', header, copy_source=PREDECESSOR_COPY, expected_failure=True)
+        jobs.append(('broken_encoded_' + protection, header.replace(fixed, old), dict(expected_failure=True)))
+    jobs.append(('broken_log_copy', header, dict(copy_source=PREDECESSOR_COPY, expected_failure=True)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for future in [pool.submit(run, n, h, **kw) for n, h, kw in jobs]:
+            future.result()
     # Force a production regex compilation error. A nil sanitizer must delete, never export, its input.
     line = next(line for line in header.splitlines() if '// privacy:github' in line)
     invalid = header.replace(line, '    text = ReportPrivacyReplace(text, @"[", @"[token]");')

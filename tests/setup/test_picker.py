@@ -6,8 +6,19 @@
 
 
 
+
+
+
+
+
+
 """
 import os
+import io
+import hashlib
+import json
+from contextlib import redirect_stdout
+from unittest import mock
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +27,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+(ROOT / '.metal-cache').mkdir(exist_ok=True)
 SWIFT = ROOT / "tools/installer/SetupApp.swift"
 sys.path.insert(0, str(ROOT / "tools"))
 from setup_kit import backend
@@ -89,6 +101,99 @@ class PickerTests(unittest.TestCase):
             except backend.SetupError:
                 failures += 1
             self.assertEqual(failures, 1, "broken pcRoot control must fail the speed.exe acceptance oracle")
+
+    def test_extras_page_sequence_original_control(self):
+        original = 'enum Page: Int { case welcome, pc, x360, review, build, finished }'
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(), '62806724829305c3b7b3b85efafc41d3fa7a3c99fbf7e94026f05e0216e69947')
+        with tempfile.TemporaryDirectory(prefix='extras-pages-', dir=ROOT / '.metal-cache') as td:
+            scratch = Path(td)
+            results = []
+            for label, enum in (('current', extract_function(SWIFT.read_text(), 'enum Page')), ('original', original)):
+                source = scratch / (label + '.swift')
+                binary = scratch / label
+                source.write_text('import Foundation\n' + enum + '\n'
+                    + 'print((0...6).compactMap { Page(rawValue: $0) }.map { String(describing: $0) }.joined(separator: ","))\n')
+                subprocess.run(['swiftc', '-module-cache-path', str(scratch / 'modules'), str(source), '-o', str(binary)],
+                               check=True, capture_output=True)
+                results.append(subprocess.run([str(binary)], check=True, capture_output=True, text=True).stdout.strip().split(','))
+            expected = ['welcome', 'pc', 'x360', 'extras', 'review']
+            self.assertEqual(results[0][:5], expected)
+            self.assertNotEqual(results[1][:5], expected, 'original page sequence must fail the extras oracle')
+
+    def test_carbon_picker_keeps_independent_roles_and_recognizes_content(self):
+        sys.path.insert(0, str(ROOT / 'tests/setup'))
+        import test_car_sources as sf
+        from setup_kit import car_sources as cs
+        with tempfile.TemporaryDirectory(prefix='carbon-picker-', dir=ROOT / '.metal-cache') as td:
+            scratch = Path(td)
+            game = scratch / 'carbon'
+            sf.write_files(game, dict(sf.ASSETS, **{'unusual-launcher.EXE': sf.fake_pe()}))
+            xbox = scratch / 'xbox'
+            physical = sf.archive_files(sf.fake_xex(), {n: b'x360 ' + v for n, v in sf.ASSETS.items()})
+            sf.write_files(xbox, physical)
+            iso = scratch / 'renamed-disc.iso'
+            iso.write_bytes(sf.tiny_iso(physical))
+            manifest = scratch / 'fingerprints.json'
+            manifest.write_text(json.dumps({'schema': 1, 'releases': [sf.release('pc', sf.fake_pe(), sf.ASSETS),
+                sf.release('x360', sf.fake_xex(), {n: b'x360 ' + v for n, v in sf.ASSETS.items()})]}))
+            source = scratch / 'picker.swift'
+            source.write_text('import Foundation\n' + extract_function(SWIFT.read_text(), 'enum RunMode') + '\n'
+                + 'func sourceDir() -> URL { URL(fileURLWithPath: "/payload") }\n'
+                + extract_function(SWIFT.read_text(), 'func carArguments') + '\n'
+                + 'let args = carArguments(mode: .carsCheck, carbon: URL(fileURLWithPath: CommandLine.arguments[1]), '
+                  'selection: nil, work: URL(fileURLWithPath: CommandLine.arguments[2]))\n'
+                + 'print(String(data: try! JSONSerialization.data(withJSONObject: args), encoding: .utf8)!)\n')
+            binary = scratch / 'picker'
+            subprocess.run(['swiftc', '-module-cache-path', str(scratch / 'modules'), str(source), '-o', str(binary)],
+                           check=True, capture_output=True)
+            with mock.patch.object(cs, 'MANIFEST', manifest), \
+                    mock.patch.object(backend, 'ROOT', scratch / 'payload'), \
+                    mock.patch.dict(os.environ, {'NFSMW_SETUP_HOME': str(scratch / 'setup-home')}):
+                for chosen, platform in ((game, 'pc'), (game / 'unusual-launcher.EXE', 'pc'),
+                                          (xbox, 'x360'), (xbox / 'DEFAULT.XEX', 'x360'), (iso, 'x360')):
+                    with self.subTest(chosen=chosen.name):
+                        result = subprocess.run([str(binary), str(chosen), str(scratch / 'work')],
+                                                check=True, capture_output=True, text=True)
+                        args = json.loads(result.stdout)[2:]
+                        self.assertEqual(args[args.index('--carbon') + 1], str(chosen))
+                        self.assertFalse(set(('--pc', '--x360', '--dest', '--build')).intersection(args))
+                        output = io.StringIO()
+                        with redirect_stdout(output):
+                            rc = backend.main(args)
+                        events = [json.loads(line) for line in output.getvalue().splitlines()]
+                        if chosen.suffix.lower() in ('.exe', '.xex'):
+                            from test_car_setup_flow import original_carbon_input
+                            original_output = io.StringIO()
+                            with mock.patch.object(backend, 'carbon_input', original_carbon_input()), redirect_stdout(original_output):
+                                self.assertEqual(backend.main(args), 0)
+                            self.assertIn('cars-recognition', original_output.getvalue())
+                            self.assertNotEqual(rc, 0, events)
+                            self.assertIn('game folder', events[-1]['msg'])
+                            self.assertFalse(any(e['ev'] == 'cars-recognition' for e in events))
+                            continue
+                        self.assertEqual(rc, 0, output.getvalue())
+                        recognition = next(e for e in events if e['ev'] == 'cars-recognition')
+                        self.assertEqual(recognition['platform'], platform)
+                        self.assertFalse(recognition['output_verified'])
+                # Same bytes identified as a different game are recognized by
+                # the source API, then rejected by the Carbon-only UI command.
+                manifest.write_text(json.dumps({'schema': 1, 'releases': [sf.release('pc', sf.fake_pe(), sf.ASSETS, game='prostreet')]}))
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    rc = backend.main(['--cars-check', '--carbon', str(game), '--events'])
+                self.assertNotEqual(rc, 0)
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertFalse(any(e['ev'] in ('done', 'cars-result') for e in events))
+                self.assertIn('Carbon source', events[-1]['msg'])
+                # A wrong title ID in the chosen Xbox folder is refused by content.
+                sf.write_files(xbox, {'DEFAULT.XEX': sf.fake_xex(title=0x4D5307E6)})
+                manifest.write_text(json.dumps({'schema': 1, 'releases': [sf.release('x360', sf.fake_xex(),
+                    {n: b'x360 ' + v for n, v in sf.ASSETS.items()})]}))
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    rc = backend.main(['--cars-check', '--carbon', str(xbox), '--events'])
+                self.assertNotEqual(rc, 0)
+                self.assertNotIn('"ev":"cars-result"', output.getvalue())
 
     def test_missing_disc_numbers_read_from_the_backend_messages(self):
         """The disc page offers "Disc N: Choose..." for exactly the discs the backend's check could not find."""

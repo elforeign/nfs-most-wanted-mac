@@ -1,16 +1,14 @@
-"""Offline chase-camera maths and hook isolation, including four source-mutation controls.
+"""Offline chase-camera maths and hook isolation, including two source-mutation controls.
 Run: $TOOLS_PY -I runtime/chasecam_test.py [--broken]
 Compiles the real chasecam.c with the translated MW parameter/boost evaluators
 and their dependency closure, loading their actual tables from speed.exe.
 Curve expectations come from the decoded endpoints in chasecam_spec.md.
 The live recorded matrix proof is BOOT_DIAG_CHASE_COMPARE=1 (or broken).
-Results: 417 hook/registry checks, 12 env checks and 104 curve comparisons pass; flattened close FOV
+Results: 419 hook/registry checks, 12 env checks and 104 curve comparisons pass; flattened close FOV
 fails 1 hook check and 9 curve comparisons; applying On hooks while Off
 fails 12 hook checks. The runtime matrix comparator gives 0 differing words normally
 and 1 with deliberate output corruption. The normal run rejects output corruption
-and four source mutations. Pan fixture: 1,554 frozen-yaw and 1,425 unfrozen-hold
-checks pass; forcing weather freezing fails 515 hold checks, removing repeat yaw
-fails 226 checks.
+and two source mutations.
 No game, Unicorn, GPU, sockets or private ProStreet input is used.
 """
 import math
@@ -39,16 +37,6 @@ void app_pref_batch_begin(void) {}
 void app_pref_batch_end(void) {}
 void report_note(const char *f, ...) { (void)f; }
 void diag_event(const char *f, ...) { (void)f; }
-static int pan_calls, stable_value, stable_calls, fit_value=-1, fit_calls;
-void f_004700D0(Cpu *c) {
-    ++pan_calls; memcpy(G+c->ecx,G+M32(c->esp+4),64);
-    M16(c->ecx+0xC4)=0; c->eax=123; c->esp+=12;
-}
-void x360_set_shadow_stable(int on) { stable_value=on; ++stable_calls; }
-void x360_set_shadow_fit(int preset) { fit_value=preset; ++fit_calls; }
-static unsigned pose_calls;
-int shadow_near_ab_enabled(void) {return 0;}
-void shadow_near_pose_camera(Cpu *c,uint32_t camera,uint32_t view,uint32_t mode) { (void)c;(void)camera;(void)view;(void)mode;++pose_calls; }
 float diag_car_speed(void) { return 0; }
 uint64_t diag_current_frame(void) { return 0; }
 void diag_shot_request(uint64_t f) { (void)f; }
@@ -92,53 +80,10 @@ static Cpu initial(unsigned view, unsigned mode, float kmh) {
     MF32(ANCHOR+0x10)=kmh/3.6f; MF32(ANCHOR+0x14)=80;
     Cpu c; child(&c,MOVER,0x12345); return c;
 }
-static int fixture(void) {
-    int ab=getenv("BOOT_DIAG_SHADOW_AB")!=NULL;
-    int yaw=!strcmp(getenv("BOOT_DIAG_SHADOW_PAN"),"yaw");
-    Cpu c=initial(1,2,0), before=c; diag_on=1;
-    M32(0x925E90)=6; M32(0x919650)=0xB05000; M32(0x9196B8)=0xB06000;
-    M32(0x9B392C)=0xB0A000;
-    memset(G+CAMERA,0,64);
-    for(int i=0;i<4;i++) MF32(CAMERA+i*20)=1;
-    for(int i=0;i<3;i++) MF32(CAMERA+48+i*4)=-(float)(i+3);
-    M16(CAMERA+0xC4)=14196;
-    MF32(0x9885D8)=0; shadow_pan(&c,CAMERA,1);
-    CHECK(!pan_calls);
-    for(int step=0;step<=128;step++) {
-        float t=10+step*.25f;
-        MF32(0x9885D8)=t; MF32(0xB0A180)=t;
-        MF32(0xB06290)=.3f; MF32(0xB0628C)=.4f; MF32(0xB096A0)=.5f;
-        shadow_pan(&c,CAMERA,1);
-        shadow_pan_matrix(CAMERA);
-        CHECK(!memcmp(&c,&before,sizeof c)); CHECK(M16(CAMERA+0xC4)==14196);
-        float sweep=ab?fmodf(t-10,4)-2:t-12;
-        float a=yaw&&sweep>0?sweep*2*.017453292519943295f:0;
-        near(MF32(CAMERA),cosf(a)); near(MF32(CAMERA+16),sinf(a));
-        for(int i=0;i<3;i++) {
-            float eye=0;
-            for(int j=0;j<3;j++) eye-=MF32(CAMERA+48+j*4)*MF32(CAMERA+i*16+j*4);
-            near(eye,(float)(i+3));
-        }
-        near(MF32(0xB06290),ab?0:.3f); near(MF32(0xB0628C),ab?0:.4f);
-        near(MF32(0xB096A0),ab?0:.5f); near(MF32(0xB0A180),ab?10:t);
-        if(ab) CHECK(stable_value==(t>=18&&(t<26||t>=38)));
-    }
-    CHECK(pan_calls==129); CHECK(stable_calls==(ab?129:0));
-    CHECK(fit_calls==(ab?1:0)); CHECK(fit_value==(ab?0:-1));
-    // Diagnostic state must not mutate render weather when diagnostics are off.
-    diag_on=0; MF32(0xB06290)=.7f; shadow_pan_environment(); near(MF32(0xB06290),.7f);
-    printf("pan fixture %s %s: checks=%u failures=%u\n",yaw?"yaw":"hold",ab?"frozen":"unfrozen",checks,failures);
-    return failures?1:0;
-}
 int main(int argc,char **argv) {
     if(argc!=2 && argc!=3) return 2;
     G=calloc(1,SIZE); FILE *f=fopen(argv[1],"rb"); if(!G || !f) return 2;
     size_t got=fread(G,1,SIZE,f); fclose(f); if(!got) return 2;
-    if(argc==3 && !strcmp(argv[2],"fixture")) {
-        static char dir[1024]; snprintf(dir,sizeof dir,"%s",argv[1]);
-        char *slash=strrchr(dir,'/'); if(!slash) return 2; *slash=0; diag_dir=dir;
-        return fixture();
-    }
     Setting *registered=settings_find("controls.chase_camera");
     CHECK(registered==&s_chase && registered->category==SET_CONTROLS && registered->order==140);
     CHECK(registered->def==0 && registered->restart==0 && !strcmp(registered->env,"NFS_CHASE_CAM"));
@@ -212,8 +157,10 @@ int main(int argc,char **argv) {
     replay=initial(1,2,200); chase_compare(&replay,&proof,1); frame=NULL;
     // Bumper mode reaches the diagnostic hold/pose path even when the speed
     // camera setting is Off. Ordinary unsupported modes still call retail.
-    unsigned poses=pose_calls;
-    Cpu bumper=initial(1,0,0);f_0047D3C0(&bumper);CHECK(pose_calls==poses+1);
+    Cpu bumper=initial(1,0,0), baseline=bumper;
+    memcpy(before,G,SIZE); f_0047D3C0_orig(&baseline); memcpy(after,G,SIZE);
+    memcpy(G,before,SIZE); f_0047D3C0(&bumper);
+    CHECK(!memcmp(&bumper,&baseline,sizeof bumper)); CHECK(!memcmp(G,after,SIZE));
     printf("hooks checks=%u failures=%u\n",checks,failures);
     free(before); free(after); free(G); return failures?1:0;
 }
@@ -285,18 +232,7 @@ def run(d, label, source):
     failures += int(rows != len(SPEEDS) * 2)
     proof = list(csv.DictReader((d / 'chasecam_compare.tsv').open(), delimiter='\t'))
     failures += int(len(proof) != 2 or proof[0]['different_words'] != '0' or proof[1]['different_words'] != '1')
-    if label in ('normal', 'broken-freeze', 'broken-repeat'):
-        for mode, ab in [('yaw', True), ('hold', False)]:
-            fixture_env = {**env, 'BOOT_DIAG_SHADOW_PAN': mode}
-            if ab: fixture_env['BOOT_DIAG_SHADOW_AB'] = 'both'
-            proof_run = subprocess.run([str(d/'test'),str(d/'image.bin'),'fixture'],
-                                       capture_output=True,text=True,env=fixture_env)
-            print(proof_run.stdout.strip())
-            failures += int(proof_run.returncode != 0)
-            if proof_run.returncode: print(proof_run.stderr[-1500:])
-            fit_rows = list(csv.DictReader((d/'shadow_pan_fit.tsv').open(),delimiter='\t'))
-            failures += int(len(fit_rows) != 129 or
-                            any(row['frozen'] != str(int(ab)) for row in fit_rows))
+    if label == 'normal':
         for value in ('off', 'on'):
             p_env = subprocess.run([str(d / 'test'), str(d / 'image.bin'), str(int(value == 'on'))],
                 capture_output=True, text=True, env={**env, 'NFS_CHASE_CAM':value})
@@ -344,10 +280,8 @@ def main():
         normal = run(d, 'normal', source)
         mutant_curve = run(d, 'broken-curve', broken)
         mutant_off = run(d, 'broken-Off', source.replace('if (frame->active) {', 'if (1) {'))
-        mutant_freeze = run(d, 'broken-freeze', source.replace('shadow_pan_environment_active = ab;', 'shadow_pan_environment_active = 1;'))
-        mutant_repeat = run(d, 'broken-repeat', source.replace('fmodf(t - 10, 4) - 2', 't - 12'))
-        ok = normal == 0 and min(mutant_curve, mutant_off, mutant_freeze, mutant_repeat) > 0 and check_recording()
-        print('CHASECAM PASS (four broken controls rejected)' if ok else 'CHASECAM FAIL')
+        ok = normal == 0 and min(mutant_curve, mutant_off) > 0 and check_recording()
+        print('CHASECAM PASS (two broken controls rejected)' if ok else 'CHASECAM FAIL')
         return 0 if ok else 1
 
 

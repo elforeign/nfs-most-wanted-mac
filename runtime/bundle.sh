@@ -52,6 +52,16 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp boot "$APP/Contents/MacOS/$EXEC_NAME"
 cp docs/guide.md "$APP/Contents/Resources/Guide.md"
+# Keep the complete texts readable from Help > Licences, including source and
+# relinking instructions. A public bundle must never silently omit them.
+for legal in ../NOTICE ../LICENSE ../media/PREBUILT.md ../media/licenses/LGPL-2.1.txt ../media/licenses/FFmpeg-notices.txt; do
+    if [ -f "$legal" ]; then
+        cat "$legal" >> "$APP/Contents/Resources/Licences.md"
+        printf '\n\n' >> "$APP/Contents/Resources/Licences.md"
+    elif [ "${NFS_PUBLIC:-0}" = 1 ]; then
+        echo "bundle.sh: required licence file missing: $legal" >&2; exit 1
+    fi
+done
 # The checklist is optional and is never included in a public build.
 TESTING_MD=${NFS_TESTING_MD:-docs/testing.md}
 if [ "${NFS_PUBLIC:-0}" != 1 ] && [ -f "$TESTING_MD" ]; then

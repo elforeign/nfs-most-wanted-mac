@@ -19,6 +19,7 @@ def run(source, saved):
         (tmp / 'pub_settings.c').write_text(source)
         pref = f'    app_pref_set("graphics.car_reflection", "{saved}");\n' if saved else ''
         (tmp / 'main.c').write_text(stubs + '''
+void live_picture_apply_reset(int v) { (void)v; }
 int main(void) {
 ''' + pref + '''    settings_init();
     const Setting *s = settings_find("graphics.car_reflection");

@@ -27,7 +27,6 @@ pre=r'''
 #include <stdlib.h>
 #include <string.h>
 static int diag_on=1,gpt_on;
-static int upscale_copy_active(void) { return 0; } // Standalone default-Off transport fixture.
 static char *diag_dir="/tmp";
 static uint64_t frame_serial=1;
 static id<MTLDevice> mtl;

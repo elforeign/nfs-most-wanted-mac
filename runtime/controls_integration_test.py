@@ -3,13 +3,13 @@
 Fake FE widgets, physical devices and scratch files only. Binding insertion,
 selection, layout mapping and evaluation use production/translated functions.
 PASS: 393,940 checks / 0 failures across native PS and both non-PS layouts,
-front-end and pause. Pre-fix Reset Defaults: 58 / 393,940 failures (PS 32,
-Xbox 26, PS2 0); reset-layout mutation reproduces the same failures.
+front-end and pause. Reset-layout mutation with the production row/settings fixture: 48 / 393,940
+failures (PS 28, Xbox 20, PS2 0). Original standalone fixture: 58 failures.
 Reset checks both slots of all 19 actions and Speedbreaker's physical controls.
 Pinned 64bf1349 functions: 764 / 393,914 failures in each capture/P2 variant
 (capture phase 244; P2 phase 332), never a compile rejection.
 Capture-remap / P2-leak / restore / cancel / premature-save mutants:
-428 / 332 / 11,194 / 1,884 / 4,392 failures out of 393,914 / 393,940 /
+428 / 332 / 11,146 / 1,890 / 4,392 failures out of 393,914 / 393,940 /
 393,940 / 393,940 / 393,940 checks. Earlier pinned standalone proofs remain.
 Original function fragments are embedded and SHA-256 verified without Git.
 Baseline isolation: 3 checks / 0 failures; pre-fix: 3 / 3 failures.
@@ -535,7 +535,7 @@ int main(int argc,char **argv) {
 def main():
     if not (R.parent/'recomp/out/speed_31.c').exists():
         print('SKIP: needs translated input functions'); return 3
-    pre = h.PRE
+    pre = re.sub(r'void settings_add\(.*?\n', '', h.PRE)
     for name in ('padbind_port_begin', 'padbind_port_end', 'padbind_input_set',
                  'padbind_input_begin', 'padbind_input_end', 'padbind_follow',
                  'padbind_swap', 'f_00634900', 'padbind_race_update'):

@@ -1,7 +1,8 @@
 // padfx.m - the DualSense's adaptive triggers and lightbar, from the race (stage 2 of the native DualSense).
 //
 // Both go out through GameController.framework (GCDualSenseGamepad.leftTrigger / rightTrigger, GCController.light),
-// All effects are built in, default On; hidden NFS_PAD_TRIGGERS/LIGHT/ROAD/PLAYERS=off overrides disable them.
+// Effects default On. Native Controls saves adaptive triggers; NFS_PAD_TRIGGERS overrides it.
+// Hidden NFS_PAD_LIGHT/ROAD/PLAYERS=off overrides disable the other effects.
 // Road loading requires adaptive triggers; player indicators identify both slots. Rumble stays
 // rumble.m's (the X360 model on the compatible-vibration motors, NFS_RUMBLE). Nothing here touches a controller
 // unless its switch is on and the pad is a real one: with BOOT_PAD=sim, or a switch off, the same decisions are made
@@ -36,18 +37,26 @@
 #include <stdatomic.h>
 
 #include "host.h"
+#include "setting_bool.h"
 
 #define FN_PLAYER_PURSUIT 0x005EB9E0u   // GManager::GetPlayerPursuitInterfaces(IPursuit **, IPerpetrator **)
 #define FN_GET_HEAT 0x00409400u         // AIPerpVehicle::GetHeat, slot +4 of the IPerpetrator vtable
 #define VT_IPURSUIT 0x00892770u         // AIPursuit's IPursuit vtable
 
 // ---------------- switches ----------------
-static int trig_sw = -1, light_sw = -1, player_sw = -1, road_sw = -1;   // -1: not read yet
+static _Atomic int trig_sw = -1;
+static int light_sw = -1, player_sw = -1, road_sw = -1;   // -1: not read yet
 static int env_on(const char *name) {
     const char *e = getenv(name);
     return e && (!strcmp(e, "on") || !strcmp(e, "1") || !strcasecmp(e, "true"));
 }
-static int triggers_on(void) { if (trig_sw < 0) trig_sw = !getenv("NFS_PAD_TRIGGERS") || env_on("NFS_PAD_TRIGGERS"); return trig_sw; }
+static int triggers_on(void) {
+    if (trig_sw < 0) {
+        int value = setting_bool_parse(getenv("NFS_PAD_TRIGGERS"));
+        trig_sw = value < 0 ? 1 : value;
+    }
+    return trig_sw;
+}
 static int light_on(void) { if (light_sw < 0) light_sw = !getenv("NFS_PAD_LIGHT") || env_on("NFS_PAD_LIGHT"); return light_sw; }
 static int player_on(void) { if (player_sw < 0) player_sw = !getenv("NFS_PAD_PLAYERS") || env_on("NFS_PAD_PLAYERS"); return player_sw; }
 int padfx_road_wanted(void) { if (road_sw < 0) road_sw = !getenv("NFS_PAD_ROAD") || env_on("NFS_PAD_ROAD"); return triggers_on() && road_sw; }
@@ -211,6 +220,11 @@ static NSHashTable<GCController *> *detached;                // guarded by GCCon
 static NSMutableArray<PadRestore *> *restorations;          // main queue only
 static void release_pad(void);
 static void release_player(int i);
+static void fx_sent(GCController *ctl, int n) {
+    if (!diag_on) return;
+    uint64_t link = padlink_token((__bridge void *)ctl);
+    while (n-- > 0) padlink_output(link, PADLINK_FX, 1);
+}   // padlink.c's output count
 static int is_detached(GCController *ctl) {
     if (!ctl) return 0;
     @synchronized (GCController.class) { return [detached containsObject:ctl]; }
@@ -227,10 +241,10 @@ static void restore_connected(GCController *ctl) {           // main, before tak
     for (PadRestore *r in [restorations copy]) if (r.ctl == ctl) {
         if (r.triggers && [ctl.extendedGamepad isKindOfClass:GCDualSenseGamepad.class]) {
             GCDualSenseGamepad *g = (GCDualSenseGamepad *)ctl.extendedGamepad;
-            [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff];
+            [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff]; fx_sent(ctl, 2);
         }
-        if (r.light && r.color) ctl.light.color = r.color;
-        if (r.player) ctl.playerIndex = r.index;
+        if (r.light && r.color) { ctl.light.color = r.color; fx_sent(ctl, 1); }
+        if (r.player) { ctl.playerIndex = r.index; fx_sent(ctl, 1); }
         [restorations removeObject:r];
     }
 }
@@ -251,7 +265,8 @@ void padfx_connect(void *gc) {
     if ([NSThread isMainThread]) settle();
     else dispatch_async(dispatch_get_main_queue(), settle);
 }
-static void apply_trig(GCDualSenseAdaptiveTrigger *t, Trig x) {
+static void apply_trig(GCController *ctl, GCDualSenseAdaptiveTrigger *t, Trig x) {
+    fx_sent(ctl, 1);
     switch (x.mode) {
     case T_FEEDBACK: [t setModeFeedbackWithStartPosition:x.a resistiveStrength:x.b]; break;
     case T_SLOPE:
@@ -278,9 +293,9 @@ static void release_pad(void) {           // main: restore only the outputs we t
     }
     if (!gone && trig_taken && [owner.extendedGamepad isKindOfClass:GCDualSenseGamepad.class]) {
         GCDualSenseGamepad *g = (GCDualSenseGamepad *)owner.extendedGamepad;
-        [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff];
+        [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff]; fx_sent(owner, 2);
     }
-    if (!gone && light_taken && owner.light && own_color) owner.light.color = own_color;
+    if (!gone && light_taken && owner.light && own_color) { owner.light.color = own_color; fx_sent(owner, 1); }
     trig_taken = light_taken = 0;
     owner = nil; own_color = nil;
     sent_l = sent_r = (Trig){.mode=-1}; sent_c = (Light){.own=-1};
@@ -290,7 +305,7 @@ static void release_player(int i) {
         if (is_detached(player_owner[i])) {
             PadRestore *r = restoration(player_owner[i]);
             if (!r.player) { r.player = 1; r.index = own_index[i]; }
-        } else player_owner[i].playerIndex = own_index[i];
+        } else { player_owner[i].playerIndex = own_index[i]; fx_sent(player_owner[i], 1); }
     }
     player_owner[i] = nil;
 }
@@ -317,30 +332,30 @@ static void flush(uint64_t token) {       // main; a cancelled block can never r
     owner = ctl;
     GCDualSenseGamepad *g = [ctl.extendedGamepad isKindOfClass:GCDualSenseGamepad.class] ? (GCDualSenseGamepad *)ctl.extendedGamepad : nil;
     if (g && want.triggers) {
-        if (!trig_eq(want.l, sent_l)) { apply_trig(g.leftTrigger, want.l); sent_l = want.l; }
-        if (!trig_eq(want.r, sent_r)) { apply_trig(g.rightTrigger, want.r); sent_r = want.r; }
+        if (!trig_eq(want.l, sent_l)) { apply_trig(ctl, g.leftTrigger, want.l); sent_l = want.l; }
+        if (!trig_eq(want.r, sent_r)) { apply_trig(ctl, g.rightTrigger, want.r); sent_r = want.r; }
         trig_taken = 1;
     } else if (g && trig_taken) {
-        [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff];
+        [g.leftTrigger setModeOff]; [g.rightTrigger setModeOff]; fx_sent(ctl, 2);
         trig_taken = 0; sent_l = sent_r = (Trig){.mode=-1};
     }
     if (ctl.light && want.light) {
         if (!light_taken) { own_color = ctl.light.color; light_taken = 1; }
         Light c = want.c;
         if (c.own != sent_c.own || c.r != sent_c.r || c.g != sent_c.g || c.b != sent_c.b) {
-            if (!c.own) ctl.light.color = [[GCColor alloc] initWithRed:c.r green:c.g blue:c.b];
-            else if (own_color) ctl.light.color = own_color;
+            if (!c.own) { ctl.light.color = [[GCColor alloc] initWithRed:c.r green:c.g blue:c.b]; fx_sent(ctl, 1); }
+            else if (own_color) { ctl.light.color = own_color; fx_sent(ctl, 1); }
             sent_c = c;
         }
     } else if (light_taken) {
-        if (own_color) ctl.light.color = own_color;
+        if (own_color) { ctl.light.color = own_color; fx_sent(ctl, 1); }
         light_taken = 0; own_color = nil; sent_c = (Light){.own=-1};
     }
     // Restore displaced owners before assigning either new slot (including a slot swap).
     for (int i = 0; i < 2; ++i) if (player_owner[i] != want.players[i]) release_player(i);
     for (int i = 0; i < 2; ++i) if (want.players[i] && !is_detached(want.players[i]) && !player_owner[i]) {
         player_owner[i] = want.players[i]; own_index[i] = player_owner[i].playerIndex;
-        player_owner[i].playerIndex = i ? GCControllerPlayerIndex2 : GCControllerPlayerIndex1;
+        player_owner[i].playerIndex = i ? GCControllerPlayerIndex2 : GCControllerPlayerIndex1; fx_sent(player_owner[i], 1);
     }
     applied_generation = token;
     output_active = trig_taken || light_taken || player_owner[0] || player_owner[1];
@@ -397,7 +412,14 @@ void padfx_poll(void) {
 void padfx_close(void) {
     if (!atomic_exchange(&closed, 1)) padfx_stop();
 }
-void padfx_set_triggers(int on) { trig_sw = on != 0; padfx_stop(); }
+void padfx_set_triggers(int on) {
+    pthread_mutex_lock(&mu);
+    trig_sw = on != 0;
+    // Release resistance immediately, including an already queued frame. Do not
+    // invalidate the shared feedback model: compatible-vibration rumble stays live.
+    if (!on) { want.triggers = 0; post(); }
+    pthread_mutex_unlock(&mu);
+}
 void padfx_set_light(int on) { light_sw = on != 0; padfx_stop(); }
 void padfx_set_players(int on) { player_sw = on != 0; padfx_stop(); }
 void padfx_set_road(int on) { road_sw = on != 0; padfx_stop(); }

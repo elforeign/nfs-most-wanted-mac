@@ -27,6 +27,12 @@
 
 
 
+
+
+
+
+
+
 """
 import argparse
 from contextlib import contextmanager
@@ -56,16 +62,18 @@ import zipfile
 
 from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, digest_tree, mark_owned, owned, real_dir,
                       recover_interrupted, remove, transactional_install, write_synced)
-from . import pc_disc, rtpatch
+from . import pc_disc, rtpatch, prebuilt
+from . import car_sources, car_catalog
 from . import stage as staging
 from .x360_cache import PreparedCache, preparation_key
+from . import x360_extras
 
 ROOT = Path(__file__).resolve().parents[2]
 FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.4.0"
+PUBLIC_VERSION = "4.5.0"
 LLVM_FLAGS = ["-mllvm", "-capture-tracking-max-uses-to-explore=100000"]
 STAGES = [
     ("preflight", "Checking developer tools"), ("pc", "Checking the installed PC game"),
@@ -151,10 +159,12 @@ def safe_cache_dir():
     return Path(base) / "NFSMW-Setup"
 
 
-# (pc_src.tmp and check-x360.tmp are the stamps' temporary files: an interrupted run leaves them.)
+# (pc_src.tmp and check-x360.tmp are the stamps' temporary files: an interrupted run leaves them; car-selection.json is
+# the extras page's ticked cars, written before the first PC check can mark the folder.)
 SETUP_WORK_NAMES = {"run-log.txt", "tmp", "tool-home", "toolchain", "logs", "stage", "check-x360", "check-x360.json",
-                    "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", ".setup.lock", OWNER_MARK}
-SETUP_CACHE_NAMES = {"builds", "build.lock", "x360", OWNER_MARK}
+                    "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", ".setup.lock", "extras", "car-selection.json",
+                    OWNER_MARK}
+SETUP_CACHE_NAMES = {"builds", "stages", "build.lock", "x360", "cars", OWNER_MARK}
 
 
 def claim(folder, default, known, what, registry):
@@ -297,16 +307,18 @@ class Events:
             self.log.write((line + "\n").encode())
             self.log.flush()
         except OSError:
-            if ev not in ("done", "ready"):
+            if ev not in ("done", "ready", "cars-result"):
                 raise
-        if self.enabled:
-            try:
+        try:
+            if self.enabled:
                 print(line, file=self.stream, flush=True)
-            except OSError:
-                if ev not in ("done", "ready"):
-                    raise
-        elif ev in ("stage", "error", "warn", "done", "ready"):
-            print(fields.get("title") or fields.get("msg") or fields.get("app") or fields.get("descriptor"), file=self.stream, flush=True)
+            elif ev in ("stage", "error", "warn", "done", "ready", "cars-result"):
+                message = (fields.get("title") or fields.get("msg") or fields.get("app") or fields.get("descriptor")
+                           or ("Extras " + fields.get("operation", "") + " completed."))
+                print(message, file=self.stream, flush=True)
+        except OSError:
+            if ev not in ("done", "ready", "cars-result"):
+                raise
         if ev in ("done", "ready"):
             self.completed = True
 
@@ -521,6 +533,18 @@ def validate_pc(root, source_root=ROOT):
     return exe, exe_fingerprint(exe.read_bytes(), exe, source_root)
 
 
+def movie_note(root):
+    """A player-facing note when the game folder has no usable movies (MOVIES with a non-empty .vp6), else None.
+    Disc sets without them are refused while they are unpacked; an installed folder or its .zip is used as it is."""
+    folders = [p for p in root.iterdir() if p.name.casefold() == "movies" and p.is_dir() and not p.is_symlink()]
+    if any(p.is_file() and not p.is_symlink() and p.suffix.casefold() == ".vp6" and p.stat().st_size > 0
+           for folder in folders for p in folder.iterdir()):
+        return None
+    return ("Your game folder has " + ("an empty MOVIES folder" if folders else "no MOVIES folder") +
+            ", so the game's intro and story movies won't play. To have them, copy the MOVIES folder from your game"
+            " disc into the game folder, then run Setup again.")
+
+
 ZIP_MAX_BYTES = 8 * 1024**3   # a full game folder unpacks to about 2.8 GB
 ZIP_MAX_FILES = 20000         # it has about 1,500 entries
 PC_DIRS = ("GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND")
@@ -656,7 +680,7 @@ def extract_pc_disc(source, update, exe, work, events, source_root=ROOT, extra=(
     def disc_stamp(d):  # a disc folder's own time stays put when a file in it is overwritten: stamp every file
         return stat(d.path) if d.handle else [str(d.path)] + [stat(d.path / name) for name, _, _ in sorted(d.files.values())]
     try:
-        key = dict(discs=[disc_stamp(d) for d in discs.values()], update=stat(update) if update else None,
+        key = dict(movie_layout=1, discs=[disc_stamp(d) for d in discs.values()], update=stat(update) if update else None,
                    exe=stat(exe) if exe else None)
         return unpacked(work, key, events, "the disc images",
                         lambda out: _install_discs(discs, update, exe, out, work, events, source_root))
@@ -670,6 +694,9 @@ def extract_pc_disc(source, update, exe, work, events, source_root=ROOT, extra=(
 def _install_discs(discs, update, exe, out, work, events, source_root):
     first = discs[1]
     _, loose = pc_disc.install_list(first)
+    loose_files = [(first, name) for name in loose]
+    loose_files += [(disc, name) for disc in discs.values() for name, _, _ in disc.files.values()
+                    if name.casefold().startswith("movies/")]
     if "speed.exe" not in first:
         raise SetupError("Disc 1 has no speed.exe.", pc_disc.FIX)
     def current(data):
@@ -705,8 +732,8 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
                     raise SetupError(f"{label} can't be read: {e}", DISC_FIX) from None
                 opened.append(archive)
                 archives.append((label, archive) + zip_members(archive, label, DISC_FIX))
-        total = sum(size for *_, size in archives) + sum(first.size(name) for name in loose)
-        if total > ZIP_MAX_BYTES or sum(len(members) for _, _, members, _ in archives) > ZIP_MAX_FILES:
+        total = sum(size for *_, size in archives) + sum(disc.size(name) for disc, name in loose_files)
+        if total > ZIP_MAX_BYTES or len(loose_files) + sum(len(members) for _, _, members, _ in archives) > ZIP_MAX_FILES:
             raise SetupError("The discs hold far more than the game (more than 8 GB or 20,000 files).", pc_disc.FIX)
         if shutil.disk_usage(work).free < total + 512 * 1024**2:
             raise SetupError("There is not enough free disk space to unpack the discs.", "Free space on the work volume, then try again.")
@@ -718,13 +745,33 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
     finally:
         for f in reversed(opened):
             f.close()
-    for name in loose:
-        if name.casefold() in {p.name.casefold() for p in out.iterdir()}:
-            raise SetupError(f"The discs hold {name} twice.", DISC_FIX)
-        with first.open(name) as src, open(out / name, "xb") as dst:
+    for disc, name in loose_files:
+        # Merge Windows component case, including a MOVIES folder already created by an archive.
+        target = out
+        for part in name.split("/"):
+            matches = [p for p in target.iterdir() if p.name.casefold() == part.casefold()] if target.is_dir() else []
+            if len(matches) > 1:
+                raise SetupError(f"The discs hold {name} twice (in different case).", DISC_FIX)
+            target = matches[0] if matches else target / part
+        if target.exists():
+            identical = target.is_file() and target.stat().st_size == disc.size(name)
+            if identical:
+                with disc.open(name) as src, target.open("rb") as existing:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if chunk != existing.read(1 << 20):
+                            identical = False
+                            break
+                        if not chunk:
+                            break
+            if not identical:
+                raise SetupError(f"The discs hold copies with different contents: {name}.", DISC_FIX)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with disc.open(name) as src, open(target, "xb") as dst:
             shutil.copyfileobj(src, dst, 1 << 20)
-        if (out / name).stat().st_size != first.size(name):
-            raise SetupError(f"{name} on disc 1 changed or was cut short while Setup copied it.", DISC_FIX)
+        if target.stat().st_size != disc.size(name):
+            raise SetupError(f"{name} on disc {disc.number} changed or was cut short while Setup copied it.", DISC_FIX)
     if patch:
         patch.apply(out, skip=["speed.exe"] if new_exe is not None else [], progress=events.progress)
     if new_exe is not None:
@@ -736,6 +783,11 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
     names = {p.name.casefold() for p in out.iterdir()}
     if "speed.exe" not in names or not all(n.casefold() in names for n in PC_DIRS):
         raise SetupError("The discs don't hold the whole game (speed.exe, GLOBAL, TRACKS, CARS, FRONTEND and SOUND).", pc_disc.FIX)
+    movie_dirs = [p for p in out.iterdir() if p.name.casefold() == "movies" and p.is_dir()]
+    if len(movie_dirs) != 1 or not any(p.is_file() and p.suffix.casefold() == ".vp6" and p.stat().st_size > 0
+                                       for p in movie_dirs[0].iterdir()):
+        raise SetupError("The PC discs are missing MOVIES or its .vp6 movie files (the MOVIES folder is empty).",
+                         "Choose the complete PC disc set, including its MOVIES files, or an installed game folder with MOVIES.")
     return out
 
 
@@ -783,6 +835,9 @@ def source_inventory(root):
                         raise SetupError(f"Setup source contains a symbolic link: {p}", "Download Setup again.")
                     result[str(p.relative_to(root))] = sha_file(p)
     result["setup.sh"] = sha_file(root / "setup.sh")
+    for name in ("LICENSE", "NOTICE"):
+        if (root / name).is_file():
+            result[name] = sha_file(root / name)
     return result
 
 
@@ -797,37 +852,91 @@ def dependency_identity(root, toolchain):
             "packages": toolchain["packages"]}
 
 
-def cache_key(source, dependencies, toolchain, pc_hash, x360_hash):
+def cache_key(source, dependencies, toolchain, pc_hash, x360_hash, extras=None):
     return identity(dict(schema=1, source=source, dependencies=dependencies, toolchain=toolchain,
-                         player=dict(pc=pc_hash, x360=x360_hash), public=True, cflags="recomp defaults; runtime -O1"))
+                         player=dict(pc=pc_hash, x360=x360_hash, **x360_extras.identity(extras)), public=True, cflags="recomp defaults; runtime -O2 -g"))
 
 
-class Cache:
-    def __init__(self, directory, events):
-        self.directory, self.events = directory, events
-        directory.mkdir(parents=True, exist_ok=True)
+class BuildStageCache:
+    """Verified immutable stage outputs, independent of the disposable source copy.
 
-    def run(self, name, outputs, action):
-        stamp = self.directory / (name + ".json")
+    Callers hold build.lock. Neither interrupted output nor an old target/compiler
+    artifact can satisfy build_inputs.fresh. Copies never share writable inodes.
+    """
+    def __init__(self, directory, events, inputs):
+        self.directory, self.events, self.inputs = directory, events, inputs
+
+    def run(self, name, fingerprint, source, relative, action):
+        parent = self.directory / name
+        self.directory.mkdir(parents=True, exist_ok=True)
+        if not real_dir(self.directory):
+            raise SetupError("The build-stage cache is not a real directory.")
+        parent.mkdir(parents=True, exist_ok=True)
+        if not real_dir(parent):
+            raise SetupError("The build-stage cache is not a real directory.")
+        entry = parent / fingerprint
+        names = list(dict.fromkeys(relative))
+        tops = [n for n in names if not any(Path(n).is_relative_to(p) for p in names if p != n)]
+
+        def artifacts(base):
+            result = {}
+            for n in names:
+                output = base / n
+                if os.path.realpath(output) != os.path.abspath(output):
+                    raise InstallError("Unexpected symbolic link in build output.")
+                result[n] = digest_tree(output) if output.exists() and not (
+                    output.is_file() and not output.stat().st_size) else 'missing'
+            return result
+
+        def clear_output(base, n):
+            output = base / n
+            if os.path.realpath(output.parent) != os.path.abspath(output.parent):
+                raise SetupError("The build output parent is a symbolic link.")
+            remove(output)
+
+        def copy_outputs(src, dst):
+            for n in tops:
+                output = dst / n
+                clear_output(dst, n)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                if (src / n).is_dir():
+                    shutil.copytree(src / n, output)
+                else:
+                    shutil.copy2(src / n, output)
+
         try:
-            expected = json.loads(stamp.read_text())
-            actual = {str(p): digest_tree(p) for p in outputs if p.exists()}
-            valid = len(actual) == len(outputs) and expected == actual
-        except (OSError, ValueError, InstallError):
+            saved = artifacts(entry / 'outputs') if real_dir(entry) else {}
+            valid = bool(saved) and self.inputs.fresh(entry / 'manifest.json', fingerprint, saved)
+        except (OSError, InstallError, ValueError):
             valid = False
         if valid:
+            try:
+                local = artifacts(source)
+            except (OSError, InstallError):
+                local = {}
+            if local != saved:
+                copy_outputs(entry / 'outputs', source)
+            if artifacts(source) != saved:
+                raise SetupError(f"The retained {name} output changed while being restored.")
             self.events.emit("warn", id=self.events.current, msg=f"Resuming verified {name} output.")
-            return
-        stamp.unlink(missing_ok=True)
-        for output in outputs:
-            remove(output)
+            return False
+        remove(entry)
+        for n in tops:
+            clear_output(source, n)
         action()
-        if any(not p.exists() or (p.is_file() and not p.stat().st_size) for p in outputs):
+        saved = artifacts(source)
+        if 'missing' in saved.values():
             raise SetupError(f"{name} completed without all required outputs.")
-        records = {str(p): digest_tree(p) for p in outputs}
-        temporary = stamp.with_suffix(".tmp")
-        temporary.write_text(json.dumps(records, sort_keys=True))
-        os.replace(temporary, stamp)
+        pending = parent / (".pending-" + uuid.uuid4().hex)
+        try:
+            copy_outputs(source, pending / 'outputs')
+            if artifacts(pending / 'outputs') != saved:
+                raise SetupError(f"The {name} output changed while being retained.")
+            self.inputs.record(pending / 'manifest.json', fingerprint, saved)
+            pending.rename(entry)
+        finally:
+            remove(pending)
+        return True
 
 
 def copy_source(root, target, inventory):
@@ -876,7 +985,7 @@ def module_environment(env):
         os.environ.update(original)
 
 
-def prepare_x360(source, out, pc, events, env, record=None):
+def prepare_x360(source, out, pc, events, env, record=None, extras=None):
     if source is None:
         events.emit("features", x360=False, missing=X360_MISSING)
         return {}
@@ -903,7 +1012,7 @@ def prepare_x360(source, out, pc, events, env, record=None):
             events.log.write(("x360: " + str(args or kwargs) + "\n").encode())
     try:
         with module_environment(env):
-            result = module.prepare(source, out, pc, progress)
+            result = module.prepare(source, out, pc, progress, **({} if x360_extras.selection(extras) == x360_extras.ALL else {"extras": extras}))
     except Exception as e:
         if isinstance(e, Cancelled):
             raise
@@ -936,13 +1045,13 @@ def x360_stat(source):
     return {"": stat(source)}
 
 
-def x360_identity(source, pc_hash, inventory, content, toolchain):
+def x360_identity(source, pc_hash, inventory, content, toolchain, extras=None):
     """What a converted X360 copy depends on: the player's copy (its content digest, the one --build computes for
     its cache key, plus every file's path, size, modification time and inode), the PC game's content and this
     Setup's source and toolchain."""
     files = x360_stat(source)
     return identity(dict(schema=3, x360=str(source), files=files, content=content, pc=pc_hash,
-                         source=identity(inventory), toolchain=toolchain))
+                         source=identity(inventory), toolchain=toolchain, **x360_extras.identity(extras)))
 
 
 def record_check_x360(work, key, roots, record):
@@ -1083,7 +1192,7 @@ def overlaps(a, b):
     return within(a, b) or within(b, a)
 
 
-def check_locations(paths, pc, x360, dest, source, extras=()):
+def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None):
     """Refuse any location choice that could make Setup write into, or delete, something it must only read.
 
     work and cache are recursively removed and populated (stage, pc_src extraction, build copies): they may not
@@ -1094,7 +1203,7 @@ def check_locations(paths, pc, x360, dest, source, extras=()):
     own names directly in it are written). All comparisons are by filesystem identity (within()). extras are further
     inputs (a disc image's 1.3 update and speed.exe).
     """
-    inputs = [pc] + ([x360] if x360 else []) + list(extras)
+    inputs = [pc] + ([x360] if x360 else []) + list(extras) + ([carbon_input(carbon)] if carbon else [])
     apps = [dest / "NFSMW.app", dest / f"{PUBLIC_NAME}.app"]
     profiles = [paths.data, paths.legacy]
     protected = inputs + [source] + apps + profiles
@@ -1122,12 +1231,23 @@ def check_locations(paths, pc, x360, dest, source, extras=()):
     # state itself is not recursively deleted or used as a build output root.
 
 
-def check_space(paths, pc, dest, stage_only=False):
+def check_space(paths, pc=None, dest=None, stage_only=False, car_plan=None, x360_bytes=0, x360_shared_bytes=0):
+    if car_plan is not None:
+        # F-T groups extraction, temporary output, publication and margin by
+        # volume. Unknown conversion sizes stay unknown until measured.
+        for volume in car_plan['volumes']:
+            required = volume['required_bytes']
+            minimum = (required if required is not None else
+                       sum(volume.get(key) or 0 for key in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes')))
+            if minimum > volume['available_bytes']:
+                raise SetupError("There is not enough free disk space for the selected extras.",
+                                 "Free space on the listed extras volumes and retry.")
+        return
     size = sum(p.stat().st_size for p in pc.rglob("*") if p.is_file())
     # Keep two copies until commit (staging and permanent); allow 4 GiB for
     # generated C, libraries and toolchain output. Check every relevant volume.
-    for path, required in ((paths.work, size + 4 * 1024**3), (paths.cache, 4 * 1024**3),
-                           (dest if stage_only else paths.data, size + 512 * 1024**2), (dest, 256 * 1024**2)):
+    for path, required in ((paths.work, size + 4 * 1024**3 + x360_bytes + x360_shared_bytes), (paths.cache, 4 * 1024**3 + x360_bytes),
+                           (dest if stage_only else paths.data, size + 512 * 1024**2 + x360_bytes), (dest, 256 * 1024**2)):
         while not path.exists():
             path = path.parent
         if shutil.disk_usage(path).free < required:
@@ -1249,6 +1369,18 @@ def build(args, paths, events, runner, source_root=ROOT):
     if stage_only:
         dest = destination.parent
     x360 = clean_path(args.x360) if args.x360 else None
+    chosen = getattr(args, "x360_extras", None)
+    if chosen is None:
+        try:
+            remembered = staging.load_choices(paths.state)
+        except InstallError:
+            remembered = None  # explicit sources can repair damaged remembered inputs
+        chosen = remembered.get("x360_extras") if remembered else None
+    try:
+        chosen = x360_extras.selection(chosen)
+    except ValueError as error:
+        raise SetupError(str(error)) from error
+    options = {} if chosen == x360_extras.ALL else {"extras": chosen}
     pc_update = clean_path(args.pc_update) if getattr(args, "pc_update", None) else None
     pc_exe = clean_path(args.pc_exe) if getattr(args, "pc_exe", None) else None
     pc_discs = [clean_path(p) for p in getattr(args, "pc_disc", None) or []]
@@ -1283,6 +1415,10 @@ def build(args, paths, events, runner, source_root=ROOT):
     elif pc_disc.is_disc(pc):  # PC disc images, the 1.3 update and speed.exe: only read, installed into work
         pc = extract_pc_disc(pc, pc_update, pc_exe, paths.work, events, source_root, pc_discs)
     exe, fingerprint = validate_pc(pc, source_root)
+    note = movie_note(pc)
+    if note:  # the game runs without them, but must not lose its movies without a word
+        setup_log(note)
+        events.emit("warn", id="pc", msg=note)
     pc_hash = digest_tree(pc)
     events.progress()
     events.stage("x360")
@@ -1299,28 +1435,30 @@ def build(args, paths, events, runner, source_root=ROOT):
         before = x360_stat(x360)
         content = x360_content_digest(x360)
         inventory = source_inventory(source_root)
-        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(content, pc_hash, inventory, toolchain))
+        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(content, pc_hash, inventory, toolchain, **options))
         roots = restore_prepared_x360(prepared_cache, check_out, events, record) if owned(paths.cache, paths.state) else None
         if roots is None:
-            roots = prepare_x360(x360, check_out, pc, events, runner.env, record)
+            roots = prepare_x360(x360, check_out, pc, events, runner.env, record, **options)
         if roots and x360_stat(x360) == before and x360_content_digest(x360) == content:  # changed while it was converted: not reused by the build
-            record_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, content, toolchain), roots, record)
+            record_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, content, toolchain, **options), roots, record)
         events.progress()
         return None
     x360_before = x360_stat(x360) if x360 else None
     x360_hash = x360_content_digest(x360) if x360 else None
     inventory = source_inventory(source_root)
-    key = cache_key(inventory, dependencies, toolchain, pc_hash, x360_hash)
+    key = cache_key(inventory, dependencies, toolchain, pc_hash, x360_hash, **options)
     cache_home = paths.cache / "builds" / key
     claim(paths.cache, paths.cache == paths.default_cache, SETUP_CACHE_NAMES, "cache", paths.state)
     with exclusive(paths.cache / "build.lock"):
         # Publishers hold this same lock: every pending copy is now abandoned.
         # Reclaim it before disk-space checks, including builds with cache hits.
         PreparedCache.clean_pending(paths.cache / "x360")
+        space = dict(x360_bytes=x360_extras.required_bytes(chosen) if x360 else 0,
+                     x360_shared_bytes=146_000_000 if x360 and "textures" in chosen and "arrest" not in chosen else 0)
         if stage_only:
-            check_space(paths, pc, clean_path(args.stage), stage_only=True)
+            check_space(paths, pc, clean_path(args.stage), stage_only=True, **space)
         else:
-            check_space(paths, pc, dest)
+            check_space(paths, pc, dest, **space)
         source = cache_home / "source"
         source.parent.mkdir(parents=True, exist_ok=True)
         copy_source(source_root, source, inventory)
@@ -1347,13 +1485,13 @@ def build(args, paths, events, runner, source_root=ROOT):
                 temporary.rename(pc_copy / canonical)
         roots = {"pc_root": pc_copy}
         record = {}
-        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(x360_hash, pc_hash, inventory, toolchain))
+        prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(x360_hash, pc_hash, inventory, toolchain, **options))
         reused = restore_prepared_x360(prepared_cache, staged_data / "x360", events, record) if x360 else None
         cached_preparation = reused is not None
         if x360 and reused is None:
-            reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash, toolchain),
+            reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash, toolchain, **options),
                                       staged_data / "x360", events, record)
-        roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env, record))
+        roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env, record, **options))
         if stage_only and x360 and not (set(roots) - {"pc_root"}):
             raise SetupError("X360_PREPARATION_MISSING: The selected Xbox 360 source produced no extras.",
                              "Use a complete Setup build with Xbox 360 support and reconnect your source.")
@@ -1368,32 +1506,67 @@ def build(args, paths, events, runner, source_root=ROOT):
         manifest = stage / "roots.txt"
         write_roots(manifest, roots)
         events.progress()
-        cache = Cache(cache_home / "stamps", events)
+        spec = importlib.util.spec_from_file_location("_setup_build_inputs", source / "recomp/build_inputs.py")
+        build_inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build_inputs)
+        cache = BuildStageCache(paths.cache / "stages", events, build_inputs)
+        # /usr/bin compiler launchers can stay unchanged across a toolchain
+        # repair. Include the selected binaries as well as preflight's versions.
+        build_compiler = dict(toolchain)
+        build_compiler["python-binary"] = sha_file(Path(sys.executable))
+        build_compiler["package-files"] = build_inputs.package_files(toolchain["packages"])
+        build_compiler["selected"] = {}
+        for tool in ("clang", "clang++", "ar", "ld", "make"):
+            selected = runner.run(["xcrun", "--find", tool], capture=True).strip()
+            build_compiler["selected"][tool] = [selected, sha_file(Path(selected)) if selected else "missing"]
         py = Path(sys.executable).absolute()
         def command(argv):
             return lambda: runner.run(argv, cwd=source)
         def cached(name, relative, argv):
-            cache.run(name, [source / p for p in relative], command(argv))
+            # Absolute staging/cache paths change on every source/content update;
+            # argument roles and values, including flags, determine the build.
+            # The executable's bytes/version remain in build_compiler; its
+            # installation path is a role just like source and asset paths.
+            roles = {str(py): "$PYTHON", str(pc_copy): "$PC", str(source): "$SOURCE"}
+            if "x360_root" in roots:
+                roles[str(roots["x360_root"])] = "$X360"
+            arguments = []
+            for arg in map(str, argv):
+                arguments.append(next((role + arg[len(path):] for path, role in roles.items()
+                                       if arg == path or arg.startswith(path + os.sep)), arg))
+            fingerprint = build_inputs.stage_key(name, source, pc_copy, roots.get("x360_root"),
+                compiler=build_compiler, env=runner.env, arguments=arguments)
+            cache.run(name, fingerprint, source, relative, command(argv))
         events.stage("recompile")
-        cached("recompile", ["recomp/out", "recomp/out/speed.a"], [py, "-I", "recomp/build_all.py", "--exe", pc_copy / "speed.exe"])
+        cached("recompile", ["recomp/out", "recomp/out/speed.a", "recomp/out/funcs.h", "recomp/out/breaker_diag.inc",
+                             "recomp/out/speed_32.c"], [py, "-I", "recomp/build_all.py", "--exe", pc_copy / "speed.exe"])
         if not (source / "recomp/out/speed.a").is_file():
             raise SetupError("Recompilation produced no speed.a; stale archives are not accepted.")
         events.progress()
         events.stage("tables")
-        table_names = ("attrib_x360", "x360audio_attrib", "attrib_light_data", "trees_params", "controltype_buttons", "auxlights_data", "glass_uv1")
-        cached("tables", ["runtime/gen"] + [f"runtime/gen/{name}.inc" for name in table_names], [py, "-I", "tools/gen_tables.py", "--pc", pc_copy] +
+        table_generator = build_inputs.load_module(source / "tools/gen_tables.py")
+        table_names = list(table_generator.STUBS) + table_generator.PUBTABLES + table_generator.PADTABLES
+        cached("tables", ["runtime/gen/" + name for name in table_names] + ["runtime/gen/inputs.txt"], [py, "-I", "tools/gen_tables.py", "--pc", pc_copy] +
                (["--x360", roots["x360_root"]] if "x360_root" in roots else ["--no-x360"]))
         events.progress()
         events.stage("audio")
         # FFmpeg is built here (media.cpp needs its headers) but reported as itself: an FFmpeg failure is an "ffmpeg"
         # error ("Building the video decoder"), not an audio one. No stage event: the contract's order is unchanged.
         events.current = "ffmpeg"
-        cached("ffmpeg", ["third_party/ffmpeg"], ["sh", "media/build_ffmpeg.sh"])
+        used_prebuilt = prebuilt.install(source_root, source, setup_log,
+                                        expected_sha256=getattr(args, 'prebuilt_manifest_sha256', None))
+        ffmpeg_libraries = [f"third_party/ffmpeg/lib/lib{name}.a" for name in ("avformat", "avcodec", "swscale", "swresample", "avutil")]
+        if not used_prebuilt:
+            cached("ffmpeg", ["third_party/ffmpeg", "third_party/ffmpeg/include/libavformat/avformat.h"] + ffmpeg_libraries,
+                   ["sh", "media/build_ffmpeg.sh"])
         events.current = "audio"
-        cached("audio", ["host/audio/build/libhostaudio.a", "host/audio/build/libmedia.a"], ["sh", "host/audio/build.sh"])
+        # Install only the libraries; build.sh's audio tests run in the offline suite.
+        if not used_prebuilt:
+            cached("audio", ["host/audio/build/libhostaudio.a", "host/audio/build/libmedia.a"], ["sh", "host/audio/build.sh", "lib"])
         events.progress()
         events.stage("shaders")
-        cached("shaders", ["host/shaders/build/libsmtranslate.a"], ["sh", "host/shaders/build.sh", "lib"])
+        if not used_prebuilt:
+            cached("shaders", ["host/shaders/build/libsmtranslate.a"], ["sh", "host/shaders/build.sh", "lib"])
         events.progress()
         events.stage("ffmpeg")
         for library in ("avformat", "avcodec", "swscale", "swresample", "avutil"):
@@ -1403,6 +1576,9 @@ def build(args, paths, events, runner, source_root=ROOT):
         events.progress()
         events.stage("runtime")
         cached("runtime", ["runtime/boot"], ["sh", "runtime/build.sh"])
+        # Coverage is validation against the current host source, not an input
+        # to translated code. Recheck it even when both native artifacts resume.
+        runner.run([py, "-I", "recomp/hook_coverage.py", "--host", "mac", "--binary", "runtime/boot"], cwd=source)
         events.progress()
         events.stage("assets")
         write_roots(manifest, roots)
@@ -1421,7 +1597,7 @@ def build(args, paths, events, runner, source_root=ROOT):
             ready = staging.publish(clean_path(args.stage), app, staged_data, roots, destination, paths.data,
                                     PUBLIC_VERSION, dict(pc=str(selected_pc), x360=str(x360) if x360 else None,
                                     pc_update=str(pc_update) if pc_update else None, pc_exe=str(pc_exe) if pc_exe else None,
-                                    pc_discs=[str(p) for p in pc_discs],
+                                    pc_discs=[str(p) for p in pc_discs], **x360_extras.identity(chosen),
                                     pc_sha256=pc_hash, x360_sha256=x360_hash, source_id=identity(inventory),
                                     executable_fingerprint=fingerprint, dependencies=dependencies, toolchain=toolchain),
                                     on_commit=lambda path: setattr(events, "ready", path))
@@ -1432,7 +1608,7 @@ def build(args, paths, events, runner, source_root=ROOT):
             # Only a committed normal installation changes remembered source choices.
             with ignored_cancellation():
                 try:
-                    staging.save_choices(paths.state, selected_pc, x360, path, pc_update, pc_exe, pc_discs)
+                    staging.save_choices(paths.state, selected_pc, x360, path, pc_update, pc_exe, pc_discs, chosen)
                 except (OSError, InstallError) as e:
                     events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
         installed = transactional_install(app, staged_data, roots, paths.data, dest, lambda p: verify_app(p, runner), log=setup_log,
@@ -1462,6 +1638,296 @@ def check_stage_locations(target, paths, pc, x360, destination, source, extras=(
         raise SetupError("The update staging directory already exists.", "Choose a new staging directory for each update attempt.")
 
 
+def car_api():
+    # Keep optional conversion dependencies out of the required build's import
+    # path; its normal preflight reports any missing bundled Python packages.
+    return importlib.import_module('.car_import', __package__)
+
+
+@contextmanager
+def car_cancellation():
+    """F-T polls cancellation before activation; never interrupt its commit."""
+    pending = [False]
+    def stop(signum, frame):
+        pending[0] = True
+    old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield lambda: pending[0]
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
+@contextmanager
+def car_log(directory):
+    """Open the extras log relative to a checked directory descriptor."""
+    path = directory / ('cars-' + uuid.uuid4().hex + '.log')
+    with car_catalog._directory(directory, create=True) as base:
+        car_catalog._bound(directory, base)
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=base)
+        with os.fdopen(fd, 'wb', buffering=0) as log:
+            yield path, log
+
+
+def carbon_input(value, *, picked=False):
+    """Resolve extras picks once; retain build protection's existing normalization."""
+    car_import = car_api()
+    path = car_import._path(Path(value).expanduser().resolve(strict=True) if picked else value)
+    if path.is_file() and (path.suffix.lower() == '.exe' or path.name.casefold() == 'default.xex'):
+        if not picked:
+            return path.parent
+        raise SetupError("Choose the Carbon game folder instead of its executable.",
+                         "Choose the folder containing CARS and GLOBAL, or an Xbox 360 ISO.")
+    return car_sources._folder(path)
+
+
+def car_specs(path):
+    if not path:
+        return []
+    car_import = car_api()
+    path = car_import._path(path)
+    with car_import._asset(path) as fd:
+        if os.fstat(fd).st_size > 1 << 20:
+            raise SetupError("The car selection JSON is too large.")
+        with os.fdopen(os.dup(fd), 'r') as stream:
+            value = json.load(stream)
+    if type(value) is not list:
+        raise SetupError('The car selection must be a JSON array of car metadata.')
+    return car_import._specs(value)
+
+
+def car_installed_inputs(paths):
+    """Protect remembered asset roots even when management needs no media.
+
+    Only read the manifest paths; unplugged asset volumes must not prevent
+    listing, removal or restoration of retained packs.
+    """
+    inputs = []
+    for name, keys in (('roots.txt', {'pc_root', 'x360_root', 'assets_root', 'movies'}),
+                       ('app.txt', {'game_dir'})):
+        manifest = paths.data / name
+        if not manifest.exists():
+            continue
+        with car_api()._asset(manifest) as fd:
+            if os.fstat(fd).st_size > 1 << 18:
+                raise SetupError('The installed asset manifest is too large.')
+            with os.fdopen(os.dup(fd), 'r') as stream:
+                for line in stream:
+                    key, sep, value = line.strip().partition('=')
+                    if sep and key.strip() in keys and Path(value.strip()).is_absolute():
+                        inputs.append(clean_path(value.strip()))
+    return inputs
+
+
+def car_locations(paths, inputs):
+    """Only catalog/cache/logs are writable; source and save trees are protected."""
+    managed = [paths.data / 'car-catalog', paths.cache, paths.work, paths.state / OWN_DIR]
+    protected = [ROOT, paths.legacy, paths.data / SAVE_DIR] + list(inputs) + car_installed_inputs(paths)
+    for directory in (paths.cache, paths.work, paths.state / OWN_DIR):
+        if overlaps(directory, paths.data):
+            raise SetupError('Extras temporary files must be outside the installed data profile.')
+    if overlaps(paths.data, paths.legacy):
+        raise SetupError("The data and legacy save folders overlap.")
+    for target in managed:
+        for keep in protected:
+            if overlaps(target, keep):
+                raise SetupError("An extras work/catalog folder overlaps a protected path.",
+                                 "Choose separate source, save, cache and work folders.")
+    for i, target in enumerate(managed):
+        if any(overlaps(target, other) for other in managed[i + 1:]):
+            raise SetupError("Extras work, cache and catalog folders must be separate.")
+    for source in inputs:
+        if overlaps(source, paths.data):
+            # Installed MW roots may live beneath data, but never contain the
+            # catalog, work, saves or metadata being written (checked above).
+            if within(paths.data, source):
+                raise SetupError("An extras input contains the installed data root.")
+
+
+def car_plan_event(events, plan, specs):
+    by_slot = {car['slot']: car for car in specs}
+    rows = []
+    for car in plan.get('cars', []):
+        spec = by_slot[car['slot']]
+        display = spec['display']
+        name = display.get('name') if type(display) is dict else None
+        rows.append(dict(slot=car['slot'], name=name if type(name) is str else spec['folder'],
+                         car_hash=car_sources.path_hash('CARS/' + spec['folder']), approved=car['approved'],
+                         reused=car['reused'], reason=car.get('reason', '') or
+                         ('' if car['approved'] else 'Output has not passed packaged approval.')))
+    events.emit('cars-plan', measured=plan['measured'], approved=plan['approved'], volumes=plan['volumes'], cars=rows)
+
+
+def car_result(events, operation, result):
+    selected = result.get('selection', result.get('pointer', {}).get('selection', []))
+    events.emit('cars-result', operation=operation, verified=not bool(result.get('error')),
+                generation=result.get('generation') or result.get('pointer', {}).get('generation') or '',
+                message=result.get('error', ''),
+                selection=selected,
+                cars=[dict(slot=r['slot'], name=r.get('display', {}).get('name', ''),
+                           state=r['state'], selected=r['slot'] in selected) for r in result.get('cars', [])],
+                generations=[dict(generation=r['generation'], verified=r['verified'])
+                             for r in result.get('generations', [])])
+
+
+def cars_command(args):
+    """No build flags, developer tools, source copying or profile/save migration."""
+    car_import = car_api()
+    operation = next(name for name in ('check', 'import', 'list', 'remove', 'restore')
+                     if getattr(args, 'cars_' + name))
+    if any((args.pc, args.x360, args.dest, args.stage, args.app, args.pc_update, args.pc_exe, args.pc_disc)):
+        raise SetupError("Car commands use the installed data root; omit PC build and destination arguments.")
+    if operation in ('check', 'import') and not args.carbon:
+        raise SetupError("--cars-check and --cars-import require --carbon.")
+    if args.cars_measure and operation != 'check':
+        raise SetupError('--cars-measure requires --cars-check.')
+    if args.cars_repair and operation != 'import':
+        raise SetupError('--cars-repair requires --cars-import.')
+    if operation == 'import' and not args.cars_spec:
+        raise SetupError("--cars-import requires --cars-spec (local car selection JSON).")
+    if operation not in ('check', 'import') and any((args.carbon, args.cars_spec, args.cars_mw_pc,
+                                                    args.cars_measure, args.cars_repair)):
+        raise SetupError("Source/selection options apply only to car check/import.")
+    # Paths normally resolves aliases for the build. CarImporter requires no
+    # symlink components, including environment-selected profile/cache roots.
+    for key in ('HOME', 'NFSMW_SETUP_HOME', 'NFSMW_SETUP_DATA', 'NFSMW_SETUP_CACHE', 'NFSMW_SETUP_STATE'):
+        if os.environ.get(key):
+            car_import._path(os.environ[key])
+    if args.work:
+        car_import._path(args.work)
+    defaults = Paths(args.work or Path.home())
+    paths = Paths(args.work or defaults.state / 'car-work')
+    specs = car_specs(args.cars_spec)
+    carbon = carbon_input(args.carbon, picked=True) if args.carbon else None
+    inputs = ([carbon] if carbon else []) + ([car_import._path(args.cars_spec)] if args.cars_spec else [])
+    mw = None
+    if operation == 'import' or (operation == 'check' and specs):
+        if args.cars_mw_pc:
+            mw = car_import._path(args.cars_mw_pc)
+        else:
+            from .export import current_roots
+            mw = current_roots(paths.data / 'unused.app', paths.data)['pc_root']
+        if not (mw / 'CARS').is_dir():
+            mw = find_pc_root(mw)
+        inputs.append(mw)
+    for managed in (paths.data, paths.cache, paths.work):
+        car_import._path(managed)
+    car_locations(paths, inputs)
+    engine = car_import.CarImporter(paths.data / 'car-catalog', paths.cache / 'cars')
+    if specs or operation in ('list', 'remove', 'restore'):
+        # Adopt the same cache ownership as a required build before creating
+        # car preparations. A later build must accept this cache, including an
+        # explicit initially-empty cache override used before the first build.
+        car_import._path(paths.state / OWN_DIR)
+        claim(paths.cache, paths.cache == paths.default_cache, SETUP_CACHE_NAMES, 'cache', paths.state)
+    with car_log(paths.work) as (log_path, log), car_cancellation() as cancel:
+        events = Events(args.events, log)
+        events.current = 'cars'
+        events.emit('stage', id='cars', title='Checking and preparing optional extras')
+        try:
+            recognition = None
+            if carbon:
+                with cancellation():  # recognition has no catalog writes to protect
+                    recognition = car_sources.recognise(carbon)
+                engine._tick(cancel)
+                if recognition['game'] != 'carbon':
+                    raise SetupError("Choose a Carbon source for these extras.")
+                try:
+                    car_catalog.packaged_policy()
+                    approval = True
+                except (OSError, car_catalog.CatalogError):
+                    approval = False
+                events.emit('cars-recognition', game=recognition['game'], platform=recognition['platform'],
+                            approval_available=approval, output_verified=False,
+                            cars=[dict(car_hash=r['car_hash'], status=r['status']) for r in recognition['cars']])
+                from .car_selection import available_specs
+                specs, skipped = available_specs(specs, recognition)
+                for reason in skipped:
+                    events.emit('warn', id='cars', msg=reason)
+            plan = None
+            pending = iter(specs)
+            active = None
+            extracted = 0
+            def progress(row):
+                nonlocal active, extracted
+                phase = row['phase']
+                if phase == 'extracted':
+                    active = next(pending, None)
+                    extracted += 1
+                slot = active['slot'] if active else -1
+                if phase in ('extracted', 'converted', 'prepared'):
+                    total = sum(v['extraction_bytes'] for v in plan['volumes']) if plan else 0
+                    count = sum(not c['reused'] for c in plan['cars']) if plan else len(specs)
+                    done = total if extracted == count else 0
+                    # During a measured plan the exact byte plan is not yet
+                    # available; 0/0 means unknown, never a guessed estimate.
+                    events.emit('cars-progress', phase=phase, slot=slot,
+                                done=done if phase == 'extracted' else 1,
+                                total=total if phase == 'extracted' else 1)
+                else:
+                    events.emit('cars-progress', phase='verification', slot=-1, done=0, total=0)
+            if specs:
+                # Imports plan without conversion, then convert once inside
+                # the activation transaction. Explicit measured checks stay dry.
+                try:
+                    plan = engine.plan(carbon, mw_pc=mw, cars=specs,
+                                       measure=args.cars_measure and operation == 'check', cancel=cancel, progress=progress)
+                except car_import.CacheError:
+                    if not args.cars_repair:
+                        raise
+                    # Reimport owns quarantine/reconstruction. A normal plan
+                    # deliberately refuses the corrupt preparation first.
+                    events.emit('warn', id='cars', msg='A retained preparation needs repair; rebuilding it from the verified source.')
+                if plan is not None:
+                    check_space(paths, car_plan=plan)
+                    car_plan_event(events, plan, specs)
+                    if plan['measured']:
+                        for car in plan['cars']:
+                            if not car['reused']:
+                                size = sum(p['size'] for p in car['contract']['inputs']['source'].values())
+                                events.emit('cars-progress', phase='extracted', slot=car['slot'], done=size, total=size)
+                    pending = iter(c for c in specs if not next(p for p in plan['cars'] if p['slot'] == c['slot'])['reused'])
+                active, extracted = None, 0
+            if operation == 'import':
+                if not specs:
+                    result = engine.list_cars()
+                else:
+                    result = engine.reimport(carbon, mw_pc=mw, cars=specs, cancel=cancel, progress=progress) if args.cars_repair else \
+                        engine.import_cars(carbon, mw_pc=mw, cars=specs, cancel=cancel, progress=progress)
+            elif operation == 'remove':
+                result = engine.remove(args.cars_remove, cancel=cancel, progress=progress)
+            elif operation == 'restore':
+                result = engine.restore(args.cars_restore, cancel=cancel, progress=progress)
+            elif operation == 'list':
+                result = engine.list_cars()
+            else:
+                result = {}
+            if operation in ('check', 'list'):
+                engine._tick(cancel)
+            # F-T's returned pointer is committed. Nothing after it may turn
+            # that completed import/removal/restore into a cancellation/error.
+            with ignored_cancellation():
+                try:
+                    log.write((json.dumps(result, sort_keys=True) + '\n').encode())
+                except OSError:
+                    pass
+                if plan is None and result.get('volumes'):
+                    try:
+                        events.emit('cars-plan', measured=True, approved=True, volumes=result['volumes'], cars=[])
+                    except OSError:
+                        pass
+                car_result(events, operation, result)
+            return 0
+        except (Exception, KeyboardInterrupt) as exc:
+            try:
+                log.write(traceback.format_exc().encode())
+            except OSError:
+                pass
+            events.emit('error', id='cars', msg=str(exc) or 'Extras were cancelled.',
+                        fix='Retry the extras operation or skip it. Your previous catalog is retained.', log=str(log_path))
+            return 130 if isinstance(exc, (Cancelled, car_import.Cancelled, KeyboardInterrupt)) else getattr(exc, 'exit_code', 1)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Build and install NFS Most Wanted Native from your own PC v1.3 game. Offline; no game files are supplied.")
     mode = ap.add_mutually_exclusive_group(required=True)
@@ -1469,6 +1935,15 @@ def main(argv=None):
     mode.add_argument("--build", action="store_true")
     mode.add_argument("--stage-only", action="store_true", help="prepare a verified update without installing it")
     mode.add_argument("--export-all-in-one", action="store_true", help="export a signed app containing the current install's assets")
+    for name in ('check', 'import', 'list'):
+        mode.add_argument('--cars-' + name, action='store_true', help='standalone extras ' + name)
+    mode.add_argument('--cars-remove', nargs='+', type=int, help='deselect permanent slots; retain packs')
+    mode.add_argument('--cars-restore', help='restore a verified retained generation')
+    ap.add_argument('--carbon', help='Carbon folder, any executable, or X360 ISO')
+    ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')
+    ap.add_argument('--cars-mw-pc', help='MW donor folder before first installation; otherwise use installed roots')
+    ap.add_argument('--cars-measure', action='store_true', help='measure conversion without activating it')
+    ap.add_argument('--cars-repair', action='store_true', help='rebuild a rejected preparation from original sources')
     ap.add_argument("--app", help="installed .app to export (required with --export-all-in-one)")
     ap.add_argument("--stage", help="new directory for the prepared update and ready.json (required with --stage-only)")
     ap.add_argument("--pc", help="installed PC game folder, a .zip of it (unpacked into --work), or a PC disc image (.iso, or "
@@ -1478,15 +1953,22 @@ def main(argv=None):
     ap.add_argument("--pc-exe", help="with disc images: a speed.exe with the 1.3 code, used instead of the copy-protected one")
     ap.add_argument("--pc-disc", action="append", help="with disc images: another disc of the set, from any folder "
                     "(repeat for each disc not beside --pc; discs are identified by their content, not their names)")
+    ap.add_argument("--x360-extras", help="comma-separated arrest,textures,ui; empty skips all three; omitted remembers the last install")
     ap.add_argument("--x360", help="your Xbox 360 game folder or ISO")
     ap.add_argument("--dest", help="installation directory; --stage-only: installed .app; --export-all-in-one: new .app path")
     ap.add_argument("--work", help="disposable build directory (required with --check or --build)")
     ap.add_argument("--events", action="store_true", help="JSON-line events on stdout; full output in the run log")
+    ap.add_argument("--prebuilt-manifest-sha256", help="optional libraries' manifest digest from the signed Setup app")
     args = ap.parse_args(argv)
     paths = None
     events = None
     log_path = None
+    car_mode = any((args.cars_check, args.cars_import, args.cars_list, args.cars_remove, args.cars_restore))
     try:
+        if car_mode:
+            return cars_command(args)
+        if any((args.carbon, args.cars_spec, args.cars_mw_pc, args.cars_measure, args.cars_repair)):
+            raise SetupError("Extras options require a --cars-* operation.")
         if args.export_all_in_one:
             if not args.app or not args.dest or args.pc or args.x360 or args.stage:
                 raise SetupError("--export-all-in-one requires --app and --dest (a new .app path).")
@@ -1608,7 +2090,7 @@ def main(argv=None):
         if events is not None and events.report_committed():
             return 0
         # Includes failures before a log can be opened. stdout remains parseable.
-        obj = dict(ev="error", id=events.current if events else "preflight", msg=str(e) or "Setup was interrupted.", fix=getattr(e, "fix", "Choose a writable work directory and try again."), log=str(log_path or ""))
+        obj = dict(ev="error", id=events.current if events else ("cars" if car_mode else "preflight"), msg=str(e) or "Setup was interrupted.", fix=getattr(e, "fix", "Choose a writable work directory and try again."), log=str(log_path or ""))
         print(json.dumps(obj) if args.events else obj["msg"], flush=True)
         return 130 if isinstance(e, (Cancelled, KeyboardInterrupt)) else 1
 

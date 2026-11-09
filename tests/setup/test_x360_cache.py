@@ -11,6 +11,7 @@ Publication I/O faults (mkdir/hash/prune/copy/manifest/rename/cleanup):
 0/8 installs succeed before / 8/8 after; cache-read fault: 0/1 before / 1/1 after.
 Stale pending plus low space on a cache hit: 0/1 installs before / 1/1 after;
 lock-before-cleanup/space preserves a live publication: 0/1 before / 1/1 after.
+Shader retention: version 1 fails 1/1 cache-version regression; version 2 passes 1/1.
 Run with the project's Python -I; the offline suite discovers this file.
 """
 import json
@@ -59,6 +60,15 @@ class PersistentPreparationTests(Fixture):
 
     def entry(self):
         return next((self.paths.cache / "x360").glob("*.*"))
+
+    def test_full_archive_cache_version_is_incompatible(self):
+        args = ('disc-content', 'pc-content', {}, {'clang': 'test'})
+        retained_key = cache_impl.preparation_key(*args)
+        self.assertEqual(cache_impl.CONVERTER_VERSION, 2)
+        with mock.patch.object(cache_impl, 'CONVERTER_VERSION', 1):
+            full_archive_key = cache_impl.preparation_key(*args)
+        self.assertNotEqual(retained_key, full_archive_key)
+        self.assertEqual(retained_key, cache_impl.preparation_key(*args))
 
     def test_second_install_skips_preparation(self):
         original = (self.iso.read_bytes(), self.iso.stat())
@@ -209,12 +219,12 @@ class PersistentPreparationTests(Fixture):
         pending = self.paths.cache / "x360/.pending-interrupted"
         write(pending / "data/partial", b"interrupted publication")
         probes = []
-        def space(paths, pc, dest):
+        def space(paths, pc, dest, **selected_space):
             def usage(path):
                 probes.append(path)
                 return types.SimpleNamespace(free=(3 if pending.exists() else 32) * 1024**3)
             with mock.patch.object(shutil, "disk_usage", side_effect=usage):
-                check_space(paths, pc, dest)
+                check_space(paths, pc, dest, **selected_space)
         self.run_setup(space_check=space)
         self.assertTrue(probes)
         self.assertFalse(pending.exists())
@@ -292,7 +302,11 @@ class PersistentPreparationTests(Fixture):
 
 
 if __name__ == "__main__":
-    if "--validation-off" in sys.argv:
+    if "--legacy-converter-version" in sys.argv:
+        sys.argv.remove("--legacy-converter-version")
+        with mock.patch.object(cache_impl, "CONVERTER_VERSION", 1):
+            unittest.main(defaultTest="PersistentPreparationTests.test_full_archive_cache_version_is_incompatible", verbosity=2)
+    elif "--validation-off" in sys.argv:
         sys.argv.remove("--validation-off")
         with mock.patch.object(b.PreparedCache, "_matches", return_value=True):
             unittest.main(defaultTest="PersistentPreparationTests.test_corruption_is_rejected", verbosity=2)

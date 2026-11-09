@@ -1,8 +1,9 @@
 """Bounded, dormant compatibility inventory for source PC audio modules.
 
-This is evidence for adapters, not an executable bank converter. In particular,
-structurally decoded instructions do not certify arbitrary native programs.
-No source bytecode, bank allowlist or runtime admission bypass is embedded.
+Generic inspection is evidence for adapters, not an executable bank converter.
+Structurally decoded instructions do not certify arbitrary native programs.
+Named stock-profile admission additionally pins the exact paired programs whose
+binding, backend and execution proofs passed. No source bytecode is embedded.
 """
 from __future__ import annotations
 
@@ -405,9 +406,26 @@ def inspect_bank(data, expected):
             'sound_admissible': False, 'blockers': blockers}
 
 
-def require_sound_admission(data, expected):
-    """Always reject until executable adaptation proofs exist, after validation."""
+STOCK_EXECUTION = {
+    'e5e2aaa143f345009f37a0436643aed099f438a9d975c1e26f828045b2ff7f64': 'CAR_ENG',
+    '67d6f7fb267d3725729a66f827cee8f60e62c3f5971ad8d994adbbc91448ae7c': 'CAR',
+}
+
+
+def require_sound_admission(data, expected, *, closure=None):
+    """Admit only the exact paired stock programs with completed replay proofs.
+
+    Generic inspection/admission remains closed. A caller cannot certify other
+    code by passing an interface, familiar instruction set, or proof boolean.
+    """
     report = inspect_bank(data, expected)
+    name = STOCK_EXECUTION.get(report['sha256'])
+    if closure == 'jaguarxk:stock-v1' and name and len(report['modules']) == 1:
+        module = report['modules'][0]
+        _need(module['interface'] == name and module['member_words'] == 100 and
+              all(p['classification'] == TRANSLATED for p in module['players']), 'stock execution profile')
+        report.update(sound_admissible=True, blockers=[], execution_profile=closure)
+        return report
     raise ValueError('audio ABI: sound admission blocked: ' + '; '.join(report['blockers']))
 
 

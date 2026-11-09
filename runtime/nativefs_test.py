@@ -1,8 +1,9 @@
 """Full-screen registry and asynchronous Cocoa policy, using fake windows only.
 
-Proof: 6 registry boots and fake-window production: 0 failures, 6 change notes.
-Restart-disabled row: 1 failure; missing toggle: 5; missing Space flag: 1.
-Stale presentation cache: 6 failures; real policy checks request/display/limit gates.
+Proof: 8 registry boots and fake-window production: 0 failures, 6 change notes.
+Queued-mode hook integration: old harness 7 compiler errors, updated harness 0.
+Row without live_env: 3 failures (fixed row: 0); missing toggle: 5; missing Space flag: 1.
+Stale presentation cache: 7 failures; real policy checks request/display/limit gates.
 No NSApplication, real window, Metal device or game is created.
 """
 from pathlib import Path
@@ -20,6 +21,7 @@ stubs = (RT / 'settings_look_test.c').read_text()
 stubs = stubs[stubs.index('#include <stdio.h>'):stubs.index('static int failures;')]
 user = (RT / 'user32.m').read_text()
 mode = user[user.index('static void ns_apply_mode(Win *w) {'):user.index('static void ns_close(Win *w) {')]
+reconcile = user[user.index('static void ns_reconcile_mode(Win *w) {'):user.index('void user32_fullscreen_mode_changed(void) {')]
 resize = user[user.index('static void ns_resize(Win *w) {'):user.index('// app.m\'s View >')]
 callbacks = user.split('@implementation GameWindowDelegate\n')[1].split('- (BOOL)windowShouldClose:')[0]
 presenter = (RT / 'render_present.m').read_text()
@@ -28,6 +30,7 @@ host = (RT / 'host.h').read_text()
 presentation_type = host[host.index('typedef struct {\n    uint64_t shown[5];'):host.index('} RenderPresentation;') + len('} RenderPresentation;')]
 
 ROW_MAIN = r'''
+void live_picture_apply_fullscreen(int v){(void)v;}
 @ROW@
 static int failures;
 #define CHECK(x) do { if(!(x)){fprintf(stderr,"FAIL: %s\n",#x);++failures;} }while(0)
@@ -40,7 +43,7 @@ int main(int argc, char **argv) {
     const char *wanted=strcmp(argv[2],"-")?argv[2]:argv[1];
     CHECK(initial==(!strcasecmp(wanted,"native")?1:!strcasecmp(wanted,"auto")?2:0));
     CHECK(s_fullscreen.category==SET_DISPLAY && !strcmp(s_fullscreen.label,"Full screen"));
-    CHECK(s_fullscreen.def==0 && s_fullscreen.restart==1 && !s_fullscreen.apply);
+    CHECK(s_fullscreen.def==0 && !s_fullscreen.restart && s_fullscreen.live_env && s_fullscreen.apply==live_picture_apply_fullscreen);
     CHECK(s_fullscreen.nchoices==3 && !strcmp(s_fullscreen.choices[2],"Auto") && !strcmp(s_fullscreen.choices[0],"Borderless") && !strcmp(s_fullscreen.choices[1],"Native"));
     char boot_mode[32];snprintf(boot_mode,sizeof boot_mode,"%s",getenv("NFS_FULLSCREEN_MODE")?:"");
     if(initial)CHECK(!strcasecmp(boot_mode,initial==2?"auto":"native"));
@@ -50,7 +53,7 @@ int main(int argc, char **argv) {
         int v=i!=1;if(i==2)v=2;settings_set(&s_fullscreen,v);
         CHECK(settings_get("display.fullscreen")==v);
         CHECK(!strcmp(app_pref("display.fullscreen"),v==2?"auto":v?"native":"borderless"));
-        CHECK(!strcmp(getenv("NFS_FULLSCREEN_MODE")?:"",boot_mode));
+        CHECK(!strcmp(getenv("NFS_FULLSCREEN_MODE")?:"",v==2?"auto":v?"native":""));   // exported at once, no restart
     }
     printf("row failures=%d\n",failures);return failures?1:0;
 }
@@ -66,6 +69,7 @@ WINDOW = r'''
 #include "roam_online.h"
 atomic_int roam_online_active;
 @interface FakeScreen : NSObject
+@property NSDictionary *deviceDescription;
 @property NSInteger maximumFramesPerSecond;
 @property NSTimeInterval minimumRefreshInterval, maximumRefreshInterval, displayUpdateGranularity;
 @end
@@ -109,7 +113,7 @@ atomic_int roam_online_active;
 @implementation FakeView
 - (BOOL)isKindOfClass:(Class)c {return c==NSView.class || [super isKindOfClass:c];}
 @end
-typedef struct {int full, visible, native_transition, mode_logged, cw, ch; NSWindow *ns; NSView *view;} Win;
+typedef struct {int full, visible, native_transition, mode_logged, mode_pending, reenter, cw, ch; NSWindow *ns; NSView *view;} Win;
 @PRESENTATION_TYPE@
 static Win game;
 static int app_bundled=1, notes, samples, failures, request=1, limit_choice;
@@ -133,6 +137,7 @@ static const NSWindowStyleMask windowed_style=NSWindowStyleMaskTitled|NSWindowSt
 int app_screen_is_builtin(void) { return 0; }
 @POLICY@
 @MODE@
+@RECONCILE@
 @RESIZE@
 @interface GameWindowDelegate : NSObject
 @property uint32_t hwnd;
@@ -146,6 +151,7 @@ int main(void) {@autoreleasepool {
     FakeView *view=[FakeView new];FakeLayer *backing=[FakeLayer new];view.layer=backing;
     view.window=(NSWindow *)fake;backing.delegate=view;backing.displaySyncEnabled=YES;layer=(CAMetalLayer *)backing;
     FakeScreen *screen=[FakeScreen new];screen.maximumFramesPerSecond=120;
+    screen.deviceDescription=@{@"NSScreenNumber":@1};
     screen.minimumRefreshInterval=1./120;screen.maximumRefreshInterval=1./48;
     fake.screen=(NSScreen *)screen;
     game=(Win){.full=1,.visible=1,.cw=1920,.ch=1080,.ns=(NSWindow *)fake,.view=(NSView *)view};
@@ -171,6 +177,14 @@ int main(void) {@autoreleasepool {
     CHECK(strstr(note,"mode=Native") && strstr(note,"owns_space=1") && strstr(note,"gpu_mhz=state=P13"));
     CHECK(strstr(note,"adaptive requested/applicable=1/1") && samples==3);
     RenderPresentation ps;render_presentation_stats(&ps);
+    CHECK(fabs(ps.refresh_ms-1000.0/120)<1e-9);
+    FakeScreen *other=[FakeScreen new];other.deviceDescription=@{@"NSScreenNumber":@2};
+    other.maximumFramesPerSecond=144;other.minimumRefreshInterval=other.maximumRefreshInterval=1./144;
+    fake.screen=(NSScreen*)other;render_presentation_stats(&ps);
+    CHECK(fabs(ps.refresh_ms-1000.0/120)<1e-9); // refresh stays on the cached screen
+    render_presentation_changed();render_presentation_stats(&ps);
+    CHECK(fabs(ps.refresh_ms-1000.0/144)<1e-9);
+    fake.screen=(NSScreen*)screen;render_presentation_changed();render_presentation_stats(&ps);
     CHECK(ps.native_fullscreen && ps.vrr_available && ps.adaptive_scheduling && ps.display_sync);
     request=0;render_presentation_stats(&ps);CHECK(!ps.vrr_requested && !ps.adaptive_scheduling);
     request=1;limit_choice=3;render_presentation_stats(&ps);CHECK(ps.vrr_requested && !ps.adaptive_scheduling);
@@ -226,10 +240,10 @@ def main():
         exe = build(stubs + ROW_MAIN.replace('@ROW@', row))
         for saved, override in (('-', '-'), ('native', '-'), ('borderless', '-'), ('native', 'borderless'), ('borderless', 'native'), ('-', 'NATIVE'), ('auto', '-'), ('-', 'AUTO')):
             run(exe, saved, override)
-        print('PASS fullscreen row: 8 default/saved/override boots, 3-choice round trips, restart boundary')
-        exe = build(stubs + ROW_MAIN.replace('@ROW@', row.replace('.restart = 1', '.restart = 0')))
-        print('PASS restart-disabled mutant rejected:', run(exe, '-', '-', expected=1))
-        source = WINDOW.replace('@POLICY@', policy).replace('@MODE@', mode).replace('@RESIZE@', resize).replace('@CALLBACKS@', callbacks).replace('@PRESENTER@', presenter).replace('@PRESENTATION_TYPE@', presentation_type)
+        print('PASS fullscreen row: 8 default/saved/override boots, 3-choice round trips, live export')
+        exe = build(stubs + ROW_MAIN.replace('@ROW@', row.replace('.live_env = 1', '.live_env = 0')))
+        print('PASS no-live_env mutant rejected:', run(exe, '-', '-', expected=1))
+        source = WINDOW.replace('@POLICY@', policy).replace('@MODE@', mode).replace('@RECONCILE@', reconcile).replace('@RESIZE@', resize).replace('@CALLBACKS@', callbacks).replace('@PRESENTER@', presenter).replace('@PRESENTATION_TYPE@', presentation_type)
         print('PASS fake native window:', run(build(source, True)))
         for old, new in (('[window toggleFullScreen:nil];', '(void)window;'),
                          ('window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;', 'window.collectionBehavior = NSWindowCollectionBehaviorFullScreenNone;')):

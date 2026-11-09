@@ -15,6 +15,10 @@ nibble order 3; predictor 2; trim 3 errors; loop end 2; rounding 2; signed PCM 2
 Strict oracle compile regression: before cleanup, 2 unused-variable errors /
 0 checks; after, -Werror build and 6/6 checks pass.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 import os
 from pathlib import Path
 import re
@@ -360,7 +364,7 @@ class CodecProof(unittest.TestCase):
 
 def private_proof(exe, scratch, *, original=False):
     from setup_kit import car_audio as graph
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     roster = ROOT / 'tools_snapshot/private_cars.py'
     attributes = source / 'GLOBAL/attributes.bin'
     if not attributes.is_file() or not roster.is_file() or exe is None:

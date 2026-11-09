@@ -73,6 +73,11 @@ static unsigned asset_count(void) { return nadditions + traffic_active; }
 static Addition *asset(unsigned j) { return j < nadditions ? additions + j : &traffic_addition; }
 static _Thread_local Addition *model_namespace;
 static uint32_t parts_hash(const char *s);
+/* Standalone catalog checks omit the optional sidecar adapter. */
+__attribute__((weak)) int car_audio_load(uint32_t key, const char *name, const char *path) {
+    (void)key; (void)name; (void)path; return 0;
+}
+__attribute__((weak)) void car_audio_unload(uint32_t key) { (void)key; }
 void f_00751540_orig(Cpu *c);
 void f_00752940_orig(Cpu *c);
 void f_00752B60_orig(Cpu *c);
@@ -132,6 +137,9 @@ void car85_vault_unloaded(uint32_t vault) {
     memset(v, 0, sizeof *v);
     for (unsigned i = 0; i < nsources; ) {
         if (sources[i].generation != generation) { ++i; continue; }
+        if (car_audio_unload && M32(sources[i].ld + 4) == PVEHICLE)
+            for (unsigned j=0;j<nadditions;++j)
+                if (additions[j].pv==M32(sources[i].ld)) car_audio_unload(additions[j].key);
         gfree(sources[i].ld);
         memmove(sources + i, sources + i + 1, (--nsources - i) * sizeof *sources);
     }
@@ -708,7 +716,8 @@ static uint32_t packed_display(Addition *a) {
     UniChar wide[256]; CFIndex n=CFStringGetLength(text);
     if (n>256) fail("display name too long");
     CFStringGetCharacters(text,CFRangeMake(0,n),wide); CFRelease(text);
-    uint32_t histogram=M32(0x0091CF7Cu),count=histogram?M32(histogram):0;
+    // LoaderLanguage 0057E97D stores the histogram here; 0091CF7C is the string pool.
+    uint32_t histogram=M32(0x0091CF84u),count=histogram?M32(histogram):0;
     if (count>65536) fail("invalid language histogram");
     unsigned used=0;
     for (CFIndex k=0;k<n;++k) {
@@ -1519,6 +1528,13 @@ void car85_vault_loaded(Cpu *c, uint32_t vault) {
             if (!a->frontend_key || !a->ecar_key) fail("zero catalog binding key");
         }
         if (!a->key) fail("zero addition Attrib key");
+        if (car_audio_load && a->directory[0]) {
+            char path[PATH_MAX];
+            if (snprintf(path,sizeof path,"%s/AUDIO.BIN",a->directory)>=(int)sizeof path ||
+                car_audio_load(a->key,a->name,path)<0) {
+                if (diag_on) diag_event("addcar_audio: rejected sidecar key=%08X; using stock engine",a->key);
+            }
+        }
         for (unsigned i = 0; i < j; ++i) {
             Addition *b=&additions[i];
             if (a->key==b->key || addition_key(a,FRONTEND)==addition_key(b,FRONTEND) ||

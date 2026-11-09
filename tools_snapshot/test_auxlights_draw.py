@@ -71,6 +71,8 @@ static int split_fixture;
 static int split_view_rect(uint32_t v,uint32_t *r) { (void)r; return split_fixture && v==0x9196C0; }
 static unsigned long long host_ticks(void) { return 1; }
 static void diag_event(const char *s,...) { (void)s; }
+static void underglow_render_receiver_record(uint32_t queue) { (void)queue; }
+static void underglow_render_receiver_clear(void) {}
 HOOKS
 static unsigned append_count, lit_count;
 void f_007311F0_orig(Cpu *c) { c->eax=1; }

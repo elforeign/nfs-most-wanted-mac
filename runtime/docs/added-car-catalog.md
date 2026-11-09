@@ -212,3 +212,105 @@ durable publication failures and source-tree/pointer preservation. Test output
 records good and broken counts: 30 tests, 22 good checks and 117 rejected broken
 controls. Bypassing the contract-approval guard in memory makes four tests fail
 (zero errors). Real output approvals still require visual review.
+## Optional source engine audio
+
+`NFS_ADDCAR_AUDIO` defaults On (unset, `on` or `1`), enabling the optional Mac
+`AUDIO.BIN` sidecar for the Jaguar XK source stock tier. `off` or `0` restores
+donor audio. Stock cars stay on the native engine path, byte-identical to the
+adapter bypass. Missing sidecars retain the donor engine. Other source cars,
+source revisions and tiers have no admission profile.
+This is a startup experiment: listening acceptance and a guarded game check are
+still required. Timbre, layer balance, acceleration/deceleration transitions,
+spatial impression and audible clicks have no automated acceptance claim.
+
+`car_convert.convert(..., mac_audio=True)` adds the sidecar to the normal tracked,
+transactional output inventory. The default conversion and X360/Windows outputs
+retain their existing binary files. Setup must explicitly request this Mac
+option; no UI, backend protocol or approval policy is changed by this feature.
+Existing catalog generations require a reviewed output pin before adding it.
+
+The version-1 `A7CA` sidecar contains the complete canonical A1 graph, both
+effective numeric engineaudio calibration layouts, all source GIN/ABK resources,
+A2 decoded samples, source selector identities and the two A3/A4 executable
+plans. Its 68-byte header stores magic, version, total bytes, resource count,
+graph bytes, a 16-byte car name and a 32-byte payload digest. All integers are
+little endian. Layer records contain a 300-byte calibration and bank/acceleration/
+deceleration resource indices. Resource records retain full source SHA-256s,
+source bytes, pointer-free plans and mono PCM. Full package SHA-256 is pinned in
+both the builder and runtime:
+`66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c`
+(6,481,404 bytes). Recomputing a corrupt input's local checksum cannot admit it.
+Generic ABI admission stays closed; only the exact paired stock programs can
+use the named `jaguarxk:stock-v1` execution profile. Upgrade resources remain
+provenance in the complete graph and acquire no executable admission.
+
+Resource opens use `SOUND/ADDCAR_AUDIO/<package SHA-256>/<resource SHA-256>`.
+Both full digests are compared; runtime bank tokens are monotonically allocated,
+never truncated hashes. Each open has an independent cursor. `boot.c` serves
+these identities before unrelated X360 engine replacements. Source files and
+native resource namespaces are not modified.
+
+Native hooks are relocated at AEMS initialization `004DC360`, Ginsu initialization
+`004EE1C0`, detach `004DC1D0`, and destructors `004F5CD0`/`004F5D60`. The existing `posaudio.c`
+`004EDD90`/`004EE3E0` wrappers retain their positional context and native call,
+then update the two distinct 100-word source exports. RPM comes from the live
+engine's vtable `+44`; load, main gain, dry/wet gain, pitch and azimuth come from
+the native live controller. Each export uses its source RPM bounds and complete
+primary/secondary calibration, including w84's primary `+74` origin.
+
+Source bank programs run through `interp_run`; ordinals 4/27/38 dispatch to the
+owned adapters only inside this execution scope. The donor program is released
+after successful source initialization. Source loop PCM uses continuous source
+pan, priority, gain/pitch and biquad callbacks, then four mono native packet
+streams carry stereo dry and wet sends into the native mixer/reverb. The source
+float buffers pass through a scoped `00825310` conversion hook: native packet
+reader `00827182` calls the converter installed at `00822BF3` via `009C2528`.
+Only the eight owned packet buffers use the original float values in native
+16-bit sample units; all unrelated buffers call the original converter. This
+retains headroom before the existing master limiter. The measured source peak
+is 1.08107078; a separate +1.25/-1.5 fixture fails with int16 staging and passes
+with float conversion. Native transport startup gain is unity. The source
+pool has 512 voices; its priority arbitration is separate from the four native
+transport voices. Native-pool resource pressure and this grouping still need a
+guarded-game assessment; the headless transport does not certify native voice
+stealing, device mix or audible quality.
+
+For player engines, all four original acceleration/deceleration GIN byte streams
+(engine plus exhaust) pass through native `004E1280`, Ginsu construction,
+SetSynthData, StartSynthesis, UpdateFrequency and teardown. The two donor Ginsu
+streams are stopped after successful replacement. A retiring pvehicle vault
+defers freeing a package while an engine still borrows it; the final real engine
+destructor finishes that unload. AEMS and Ginsu instances both release their
+source players, classes and buffers before the original destructor runs.
+
+Default-selection proof in `runtime/car_audio_test.py` compares 267,040
+CPU/guest/PCM bytes for stock cars across four lifecycle pairs with the switch
+unset, and verifies both added-car constructors select source engine/exhaust
+with nonzero PCM. Each check fails with exit 1 on the old unset-Off default;
+both pass with the new default. Explicit `off` and `0` retain the donor path;
+all 18 prior safety controls still pass. The native private replay below uses
+the unset default for stock comparisons and Jaguar XK source selection.
+
+Headless proof: `runtime/car_audio_test.py --original --private` must exit 1 with
+0/2 source engine/exhaust matches; `--private` must exit 0 with 2/2, four matched
+GINs, nonzero bank and native-Ginsu PCM, AEMS teardown and two unload/reload
+cycles. It uses pinned native synthesis/default-initializer fragments and the
+production hooks, interpreter, adapters and file service; packet transport and
+live car observations are headless boundaries. The real native packet reader
+and PCM converter are included. Off/stock compares 120,320 native
+PCM bytes across four pairs, with matching per-pair SHA-256
+`671cd21892b9cbc6b431092b06b93d732f0b7ccc76e7a8a522591b5f3bec1ee7`,
+plus 65,536 controller bytes and CPU state. Removing serving, either export,
+source PCM, GIN selection or the package pin must fail; a 64-byte native
+attribute descriptor also fails its guest guard (the initializer writes 104).
+Eleven targeted controls include detached/inactive controller use, deferred
+unload, zero transport gain and lossy headroom. The fixed lifecycle releases
+194/194 guest allocations and 44/44 native packet objects and produces 163,702
+nonzero samples out of 247,936 native packet-reader PCM samples.
+
+The adapter's default generated replay rejects both duplicate and overlapping
+player ranges before modifying the load image, verifies immediate unlink after
+an external ordinal-4 destroy request, and checks cleared imported-control
+handles. All six compiled detach/selector/ordinal/control/unlink/overlap controls
+fail without private banks. Private adapter replay covers 69 banks, 98 modules,
+400 players and 127/127 interfaces with every PCM borrow/control object retired.

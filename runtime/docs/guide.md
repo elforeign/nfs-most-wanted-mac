@@ -1,5 +1,26 @@
 # Guide
 
+## Optional cars
+
+Appearance review accepted 10 PC and 9 Xbox 360 conversions. Accepted on both:
+997GT3RS, BRERA, CCX, CORVETTEZ06, EUROPA, JAGUARXK, MR2, R32 and R8;
+300C is accepted on PC only. JAGUARXK renders in race and showroom on both.
+
+240SX remains unapproved on both platforms because its logo is a placeholder.
+997TT, CAMARON, G35, MAZDASPEED3 and MUSTANGSHLBYN on both platforms, plus
+300C on Xbox 360, failed conversion during review. Converter fixes now exist,
+but those outputs still need appearance review.
+
+These reviewed conversions are not available for import in this package yet.
+Your Most Wanted installation works without extras.
+
+When a package provides approved cars, use Setup's Extras page to import your
+own source files. Enable **Cars from later games** and restart. Keep retained
+generations when removing cars. If a career requests missing cars, restore its
+verified generation in Setup, or reimport the identical source files with the
+same package, then restart. Keep the career and its dependency files together;
+never delete or overwrite a career to bypass a missing-car refusal.
+
 ## Open Help from the couch
 
 Click the touchpad on a DualSense or DualShock 4 to open F10. On a keyboard, press F10, or Fn+F10 if F10 controls your Mac's sound.
@@ -63,7 +84,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 
 - **Car paint** selects the PC highlight or the console's sun-coloured highlight. **Car glass** changes window opacity and reflections.
 - **Tyre and badge detail** adds surface relief; **Paint flake** adds close-up sparkle. Their X360 choices need X360 Car paint too.
-- **Car reflections > Sharp** adds finer reflected detail and uses more memory; Standard keeps the original. Restart to apply.
+- **Car reflections > Sharp** adds finer reflected detail and uses more memory; Standard keeps the original. Changes apply while playing, with a brief pause to rebuild the picture.
 - **Police light glow** adds glow around police lights. **Arrest scenes** chooses PC or installed X360 scenes and needs a restart.
 
 ## Mirror
@@ -77,7 +98,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 ## Display & performance
 
 - **Window mode** switches between Full screen and a resizable Window.
-- **Full screen** chooses Borderless (default, recommended), Native, or Auto (Native on the Mac screen, Borderless on a TV or other display). **Known issue with Native:** on some Macs, macOS can drop the graphics chip to its slowest speed during long, busy scenes (big pursuits) and not raise it again, so the frame rate falls to about a third until you leave Native. If that happens, switch to Borderless. For Native, also set **Window mode > Full screen**, save your career and restart. Native uses its own macOS Space so Game Mode can engage; macOS controls whether it does.
+- **Full screen** chooses Borderless (default, recommended), Native, or Auto (Native on the Mac screen, Borderless on a TV or other display). Changes apply while playing; for Native, also set **Window mode > Full screen**. Native uses its own macOS Space so Game Mode can engage; macOS controls whether it does. **Known issue with Native:** on some Macs, macOS can drop the graphics chip to its slowest speed during long, busy scenes (big pursuits) and not raise it again, so the frame rate falls to about a third until you leave Native. If that happens, switch to Borderless.
 - **Frame rate limit** offers Off, 120, 60 or 40. Display refresh affects the result: 40 on a 60 Hz screen gives 30 fps. **Variable refresh pacing** asks compatible displays for adaptive pacing.
 - **Performance overlay** shows Compact numbers or Full details and a timing graph while you drive.
 - **Quit game** and **Restart game** need a second press within four seconds. Settings are saved; race progress since your last save is lost.

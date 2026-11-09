@@ -48,6 +48,9 @@
 
 #include "host.h"
 #include "diag_car.h"
+#include "underglow_render.h"
+#include "underglow_light.h"
+#include "framelate.h"
 
 int diag_on;
 int diag_fixed_step;
@@ -55,6 +58,8 @@ const char *diag_dir;
 static FILE *events_f, *frames_f;
 static uint64_t frame_now, last_frame_ns;
 static int idle_now;                     // diag_idle
+static int exiting;
+void diag_begin_exit(void) { __atomic_store_n(&exiting, 1, __ATOMIC_RELEASE); }
 static int shot_every = 3600;            // periodic overview shots (frame_NNNNN.jpg, small); 0 = none
 static FILE *timeline_f;                 // timeline.log (below)
 static float timeline_race0 = -1, timeline_secs = 60;
@@ -284,6 +289,9 @@ static void guest_state(FILE *f, Cpu *c, uint32_t tid) {
 }
 // Writes a full report: every thread's host backtrace, guest registers/stacks, the event ring.
 void diag_report(const char *file, const char *why) {
+    // Recheck at publication too: exit can begin after a watchdog sampled time.
+    if (__atomic_load_n(&exiting, __ATOMIC_ACQUIRE) &&
+        (!strncmp(file, "hang", 4) || !strncmp(file, "stall", 5))) return;
     char path[1024];
     if (diag_dir) snprintf(path, sizeof path, "%s/%s", diag_dir, file);
     else snprintf(path, sizeof path, "%s/%s-%s", log_dir(), log_name(), file);   // NFSMW-crash.txt next to NFSMW.log
@@ -539,13 +547,13 @@ static void *hang_monitor(void *p) {
     for (unsigned tick = 1;; ++tick) {
         profile_wait_100ms();
         // stall: a frame late by more than BOOT_DIAG_STALL ms (but not yet a hang): one report while it lasts
-        uint64_t t = host_ticks();
-        if (stall_ms > 0 && !idle_now && last_frame_ns && frame_now > 600 && t - last_frame_ns > (uint64_t)stall_ms * 1000000ull &&
-            stall_at != last_frame_ns && stalls < 5) {
-            stall_at = last_frame_ns;
+        uint64_t last, late = framelate_ns(&last_frame_ns, host_ticks, &last);   // stamp before clock (framelate.h)
+        if (stall_ms > 0 && !diag_is_idle() && frame_now > 600 && late > (uint64_t)stall_ms * 1000000ull && stall_at != last && stalls < 5) {
+            stall_at = last;
             char file[64], why[128];
             snprintf(file, sizeof file, "stall_%d.txt", ++stalls);
-            snprintf(why, sizeof why, "stall: no frame for %d ms after frame %llu", stall_ms, (unsigned long long)frame_now);
+            snprintf(why, sizeof why, "stall: no frame for %d ms after frame %llu (%.0f ms since it)", stall_ms,
+                     (unsigned long long)frame_now, late / 1e6);
             diag_report(file, why);
         }
         if (tick % 10) continue;                                         // the rest once a second
@@ -557,13 +565,14 @@ static void *hang_monitor(void *p) {
             FILE *f = fopen(tmp, "w");
             if (f) { boot_write_call_counts(f); fclose(f); rename(tmp, path); }
         }
+        late = framelate_ns(&last_frame_ns, host_ticks, &last);
         uint64_t now = host_ticks();
         // a hang that lasts gets a second and third report 10 s apart: a thread that loops shows a different
         // stack in each, one that's blocked the same
-        if (!idle_now && last_frame_ns && now - last_frame_ns > (uint64_t)secs * 1000000000ull &&
-            (reported_at != last_frame_ns || (same_hang < 3 && now - last_report > 10000000000ull)) && reports < 6) {
-            same_hang = reported_at == last_frame_ns ? same_hang + 1 : 1;
-            reported_at = last_frame_ns;
+        if (!diag_is_idle() && late > (uint64_t)secs * 1000000000ull &&
+            (reported_at != last || (same_hang < 3 && now - last_report > 10000000000ull)) && reports < 6) {
+            same_hang = reported_at == last ? same_hang + 1 : 1;
+            reported_at = last;
             last_report = now;
             char file[64], why[128];
             snprintf(file, sizeof file, "hang_%d.txt", ++reports);
@@ -619,6 +628,25 @@ int diag_frame_wanted(uint64_t frame, const char *list_env) {
     }
     if (k < 4) cached_ans[k] = ans;
     return ans;
+}
+// The common draw/COM path reads only a cached flag. Key marks can occur
+// within a frame, so retain the frame-list parser's race/key invalidation.
+int diag_draw_frame_wanted(uint64_t frame) {
+    static int init, probe, wanted;
+    static uint64_t cached_frame = ~0ull, cached_race, cached_key;
+    if (!init) {
+        const char *s = getenv("BOOT_DIAG_DRAWS");
+        probe = s && strstr(s, "probe");
+        init = 1;
+    }
+    // Probe phases and their simulation threshold can change within a frame.
+    // Preserve that specialized diagnostic path's per-call observation.
+    if (probe) return diag_frame_wanted(frame, "BOOT_DIAG_DRAWS");
+    if (cached_frame != frame || cached_race != race_frame || cached_key != key_frame) {
+        wanted = diag_frame_wanted(frame, "BOOT_DIAG_DRAWS");
+        cached_frame = frame; cached_race = race_frame; cached_key = key_frame;
+    }
+    return wanted;
 }
 // BOOT_DIAG_SIMSHOTS=s1,s2,...: the back buffer when the race's sim time (Sim::GetTime since the race started)
 // passes each value, written as simshot_<s>.png. Runs at different frame or tick rates compare at equal game time.
@@ -836,10 +864,10 @@ void diag_idle(int idle) {
     if (idle == idle_now) return;
     idle_now = idle;                     // always: report.m's hang watchdog runs in normal play too
     if (diag_on) diag_event(idle ? "main thread idle: waiting for messages" : "main thread drawing again");
-    last_frame_ns = host_ticks();
+    __atomic_store_n(&last_frame_ns, host_ticks(), __ATOMIC_RELEASE);
 }
 uint64_t diag_last_frame_ns(void) { return last_frame_ns; }
-int diag_is_idle(void) { return idle_now; }
+int diag_is_idle(void) { return idle_now || __atomic_load_n(&exiting, __ATOMIC_ACQUIRE); }
 
 // Scripted race characters (BOOT_DIAG, races): GManager::mObj (0x0091E00C) keeps the GCharacters that
 // GCharacter::Spawn (00601320) has asked for in a vector at +0x80..+0x84; ServicePendingCharacters (005FDD60) walks it
@@ -879,7 +907,7 @@ void diag_frame(uint64_t frame, uint64_t draws) {
     diag_idle(0);
     uint64_t now = host_ticks(), prev = last_frame_ns;
     frame_now = frame;
-    last_frame_ns = now;
+    __atomic_store_n(&last_frame_ns, now, __ATOMIC_RELEASE);   // read by the hang monitor's thread (framelate.h)
     static uint32_t state = 0xFFFFFFFFu;
     uint32_t st = M32(GAMEFLOW_STATE);
 #ifdef NFS_PUBLIC
@@ -1325,7 +1353,16 @@ static inline float car_f32(uint32_t a) { float f; memcpy(&f, G + a, 4); return 
 FILE *dump_file(void);
 void f_0074E160_orig(Cpu *c);
 void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags, p8, reflection, float, min LOD, max LOD)
-    if (!diag_on) { f_0074E160_orig(c); return; }
+    if (!diag_on && !underglow_light_enabled()) { f_0074E160_orig(c); return; }
+    UGCarCapture light_capture;
+    underglow_light_begin(c, &light_capture);
+    if (!diag_on) {
+        f_0074E160_orig(c);
+        underglow_light_end(c, &light_capture);
+        return;
+    }
+    UGCarCapture mount_capture;
+    underglow_render_car_begin(c, &mount_capture);
     DiagCarRender sample;
     diag_car_begin(c, &sample, frame_now);
     FILE *df = diag_on ? dump_file() : NULL;
@@ -1335,6 +1372,8 @@ void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags
                     (int)M32(self + 0x162C), M32(c->esp));
     uint32_t fail0 = M32(0x00915F98u), vid = M32(view + 4);
     f_0074E160_orig(c);
+    underglow_light_end(c, &light_capture);
+    underglow_render_car_end(c, &mount_capture);
     diag_car_end(c, &sample);
     if (df) fprintf(df, "car: Render %08X view %u -> %u\n", self, M32(view + 4), c->eax & 0xFF);
     if (vid == 1) { ++diag_car1[0]; diag_car1[1] += c->eax & 1; diag_car1[2] += M32(0x00915F98u) != fail0; }   // frames.log `cars1`
@@ -1342,6 +1381,7 @@ void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags
 }
 void f_007387E0_orig(Cpu *c);
 void f_007387E0(Cpu *c) {   // thiscall void RenderPart(view, CarPartModel *, bMatrix4 *, eDynamicLightContext *, flags)
+    if (diag_on) underglow_render_part(c);
     FILE *df = diag_on ? dump_file() : NULL;
     if (df) {
         uint32_t self = c->ecx, slot = arg(c, 1), m = arg(c, 2), off = slot - self, model = slot ? M32(slot) & ~3u : 0;
@@ -1747,8 +1787,20 @@ void f_00508560(Cpu *c) {
         diag_event("carpack: LoadStreamingEntry loader %08X count %d pool %d hashes %08X %08X %08X%s", c->ecx, (int)n,
                    (int)arg(c, 4), h ? M32(h) : 0, h && (int)n > 1 ? M32(h + 4) : 0, h && (int)n > 2 ? M32(h + 8) : 0,
                    n > 4096u ? " BAD count" : "");
+        diag_cartex_request(c);
     }
     f_00508560_orig(c);
+}
+// cartex (diag_car.c): car texture hashes two streaming packs hold; a deleted pack frees them for every car.
+void f_00501050_orig(Cpu *c);
+void f_00501050(Cpu *c) {
+    if (diag_on) diag_cartex_unload(c);
+    f_00501050_orig(c);
+}
+void f_004FB530_orig(Cpu *c);
+void f_004FB530(Cpu *c) {
+    if (diag_on) diag_cartex_free(c);
+    f_004FB530_orig(c);
 }
 void f_007528D0_orig(Cpu *c);
 void f_007528D0(Cpu *c) {

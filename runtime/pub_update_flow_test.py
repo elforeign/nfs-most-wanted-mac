@@ -11,6 +11,8 @@ broken=2 rejected; retained detach good=6, broken retry policy=2 rejected.
 Mounted interpreter proof: good=1 detached before build (rc=0) / original-order
 broken=1 rejected with Resource busy (rc=1). Direct restricted run: image refused
 with "Device not configured" (rc=3); --mounted-prepare skips only image refusal.
+Cleanup regression requires original detach/rmtree EBUSY (16), then successful
+retry/force unmount with the same file still open (1 broken / 1 good control).
 """
 import io
 import json
@@ -23,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import time
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
@@ -286,12 +289,33 @@ def detach_retry_cases(root):
     print('Retained detach good=6 PASS (0/1/3/5/1/1 attempts, bounded waits); broken retry policy=2 rejected')
 
 
+def cleanup_mount(mount, deadline=None):
+    """Wait for detach before TemporaryDirectory can remove the mount directory."""
+    deadline = time.monotonic() + 9 if deadline is None else deadline
+    for force in (False, False, True):
+        if not mount.is_mount(): return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: break
+        try:
+            result = subprocess.run(['/usr/bin/hdiutil', 'detach', *(['-force'] if force else []), str(mount)],
+                                    capture_output=True, text=True, timeout=remaining if force else min(2, remaining))
+            assert result.returncode in (0, 16) or 'busy' in result.stderr.lower(), result.stderr
+            if result.returncode == 0: break
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(min(.1, max(0, deadline - time.monotonic())))
+    while mount.is_mount() and time.monotonic() < deadline:
+        time.sleep(min(.1, max(0, deadline - time.monotonic())))
+    assert not mount.is_mount(), 'Scratch image still mounted after bounded cleanup'
+
+
 def mounted_prepare():
     """Real mapped executable on a scratch volume; no released image required."""
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp).resolve(); image=root/'scratch.dmg'
         # Probe disk-image access before constructing the interpreter fixture.
-        result=subprocess.run(['/usr/bin/hdiutil', 'create', '-size', '32m', '-fs', 'HFS+',
+        # Disable indexing at creation, before Spotlight can see an attached volume.
+        result=subprocess.run(['/usr/bin/hdiutil', 'create', '-nospotlight', '-size', '32m', '-fs', 'HFS+',
                                '-volname', 'UpdateDetachTest', str(image)], capture_output=True, text=True)
         def refused(result):
             message=result.stderr.lower()
@@ -344,7 +368,24 @@ def mounted_prepare():
                 if broken: assert 'busy' in result.stderr.lower(), result.stderr
                 outcomes.append(result.returncode)
             finally:
-                if mount.is_mount(): run(['/usr/bin/hdiutil', 'detach', mount])
+                deadline = time.monotonic() + 9
+                held = None
+                try:
+                    if broken and mount.is_mount():
+                        held = (mount/'cleanup-busy').open('w')
+                        try:
+                            try:
+                                subprocess.run(['/usr/bin/hdiutil', 'detach', str(mount)],
+                                               capture_output=True, text=True, timeout=1)
+                            finally: shutil.rmtree(mount)
+                        except OSError as error:
+                            assert error.errno == 16, error
+                        else: raise AssertionError('Original cleanup accepted a busy volume')
+                finally:
+                    try: cleanup_mount(mount, deadline)
+                    finally:
+                        if held: held.close()
+                if held: print('Cleanup held-open file: original EBUSY=16; retry/force unmounted=1 PASS')
         print('Mounted interpreter good=1 detached before build; original-order broken=1 busy; rc='+str(outcomes))
     return 0
 

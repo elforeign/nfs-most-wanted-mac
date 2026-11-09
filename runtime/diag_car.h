@@ -15,3 +15,6 @@ void diag_car_begin(Cpu *c, DiagCarRender *sample, uint64_t frame);
 void diag_car_observe(Cpu *c, uint32_t site);
 void diag_car_reject(uint32_t site);
 void diag_car_end(Cpu *c, DiagCarRender *sample);
+void diag_cartex_request(Cpu *c);   // LoadStreamingEntry 00508560: hashes two packs hold
+void diag_cartex_unload(Cpu *c);    // UnloadAllStreamingEntries 00501050: a car pack's loaded entries
+void diag_cartex_free(Cpu *c);      // InternalUnloadStreamingEntry 004FB530: a freed hash another pack holds

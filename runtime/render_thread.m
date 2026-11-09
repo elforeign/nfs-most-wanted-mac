@@ -16,7 +16,7 @@ int rt_on = -1;
 
 enum { OP_RENC = 1, OP_BENC, OP_BENCD, OP_END, OP_LABEL, OP_PSO, OP_DSS, OP_FTEX, OP_VTEX, OP_FSAMP, OP_VSAMP, OP_VBUF, OP_FBUF,
        OP_VBOFF, OP_FBOFF, OP_VBYTES, OP_FBYTES, OP_VIEWPORT, OP_SCISSOR, OP_CULL, OP_WINDING, OP_BIAS, OP_STENCIL, OP_BLENDC,
-       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB, OP_RLIST, OP_MIPMAPS, OP_NATIVE };
+       OP_VIS, OP_FILL, OP_DRAW, OP_DRAWI, OP_DRAWIX, OP_COPY_TT, OP_COPY_TTR, OP_COPY_TB, OP_RLIST, OP_MIPMAPS, OP_NATIVE, OP_RLIST_X };
 
 @interface RTNative : NSObject {
 @public
@@ -234,6 +234,7 @@ destinationBytesPerImage:(NSUInteger)bpi {
 // The same typed op stream serves ordinary frames and deferred coverage lists.
 // Lists capture bytes inline and retain resources once; they never redo D3D translation.
 static int replay_render_op(unsigned k,const uint64_t *a,id<MTLRenderCommandEncoder> r);
+static void replay_render_list_x(RTCmd *c,id<MTLRenderCommandEncoder> r,const uint64_t *x);
 static void replay_render_list(RTCmd *c,id<MTLRenderCommandEncoder> r) {
     for(size_t i=0;i<c->n;){const uint64_t *w=c->w+i;i+=w[0]>>8;
         if(!replay_render_op(w[0]&255,w+1,r)){fprintf(stderr,"boot: bad render list op %u\n",(unsigned)(w[0]&255));abort();}}
@@ -243,6 +244,7 @@ static int replay_render_op(unsigned k,const uint64_t *a,id<MTLRenderCommandEnco
     switch(k){
         case OP_LABEL:r.label=O(a[0]);break;
         case OP_RLIST:replay_render_list((RTCmd *)O(a[0]),r);break;
+        case OP_RLIST_X:replay_render_list_x((RTCmd *)O(a[0]),r,a+1);break;
         case OP_PSO: [r setRenderPipelineState:O(a[0])]; break;
         case OP_DSS: [r setDepthStencilState:O(a[0])]; break;
         case OP_FTEX: [r setFragmentTexture:O(a[0]) atIndex:a[1]]; break;
@@ -274,6 +276,24 @@ static int replay_render_op(unsigned k,const uint64_t *a,id<MTLRenderCommandEnco
     }
     return 1;
 }
+// A list replayed into a target 1/div the size (soft_smoke_half.m): viewports and scissors divided and clamped,
+// fragment texture `from` bound as `to`, and optionally one float of a fragment-bytes block replaced (a diagnostic
+// control). Words: div, width, height, from, to, bytes index, bytes length, bytes offset, float bits (0 length: none).
+// Only lists replayed through rt_render_list_replay_scaled take this path; every other replay is unchanged.
+static void replay_render_list_x(RTCmd *c,id<MTLRenderCommandEncoder> r,const uint64_t *x) {
+    double div=(double)x[0];
+    for(size_t i=0;i<c->n;){const uint64_t *w=c->w+i,*a=w+1;i+=w[0]>>8;unsigned k=(unsigned)(w[0]&255);
+        if(k==OP_VIEWPORT){MTLViewport v;memcpy(&v,a,sizeof v);v.originX/=div;v.originY/=div;v.width/=div;v.height/=div;[r setViewport:v];}
+        else if(k==OP_SCISSOR){MTLScissorRect s;memcpy(&s,a,sizeof s);
+            NSUInteger x0=MIN(s.x/x[0],x[1]),y0=MIN(s.y/x[0],x[2]),x1=MIN((s.x+s.width+x[0]-1)/x[0],x[1]),y1=MIN((s.y+s.height+x[0]-1)/x[0],x[2]);
+            [r setScissorRect:(MTLScissorRect){x0,y0,x1>x0?x1-x0:0,y1>y0?y1-y0:0}];}
+        else if(k==OP_FTEX)[r setFragmentTexture:O(a[0]==x[3]?x[4]:a[0]) atIndex:a[1]];
+        else if(k==OP_FBYTES && x[6] && a[1]==x[5] && a[0]==x[6] && x[7]+4<=x[6] && x[6]<=4096){
+            uint8_t b[4096];uint32_t f=(uint32_t)x[8];memcpy(b,a+2,a[0]);memcpy(b+x[7],&f,4);[r setFragmentBytes:b length:a[0] atIndex:a[1]];}
+        else if(k==OP_RLIST)replay_render_list_x((RTCmd *)O(a[0]),r,x);
+        else if(!replay_render_op(k,a,r)){fprintf(stderr,"boot: bad render list op %u\n",k);abort();}
+    }
+}
 static RTCmd *render_list_cmd(void){RTCmd *c=[RTCmd new];c->owned=[NSMutableArray new];return c;}
 id rt_render_list_new(void){RTRender *r=[RTRender new];r->c=render_list_cmd();return r;}
 unsigned rt_render_list_ops(id list){return list?(unsigned)((RTRender *)list)->c->n:0;}
@@ -289,6 +309,18 @@ void rt_render_list_replay(id list,id<MTLRenderCommandEncoder> encoder){
     // Detach the immutable snapshot: later draws and discard cannot mutate an
     // already queued frame. The render thread releases its resource ownership.
     r->c=render_list_cmd();
+}
+void rt_render_list_replay_scaled(id list,id<MTLRenderCommandEncoder> encoder,const RTListScale *s,int keep){
+    if(!list||!encoder||!s||!s->div)return;
+    RTRender *r=list;RTCmd *recording=r->c;
+    uint64_t x[9]={s->div,s->width,s->height,(uint64_t)(uintptr_t)s->from,(uint64_t)(uintptr_t)s->to,s->bytes_index,s->bytes_length,s->bytes_offset,0};
+    memcpy(&x[8],&s->bytes_value,4);
+    if([(id)encoder isKindOfClass:[RTRender class]]){
+        RTCmd *target=((RTRender *)encoder)->c;
+        uint64_t *a=op(target,OP_RLIST_X,10);a[0]=obj_w(target,recording);
+        x[3]=obj_w(target,(__bridge id)s->from);x[4]=obj_w(target,(__bridge id)s->to);memcpy(a+1,x,sizeof x);
+    }else replay_render_list_x(recording,encoder,x);
+    if(!keep)r->c=render_list_cmd();
 }
 
 static void replay(RTCmd *c) {

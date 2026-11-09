@@ -24,6 +24,8 @@ int postfx_look_variant(const char *s){(void)s;return 0;}
 void render_soft_smoke_proof_finish(void){} // proof is inactive in this recording-only fixture
 void render_soft_smoke_late(id<MTLTexture> scene){(void)scene;}
 id<MTLTexture> render_soft_smoke_layer(void){return nil;}
+id<MTLTexture> render_soft_smoke_half_depth(void){return nil;}
+const char soft_half_up_msl[]="";
 void render_soft_smoke_layer_applied(void){}
 void render_soft_smoke_late_finish(id<MTLTexture> scene){(void)scene;}
 id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth,int allow_cuts){(void)allow_cuts;(void)depth;CHECK(0);return nil;}
@@ -35,6 +37,12 @@ Device dev;
 id<MTLDevice> mtl;
 id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
     (void)pass; return [mtl newRenderPipelineStateWithDescriptor:d error:e];
+}
+id<MTLRenderPipelineState> pipeline_cached_library(MTLRenderPipelineDescriptor *d, id<MTLLibrary> lib, const char *pass, NSError **e) {
+    (void)lib; return pipeline_build(d,pass,e);
+}
+id<MTLLibrary> pipeline_library_source(NSString *src, const char *pass, NSError **e) {
+    (void)pass; return [mtl newLibraryWithSource:src options:nil error:e];
 }
 id<MTLCommandBuffer> cmd;
 id<MTLTexture> backbuffer_tex,present_tex,autodepth_tex;

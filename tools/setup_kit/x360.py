@@ -5,7 +5,7 @@ PC paths and the game's executables; extract only runtime/converter inputs;
 convert into private staging; independently validate inventories, DDS metadata,
 HUFF bytes and arrest references; publish with one directory rename.
 
-Premise: roots.h consumes x360_root (raw files incl. NFS/ZZDATA0.BIN and
+Premise: roots.h consumes x360_root (retained shader window and
 default.xex), assets_root/{hd_textures_mips_alpha,hd_textures_ui,nis_arrest},
 and movies. Audio/music/police/NIS/reverb/vinyls use raw SOUND/GLOBAL/CARS;
 world tables also need GLOBAL vaults, GLOBALB and both L2RA track bundles.
@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 
-from . import huff, xdvdfs
+from . import huff, xdvdfs, x360_extras
 
 ROOT = Path(__file__).resolve().parents[2]
 SNAPSHOT = ROOT / "tools_snapshot"
@@ -45,6 +45,8 @@ REQUIRED = (
 SELECTED_DIRS = {"GLOBAL", "TRACKS", "CARS", "SOUND", "NIS", "FRONTEND", "LANGUAGES"}
 ARREST = re.compile(r"SCENE_ARREST[FM]\d+B?_BUNDLEB\.BUN$", re.I)
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_\\/%.\-]+\.[A-Za-z0-9]{2,4}".encode())
+SHADER_WINDOW = (0x09BB7000, 0x09C1C000)
+SHADER_FILE = "NFS/zzdata0_09bb7000.bin"
 XEX_TITLE = "0x454107D9"
 XEX_BUILDS = {   # the supported executables: SHA-256 of the whole decoded image (tools_snapshot/pubtables_gen.py XEX_BUILDS)
     "USA": "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618",
@@ -238,22 +240,30 @@ def _wanted(name):
     return top in SELECTED_DIRS and name.endswith((".BIN", ".BUN", ".LZC"))
 
 
-def _extract(source, stage, pc_root, work, progress):
+def _extract(source, stage, pc_root, work, progress, extras=None):
+    chosen = x360_extras.selection(extras)
+    need_nis = "arrest" in chosen or "textures" in chosen
     raw, movies = stage / "files", stage / "Movies"
     raw.mkdir()
     prefix = "FILES/" if "FILES/GLOBAL/GLOBALB.BUN" in source.files else ""
-    for name, dest in (("DEFAULT.XEX", raw / "default.xex"), ("NFS/ZDIR.BIN", raw / "NFS/ZDIR.BIN"),
-                       ("NFS/ZZDATA0.BIN", raw / "NFS/ZZDATA0.BIN")):
+    retained = (("DEFAULT.XEX", "default.xex", 0, None),
+                ("NFS/ZDIR.BIN", "NFS/ZDIR.BIN", 0, None),
+                ("NFS/ZZDATA0.BIN", SHADER_FILE, SHADER_WINDOW[0], SHADER_WINDOW[1] - SHADER_WINDOW[0]))
+    retained_sizes = {}
+    for name, rel, offset, size in retained:
         key = name if name in source.files else prefix + name
         if key not in source.files:
             raise X360Error(f"X360 copy lacks {name}")
-        source.copy(key, dest)
+        source.copy(key, raw / rel, offset, size)
+        retained_sizes[rel] = size if size is not None else source.size(key)
+    _validate_shaders(raw / SHADER_FILE)
     pc_paths = _pc_paths(pc_root)
     candidates = _candidates(pc_paths, _game_names(raw / "default.xex", pc_root, work))
     entries = _entries((raw / "NFS/ZDIR.BIN").read_bytes())
     named = {candidates[h]: e for h, e in entries.items() if h in candidates}
     required = set(REQUIRED)
-    required.update(p for p in pc_paths if p.startswith("NIS/") and ARREST.fullmatch(p.split("/")[-1]))
+    if need_nis:
+        required.update(p for p in pc_paths if p.startswith("NIS/") and ARREST.fullmatch(p.split("/")[-1]))
     required.update(p for p, physical in pc_paths.items() if p.startswith("CARS/") and p.endswith("/VINYLS.BIN")
                     and physical.stat().st_size > 0)  # traffic/police copies are zero-byte retail stubs
     absent = sorted(p for p in required if p not in named or named[p][1] == 0xFFFFFFFF or not named[p][4])
@@ -261,7 +271,7 @@ def _extract(source, stage, pc_root, work, progress):
         raise X360Error("X360 ZDIR lacks required entries: " + ", ".join(absent[:8]))
     plan = []
     for name, row in sorted(named.items()):
-        if not _wanted(name) or row[1] == 0xFFFFFFFF or not row[4]:
+        if (name.startswith("NIS/") and not need_nis) or not _wanted(name) or row[1] == 0xFFFFFFFF or not row[4]:
             continue
         _, archive, sector, _, size, _ = row
         archive_path = f"NFS/ZZDATA{archive}.BIN"
@@ -280,7 +290,7 @@ def _extract(source, stage, pc_root, work, progress):
             plan.append((name, archive_path, sector * 2048, size))
     if not any(n.startswith("CARS/") for n, *_ in plan):
         raise X360Error("X360 copy has no named vinyl packs")
-    if not any(n.startswith("NIS/") for n, *_ in plan):
+    if need_nis and not any(n.startswith("NIS/") for n, *_ in plan):
         raise X360Error("X360 copy has no named arrest bundles")
     movie_names = sorted(k for k in source.files if k.startswith("MOVIES/") and k.endswith(".WMV"))
     if not movie_names:
@@ -296,7 +306,7 @@ def _extract(source, stage, pc_root, work, progress):
     all_rows = list(struct.iter_unpack("<6I", (raw / "NFS/ZDIR.BIN").read_bytes()))
     coverage = {"names_found": sum(r[0] in candidates for r in all_rows), "entries": len(all_rows), "selected": len(plan),
                 "required": sorted(required), "files": [n for n, *_ in plan],
-                "sizes": {name: size for name, _, _, size in plan},
+                "sizes": dict(retained_sizes, **{name: size for name, _, _, size in plan}),
                 "movie_files": {name[len("MOVIES/"):]: source.size(name) for name in movie_names}}
     (stage / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
     return coverage
@@ -328,7 +338,8 @@ class _Progress:
             start += weight
 
 
-def _convert(stage, pc_root, work, progress=None):
+def _convert(stage, pc_root, work, progress=None, extras=None):
+    chosen = x360_extras.selection(extras)
     report = (lambda step: progress.part(step)) if progress else (lambda step: None)
     raw, assets = stage / "files", stage / "assets"
     assets.mkdir()
@@ -338,16 +349,21 @@ def _convert(stage, pc_root, work, progress=None):
     compare = stage / "texture_compare.tsv"
     def run(script, *args):
         _run([sys.executable, "-I", "-B", SNAPSHOT / script, *args], work, env)
-    run("texture_compare.py", pc_root, raw, compare)
+    if "textures" in chosen or "ui" in chosen:
+        run("texture_compare.py", pc_root, raw, compare)
     report("texture_compare")
-    run("x360_tex.py", raw, assets / "hd_textures_mips_alpha", "--larger", compare,
-        "--mips", "--pc-alpha", pc_root, "--tone-match", pc_root, "--frontend-files")
+    if "textures" in chosen:
+        run("x360_tex.py", raw, assets / "hd_textures_mips_alpha", "--larger", compare,
+            "--mips", "--pc-alpha", pc_root, "--tone-match", pc_root, "--frontend-files")
     report("hd_textures")
-    run("x360_tex.py", raw, assets / "hd_textures_ui", "--same-size-better", compare, "--mips")
+    if "ui" in chosen:
+        run("x360_tex.py", raw, assets / "hd_textures_ui", "--same-size-better", compare, "--mips")
     report("ui_textures")
-    run("x360_nis_arrest.py", raw, pc_root, assets / "nis_arrest")
+    if "arrest" in chosen:
+        run("x360_nis_arrest.py", raw, pc_root, assets / "nis_arrest")
     report("nis_arrest")
-    run("x360_cuffs.py", raw, pc_root, assets / "hd_textures_mips_alpha")
+    if "textures" in chosen:
+        run("x360_cuffs.py", raw, pc_root, assets / "hd_textures_mips_alpha")
     report("cuffs")
 
 
@@ -429,7 +445,25 @@ def _verify_arrest(args):
     return textures, n
 
 
-def _validate(stage, pc_root, work, coverage):
+def _validate_shaders(path):
+    """Check the exact retained extent and one supported disc's complete shader set."""
+    if not path.is_file() or path.stat().st_size != SHADER_WINDOW[1] - SHADER_WINDOW[0]:
+        raise X360Error("X360 shader window is missing or has an invalid length")
+    sys.path.insert(0, str(SNAPSHOT))
+    import x360_shader_lits as lits
+    import x360_shader_body as body
+    names = sorted(set(lits.needed()) | {r["shader"] for r in body.RECIPES.values()})
+    try:
+        build, missing = lits.select(lits.scan(path), names, body.EXTRA_PINS)
+        if build is None:
+            raise X360Error("X360 shader window has unsupported or mixed shader identities: " + " ".join(missing[:6]))
+        lits.text(lits.read_all(path), "X360 NFS/ZZDATA0.BIN")
+    except (SystemExit, ValueError, OSError) as error:
+        raise X360Error(f"Invalid X360 shader window: {error}") from error
+
+
+def _validate(stage, pc_root, work, coverage, extras=None):
+    chosen = x360_extras.selection(extras)
     # Inspect inputs independently of converter exit codes and their indexes.
     sys.path.insert(0, str(SNAPSHOT))
     import x360_tex as tex
@@ -437,7 +471,10 @@ def _validate(stage, pc_root, work, coverage):
     import texture_compare as compare
     from .huff import NativeHuff
     raw, assets = stage / "files", stage / "assets"
-    for name in sorted(set(coverage["required"]) | set(coverage.get("files", []))) + ["default.xex", "NFS/ZDIR.BIN", "NFS/ZZDATA0.BIN"]:
+    _validate_shaders(raw / SHADER_FILE)
+    if (raw / "NFS/ZZDATA0.BIN").exists():
+        raise X360Error("X360 output must retain only the shader window, not ZZDATA0.BIN")
+    for name in sorted(set(coverage["required"]) | set(coverage.get("files", []))) + ["default.xex", "NFS/ZDIR.BIN", SHADER_FILE]:
         p = raw / name
         if not p.is_file() or p.stat().st_size == 0:
             raise X360Error(f"X360 output lacks required file: {name}")
@@ -454,33 +491,41 @@ def _validate(stage, pc_root, work, coverage):
     try:
         tex.huff = compare.huff = native
         tex.jdlz = compare.jdlz = native.jdlz
-        wanted_hd, wanted_ui, xbox = _expected_textures(stage, tex, pc_root)
-        if native.blocks == 0 or native.bytes == 0:
+        wanted_hd, wanted_ui, xbox = _expected_textures(stage, tex, pc_root) if chosen else ({}, {}, {})
+        if chosen and (native.blocks == 0 or native.bytes == 0):
             raise X360Error("X360 validation decoded no HUFF bytes")
-        _texture_inventory(assets / "hd_textures_mips_alpha", wanted_hd, True)
-        _texture_inventory(assets / "hd_textures_ui", wanted_ui, True)
+        for feature, wanted in (("textures", wanted_hd), ("ui", wanted_ui)):
+            folder = assets / x360_extras.FOLDERS[feature]
+            if feature in chosen:
+                _texture_inventory(folder, wanted, True)
+            elif folder.exists():
+                raise X360Error("Unselected texture output was created")
         pc_paths = _pc_paths(pc_root)
         bundles = sorted(p for p in pc_paths if p.startswith("NIS/") and ARREST.fullmatch(p.split("/")[-1]))
-        output = assets / "nis_arrest"
-        if {p.name.upper() for p in output.glob("*.bun")} != {p.split("/")[-1] for p in bundles}:
-            raise X360Error("Arrest bundle inventory incomplete")
-        refs = _rows(output / "textures.tsv")
-        aliases = {int(r["alias"], 16) for r in refs}
-        emitted = {p.name.upper(): p for p in output.glob("*.bun")}
-        used, swaps = set(), 0
-        jobs = [(pc_paths[name], raw / name, emitted[name.split("/")[-1]]) for name in bundles]
-        for textures, n in huff.ordered_map(_verify_arrest, jobs):
-            used.update(arrest.alias(t) for t in textures)
-            swaps += n
-        if len(aliases) != len(refs) or not aliases or aliases != used or not swaps:
-            raise X360Error("Arrest texture references are incomplete or unused")
-        for r in refs:
-            key = int(r["hash"], 16)
-            if (int(r["alias"], 16) != arrest.alias(key) or
-                    xbox.get((key, r["file"].upper())) != (int(r["width"]), int(r["height"]))):
-                raise X360Error("Arrest reference names a missing X360 texture")
+        refs, bundles = [], bundles if "arrest" in chosen else []
+        if "arrest" not in chosen and (assets / "nis_arrest").exists():
+            raise X360Error("Unselected arrest output was created")
+        if "arrest" in chosen:
+            output = assets / "nis_arrest"
+            if {p.name.upper() for p in output.glob("*.bun")} != {p.split("/")[-1] for p in bundles}:
+                raise X360Error("Arrest bundle inventory incomplete")
+            refs = _rows(output / "textures.tsv")
+            aliases = {int(r["alias"], 16) for r in refs}
+            emitted = {p.name.upper(): p for p in output.glob("*.bun")}
+            used, swaps = set(), 0
+            jobs = [(pc_paths[name], raw / name, emitted[name.split("/")[-1]]) for name in bundles]
+            for textures, n in huff.ordered_map(_verify_arrest, jobs):
+                used.update(arrest.alias(t) for t in textures)
+                swaps += n
+            if len(aliases) != len(refs) or not aliases or aliases != used or not swaps:
+                raise X360Error("Arrest texture references are incomplete or unused")
+            for r in refs:
+                key = int(r["hash"], 16)
+                if (int(r["alias"], 16) != arrest.alias(key) or
+                        xbox.get((key, r["file"].upper())) != (int(r["width"]), int(r["height"]))):
+                    raise X360Error("Arrest reference names a missing X360 texture")
         (stage / "validation.json").write_text(json.dumps({"huff_blocks": native.blocks, "huff_bytes": native.bytes,
-            "hd_textures": len(wanted_hd), "ui_textures": len(wanted_ui), "arrest_bundles": len(bundles),
+            "hd_textures": len(wanted_hd) if "textures" in chosen else 0, "ui_textures": len(wanted_ui) if "ui" in chosen else 0, "arrest_bundles": len(bundles),
             "arrest_textures": len(refs)}, indent=2) + "\n")
     finally:
         tex.huff, tex.jdlz, compare.huff, compare.jdlz = previous
@@ -545,7 +590,9 @@ def _expected_textures(stage, tex, pc_root):
     return hd, ui, xbox
 
 
-def prepare(source: Path, out: Path, pc_root: Path, progress=None) -> X360Result:
+def prepare(source: Path, out: Path, pc_root: Path, progress=None, extras=None) -> X360Result:
+    chosen = x360_extras.selection(extras)
+    options = {} if chosen == x360_extras.ALL else {"extras": chosen}
     stage = src = None
     bytecode = sys.dont_write_bytecode
     try:
@@ -562,16 +609,27 @@ def prepare(source: Path, out: Path, pc_root: Path, progress=None) -> X360Result
         work.mkdir()
         src = Source(source)
         steps = _Progress(progress)
-        coverage = _extract(src, stage, pc_root, work, lambda i, n: steps.part("extract", i, n))
+        coverage = _extract(src, stage, pc_root, work, lambda i, n: steps.part("extract", i, n), **options)
         src.close()
         src = None
-        _convert(stage, pc_root, work, steps)
-        _validate(stage, pc_root, work, coverage)
+        _convert(stage, pc_root, work, steps, **options)
+        _validate(stage, pc_root, work, coverage, **options)
         steps.part("validate")
+        # NIS inputs also supply the HD handcuffs. Use them during conversion,
+        # but only arrest playback needs the raw bundles in the installed root.
+        if "arrest" not in chosen:
+            if (stage / "files/NIS").exists():
+                shutil.rmtree(stage / "files/NIS")
+            coverage["files"] = [n for n in coverage["files"] if not n.startswith("NIS/")]
+            coverage["required"] = [n for n in coverage["required"] if not n.startswith("NIS/")]
+            coverage["sizes"] = {n: v for n, v in coverage["sizes"].items() if not n.startswith("NIS/")}
+            coverage["selected"] = len(coverage["files"])
+            (stage / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
         shutil.rmtree(work)
         stage.rename(final)
         return X360Result({"x360_root": final / "files", "assets_root": final / "assets", "movies": final / "Movies"},
-                          FEATURES, (), coverage["names_found"], coverage["entries"])
+                          tuple(n for n in FEATURES if n not in x360_extras.ALL or n in chosen),
+                          tuple(n for n in x360_extras.ALL if n not in chosen), coverage["names_found"], coverage["entries"])
     except X360Error:
         raise
     except OSError as error:

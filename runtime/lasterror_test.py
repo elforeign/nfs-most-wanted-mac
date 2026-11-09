@@ -48,6 +48,7 @@ uint32_t galloc(uint32_t n) { (void)n; abort(); }
 uint32_t call_guest(Cpu *c, uint32_t f, int n, const uint32_t *a) {
     (void)c; (void)f; (void)n; (void)a; abort();
 }
+void diag_begin_exit(void) {}
 void diag_event(const char *f, ...) { (void)f; }
 void diag_call_ring(const char *f, int n, const uint32_t *a, uint32_t v, uint32_t ra) {
     (void)f; (void)n; (void)a; (void)v; (void)ra;

@@ -1,13 +1,22 @@
-"""Mac synthetic Windows event/wait proof, discovered by offline_tests.sh.
+"""Synthetic Windows event/wait proof, discovered by offline_tests.sh.
 
 Original win_kernel_import: 0/5 handled, regression exit 1 -> registered events
 and waits: 5/5 handled, fixture exit 0. GIL-retaining waiter: progress 0,
 WAIT_TIMEOUT (258), exit 1 -> fixed progress 1, WAIT_OBJECT_0 (0), exit 0.
 Both controls use the same bounded progress check; no game or devices are used.
-Native events are modeled by pthreads; native Windows semantics need SDK checks.
+Mac fixture: 919 guest import calls, exit 0; control numbers above are unchanged.
+Use --desktop for the same fixture with actual
+Windows HANDLE events and SDK/CRT headers, without fake_win.inc or pthreads.
+The desktop-only test shim observes native wait entry/live event counts and
+injects the two native failures; all other operations call the Windows APIs.
+Wait-entry observation orders the pre-wait yield control; Windows exposes no
+equivalent to fake_event_waiting. runtime/win/sync.c needs no platform changes.
+check-boot runs --desktop; other hosts reject it with parser error exit 2.
 """
 from pathlib import Path
+import argparse
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -72,7 +81,47 @@ int main(void) {
 }
 '''
 
-FIXTURE = r'''#include "fake_win.inc"
+DESKTOP_SHIM = r'''#pragma once
+#include "host.h"
+#include <stdatomic.h>
+extern _Atomic unsigned fake_event_waiting;
+extern unsigned fake_event_live;
+extern int fake_event_create_fail, fake_event_wait_fail;
+static inline HANDLE test_create_event(LPSECURITY_ATTRIBUTES sa,BOOL manual,BOOL initial,LPCSTR name) {
+    if (fake_event_create_fail) { SetLastError(8); return NULL; }
+    HANDLE h=CreateEventA(sa,manual,initial,name);
+    if (h) ++fake_event_live;
+    return h;
+}
+static inline BOOL test_close_event(HANDLE h) {
+    BOOL result=CloseHandle(h);
+    if (result) --fake_event_live;
+    return result;
+}
+static inline DWORD test_wait_events(DWORD count,const HANDLE *handles,BOOL all,DWORD ms) {
+    if (fake_event_wait_fail) { SetLastError(87); return WAIT_FAILED; }
+    atomic_fetch_add(&fake_event_waiting,1);
+    DWORD result=WaitForMultipleObjects(count,handles,all,ms);
+    DWORD code=result==WAIT_FAILED ? GetLastError() : 0;
+    atomic_fetch_sub(&fake_event_waiting,1);
+    if (result==WAIT_FAILED) SetLastError(code);
+    return result;
+}
+// Included only by the fixture and the temporary copy of sync.c, so thread
+// joins and thread-handle closes remain outside the event observations.
+#define CreateEventA test_create_event
+#define CloseHandle test_close_event
+#define WaitForMultipleObjects test_wait_events
+'''
+
+FIXTURE = r'''#ifdef NFS_WIN_TEST
+#include "fake_win.inc"
+#else
+#include "desktop_sync.h"
+_Atomic unsigned fake_event_waiting;
+unsigned fake_event_live;
+int fake_event_create_fail, fake_event_wait_fail;
+#endif
 #include "sync.h"
 #include "startup.h"
 #include <stdarg.h>
@@ -262,6 +311,11 @@ def run(argv, code=0):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--desktop', action='store_true')
+    args = parser.parse_args()
+    if args.desktop and os.name != 'nt':
+        parser.error('--desktop requires native Windows SDK/CRT')
     compiler = shutil.which('clang')
     if not compiler:
         print('SKIP: no C compiler')
@@ -269,39 +323,57 @@ def main():
     assert hashlib.sha256(ORIGINAL_KERNEL.encode()).hexdigest() == ORIGINAL_KERNEL_SHA
     with tempfile.TemporaryDirectory(prefix='windows-sync-') as scratch:
         folder = Path(scratch)
-        flags = [compiler, '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
-                 '-fsanitize=address,undefined', '-DNFS_WIN_TEST', '-pthread',
-                 '-I', WIN, '-I', ROOT/'recomp', '-I', folder]
+        flags = [compiler, '-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Werror']
+        if os.name == 'nt':
+            flags += ['-fms-runtime-lib=static']
+        else:
+            flags += ['-fsanitize=address,undefined', '-DNFS_WIN_TEST', '-pthread']
+        flags += ['-I', WIN, '-I', ROOT/'recomp', '-I', folder]
+        suffix = '.exe' if os.name == 'nt' else ''
         original = folder/'original.c'
         original.write_text('#include "host.h"\nstatic uint64_t tls_used;\n' + ORIGINAL_KERNEL)
         premise = folder/'premise.c'
         premise.write_text(PREMISE)
-        baseline = folder/'baseline'
+        baseline = folder/('baseline'+suffix)
         run([*flags, original, premise, '-o', baseline])
         assert 'original handled=0/5' in run([baseline], 1)
         print('original: handled=0/5; regression exit 1')
-        fake = (WIN/'fixture.h').read_text().split('const struct ImportSlot speed_imports[]')[0]
-        (folder/'fake_win.inc').write_text(fake)
+        if os.name == 'nt':
+            (folder/'desktop_sync.h').write_text(DESKTOP_SHIM)
+        else:
+            fake = (WIN/'fixture.h').read_text().split('const struct ImportSlot speed_imports[]')[0]
+            (folder/'fake_win.inc').write_text(fake)
         fixture = folder/'fixture.c'
         fixture.write_text(FIXTURE)
         units = [WIN/n for n in ('portable.c', 'memory.c', 'core.c', 'kernel.c',
                                   'imports.c', 'startup.c', 'threads.c', 'sync.c')]
-        fixed = folder/'fixed'
+        text = (WIN/'sync.c').read_text()
+        prefix = '#include "desktop_sync.h"\n' if os.name == 'nt' else ''
+        if os.name == 'nt':
+            native_sync = folder/'native_sync.c'
+            native_sync.write_text(prefix + text)
+            units = [native_sync if p.name == 'sync.c' else p for p in units]
+        fixed = folder/('fixed'+suffix)
         run([*flags, *units, fixture, '-o', fixed])
-        print(run([fixed]).strip())
+        output = run([fixed])
+        assert 'progress=1 result=0' in output
+        assert 'SYNC FIXTURE PASS: handled=5/5 calls=919' in output
+        print(output.strip())
         assert 'progress=1 result=0' in run([fixed, 'progress'])
         assert 'progress=1 result=0' in run([fixed, 'infinite'])
         assert 'first import KERNEL32.dll!CreateEventA' in run([fixed, 'first'], 10)
         assert 'CreateEventA' in run([fixed, 'bad-stack'], 2)
-        text = (WIN/'sync.c').read_text()
         assert text.count('    gil_release();') == text.count('    gil_acquire();') == 1
         mutant = folder/'retained.c'
-        mutant.write_text(text.replace('    gil_release();', '').replace('    gil_acquire();', ''))
-        broken = folder/'retained'
-        run([*flags, *(mutant if p.name == 'sync.c' else p for p in units), fixture, '-o', broken])
+        mutant.write_text(prefix + text.replace('    gil_release();', '').replace('    gil_acquire();', ''))
+        broken = folder/('retained'+suffix)
+        run([*flags, *(mutant if p.name in ('sync.c', 'native_sync.c') else p for p in units),
+             fixture, '-o', broken])
         assert 'progress=0 result=258' in run([broken, 'progress'], 1)
         print('GIL retained: progress=0 result=258 exit 1; fixed: progress=1 result=0 exit 0')
         print('controls: first-import exit 10; inaccessible stack exit 2; all stdcall stacks preserved')
+        if os.name == 'nt':
+            print('DESKTOP SYNC CHECK PASS: synthetic guest only')
     return 0
 
 

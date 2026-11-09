@@ -1,10 +1,32 @@
 # Frame rate, timing and CPU cost
 
-Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
+                                                                                       
+
+## Runtime optimization
+
+The runtime uses `-O2 -g`, with other flags unchanged. Setup's cache identity
+includes both flags; runtime content keys invalidate earlier `-O1 -g` binaries.
+
+Solo A/O/O/A (O2 vs O1, both with `-g`): race 1.2.1, 3840×2160, MSAA 2x,
+120 Hz simulation, 95 s per run; medians from race second 45 onward.
+
+| O2 minus O1 | fps | Frame p50 | Frame p99 | Busy p50 | Busy p99 | GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Solo A/B | +4.0 | -0.41 ms | -0.51 ms | -0.40 ms | -0.47 ms | 0.00 ms |
+
+Busy p50 improved beyond the A/A range (0.38 ms; 0.04 ms without the first run).
+No hangs/stalls; zero other games at both ends. Combined draw submission/O2 gain
+is unmeasured.
+
+                
+                                                                                            
+                 
 
 ## Frame rate and timing (`pacing.c`)
 
-Session setup and display-change notes include the screen's current, potential and reference EDR headroom (sampled every 5 s). These are AppKit colour-component limits, not an HDMI HDR signal-mode flag; `HDR transport=unknown` is explicit because the public CoreGraphics display API exposes no such getter. The port continues to output SDR sRGB even when the screen has EDR headroom.
+F10 Display & performance: Frame limit (Off / 120 / 60 / 40, live); app.txt; `NFS_FRAME_LIMIT` overrides.
+
+Session setup and display-change notes include the screen's current, potential and reference EDR headroom (sampled every 5 s). These are AppKit colour-component limits, not an HDMI HDR signal-mode flag; `HDR transport=unknown` is explicit because the public CoreGraphics display API exposes no such getter. The `output=` field reports the layer actually in use: HDR only when the layer wants EDR content and is FP16, otherwise SDR, with its colour space.
 
 The game simulates in fixed ticks (`Scheduler::Run`, 00642E60; 1/60 s in the original) and renders once per main-loop pass. Its own limiter alternates ~16/~4 ms frames on a fast CPU, and the short ones run no tick, so they repeat the previous picture (pixel-identical in `BOOT_DIAG_SEQ` captures). With `NFS_FRAMEPACE=sim` (default):
 
@@ -48,8 +70,6 @@ The game simulates in fixed ticks (`Scheduler::Run`, 00642E60; 1/60 s in the ori
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
-
                                                                                                                                                                                                                                                                                                                                             
                  
 
@@ -59,36 +79,32 @@ Race 11.1.1 at level 4, 1280x720, diagnostics on: the game thread is busy ~3 ms 
 
 ## Shader compiles
 
-Shader source compilation (`render.m`, 2026-10-28): device creation queues the embedded effect shaders, their material variants and common fixed-function variants on four worker threads, then joins them **before the first scene frame**. Identical MSL shares one in-flight library; unused binding options are canonicalized without changing generated source. The tradeoff is more work during initial device loading. Later misses always compile on worker threads, including FE/loading: unexpected base misses may wait for that shader alone, with **1 ms total per frame**, then defer if still pending. Optional variants retain the compiled base draw, including Carbon lamps. `NFS_ASYNC_SHADERS=0` no longer enables synchronous source compilation. Pipeline prewarm is separately opt-in below; grass PSOs keep their existing asynchronous/PC-fallback path (`NFS_TEST_GRASS_SYNC=1` is the synchronous control). No binary archive was added.
+Device creation queues embedded effect shaders, material variants and common fixed-function variants on four shader worker threads, then joins source/effect preparation before frames. Identical MSL shares one in-flight library; unused binding options are canonicalized without changing source. Later base misses may wait for that shader alone for at most 1 ms total per frame, then defer; optional variants retain the compiled base draw. `NFS_ASYNC_SHADERS=0` does not enable frame-thread source compilation. Grass PSOs retain asynchronous/PC-fallback behavior (`NFS_TEST_GRASS_SYNC=1` is the control).
 
-`NFS_PSO_PREWARM=1` (default `0`) builds EDR post libraries/pipelines (both lamp variants), shared post setup, AO depth and AO smoke helpers during device loading. Once effect shaders are ready, the same four queues replay 93 descriptor recipes and join before the first scene frame. Recorded from one race and one free-roam entry, recipes contain shader identities, Metal vertex layouts, attachment formats, blend/write state, alpha-to-coverage and sample counts; scene recipes follow configured AA. Ordinary draws, AO replay and material helpers share the cache. Unseen descriptors retain existing creation/fallback behavior. No binary archive or disk pipeline cache.
+Loading also prepares EDR/lamp post libraries and PSOs, AO depth, soft-smoke depth copy/composite and AO multiply, split-view composition, lens raindrops, gamma, optional cuts, and 16 clear libraries (`render_post_prewarm`, `render_lazy_warm`, `render_post_lazy_warm`, `render_present_warm`). `pipeline_library_source` counts any source compilation reaching frames; `lazy_shaders_test.py` rejects unreviewed direct calls. Reflective-world AUX variants are prepared alongside world and normal-map AUX variants.
 
-With `BOOT_DIAG`, `pipeline_frame: builds=N known=N total=N known_total=N` counts frame-path creations each second: material/static passes, clears, environment filtering and presentation copies/overlay. Background grass is excluded. `known` counts catalogue descriptors and prewarmed EDR/AO helpers; other `builds` identify unseen work. `pipeline_prewarm: loading_ms` measures initial shader/pipeline loading; `ready` reports cache publication. Missing shaders/failed builds are logged. `pipeline_cache_test.py --diag DIR` rejects listed frame-path builds, including older descriptor captures. Counter clocks and descriptor recording are disabled without diagnostics.
+`NFS_PSO_PREWARM` (default On; `0` disables) queues 203 scene descriptors on the same four queues after shader publication during device creation. Frames do not join these PSO jobs; descriptor construction and Metal compilation continue while game loading advances. The catalogue includes 41 additional AA-off race/pursuit descriptors and 69 free-roam/race descriptors. `x_vt_ms` and `raindrops_prepare` build directly outside this catalogue. Samples=0 follows scene AA; explicit AO samples stay 4. Unknown or still-in-flight descriptors retain immediate frame-path creation. Concurrent builders return the first published state. No binary archive.
+
+`pipeline_cache_mu` protects the function dictionary, PSO dictionary and retained-library set. Readers: `descriptor`, `cached` (lookup and publication), `pipeline_cached_library`, and the ready count in `pipeline_loading_done`; `pipeline_register_shader` also publishes under it. Function references are retained before unlocking; compilation holds no cache mutex. Scene samples are fixed before dispatch and immutable for the load. The loading flag publishes frame-thread identity with release/acquire ordering.
+
+With `BOOT_DIAG`, `pipeline_frame` counts total/known frame PSO builds; `pipeline_build_ms` gives each build's cost. `pipeline_library: frame_sync=N` counts frame-path source compiles after loading (the race gate requires 0); a miss emits `pipeline_library_sync`. `pipeline_library_ms` gives compile duration. `BOOT_DIAG_COLD_LIBRARIES=1` changes each source's process hash to force misses without clearing shared caches. Diagnostics cost nothing when off. `pipeline_cache_test.py --diag DIR` rejects missing catalogue entries, source/known-PSO misses and preparation failures.
+
+Offline Metal proof: 812/812 descriptor round-trips at 1x/2x/4x/8x; dropping stencil rejects 652. Catalogue integrity pins descriptor metadata: removing one new recipe reports 202/203 and fails. Skipping replay gives two listed builds versus zero normally. A held in-flight build permits immediate demand; overwriting first publication fails one assertion. 128 concurrent lookups overlap 256 function publications. An added frame join is rejected (normal 0, mutant 1). AUX resource selection covers three world effect groups; omitting reflective-world coverage gives 2/3 and fails. Presentation scope counts one build versus zero when ignored; background/diagnostics-Off counters remain zero. Held replay/direct output matches 103,616 bytes across cache, EDR/HUD and lamp fixtures at 1x/4x; these are synthetic inputs.
+
+`USERDATA/shadercache.bin` stores bytecode/options/variant history across rebuilds; libraries are recreated at load. Legacy records remain readable, including AUX/soft-smoke variants. Deleting the file is safe. `NFS_TEST_FX_EPOCH=<n>` seeds the effect stamp. Diagnostic `shader_compile` events expose `frame_sync`, `preloaded` and `load_ready`. `compilehitch_test.py` checks off-thread scheduling, cache coverage, identical-source sharing and byte-identical MSL; `--diag DIR` rejects frame-thread source compilation and hang/stall reports.
 
                 
-                                                                                                                                                                                                                                                                                                                                                                                                                                         
+                                                                                                                                               
 
-                                                                                                                            
-                                   
-                                             
+                                                                                                                                  
                                           
-                                                   
-                                               
+                                            
+                                                                           
+                                                            
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
 
-                                                                                                                                                             
-
-                                                                                                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
                  
-
-`USERDATA/shadercache.bin` remains bytecode/options/variant history across runtime rebuilds; Metal libraries are recreated at load. Legacy records remain readable, and AUX/soft-smoke records no longer stop the reader and lose all later coverage. Deleting the file is safe. `NFS_TEST_FX_EPOCH=<n>` still seeds the 64-bit effect stamp. `BOOT_DIAG` logs cumulative `shader_compile: frame_sync=N`, `preloaded` and `load_ready`; these counters/logs cost nothing when diagnostics are off. `runtime/compilehitch_test.py` runs without a GPU: frame-thread compile requests **0** vs synchronous mutant **1**; cache records **6** vs broken reader **1**; four identical sources compile **once** vs broken sharing **four** times; readiness/normalization mutants also fail. **1,728 translated MSL comparisons are byte-identical.** `--diag <dir>` rejects frame-thread source compiles or hang/stall reports: the actual baseline fails and fixed race/menu runs pass.
-
-| Empty profile-cache race | Frame-thread source compiles | Hangs | Stalls | Deferred draws |
-| --- | ---: | ---: | ---: | ---: |
-| Before (run 1) | 13 | 0 | 0 | 635,515 |
-| After (run 5) | 0 | 0 | 0 | 0 |
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   

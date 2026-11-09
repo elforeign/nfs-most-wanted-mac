@@ -81,3 +81,8 @@ void host_import(Cpu *c, uint32_t slot) {
          !__builtin_strncmp(entry->name, "WINMM.dll!", 10)) && win_kernel_import(c, fn)) return;
     win_import_stop(c, entry);
 }
+WinAdapter win_import_adapter(const char *name) {
+    for (unsigned i=0; i<import_count; ++i)
+        if (!strcmp(imports[i].name,name)) return imports[i].call;
+    return NULL;
+}

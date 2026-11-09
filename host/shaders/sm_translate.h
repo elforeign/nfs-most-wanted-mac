@@ -159,8 +159,7 @@ typedef struct SmResult {
 
 /* Full world filter replacement; NULL means unsupported, including software
  * depth programs. Returned source is malloc-owned; original source is unchanged. */
-char *sm_shadow_near_patch(const char *source, const uint32_t *tokens, size_t n, const SmResult *reflection);
-int sm_shadow_near_taps(uint64_t program_key);
+char *sm_shadow_edge_patch(const char *source, const uint32_t *tokens, size_t n, const SmResult *reflection);
 void sm_default_options(SmOptions *opt);
 
 /* Translates one shader. tokens: the bytecode as passed to CreateVertexShader /

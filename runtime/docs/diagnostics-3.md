@@ -54,3 +54,18 @@ analyse with `sign_diag_test.py --analyze`. Protocol: [sign_diag.h](../sign_diag
                                                                                  
                                                                  
                  
+
+## Per-frame presentation timestamps
+
+`BOOT_DIAG` writes `present-*` rows to `events.log` for each rendered frame. Join on the explicit `frame=` serial, since callbacks can arrive late and rows can interleave; the usual `f...` log prefix is the logger's current frame. All times are monotonic seconds in the Mach/Metal time domain. Zero means unavailable, never an actual presentation.
+
+| Row | Fields |
+| --- | --- |
+| `present-frame` | `Present`: entry to render presentation, before its resolve/encoding; `screen_update`: that window's `NSScreen.lastDisplayUpdateTimestamp` sampled at entry |
+| `present-submit` | `nextDrawable`: return time; `presentDrawable`: time immediately before the presentation request; `commit`: time immediately before the final present command-buffer commit; `minimum`: requested minimum duration in seconds. A nil drawable instead records `drawable=missing` |
+| `present-commit` | `stage=frame observed`: real frame command-buffer commit observed via `rt_after_commit`, including render replay. This is an observation just after commit, not the proxy's earlier submit time |
+| `present-gpu` | `stage=frame` or `stage=present`, and that buffer's `GPUEndTime`; the latter is the complete ready path including the final copy |
+| `present-shown` | The drawable's actual `presentedTime`; zero is a drop |
+| `present-loop` | Next frame's serial, chosen absolute `deadline`, actual sleep `wake` and guest-lock `acquired`. A pass without a pacing slot has deadline zero; no-sleep passes record the same wake/acquired time |
+
+The first frame has no preceding loop row. A frame skipped before drawable acquisition has no submit/shown row. CPU submit, GPU completion and actual presentation remain separate measurements. Diagnostic clock/property reads, logging and additional completion handlers are guarded; Visible foreground presentation is required to measure TV cadence: background/covered windows may only report drops. The cutoff's lead before refresh remains unmeasured; these timestamps allow phase, ready latency and missed latches to be checked on screen.

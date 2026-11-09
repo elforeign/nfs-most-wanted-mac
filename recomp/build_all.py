@@ -95,13 +95,13 @@ def add_data_referenced(funcs):
     lst = listing.load(pe)
     starts, ends = lst.starts, lst.ends
     rejected = 0
-    for name, vs, va, rs, raw in pe.sections:
-        if name.startswith(b".text"):
+    for name, rva, size in recomp.exe_fingerprint.REGIONS:
+        if name == '.text':
             continue
-        # Only the fingerprinted data (.rdata/.data), so the output can't depend on resources or extra sections.
-        if not any(va <= r_va < va + max(vs, rs) for n, r_va, _ in recomp.exe_fingerprint.REGIONS if n != ".text"):
-            continue
-        blob = pe.data[raw:raw + rs]
+        # Scan exactly the loaded, fingerprinted bytes, including zero fill.
+        # Raw-section padding and section names are not translation inputs.
+        _, sections = recomp.exe_fingerprint._parse(pe.data)
+        blob = recomp.exe_fingerprint._region(pe.data, sections, rva, size)
         for k in range(0, len(blob) - 3, 4):
             t = int.from_bytes(blob[k:k + 4], "little")
             if text_lo <= t < text_hi and t not in known:

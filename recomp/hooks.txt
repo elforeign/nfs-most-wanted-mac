@@ -10,6 +10,8 @@
 0042F140    chasecam.c: AIVehicleHuman::Update (diag-only real-speed cruise proof fixture)
 00431C80    chasecam.c: AIVehicle::SetDriveSpeed (diag-only real-speed cruise proof fixture)
 00825957    audio_limiter.c: linked game peak limiter before Snd's float-to-int16 saturation
+00825310    car_audio.c: preserve source float PCM at owned packet conversion; stock converter unchanged
+004E9B30    music_balance.c: independent player-engine/effects trims before voice summing
 00542A40    movies.c: MoviePlayer::Play (X360 WMV instead of VP6 when the file exists)
 00525F70    movies.c: MoviePlayer::UpdateFunction (per-frame decode and texture upload)
 00517610    movies.c: MoviePlayer::Stop
@@ -18,6 +20,12 @@
 0081B4AC    dsound.c: Snd::System::SetOutputMode (discrete 5.1, mode 3)
 0081FE64    posaudio.c: optional smooth ITU 5.1 panner; Game calls original table
 004EE3E0    posaudio.c: BOOT_DIAG engine voice/gain context
+004DC360    car_audio.c: optional added-car AEMS initialization
+004DC1D0    car_audio.c: detach source audio before the native controller buffer is released
+004DC670    car_audio.c: detach source Ginsu before the native controller buffer is released
+004EE1C0    car_audio.c: optional added-car Ginsu initialization
+004F5CD0    car_audio.c: added-car AEMS teardown
+004F5D60    car_audio.c: added-car Ginsu teardown
 004EFBE0    posaudio.c: BOOT_DIAG traffic voice/gain context
 004F03A0    posaudio.c: BOOT_DIAG siren voice/gain context
 004F0840    posaudio.c: BOOT_DIAG helicopter voice/gain context
@@ -167,6 +175,7 @@
 0081E318    x360audio.c: _SNDfxlevel (diagnostics: per-second FX bus 0 send levels)
 004F0330    x360audio.c: SFXObj_Reverb::UpdateParams (diagnostic line: per-second tunnel reverb state and levels)
 00820DA3    x360audio.c: FX renderer (diagnostics: per-second FX bus input and wet output RMS)
+0081D93A    reverbfade.c: environment Reset retains the old graph for the optional half-second crossfade
 00505380    mirror.c: eRenderLightFlare: marks mirror-view flare submits (sprite size for the margin) + BOOT_DIAG cop flare counters
 006BE8F0    mirror.c: GetVisibleStateSB: mirror flares whose sprite overlaps a side plane are drawn (NFS_MIRROR_FLARE=pc: exact PC test) + BOOT_DIAG failing plane
 00750B10    mirror.c: thunk to the cars' queueing (FUN_00744DD0): the mirror's queued world is drawn before its flare pass (NFS_MIRROR_FLARE_ORDER=pc: PC order)
@@ -236,6 +245,8 @@
 0075B7A0    diag.c: CarLoader::LoadAllTexturesFromPack (BOOT_DIAG carpack: car texture loads, split-screen)
 00500D80    diag.c: eStreamPackLoader::InternalLoadStreamingEntry (BOOT_DIAG carpack: entry header, bad sizes)
 00508560    diag.c: eStreamPackLoader::LoadStreamingEntry (BOOT_DIAG carpack: entry count asked for)
+00501050    diag.c: eStreamPackLoader::UnloadAllStreamingEntries (BOOT_DIAG cartex: car pack entries freed on unload)
+004FB530    diag.c: eStreamPackLoader::InternalUnloadStreamingEntry (BOOT_DIAG cartex: freed hash another pack holds)
 007528D0    diag.c: LoadedSkin::GetTextureHashes (BOOT_DIAG carpack: per-skin texture count)
 00753060    diag.c: CarLoader::AllocateSkinLayers (BOOT_DIAG carpack: layers added)
 00759F00    diag.c: CarLoader::RemoveSomethingFromCarMemoryPool (BOOT_DIAG carpool: pool numbers per eviction attempt)
@@ -257,6 +268,7 @@
 00760B20    ws2_32.c: OnlineRacer constructor (BOOT_ONLINE: SkipFE route names every racer "SkipFE"; adds the slot index)
 00756A90    car85.c: LoaderCarInfo (append donor clone after chunk 34600)
 00590D40    car85.c: FEPlayerCarDB::Default (record-count diagnostic)
+007C2780    bmw_availability.c: UIQRCarSelect::Setup (stock coupe lot/Quick Race policy)
 007399F0    car85.c: GetTypesFromSlot (CAR85 reuses donor parts)
 00751540    car85.c: CarPart model hash (verified private solid namespace)
 00751860    car85.c: GetUsedCarTextureInfo (private image hashes for added cars; lamp-state textures for materials.m)
@@ -287,7 +299,6 @@
 00687710    roam_game.c: PVehicle resource admission (online spawn failure reason)
 006ED260    roam_game.c: Sim::CanSpawnRigidBody (online spawn failure reason)
 
-007C3690    gameplay_opts.c: latch Junkman option for the customization visit
 00576E30    gameplay_opts.c: Junkman UtilizeMarker preserves stock after the career
 0058A680    gameplay_opts.c: Junkman performance availability after the career
 00576ED0    gameplay_opts.c: Junkman marker availability after the career
@@ -297,6 +308,8 @@
 007AED80    gameplay_opts.c: cart totals do not debit unlimited Junkman items
 007B13C0    gameplay_opts.c: selected Junkman part displays zero marker cost
 007B0620    gameplay_opts.c: performance header keeps virtual stock separate from cosmetic cart costs
+007BB560    underglow_menu.c: CustomizeCategoryScreen::AddCustomOption (Underglow entry after Visual's last entry)
+007BFBD0    underglow_menu.c: CustomizeSub::Setup (Underglow colour page)
 007BB870    maxperf_career.c: CustomizeSub::NotificationMessage (career Max Performance confirmation)
 
 0052AF20    controlpages.c: Controls Keyboard / Controller / Drag page cycle
@@ -318,3 +331,12 @@
 00640F00    breaker_diag.c: EPlayRaceNIS constructor (diagnostic decisions only)
 00590BD0    underglow.c: FEPlayerCarDB::CreateCar (clear reused cosmetic identity on success)
 00581370    underglow.c: FEPlayerCarDB::DeleteCar (clear cosmetic identity on success)
+
+00529310    music_balance.c: UIOptionsScreen::SetupAudio (independent Music space rows)
+
+005910E0    underglow_light.m: FEPlayerCarDB::BuildRideForPlayer (owned ride provenance)
+007609B0    underglow_light.m: FrontEndRenderingCar::ReInit (owned ride copy)
+00739A70    underglow_light.m: RideInfo::Init (invalidate recycled ride provenance)
+007A9DB0    underglow_light.m: CarViewer::SetRideInfo (owned temporary ride copy)
+0075D220    underglow_light.m: VehicleRenderConn::Load (owned customization to runtime ride)
+00750B00    underglow_light.m: RenderVehicleFlares (flush main-view mounted light after opaque road)

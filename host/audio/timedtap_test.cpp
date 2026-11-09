@@ -1,6 +1,8 @@
 // Timed capture proof, registered and run by build.sh; every output fixture is manual/null/offline.
 // Pinned PCM-only baseline: pcm_samples=3510 metadata_blocks=0/3, 8 checks / 1 failure;
-// fixed: pcm_samples=3510 metadata_blocks=3/3, 457 checks / 0 failures. Mutants: README.md.
+// fixed: pcm_samples=3510 metadata_blocks=3/3, 458 checks / 0 failures. Mutants: README.md.
+// Null starvation race: 200 iterations, old ordering forced to deliver an intervening block: 200 failures;
+// stop-before-release ordering: 0 failures, with exactly two adjacent captured blocks per iteration.
 #include "dsound_host.h"
 #include <mach/mach_time.h>
 #ifndef TIMEDTAP_SOURCE
@@ -303,6 +305,8 @@ static void null_proof() {
     for (int c=1;c<6;++c) distinct &= r.records[0].pcm[c] > r.records[0].pcm[c-1] + 0.03f;
     check(distinct && r.mismatches==0,"null sink captures channel-distinct PCM identical to legacy tap");
     { std::lock_guard<std::mutex> lock(f.d->m); f.d->t0 -= std::chrono::seconds(1); }
+    // Stop while delivery is held: releasing first could consume the starvation flag on an unseen block.
+    f.d->running = false;
     r.pause = false; // callback reads pause only on entry; publish via resume below
     r.resume.store(true,std::memory_order_release);
     stop_thread(*f.d);
@@ -310,10 +314,14 @@ static void null_proof() {
     r.resume = false; r.entered = false; r.pause = true;
     start_thread(*f.d);
     while (!r.entered.load(std::memory_order_acquire)) std::this_thread::yield();
-    auto &b = r.records[r.count-1].block;
+    auto &a = r.records[0].block;
+    auto &b = r.records[1].block;
+    check(r.count == 2 && b.sample_position == a.sample_position + a.frames,
+          "null starvation compares adjacent captured blocks");
     check(b.clock_generation > oldgen && (b.flags & DS_CAPTURE_DISCONTINUITY), "null starvation rebases and marks discontinuity");
     printf("null: generation_before=%llu after=%llu position=%llu\n", (unsigned long long)oldgen,
            (unsigned long long)b.clock_generation,(unsigned long long)b.sample_position);
+    f.d->running = false;
     r.resume.store(true,std::memory_order_release);
     stop_thread(*f.d);
     ds_capture_stop();

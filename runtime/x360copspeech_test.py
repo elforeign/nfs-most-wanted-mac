@@ -60,7 +60,7 @@ def main():
             test_source = scratch / 'baseline_test.c'
             test_source.write_text((ROOT / 'runtime/x360copspeech_test.c').read_text().replace(
                 '#include "x360copspeech.c"', '#include "' + str(Path(sys.argv[2]).resolve()) + '"'))
-        run(['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-DX360AUDIO_TEST', '-O1', '-g', '-w',
+        run(['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-DX360AUDIO_TEST', '-O2' if timing else '-O1', '-g', '-w',
              *(['-DCOP_TEST_BASELINE'] if baseline else []),
              *([] if timing else ['-fsanitize=address,undefined']), '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'recomp'),
              '-I', str(ROOT / 'recomp/out'), str(ROOT / 'runtime/x360audio.c'),
@@ -100,7 +100,7 @@ def main():
             return value
 
         if timing:
-            print('host timing: runtime -O1, without sanitizers; OS file cache warm')
+            print('host timing: runtime -O2, without sanitizers; OS file cache warm')
             serve(EXTRACT, True, NFS_X360_COPSPEECH='x360')
             serve(EXTRACT, True, NFS_X360_COPSPEECH='x360', NFS_COP_TEST_WARM='1')
             return

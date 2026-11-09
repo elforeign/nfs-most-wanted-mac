@@ -21,6 +21,7 @@ HARNESS = r'''
 #include "host.h"
 #include "funcs.h"
 #include "diag_car.h"
+#include "underglow_render.h"
 #include <stdlib.h>
 #include <stdarg.h>
 uint8_t *G;
@@ -37,6 +38,11 @@ void diag_event(const char *fmt, ...) {
     va_list ap; va_start(ap,fmt); vsnprintf(last_line,sizeof last_line,fmt,ap); va_end(ap); ++logs;
 }
 FILE *dump_file(void) { return NULL; }
+int underglow_light_enabled(void) { return 0; }
+void underglow_light_begin(const Cpu *c, UGCarCapture *s) { memset(s,0,sizeof *s); }
+void underglow_light_end(const Cpu *c, const UGCarCapture *s) {}
+void underglow_render_car_begin(const Cpu *c, UGCarCapture *s) { memset(s,0,sizeof *s); }
+void underglow_render_car_end(const Cpu *c, const UGCarCapture *s) {}
 #define diag_car_init real_diag_car_init
 #define diag_car_begin real_diag_car_begin
 #define diag_car_observe real_diag_car_observe
@@ -206,7 +212,7 @@ def main():
     code, stubs = decoder()
     diag = (ROOT / 'runtime/diag.c').read_text()
     wrapper = diag[diag.index('\nunsigned diag_car1[4];') + 1:diag.index('void f_007387E0_orig')]
-    assert 'if (!diag_on) { f_0074E160_orig(c); return; }' in wrapper
+    assert 'if (!diag_on && !underglow_light_enabled()) { f_0074E160_orig(c); return; }' in wrapper
     source = (ROOT / 'runtime/diag_car.c').read_text()
     cars = (ROOT / 'runtime/car85.c').read_text()
     names = ['solid_context', 'private_solid_hash', 'model_00751540', 'f_00751540', 'car85_diag_model_hash']
@@ -221,7 +227,15 @@ def main():
         mutant = source.replace('case 0x0074E223: return "pixel-size";', 'case 0x0074E223: return "visibility";')
         assert mutant != source
         no_scope = hashes.replace('model_namespace = (nadditions || traffic_active) ? solid_context(ride) : NULL;', 'model_namespace = NULL;')
-        no_guard = wrapper.replace('if (!diag_on) { f_0074E160_orig(c); return; }', '')
+        no_guard = wrapper.replace('if (!diag_on && !underglow_light_enabled()) { f_0074E160_orig(c); return; }', '')
+        production_path = """    if (!diag_on) {
+        f_0074E160_orig(c);
+        underglow_light_end(c, &light_capture);
+        return;
+    }
+"""
+        assert production_path in no_guard
+        no_guard = no_guard.replace(production_path, '')
         assert no_scope != hashes and no_guard != wrapper
         variants = [('normal', source, hashes, wrapper), ('swapped-reason', mutant, hashes, wrapper),
                     ('no-namespace', source, no_scope, wrapper), ('off-guard-removed', source, hashes, no_guard)]

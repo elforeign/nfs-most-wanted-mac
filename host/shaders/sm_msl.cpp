@@ -20,7 +20,7 @@
 #include <set>
 #include <string>
 
-#include "shadow_near_msl.h"
+#include "shadow_edge_msl.h"
 
 namespace sm {
 namespace {
@@ -1096,9 +1096,6 @@ extern "C" void sm_result_free(SmResult *r) {
     r->constants = nullptr;
 }
 
-extern "C" char *sm_shadow_near_patch(const char *source,const uint32_t *tokens,size_t n,const SmResult *pc) {
-    return source && pc ? sm::near_patch(source,tokens,n,*pc) : nullptr;
-}
-extern "C" int sm_shadow_near_taps(uint64_t key) {
-    const auto *p=sm::near_program(key);return p?p->taps:0;
+extern "C" char *sm_shadow_edge_patch(const char *source,const uint32_t *tokens,size_t n,const SmResult *pc) {
+    return source && pc ? sm::shadow_edge_patch(source,tokens,n,*pc) : nullptr;
 }

@@ -41,8 +41,9 @@ int app_fullscreen_is_auto(void) {
     const char *mode = getenv("NFS_FULLSCREEN_MODE");
     return mode && !strcasecmp(mode, "auto");
 }
+static int builtin = -1;       // Auto is decided from the screen the window is on, once per mode change
+void app_fullscreen_mode_reset(void) { builtin = -1; }
 int app_native_fullscreen(void) {
-    static int builtin = -1;   // Auto is decided once, at launch, from the screen the window opens on
     const char *mode = getenv("NFS_FULLSCREEN_MODE");
     if (mode && !strcasecmp(mode, "auto") && builtin < 0) builtin = app_screen_is_builtin();
     return app_fullscreen_resolve(mode, builtin > 0);
@@ -441,7 +442,7 @@ static NSString *ask_game_dir(const char *why) {
 }
 
 // ---------------- NSApp, the menu bar, Quit ----------------
-static void quit_now(void) { fflush(NULL); exit(0); }
+static void quit_now(void) { diag_begin_exit(); fflush(NULL); exit(0); }
 
 // Confirm inside the F10 menu, not with a modal alert: a pad can't answer an NSAlert, and the
 // frozen frame loop behind it tripped the 15 s hang watchdog. 1 on the second press within 4 s.

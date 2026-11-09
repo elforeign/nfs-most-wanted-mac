@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release archive proof using real clang/ar, no game inputs.
 
-Good: 10 archives / 382 arm64 members at 14.5; bad: added guest-named object
+Good: 10 archives / 390 arm64 members at 14.5; bad: added guest-named object
 10/10 rejected, last member at 27.0 10/10 rejected, x86_64 10/10 rejected.
 Duplicate member at 27.0: 1/1 rejected; missing object: 10/10 rejected.
 CLI: good exit 0; guest object exit 1; member at 27.0 exit 1.
@@ -48,7 +48,7 @@ def main():
             run('clang', '-arch', arch, '-mmacosx-version-min=' + version,
                 '-c', str(source), '-o', str(temp / (label + '.o')))
         inventories = LIB.manifest()
-        assert len(inventories) == 10 and sum(sum(v.values()) for v in inventories.values()) == 382
+        assert len(inventories) == 10 and sum(sum(v.values()) for v in inventories.values()) == 390
         duplicate_proved = False
         for index, (relative, expected) in enumerate(inventories.items()):
             archive = temp / relative
@@ -99,7 +99,7 @@ def main():
             run('ar', 'qc', str(archive), *(str(p) for p in paths))
         assert duplicate_proved
         result = run(sys.executable, '-I', str(ROOT / 'media/check_libraries.py'), '--root', str(temp))
-        assert '10 archives, 382 arm64 members' in result.stdout
+        assert '10 archives, 390 arm64 members' in result.stdout
         print(result.stdout.strip())
         archive = temp / 'host/audio/build/libhostaudio.a'
         pristine = archive.read_bytes()

@@ -17,6 +17,7 @@ Setting *settings_find(const char *id) { (void)id; return NULL; }
 uint8_t *G; int diag_on=1;
 static unsigned called,checks,failed;
 void diag_event(const char *s,...) {(void)s;}
+void underglow_menu_option_added(uint32_t o){(void)o;}
 void f_00573960_orig(Cpu *c) {++called;c->esp+=8;}
 SOURCE
 int main(int argc,char **argv) {

@@ -77,6 +77,7 @@ uint64_t host_ticks(void) {
     return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec;
 }
 uint64_t host_filetime(void) { return 0; }
+void diag_begin_exit(void) {}
 void diag_event(const char *f, ...) { (void)f; }
 const char *diag_symbol(uint32_t a, uint32_t *off) { (void)a; *off=0; return ""; }
 uint32_t galloc(uint32_t n) { (void)n; abort(); }

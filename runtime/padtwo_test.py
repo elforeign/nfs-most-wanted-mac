@@ -14,6 +14,9 @@
 
 
 
+
+
+
 """
 from pathlib import Path
 import os
@@ -60,7 +63,14 @@ FAKE = r'''
 @end
 @implementation GCDualShockGamepad
 @end
+@interface GCDeviceBattery : NSObject
+@property float batteryLevel;
+@property int batteryState;
+@end
+@implementation GCDeviceBattery
+@end
 @interface GCController : NSObject
+@property(strong) GCDeviceBattery *battery;
 @property(strong) GCExtendedGamepad *extendedGamepad;
 @property(copy) NSString *vendorName, *productCategory;
 @property(strong) GCController *physicalInputProfile;
@@ -93,6 +103,7 @@ uint64_t host_ticks(void) { return fake_time; }
 void diag_event(const char *fmt, ...) { (void)fmt; }
 void prompts_input(int pad) { prompts_calls += pad; }
 void prompts_pad_seen(int on) { prompts_seen = on; }
+void replay_controls_disconnect(void) {}
 int osk_visible(void) { return 0; }
 int osk_pad(int port, uint32_t buttons, int up, int down, int left, int right,
             float lx, float ly, int connected, int xbox) {
@@ -107,6 +118,8 @@ static void *led_slots[2];
 static int disconnect_calls, connect_calls, led_calls, real_opens, real_writes;
 static void *last_connect;
 void padfx_disconnect(void *ctl) { (void)ctl; ++disconnect_calls; }
+#define PADLINK_HOOK_TEST
+#include "padlink_test.c"
 void padfx_connect(void *ctl) { last_connect=ctl; ++connect_calls; }
 void padfx_player_update(int slot, void *ctl) { if (slot<0 || slot>1) abort(); led_slots[slot]=ctl; ++led_calls; }
 int settings_get(const char *name) { (void)name; return 0; }
@@ -175,6 +188,7 @@ static GCControllerButtonInput *button(float v) {
 static GCController *controller(int n) {
     GCController *ctl = [GCController new];
     GCExtendedGamepad *g = n ? [GCExtendedGamepad new] : [GCDualShockGamepad new];
+    ctl.battery = [GCDeviceBattery new]; ctl.battery.batteryLevel = n ? .8f : .08f; ctl.battery.batteryState = 0;
     ctl.extendedGamepad = g; ctl.vendorName = n ? @"Xbox" : @"DualShock 4";
     ctl.productCategory = ctl.vendorName;
     g.leftThumbstick = [GCControllerDirectionPad new]; g.rightThumbstick = [GCControllerDirectionPad new];
@@ -201,10 +215,37 @@ int main(int argc, const char **argv) { @autoreleasepool {
     (void)argc; int count = atoi(argv[1]);
     G = calloc(1, 0x1000000);
     GCController *a = controller(0), *b = controller(1);
+    diag_on = 1;
     fake_source = @[a, b];
     notify(GCControllerDidConnectNotification, a); notify(GCControllerDidConnectNotification, b);
     CHECK(connect_calls == 2 && last_connect == (__bridge void *)b);
     CHECK(pad_count() == count);
+    // Drive notification + report hooks before any input read, including no-focus gaps.
+    char battery_text[128];
+    a.battery.batteryLevel = 0; a.battery.batteryState = -1;
+    user32_pad_report(battery_text, sizeof battery_text);
+    CHECK(!links[0].low_noted && !links[0].battery_noted);
+    a.battery.batteryLevel = .08f; a.battery.batteryState = 0;
+    fake_source = count == 2 ? @[b,a] : @[a,b];
+    user32_pad_report(battery_text, sizeof battery_text);
+    CHECK(links[0].id == (__bridge void *)a && links[0].battery < .1f && links[0].low_noted);
+    padlink_output(padlink_token((__bridge void *)a), PADLINK_FX, 1);
+    uint64_t first_link = links[0].token;
+    fake_time += 2000000000ull;
+    fake_source = @[b]; notify(GCControllerDidDisconnectNotification,a);
+    CHECK(links[0].id == (count == 1 ? (__bridge void *)b : NULL));
+    CHECK(strstr(link_notes[2], "disconnected after 2.0 s"));
+    CHECK(strstr(link_notes[3], "framework 1 (peak 1/s)"));
+    CHECK(links[0].total[PADLINK_FX] == 0);
+    fake_source = @[a,b]; notify(GCControllerDidConnectNotification,a);
+    CHECK(links[0].id == (__bridge void *)a && links[0].token != first_link);
+    first_link = links[0].token;
+    // Same object unplugged/replugged while no input polling occurs gets a new epoch.
+    fake_source = @[b]; notify(GCControllerDidDisconnectNotification,a);
+    fake_source = @[a,b]; notify(GCControllerDidConnectNotification,a);
+    CHECK(links[0].id == (__bridge void *)a && links[0].token != first_link);
+
+    diag_on = 0;
     CHECK(invoke(i_EnumDevices, 5, 0u, 4u, 1u, 0u, 0u) == DI_OK);
     CHECK(enumerated == count); CHECK(guids[0] == PAD_GUID);
     CHECK(!strcmp(names[0], "Controller (DualShock 4)"));
@@ -308,7 +349,7 @@ def main():
     assert di.count(mutation) == 1
     with tempfile.TemporaryDirectory(prefix='padtwo_') as td:
         td = Path(td)
-        for broken in (False, "index", "menu", "led", "disconnect", "connect"):
+        for broken in (False, "index", "menu", "led", "disconnect", "connect", "link-presence", "link-battery", "link-unknown"):
             sample = user if broken != "menu" else user.replace(' : (portmenu_is_open() ? ~0u : 0);', ' : 0;')
             assert broken != "menu" or sample != user
             if broken == "led":
@@ -320,13 +361,32 @@ def main():
             if broken == "connect":
                 sample = user.replace("padfx_connect((__bridge void *)n.object);", "(void)n;")
                 assert sample != user
+            link = (R / 'padlink.c').read_text()
+            if broken == "link-presence":
+                # Old hooks only saw changes of present/absent in pad_read, after focus gating.
+                sample = user.replace('padlink_refresh();', '(void)0;').replace(
+                    'padlink_detach((__bridge void *)ctl);', '(void)ctl;').replace(
+                    'if (!idx) padlink_observe(ctl);', 'if (!idx && (ctl != nil) != pad_presents[0]) padlink_observe(ctl);')
+                # Keep the now-unused helper compiled without changing its behavior.
+                sample = sample.replace('static void padlink_refresh(void)', 'static void __attribute__((unused)) padlink_refresh(void)')
+            if broken == "link-battery":
+                # Old report hook sampled framework order and assigned the reading to slot zero.
+                start = user.index('void user32_pad_report(')
+                sample = user[:start] + user[start:].replace('GCController *ctl = pad_controller_n(0);',
+                    'GCController *ctl = GCController.controllers.firstObject;', 1).replace('padlink_observe(ctl);', '(void)ctl;', 1).replace(
+                    'padlink_battery((__bridge void *)ctl,', 'padlink_battery((__bridge void *)pad_controller_n(0),', 1)
+            if broken == "link-unknown":
+                # Old battery predicate accepted state unknown (framework default level zero).
+                link = link.replace(' || state < 0 || state > 2', '').replace('state == 0 && !l->low_noted', 'state != 1 && !l->low_noted')
+            link_source = td / 'link.c'
+            link_source.write_text(link)
             src = td / (str(broken) + '.m')
             src.write_text(FAKE + sample + '\n' + (di.replace(mutation, 'd->pad_idx = 0;') if broken == 'index' else di) + MAIN)
             exe = src.with_suffix('')
             run(['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fobjc-arc',
-                 '-Wno-deprecated-declarations', '-fsanitize=address,undefined', '-I', str(R), '-I', str(R.parent / 'recomp'),
+                 '-Wno-deprecated-declarations', '-fsanitize=address,undefined', '-DPADLINK_SOURCE="' + str(link_source) + '"', '-I', str(R), '-I', str(R.parent / 'recomp'),
                  str(src), '-framework', 'Foundation', '-o', str(exe)])
-            for setting in (['1', '2'] if broken == 'connect' else ['2'] if broken else [None, '1', '2', 'invalid']):
+            for setting in (['1', '2'] if broken in ('connect', 'link-presence', 'link-unknown') else ['2'] if broken else [None, '1', '2', 'invalid']):
                 env = dict(os.environ, NFS_RUMBLE='off')
                 env.pop('BOOT_PAD', None)
                 env.pop('BOOT_PAD2', None)

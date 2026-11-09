@@ -12,6 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include "d3d9_internal.h"
+extern id<MTLDevice> mtl;
+static id<MTLLibrary> pipeline_library_source(NSString *source, const char *pass, NSError **error) {
+    (void)pass; return [mtl newLibraryWithSource:source options:nil error:error];
+}
 static id<MTLRenderPipelineState> pipeline_build_device(id<MTLDevice> device, MTLRenderPipelineDescriptor *d, const char *pass, NSError **error) {
     (void)pass; return [device newRenderPipelineStateWithDescriptor:d error:error];
 }

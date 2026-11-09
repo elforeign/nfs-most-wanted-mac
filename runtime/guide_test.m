@@ -1,14 +1,24 @@
 // Real document/layout/shortcut/menu tests; only game, sound and host services are fixtures.
+static int replaySaves, replayKeyUsed;
+void replay_save_action(int unused) { (void)unused; ++replaySaves; }
+int replay_key_in_use(unsigned scan) { (void)scan; return replayKeyUsed; }
+// Streaming input adds 10 checks: good 1921/0; repeat/editor-pad/close faults have 6/1/1 failures (1921 checks).
 // Driven by guide_test.py, including deliberate source mutations. No game or GPU.
-// Proof (checks/failures): good 1700/0. Broken production source controls:
-// missing 1700/2; empty 1700/1; UTF-8 3140/1; format 2420/10; clamp 1700/10;
-// resize/cache 1700/1 each; wrap 620/120; clip 1700/1; priority 1696/88;
-// ordering 1700/4; tap 1700/9; release 1700/4; hidden 1700/2; Back 1698/32;
-// F10 1700/5; pause 1696/6; opening 1700/4; scale 1700/6; old fonts 2420/6;
-// old step 1700/6; modified release 1700/1; wheel 1700/2; page/repeat 1700/4.
-// 25 controls rejected. Large panel 1960x1280; body 10, step 14; 28 lines
+// Licences: wrong document 1917/4; omitted row 1917/9; good 1917/0.
+// Proof (checks/failures): good 1917/0. Broken production source controls:
+// missing 1917/2; empty 1917/1; UTF-8 3357/1; format 2637/10; clamp 1917/10;
+// resize/cache 1917/1 each; wrap 837/120; clip 1917/1; priority 1913/88;
+// ordering 1917/4; tap 1917/9; release 1917/4; hidden 1917/2; Back 1915/32;
+// F10 1917/4; pause 1913/6; opening 1917/4; scale 1917/6; old fonts 2637/6;
+// old step 1917/6; modified release 1917/1; wheel 1917/2; page/repeat 1917/4.
+// 31 controls rejected; replay key/pad/focus/disconnect: 1917 checks, 8/5/4/2 failures. Large panel 1960x1280; body 10, step 14; 28 lines
 // versus 14 in each previous layout, for both Guide and What to test.
 #include "guide.m"
+#include "stream_key.h"
+static int streamEditing, streamActions;
+int stream_key_editing(void) { return streamEditing; }
+void stream_key_close(void) { streamEditing=0; }
+static void stream_action(int unused) { (void)unused; ++streamActions; }
 #include "portmenu.m"
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,9 +206,9 @@ static void menu_tests(NSString *resources) {
     CHECK(!strcmp(settings_category_names[SET_DIAGNOSTICS],"Help"));
     Setting *rs[128];
     guide_refresh(); int n=rows(SET_DIAGNOSTICS,rs,128);
-    CHECK(n==1 && rs[0]==&guide_row);
+    CHECK(n==2 && rs[0]==&guide_row && rs[1]==&licences_row);
     write_text([resources stringByAppendingPathComponent:@"Testing.md"],@"# Test checklist\nFirst\nLast\n");
-    n=rows(SET_DIAGNOSTICS,rs,128); CHECK(n==2 && rs[0]==&guide_row && rs[1]==&testing_row);
+    n=rows(SET_DIAGNOSTICS,rs,128); CHECK(n==3 && rs[0]==&guide_row && rs[1]==&testing_row && rs[2]==&licences_row);
     // The direct shortcut is a hidden switch, Off by default; the chord checks below turn it on.
     CHECK(shortcut_row.def==1 && shortcut_row.hidden);
     CHECK(settings_set(&shortcut_row,0)); CHECK(!strcmp(saved_key,"controls.guide_button")); CHECK(!strcmp(saved_value,"view_r3"));
@@ -237,6 +247,15 @@ static void menu_tests(NSString *resources) {
         sel=1; portmenu_key(0x0D,1,0); portmenu_key(0x79,1,0);
         CHECK(!portmenu_is_open() && !guide_active());
     }
+    set_open(1); set_tab(SET_DIAGNOSTICS); guide_refresh();
+    Setting *licences = settings_find("help.licences"); CHECK(licences && licences->apply);
+    if (licences && licences->apply) licences->apply(0);
+    CHECK(guide_active() && [title isEqualToString:@"Licences"]);
+    CHECK([document.string containsString:@"compiled static libraries"]);
+    CHECK([document.string containsString:@"END OF TERMS AND CONDITIONS"]);
+    CHECK([document.string containsString:@"Independent JPEG Group"]);
+    CHECK([document.string containsString:@"media/PREBUILT.md"]);
+    guide_close(); set_open(0);
     CHECK(opening>=8 && pause_on==pause_off);
     // An already paused game retains its own sound state.
     M32(GAMEFLOW_STATE)=6; M32(SND_CTL_STATES)=2; set_open(1);
@@ -255,7 +274,56 @@ static void menu_tests(NSString *resources) {
     CHECK(portmenu_mouse(1,ox+900*f,oy+65*f,0)==1 && !guide_active() && portmenu_is_open());
     set_open(0); layer=nil;
     [NSFileManager.defaultManager removeItemAtPath:[resources stringByAppendingPathComponent:@"Testing.md"] error:NULL];
-    n=rows(SET_DIAGNOSTICS,rs,128); CHECK(n==1 && rs[0]==&guide_row);
+    n=rows(SET_DIAGNOSTICS,rs,128); CHECK(n==2 && rs[0]==&guide_row && rs[1]==&licences_row);
+}
+static void replay_menu_tests(void) {
+    static const char *const keys[]={"F8","F7","F6"}, *const pads[]={"Off","L3","R3"};
+    static Setting keyEnabled={.id="controls.replay_key_enabled",.type=SET_TOGGLE,.pref="",.def=1};
+    static Setting key={.id="controls.replay_key",.type=SET_CHOICE,.choices=keys,.nchoices=3,.pref=""};
+    static Setting chord={.id="controls.replay_pad",.type=SET_CHOICE,.choices=pads,.nchoices=3,.pref="",.def=1};
+    settings_add(&keyEnabled); settings_add(&key); settings_add(&chord);
+    set_open(0); guide_close(); pad(0,0);
+    for(int i=0;i<100;++i) CHECK(portmenu_key(0x77,1,i!=0)==1);
+    CHECK(replaySaves==1); CHECK(portmenu_key(0x77,0,0)==1);
+    replayKeyUsed=1;
+    CHECK(portmenu_key(0x77,1,0)==0 && replaySaves==1);
+    replayKeyUsed=0;
+    CHECK(portmenu_key(0x77,0,0)==0);
+    set_open(1); portmenu_key(0x77,1,0); CHECK(replaySaves==1);
+    set_open(0); CHECK(portmenu_key(0x77,0,0)==1);
+    const uint32_t combo=B_L1|B_R1|B_L3;
+    for(int i=0;i<100;++i) CHECK((pad(combo,0)&combo)==combo);
+    CHECK(replaySaves==2); pad(0,0);
+    pad(B_L1,0); replay_controls_cancel(); pad(combo,0);
+    CHECK(replaySaves==2); pad(0,0);
+    pad(combo,0); CHECK(replaySaves==3);
+    pad(0,0); pad(B_L1,0);
+    replay_controls_disconnect(); pad(combo,0); CHECK(replaySaves==3); pad(0,0);
+    settings_set(settings_find("controls.menu_button"),2);
+    pad(B_L3|B_R3,0); ticks+=500000000; pad(B_L3|B_R3,0);
+    CHECK(portmenu_is_open() && replaySaves==3); pad(0,0); set_open(0);
+    printf("replay menu: 100 held keys + 100 held pad samples, saves=3, accidental=0\n");
+}
+static void stream_menu_tests(void) {
+    static Setting go={.id="display.stream_go",.category=SET_DISPLAY,.order=63,.type=SET_ACTION,.pref="",.apply=stream_action};
+    settings_add(&go);
+    set_open(1); set_tab(SET_DISPLAY);
+    Setting *display[128]; int count=rows(SET_DISPLAY,display,128);
+    for(int i=0;i<count;++i) if(display[i]==&go) sel=i;
+    CHECK(current()==&go);
+    portmenu_key(0x0D,0,0);
+    for(int i=0;i<100;++i) portmenu_key(0x0D,1,i!=0);
+    CHECK(streamActions==1);
+    portmenu_key(0x0D,1,0); CHECK(streamActions==1); // held, even without repeat flag
+    portmenu_key(0x0D,0,0); portmenu_key(0x0D,1,0); CHECK(streamActions==2);
+    portmenu_key(0x0D,0,0);
+    pad(0,0); for(int i=0;i<100;++i) pad(B_CROSS,0); CHECK(streamActions==3);
+    pad(0,0); streamEditing=1; device=0;
+    portmenu_key(0x0D,1,0); pad(B_CROSS,0); CHECK(streamActions==3); CHECK(device==0);
+    streamEditing=0; pad(B_CROSS,0); CHECK(streamActions==3); // sheet-closing hold
+    pad(0,0); pad(B_CROSS,0); CHECK(streamActions==4);
+    streamEditing=1; set_open(0); CHECK(!streamEditing); pad(0,0);
+    printf("stream menu: 100 held keys + 100 held pad samples, actions=4, editor actions=0\n");
 }
 int main(int argc,char **argv) {
     (void)argc; (void)argv;
@@ -264,6 +332,8 @@ int main(int argc,char **argv) {
         NSString *resources=NSBundle.mainBundle.resourcePath;
         CHECK(resource(0)!=nil);
         layout_tests(resources); shortcut_tests(); menu_tests(resources);
+        replay_menu_tests();
+        stream_menu_tests();
         printf("guide: %d checks, %d failures\n",checks,failures);
         free(G);
         return failures!=0;

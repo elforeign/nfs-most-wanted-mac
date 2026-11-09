@@ -7,6 +7,10 @@ Review regression (eb845b37): depth rejection 0/2 before, 2/2 after;
 64-node boundary accepted 1/1 before and after. Donor comparison is equivalence
 evidence for frozen donor semantics, not a production selection regression.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 import copy
 import json
 import os
@@ -247,7 +251,7 @@ class GraphProof(unittest.TestCase):
 
 
 def private_proof():
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     mw = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition'))
     if not (source / 'GLOBAL/attributes.bin').is_file() or not (mw / 'GLOBAL/attributes.bin').is_file():
         print('private source/donor assets absent; synthetic proof completed')

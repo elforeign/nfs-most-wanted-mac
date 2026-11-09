@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Controls page cycle/snapshot/cancel/defaults, actual hooks and retail comparisons.
 ASan/UBSan; synthetic FE snapshot/widget builder, no game or input device.
-Each front-end/pause mode: 422 checks / 0 failures; pinned job 4: 3 / 422 failures
-(N2O behavioral assertions); pinned job 3: 127 / 418 failures.
-Broken snapshot / cancel / defaults / exit: 44 / 99 / 1 / 1 failures
-out of 418 / 422 / 422 / 422 checks (all rejected).
+Each front-end/pause mode: 460 checks / 0 failures with production trigopt.c
+and settings.c; the translated retail page switch, Cancel and Defaults paths
+see the real extra row. Reviewed behavior: 6/462 failures in each mode.
+Broken row Cancel / Defaults / exit / rebuild: 4/458, 2/460, 1/459,
+18/449 failures; broken binding snapshot / Cancel / Defaults / exit:
+44/456, 102/459, 1/460, 1/460. All controls exit 1 (never compile/crash).
+Pinned job 4: 3/460; job 3: 145/445 failures in the expanded fixture.
 Historical source is stored as text/hash deltas; verified PASS with Git unavailable.
 """
 from pathlib import Path
@@ -133,20 +136,21 @@ void f_00634370(Cpu *c) { c->eax=0x4000; M32(0x4008)=0x5000; c->esp+=4; }
 void f_00628C50(Cpu *c) { c->eax=joy()!=0; c->esp+=4; }
 void f_00628CB0(Cpu *c) { c->eax=GA+0x34*arg(c,0)+4; c->esp+=8; }
 void f_006284D0(Cpu *c) { c->esp+=4; }
-void f_0051D410(Cpu *c) { c->esp+=4; }
 void f_0052A780_orig(Cpu *c) { c->esp+=4; }
 void f_0052AB90_orig(Cpu *c) { ++header_calls; c->esp+=4; }
+#include "trigopt_controls_fixture.h"
+void f_0051D410(Cpu *c) { trig_redraw(c); c->esp+=4; }
 void f_0052AC70_orig(Cpu *c) {
  uint32_t self=c->ecx; int keyboard=M32(self+0xe4)==1;
+ trig_rebuild(c);
  ++snapshot_calls;
  M8(self+0x2b0)=M8(0x3084);
  for(int a=0;a<(keyboard?18:19);a++) memcpy(G+self+0xe8+24*a,G+rec(a,keyboard?0:2),24);
  c->esp+=4;
 }
-uint32_t gstr(const char *s) { strcpy((char *)G+0x710000,s); return 0x710000; }
 static int title_calls;
 uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *args) {
- (void)n;
+ int handled; uint32_t value=trig_guest(c,fn,n,args,&handled); if(handled) return value;
  if(fn==0x0063cd80) { Cpu q=*c; q.esp-=4; f_0063CD80(&q); }
  else if(fn==0x005252d0) {
   CHECK(args[0]==M32(SCREEN+0x10) && args[1]==0x4e11cf90 && args[2]==0x8941f8);
@@ -189,7 +193,17 @@ int main(int argc,char **argv) {
  uint32_t original[19][6]; page(original);
  uint8_t keyboard[19][24]; for(int a=0;a<19;a++) memcpy(keyboard[a],G+rec(a,0),24);
  invoke(f_0052AC70,SCREEN); CHECK(unchanged());
+ CHECK(trig_rows(SCREEN)==38 && adaptive.value==1);
+ trig_toggle(SCREEN); CHECK(adaptive.value==0 && !unchanged() && trig_writes==0);
+ invoke(f_0051D590,SCREEN); CHECK(adaptive.value==1 && trig_effect==1 && !strcmp(trig_drawn,"On") && unchanged());
+ trig_toggle(SCREEN); invoke(f_0051D6E0,SCREEN); CHECK(adaptive.value==1 && trig_effect==1 && !strcmp(trig_drawn,"On"));
+ invoke(f_0051D590,SCREEN); CHECK(adaptive.value==1);
+ trig_toggle(SCREEN); CHECK(adaptive.value==0);
+
  invoke(f_0052AF20,SCREEN); CHECK(M32(SCREEN+0xe4)==3 && edited_set==PADBIND_DEFAULT); CHECK(unchanged());
+ CHECK(trig_rows(SCREEN)==40 && adaptive.value==0 && trig_writes==0);
+ trig_toggle(SCREEN); invoke(f_0051D590,SCREEN); CHECK(adaptive.value==0 && trig_effect==0 && !strcmp(trig_drawn,"Off"));
+
  // Accept a Default edit by cycling. The new Drag snapshot must contain Drag.
  set_rec(rec(18,3),T_BUTTON,0,29); CHECK(!unchanged()); page(original);
  invoke(f_0052AF20,SCREEN); CHECK(M32(SCREEN+0xe4)==3 && edited_set==PADBIND_DRAG); CHECK(unchanged());
@@ -214,6 +228,7 @@ int main(int argc,char **argv) {
  set_rec(rec(18,3),T_BUTTON,0,31);
  uint8_t menus[(76-19)*52]; memcpy(menus,G+GA+19*52,sizeof menus);
  M8(0x3084)=0; invoke(f_0051D6E0,SCREEN); CHECK(M8(0x3084)==0);
+ CHECK(adaptive.value==1 && trig_effect==1 && !strcmp(trig_drawn,"On"));
  drag_defaults_check();
  CHECK(!memcmp(menus,G+GA+19*52,sizeof menus));
  CHECK(M32(rec(0,2))==T_ROT_HI && M32(rec(1,2))==T_AXIS_HI);
@@ -221,6 +236,7 @@ int main(int argc,char **argv) {
  CHECK(M32(rec(8,2)+8)==P_R1 && M32(rec(7,2)+8)==P_L1);
  for(int a=0;a<19;a++) CHECK(!memcmp(keyboard[a],G+rec(a,0),24));
  CHECK(!unchanged()); invoke(f_0051D590,SCREEN); CHECK(equal(drag));
+ CHECK(adaptive.value==0 && trig_effect==0 && !strcmp(trig_drawn,"Off"));
  // Revisit each logical page: accepted Default edits survive a Drag cancel.
  invoke(f_0052AF20,SCREEN); CHECK(M32(SCREEN+0xe4)==1 && edited_set==PADBIND_DEFAULT); CHECK(equal(original));
  invoke(f_0052AF20,SCREEN); CHECK(M32(SCREEN+0xe4)==3 && equal(original));
@@ -235,6 +251,7 @@ int main(int argc,char **argv) {
  invoke(f_0052AF20,SCREEN); CHECK(M32(SCREEN+0xe4)==3 && equal(drag));
  set_rec(rec(18,3),T_BUTTON,0,30); page(drag);
  invoke(f_0052A780,SCREEN); CHECK(edited_set==PADBIND_DEFAULT && equal(original));
+ CHECK(trig_writes==1 && !strcmp(trig_saved,"off") && adaptive.value==0);
  CHECK(padbind_edit_set(PADBIND_DRAG)); CHECK(equal(drag)); CHECK(padbind_edit_set(PADBIND_DEFAULT));
  // Reused screen addresses start on Keyboard; no-pad cycle remains Keyboard.
  M32(SCREEN+0xe4)=1; invoke(f_0052AC70,SCREEN); invoke(f_0052A780,SCREEN);
@@ -263,6 +280,8 @@ def main():
     old=PINNED_JOB3
     aliases='\n'.join('void f_'+a+'(Cpu *c) { f_'+a+'_orig(c); }' for a in hooks)
     variants={'normal':((R/'padbind.c').read_text(),source),'job3':(old,aliases)}
+    baseline=source.replace('    trigopt_options(c, 1);\n','').replace('    trigopt_options(c, 2);\n','').replace('    trigopt_options(c, 3);\n','').replace('    if (!trigopt_options(&q, 0)) c->eax &= ~255u;\n','')
+    variants['review-baseline']=((R/'padbind.c').read_text(),baseline)
     job4=PINNED_JOB4
     variants['job4']=(job4,source)
     for name,before,after in (
@@ -270,17 +289,27 @@ def main():
         ('wrong-cancel','f_0051D590_orig(c);','/* discarded cancel */ c->esp += 4;'),
         ('wrong-defaults','padbind_drag_defaults(c);','/* discarded defaults */'),
         ('wrong-exit','padbind_edit_set(PADBIND_DEFAULT);','/* leaked Drag */'),
+        ('row-cancel','trigopt_options(c, 1);','(void)c;'),
+        ('row-defaults','trigopt_options(c, 2);','(void)c;'),
+        ('row-exit','trigopt_options(c, 3);','(void)c;'),
+        ('row-rebuild','trigopt_controls(&q);','(void)q;'),
     ):
         assert before in source,name
         variants[name]=((R/'padbind.c').read_text(),source.replace(before,after,1))
     pre=re.sub(r'uint32_t call_guest\(.*?\n', '', h.PRE)
+    pre=re.sub(r'void settings_add\(.*?\n', '', pre)
     with tempfile.TemporaryDirectory(prefix='controlpages-') as tmp:
         tmp=Path(tmp); (tmp/'funcs.h').write_text('')
         for name,(pad,ui) in variants.items():
             path=tmp/(name+'.c'); exe=tmp/name
             decls='\n'.join('void f_'+a+'(Cpu *c); void f_'+a+'_orig(Cpu *c);' for a in hooks)
             path.write_text('\n'.join([pre,pad,decls,EXTRA]+[translated(a) for a in ('0052AF20','0051D4B0','0051D590','0051D6E0')]+[ui,MAIN]))
-            result=subprocess.run(['clang','-std=c11','-g','-Wno-unused-function','-fsanitize=address,undefined','-fno-sanitize-recover=all','-I',str(tmp),'-I',str(R),'-I',str(R.parent/'recomp'),str(path),'-o',str(exe)],capture_output=True,text=True)
+            extra_flags=[]
+            if name=='review-baseline':
+                leaf=tmp/'baseline-trigopt.c'
+                leaf.write_text((R/'trigopt.c').read_text().replace('preview(!adaptive.value);','settings_set(&adaptive, !adaptive.value);'))
+                extra_flags=[f'-DTRIGOPT_SOURCE="{leaf}"']
+            result=subprocess.run(['clang',*extra_flags,'-std=c11','-g','-Wno-unused-function','-fsanitize=address,undefined','-fno-sanitize-recover=all','-I',str(tmp),'-I',str(R),'-I',str(R.parent/'recomp'),str(path),'-o',str(exe)],capture_output=True,text=True)
             assert result.returncode==0,result.stderr[-5000:]
             for pause in (False,True):
                 label=name+('-pause' if pause else '-front')

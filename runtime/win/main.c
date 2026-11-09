@@ -1,5 +1,8 @@
 #include "host.h"
 #include "startup.h"
+#include "user32.h"
+#include "dinput.h"
+#include "dsound.h"
 int main(int argc,char **argv) {
     int prefix=argc==3 && !strcmp(argv[1],"--boot-prefix");
     if (argc!=2 && !prefix) { printf("usage: nfsmw-headless [--boot-prefix] <speed.exe>\n"); return WIN_FAIL; }
@@ -23,6 +26,8 @@ int main(int argc,char **argv) {
     cpu.esp-=4; M32(cpu.esp)=0xdeadbeef;
     win_cpu=&cpu; threads_init();
     if (prefix && !win_startup_init(path)) win_fail("CRT startup registration",0);
+    if (prefix && (!win_user32_register() || !win_dinput_register())) win_fail("window/input registration",0);
+    if (prefix && !win_dsound_register()) win_fail("DirectSound registration",0);
     win_boot_prefix=prefix;
     win_first_import=!prefix;
     printf("win: image loaded, %u translated functions, entry %08X, %u imports\n",

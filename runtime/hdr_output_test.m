@@ -1,4 +1,7 @@
 // Production presenter/quad proof, no game or window.
+                                                                              
+// control: 4 frame source compiles + 32 PSO builds (exit 1).
+// Steady post frames: 0 pipeline-cache calls; unmemoized control 28/94 (exit 1).
 // Auto potential 1: SDR; 7: HDR startup/status (0 failures); old request: 1 failure.
 // Expected linear readback:
 // EDR [0, .21398926 (FP16 .214041), 1, 2, 4], above_one=2, lost=0.
@@ -32,19 +35,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <objc/runtime.h>
 #include "hdr_output.h"
-#include "render_upscale_route.h"
 #include "rt_native.h"
-// The HDR fixture uses direct buffers; spatial recording has a separate fixture.
+#include "pipeline_cache.h"
+// The HDR fixture uses direct buffers.
 void rt_native_encode(id<MTLCommandBuffer> b,RTNativeEncode encode,const void *p,size_t n,NSArray *r) {encode(b,p,n,r);}
 
 static id<MTLDevice> mtl;
 static unsigned pipeline_edr_builds;
+static unsigned post_cached_calls;   // pipeline_cached_library calls (counted in cache.inc)
 static int pipeline_hold_test;
-static id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
-    if (!strcmp(pass,"edr")) ++pipeline_edr_builds;
-    return [mtl newRenderPipelineStateWithDescriptor:d error:e];
-}
 static id<MTLCommandQueue> queue;
 static id<MTLCommandBuffer> cmd;
 static CAMetalLayer *layer;
@@ -91,25 +94,20 @@ static float gamma_lut[768];
 static int x_edr_processing;
 static float render_hdr_composition_headroom(void);
 static void ensure_cmd(void) {}
-static int upscale_copy_active(void);
 static int gamma_active, present_graded;
 #include "presenter.inc"
 #include "probe.inc"
 #include "quad.inc"
 #include "legacy.inc"
 typedef struct { id<MTLTexture> tex,ms; int stale; } RenderTex;
-static RenderTex bb_rt,ad_rt,fs_native_depth,fs_world_rt,fs_display_rt,fs_composite_rt;
-static id<MTLTexture> autodepth_tex;
-static NFSUpscaleRoute *fs_upscale;
-static NSMutableSet<NSNumber *> *fs_screen_copies;
-static void upscale_finish(void) { abort(); } // Default-Off HDR isolation fixture.
+static RenderTex bb_rt,fs_world_rt,fs_display_rt,fs_composite_rt;
 static void drop_ms_texture(RenderTex *r) {r->ms=nil;r->stale=0;}
 static int fs_active,fs_composing,fs_hud,fs_toned;
 static float fs_headroom=1;
 static uint64_t frame_serial=1,fs_serial;
 static void end_pass(void) {}
 static int pass_dirty;
-static struct {uint32_t backbuffer,rt[4],ds,autodepth;} dev={.backbuffer=1};
+static struct {uint32_t backbuffer,rt[4],ds,autodepth,pp[16];} dev={.backbuffer=1};
 static int postfx_look_variant(const char *name){(void)name;return 0;}
 static id<MTLTexture> new_ms_texture(MTLPixelFormat pf,NSUInteger w,NSUInteger h,uint32_t samples) {
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
@@ -139,6 +137,9 @@ static int hdrclip_on;
 static void hdrclip_bind(id<MTLRenderCommandEncoder> e,unsigned n){(void)e;(void)n;}
 static void hdrclip_scan(id<MTLTexture> t,unsigned n){(void)t;(void)n;}
 static void gpt_render(MTLRenderPassDescriptor *p,const char *s,...){(void)p;(void)s;}
+static uint64_t host_ticks(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec*1000000000ull+t.tv_nsec;}
+#include "cache.inc"
+#include "lampglow_shader.h"
 #include "post.inc"
 static const char *hud_test_src=
 "#include <metal_stdlib>\nusing namespace metal;\nvertex float4 hud_vs(uint v [[vertex_id]]){float2 p=float2((v<<1)&2,v&2);return float4(p*float2(2,-2)+float2(-1,1),0,1);}\nfragment float4 hud_fs(float4 p [[position]]){return float4(2,2,2,1);}";
@@ -459,9 +460,11 @@ static int composition(unsigned samples) {
         d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;d.rasterSampleCount=samples;
         direct_post=[mtl newRenderPipelineStateWithDescriptor:d error:&error];CHECK(direct_post,"direct held reference");
     }
+    unsigned frames=0,steady_calls=0;
     for(int effects=0;effects<2;++effects)for(int grade=0;grade<3;++grade) {
       NSData *held_reference=nil;
       for(int held=0;held<(pipeline_hold_test?2:1);++held) {
+        unsigned frame_calls=post_cached_calls;
         double exponent=grade==1?.8:grade==2?1.2:1;
         uint16_t ramp[768];for(int i=0;i<768;++i)ramp[i]=(uint16_t)lround(65535*pow((i&255)/255.,exponent));
         render_set_gamma(ramp);cmd=[queue commandBuffer];
@@ -523,8 +526,12 @@ static int composition(unsigned samples) {
         CHECK(hud_white==1,"HUD paper white %.8f",hud_white);
         CHECK(!bad && above>800,"composition range above=%d bad=%d",above,bad);
         if(!effects && !grade)CHECK(above==896 && fabs(v[64*4]-.21404114)<.0002,"midpoint/ramp decode");
+        if(frames++)steady_calls+=post_cached_calls-frame_calls;
       }
     }
+    // After the first frame every post pass reads a memoized pipeline state.
+    printf("hdr_output_test: composition samples=%u steady_frames=%u post_cached_calls=%u\n",samples,frames-1,steady_calls);
+    CHECK(!steady_calls,"steady post frames made %u pipeline cache calls",steady_calls);
     if(pipeline_hold_test)printf("hdr_output_test: prewarm held samples=%u frames=6 bytes=49248 identical\n",samples);
     render_float_scene_present_end();
     CHECK(backbuffer_tex==display && !fs_composing,"restore SDR before next clear/FE/movie frame");
@@ -547,6 +554,54 @@ static int composition(unsigned samples) {
     for(int x=0;x<=1024;++x)CHECK(isfinite((float)raw[x*4]) && raw[x*4]>=0 && raw[x*4]<=2,"H=2 bound");
     render_float_scene_present_end();
     puts("hdr_output_test: scene/copy/float post/HUD/continuous brightness/native drawable PASS");return 0;
+}
+// Intercept the actual Metal source API so this also detects the original lazy
+// implementation, which predates the production diagnostic wrapper.
+static unsigned sync_sources, load_sources, load_frame_sources;
+static int source_after_load;
+static pthread_t source_frame_thread;
+static IMP source_compile_original;
+static id<MTLLibrary> counted_source(id self, SEL sel, NSString *src, MTLCompileOptions *options, NSError **error) {
+    if (source_after_load && pthread_equal(pthread_self(),source_frame_thread)) ++sync_sources;
+    else { ++load_sources; if(pthread_equal(pthread_self(),source_frame_thread)) ++load_frame_sources; }
+    return ((id (*)(id,SEL,NSString *,MTLCompileOptions *,NSError **))source_compile_original)(self,sel,src,options,error);
+}
+static int post_default(int disabled) {
+    if(disabled)setenv("NFS_PSO_PREWARM","0",1);else unsetenv("NFS_PSO_PREWARM");
+    CHECK(enabled()==!disabled,"scene prewarm default/override");
+    source_frame_thread=pthread_self();
+    Method method=class_getInstanceMethod(object_getClass(mtl),@selector(newLibraryWithSource:options:error:));
+    source_compile_original=method_setImplementation(method,(IMP)counted_source);
+    uint64_t start=host_ticks();
+    dispatch_queue_t q=dispatch_queue_create("post-default-test",DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t ready=dispatch_semaphore_create(0);
+    dispatch_async(q,^{@autoreleasepool{render_post_prewarm();dispatch_semaphore_signal(ready);}});
+    dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
+    double load_ms=(host_ticks()-start)/1e6;
+    pipeline_loading_done();source_after_load=1;
+    unsigned steady_calls=0;
+    for(int repeat=0;repeat<2;++repeat) {
+        unsigned repeat_calls=post_cached_calls;
+        for(int lamp=0;lamp<2;++lamp) {
+            for(NSString *fs in @[@"fs_downscale",@"fs_lum",@"fs_bright",@"fs_taps",@"fs_dofdown",@"fs_tdown"])
+                CHECK(x_edr_pipeline(fs,1,lamp),"default EDR pass");
+            for(NSUInteger samples=1;samples<=8;samples*=2)if([mtl supportsTextureSampleCount:samples]) {
+                CHECK(x_edr_pipeline(@"fs_vt",samples,lamp),"default EDR composite");
+                CHECK(lamp_post_init(64,64,samples,lamp),"default lamp/view composite");
+            }
+        }
+        if(repeat)steady_calls=post_cached_calls-repeat_calls;
+    }
+    source_after_load=0;
+    method_setImplementation(method,source_compile_original);
+    printf("hdr_output_test: post default=%s load_sources=%u load_pipelines=%lu load_ms=%.3f frame_sync=%u frame_builds=%llu steady_calls=%u\n",
+        disabled?"0":"unset",load_sources,(unsigned long)states.count,load_ms,sync_sources,(unsigned long long)frame_builds,steady_calls);
+    CHECK(!sync_sources,"post synchronous source compiles after load=%u",sync_sources);
+    CHECK(!frame_builds,"post pipeline builds after load=%llu",(unsigned long long)frame_builds);
+    CHECK(!frame_library_compiles,"post diagnostic source counter=%llu",(unsigned long long)frame_library_compiles);
+    CHECK(!steady_calls,"post repeated lookups made %u pipeline cache calls",steady_calls);
+    CHECK(load_sources==5 && !load_frame_sources,"post load sources=%u on frame thread=%u",load_sources,load_frame_sources);
+    return 0;
 }
 // Exercise every EDR recipe before a held composition frame. This is also run
 // with a deliberately omitted downscale recipe (two frame-path builds).
@@ -652,6 +707,8 @@ int main(int argc,const char **argv) {@autoreleasepool{
     if(argc==2 && !strcmp(argv[1],"--startup"))return startup();
     if(argc==2 && !strcmp(argv[1],"--sdr"))return sdr(0);
     if(argc==2 && !strcmp(argv[1],"--fallback"))return sdr(1);
+    if(argc==2 && !strcmp(argv[1],"--post-default"))return post_default(0);
+    if(argc==2 && !strcmp(argv[1],"--post-disabled"))return post_default(1);
     if(argc==2 && !strcmp(argv[1],"--prewarm"))return prewarm(1);
     if(argc==2 && !strcmp(argv[1],"--prewarm-msaa"))return prewarm(4);
     if(argc==2 && !strcmp(argv[1],"--prewarm-lamps"))return prewarm_lamps();

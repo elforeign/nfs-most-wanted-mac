@@ -24,6 +24,8 @@ Numbers (each check shown failing when broken):
   full table leaking 16 MiB guest arena per failed VB creation exit 1 (fixed 0)
 SDK-free COFF audit of the Windows host layer with the new units: unknown 0;
 without d3d9_state.c: unknown 8 (rejected).
+Audio integration: C-only host audit leaves 31 unknown; shared C++ units reduce
+that to 0. Removing those units deliberately reproduces 31 unknown (rejected).
 Hosted SDK-free COFF at O2, before the calloc allowlist entry: unknown 1
 (UNKNOWN: calloc), exit 1; with the entry: unknown 0, exit 0.
 Hosted O1 is also audited: unknown 0 before/after with clang 21, which only
@@ -402,6 +404,7 @@ def shaders_inc():
 def coff_audit(compiler, folder):
     """SDK-free Windows COFF closure, including hosted compiler libc lowering."""
     import importlib.util
+    import json
     spec = importlib.util.spec_from_file_location('windows_symbols', ROOT / 'recomp/windows_symbols.py')
     symbols = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(symbols)
@@ -410,6 +413,7 @@ def coff_audit(compiler, folder):
     stub.write_text('#include "host.h"\nconst unsigned guest_func_count=0;const uint32_t speed_entry=0,'
                     'guest_func_addr[1];void (*const guest_func_ptr[1])(Cpu *);\n')
     sources = sorted(p for p in WIN.glob('*.c') if not p.name.startswith('.'))
+    sources += [ROOT / 'host/audio/dsound_host.cpp', WIN / 'audio_output.cpp']
     assert {'d3d9.c', 'd3d9_state.c'} <= {p.name for p in sources}
     # Keep the O1 proof, and cover the desktop build's O2 policy as well:
     # some clang versions only fold malloc + memset into calloc at O2.
@@ -420,12 +424,24 @@ def coff_audit(compiler, folder):
         objects = []
         for source in [*sources, ROOT / 'runtime/imports.c', stub]:
             obj = output / f'coff_{source.parent.name}_{source.stem}.obj'
-            run([compiler, '-target', 'x86_64-pc-windows-msvc', '-std=c11', *flags,
+            language = ['-std=c11']
+            if source.suffix == '.cpp':
+                language = ['-std=c++17', '-fno-exceptions', '-fno-rtti',
+                            '-DNFS_WIN_AUDIO', '-I', WIN / 'audio_compile']
+            run([compiler, '-target', 'x86_64-pc-windows-msvc', *language, *flags,
                  '-DRECOMP_WINDOWS_COMPILE_ONLY', '-I', WIN, '-I', ROOT / 'recomp',
                  '-c', source, '-o', obj])
             objects.append(obj)
         print(f'COFF {mode}:')
         if mode == 'freestanding':
+            # The host's C DirectSound adapters require both shared C++ units.
+            audio_partial = [o for o in objects[:-1]
+                             if o.stem not in {'coff_audio_dsound_host', 'coff_win_audio_output'}]
+            assert len(audio_partial) == len(objects) - 3
+            assert not symbols.audit(compiler, [objects[-1]], audio_partial, output, sdk_headers=False)
+            missing = json.loads((output / 'symbol-closure.json').read_text())
+            assert len(missing['unknown']) == 31, missing
+            print('shared audio C++ units removed: UNKNOWN=31, rejected')
             # Broken control: without the state unit the recorder's wd_* calls are unknown.
             partial = [o for o in objects[:-1] if o.stem != 'coff_win_d3d9_state']
             assert len(partial) == len(objects) - 2

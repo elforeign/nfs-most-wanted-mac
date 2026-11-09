@@ -1,7 +1,10 @@
 """Actual translated retail save/load/create/delete through both profile wrappers.
 Public-only export: fixed 1/1, predecessor 540af7d2 0/1 (FileNotFoundError).
-No game or emulation. Good 82/82 + restart 3/3 per build. Original omission
-fails 18; explicit requested roundtrip 7/7 vs omitted callbacks 6/7; load 11; save/completion 8; default 12; create/delete 1 each.
+No game or emulation. Good 92/92 + restart 4/4 per build, including independent Light and colour.
+Changed default assertions on ORIGINAL On core: 90/92 (2 failures); fixed 92/92.
+Colour alone stays Off; explicit Light On persists across save/load and restart.
+Original omission fails 24; explicit requested roundtrip 7/7 vs omitted callbacks
+6/7; load 12; save/completion 9; default 16; create 1; delete 10.
 Helpers for audio, catalog and customization allocation are contract fixtures.
 CPU wrapper comparisons are equivalence evidence, not predecessor failures.
 """
@@ -205,7 +208,7 @@ int main(int argc,char **argv) {
     if(!strcmp(argv[2],"restart")) {
         char path[4096]; snprintf(path,sizeof path,"%s/retail",root);
         FILE *f=fopen(path,"rb"); assert(f); assert(fread(G+b,1,SAVE_SIZE,f)==SAVE_SIZE); fclose(f);
-        invoke(p,b,0); CHECK(underglow_get(p,1)==2 && underglow_get(p,2)==4);
+        invoke(p,b,0); CHECK(underglow_get(p,1)==2 && underglow_get(p,2)==4);CHECK(underglow_light_get(p,1)==1 && !underglow_light_get(p,2));
         printf("restart good=%u broken=%u\n",checks-failures,failures); free(G); return failures?1:0;
     }
     if(!strcmp(argv[2],"roundtrip")) {
@@ -218,14 +221,18 @@ int main(int argc,char **argv) {
                observed,SAVE_SIZE,!memcmp(G+b,G+baseline,SAVE_SIZE),checks-failures,failures);
         free(G); return failures?1:0;
     }
-    defaults(p); CHECK(underglow_get(p,1)==0);
+    defaults(p); CHECK(underglow_get(p,1)==0);CHECK(!underglow_light_get(p,1));
     invoke(p,baseline,1); // Off retail baseline
     CHECK(underglow_set(p,1,2)); CHECK(underglow_set(p,2,4));
     CHECK(underglow_get(p,1)==2 && underglow_get(p,2)==4);
+    CHECK(!underglow_light_get(p,1));
+    CHECK(underglow_light_set(p,1,1));CHECK(underglow_light_get(p,1)==1);
+    CHECK(underglow_light_set(p,2,0));CHECK(!underglow_light_get(p,2));
     CHECK(!underglow_set(p,0,2) && !underglow_set(p,1,8));
     invoke(p,b,1); CHECK(!memcmp(G+b,G+baseline,SAVE_SIZE)); complete(1);
     defaults(p); CHECK(underglow_get(p,1)==0); invoke(p,b,0);
     CHECK(underglow_get(p,1)==2 && underglow_get(p,2)==4);
+    CHECK(underglow_light_get(p,1)==1 && !underglow_light_get(p,2));
     // Failed completion cannot overwrite this exact digest's old cosmetic state.
     CHECK(underglow_set(p,1,1)); invoke(p,b,1); complete(0); complete(1);
     invoke(p,b,0); CHECK(underglow_get(p,1)==2);
@@ -241,7 +248,7 @@ int main(int argc,char **argv) {
     // Failure must leave existing choices; successful sell/rebuy clears reused identity.
     CHECK(!deletion(p,1,4,1)); CHECK(underglow_get(p,1)==2);
     fail_creation=1; CHECK(!creation(p,1)); fail_creation=0; CHECK(underglow_get(p,1)==2);
-    CHECK(deletion(p,1,2,1)); CHECK(underglow_get(p,1)==0 && underglow_get(p,2)==4);
+    CHECK(deletion(p,1,2,1)); CHECK(underglow_get(p,1)==0 && underglow_get(p,2)==4);CHECK(!underglow_light_get(p,1));
     CHECK(creation(p,1)==p+0x414+20); CHECK(underglow_get(p,1)==0);
     // Isolate the creation reset: bypass delete hook then recreate identical row.
     CHECK(underglow_set(p,1,2)); CHECK(deletion(p,1,2,0));
@@ -258,7 +265,7 @@ int main(int argc,char **argv) {
     cpu_equivalence(p,b);
     invoke(p,b,0);
     // Leave a real serialized payload plus snapshot for an independent process.
-    CHECK(underglow_set(p,1,2) && underglow_set(p,2,4)); invoke(p,b,1); complete(1);
+    CHECK(underglow_set(p,1,2) && underglow_set(p,2,4));CHECK(underglow_light_set(p,1,1));CHECK(underglow_light_set(p,2,0)); invoke(p,b,1); complete(1);
     char path[4096]; snprintf(path,sizeof path,"%s/retail",root);
     FILE *f=fopen(path,"wb"); assert(f); assert(fwrite(G+b,1,SAVE_SIZE,f)==SAVE_SIZE); fclose(f);
     CHECK(!private_cars_verify_save(G+b,SAVE_SIZE));

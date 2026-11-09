@@ -209,7 +209,7 @@ int main(void){@autoreleasepool{
 static int failures,diag_on,ssao_cpu_diag,clocks,ssao_tree_fringe=1,ssao_reference_record,ssao_cpu_reference_record,ssao_replay,draws;
 #define CHECK(x) do{if(!(x)){++failures;printf("FAIL %s\n",#x);}}while(0)
 static uint64_t host_ticks(void){++clocks;return 0;}
-static uint64_t ssao_diag_record_ns,ssao_diag_draws;
+static uint64_t ssao_diag_record_ns,ssao_diag_draw_ns,ssao_diag_setup_ns,ssao_diag_draws;
 typedef struct{int skip;}MatTreesDraw;
 #define TREES_NO_DRAW 0
 static MatTreesDraw mat_trees_draw={7};

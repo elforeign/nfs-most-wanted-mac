@@ -1,0 +1,3 @@
+// SDK-free audio compile surface; native SDK builds never include this directory.
+#pragma once
+#include "../audio_compile.h"

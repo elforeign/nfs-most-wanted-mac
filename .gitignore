@@ -4,6 +4,7 @@ third_party
 runtime/boot
 media/mediatest
 *.o
+/*.out
 *.a
 __pycache__/
 .metal-cache/
@@ -14,3 +15,4 @@ runtime/boot.soak*
 runtime/NFSMW.app/
 runtime/gen/
 runtime/boot.pconly*
+/.runs/

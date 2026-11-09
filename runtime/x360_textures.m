@@ -32,6 +32,7 @@
 #include "settings.h"
 #include "hd_file_cache.h"
 #include "sign_diag.h"
+#include "decal_depth.h"
 
 // state: what the first look at this texture decided, for good (streamed textures load again and again)
 enum { HD_NEW, HD_SWAP, HD_KEEP };                         // not looked at yet / swap it / keep the PC texture
@@ -121,7 +122,7 @@ static const char *later_root(char *out, size_t size) {
 static void hd_scan(void) {
     nhd = 0;
     const char *e = getenv("NFS_X360_TEXTURES");
-    if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) return;
+    int main_off = e && (!strcmp(e, "off") || !strcmp(e, "0"));
     char dir[1024];
     struct stat st;
     if (!roots_exported() && e && strcmp(e, "on") && strcmp(e, "1")) snprintf(dir, sizeof dir, "%s", e);
@@ -129,7 +130,7 @@ static void hd_scan(void) {
         roots_asset_dir("hd_textures_mips_alpha", dir, sizeof dir);
         if (stat(dir, &st)) roots_asset_dir("hd_textures_mips", dir, sizeof dir);
     }
-    int n = hd_list(dir, &hd, 0);
+    int n = main_off ? 0 : hd_list(dir, &hd, 0);
     const char *ui = getenv("NFS_X360_UI_TEXTURES");        // the same-size UI set (hd_textures_ui): after the main set, which wins on a shared hash
     int nmain = n;
     if (!ui || (strcmp(ui, "off") && strcmp(ui, "0"))) {
@@ -141,14 +142,14 @@ static void hd_scan(void) {
     if (n < 0 && diag_on) diag_event("x360: no HD texture folder %s", dir);
     nhd = n < 0 ? 0 : n;
     char later_dir[4096];
-    const char *later = later_root(later_dir, sizeof later_dir);
+    const char *later = main_off ? NULL : later_root(later_dir, sizeof later_dir);
     if (later) {
         nhd_later = hd_list(later, &hd_later, 0);
         if (nhd_later < 0) nhd_later = 0;
         if (diag_on) diag_event("later: %d overlay textures in %s", nhd_later, later);
     }
     const char *tone = getenv("NFS_X360_TEXTURES_TONE");
-    if (tone && !strcmp(tone, "x360")) {
+    if (!main_off && tone && !strcmp(tone, "x360")) {
         char sub[1100];
         snprintf(sub, sizeof sub, "%s/x360_tone", dir);
         nhd_tone = hd_list(sub, &hd_tone, 0);
@@ -680,7 +681,7 @@ int vinyls_init(Cpu *c);
 // frame (MIRROR_BACKING_RADAR, 128x64 DXT5, drawn twice mirrored over the 1170x315 px quad at 2160p) and its rounded mask
 // (RVM_MASK, 256x64 DXT5, drawn into the mirror target, alpha only) are magnified ~4.6x by bilinear filtering, which
 // turns their 1-texel anti-aliased outlines into visible steps on the curves. Their texture is made from the same
-// pixels (the PC's; the X360's are the same art) upscaled 4x with a Catmull-Rom filter, as A8R8G8B8 with box mips: the
+// pixels (the PC's; the X360's are the same art) enlarged 4x with a Catmull-Rom filter, as A8R8G8B8 with box mips: the
 // outlines become smooth curves of the same softness, the shape and the plateaus (the frame's dashes) unchanged.
 static int smooth_art = -1;
 static uint8_t cr_clamp(float v) { return v <= 0 ? 0 : v >= 255 ? 255 : (uint8_t)(v + 0.5f); }
@@ -778,6 +779,7 @@ static void ui_diag_source(uint32_t ti, uint32_t pi) {
     if (M32(ti + 0x74)) ui_diag_bytes(hash, "palette.bin", G + M32(ti + 0x74), 1024);
 }
 static void ui_diag_upload(uint32_t ti, uint32_t pi, uint32_t raw, uint32_t size) {
+    decal_depth_texture(ti, pi);
     if (diag_on && sign_diag_on) sign_diag_texture(ti, pi);
     uint32_t hash = M32(ti + 0x24);
     if (!ui_diag_wanted(hash)) return;
@@ -866,7 +868,7 @@ void f_006DDD90(Cpu *c) {                                  // TextureInfoPlatInt
     if (nhd < 0) { hd_scan(); hv_load(); }
     uint32_t ti = c->ecx, pi = M32(ti);
     ui_diag_source(ti, pi);
-    if (smooth_art_init(c, ti, pi)) return;                // the mirror's frame and mask, upscaled (above)
+    if (smooth_art_init(c, ti, pi)) return;                // the mirror's frame and mask, enlarged (above)
 hd_lookup: ;
     HdTex *hx = NULL;
     int is_later = 0;

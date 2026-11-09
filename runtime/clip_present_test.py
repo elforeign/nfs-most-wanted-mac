@@ -4,6 +4,8 @@
 
 
 
+
+
 """
 from pathlib import Path
 import re
@@ -12,11 +14,14 @@ import tempfile
 
 RT = Path(__file__).resolve().parent
 source = (RT/'render_present.m').read_text()
-present = source[source.index('static void present_show(void) {'):].split('\n}', 1)[0]+'\n}\n'
+present = source[source.index('static __attribute__((always_inline)) inline void present_draw('):source.index('\nvoid render_present(void) {')]
 PRE = r'''
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+typedef struct { uint64_t frame; double present; } PresentTiming;
+uint64_t host_ticks(void) { return 0; }
+void diag_event(const char *fmt, ...) { (void)fmt; }
 static unsigned checks, failures, clips, quads, commits, shows, completions;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; if(failures<9) fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x); } }while(0)
 @interface Texture : NSObject
@@ -114,7 +119,7 @@ int main(void) { @autoreleasepool {
   drawable_now=missing?nil:[Drawable new];
   drawable_now.texture=texture(2560,1440,hdr_output_on?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm);
   clips=quads=commits=shows=completions=0;after_commit=nil;on_queue=nil;presenting=1;
-  present_show();CHECK(after_commit!=nil);CHECK(!clips && !commits && !on_queue);
+  present_show((PresentTiming){0});CHECK(after_commit!=nil);CHECK(!clips && !commits && !on_queue);
   after_commit();CHECK(on_queue!=nil);CHECK(!clips && !commits);
   on_queue();CHECK(clips==(missing?0:1));CHECK(quads==(missing?0:1));
   CHECK(commits==(missing?0:1));CHECK(shows==(missing?0:1));CHECK(completions==(missing?0:1));CHECK(!presenting);
@@ -130,13 +135,13 @@ def main():
     variants = [('production',present),
                 ('dropped-recorder',present.replace(call,'(void)clip_headroom;')),
                 ('SDR-only',present.replace('hdr_output_on ? hdr_present_tex : present_tex','present_tex')),
-                ('headroom-one',present.replace(call,'cliprec_present(cb, src, d, 1);'))]
+                ('headroom-one',present.replace(call,'(void)clip_headroom; cliprec_present(cb, src, d, 1);'))]
     with tempfile.TemporaryDirectory(prefix='clip-present-') as d:
         f,exe=Path(d)/'t.m',Path(d)/'t'
         for label,body in variants:
             assert label=='production' or body!=present,label
             f.write_text(PRE+body+POST)
-            p=subprocess.run(['clang','-O1','-Wall','-Wextra','-Werror','-Wno-unused-variable','-Wno-unused-function','-fobjc-arc','-fblocks',str(f),'-framework','Cocoa','-framework','Metal','-framework','QuartzCore','-o',str(exe)],capture_output=True,text=True)
+            p=subprocess.run(['clang','-O1','-Wall','-Wextra','-Werror','-Wno-unused-variable','-Wno-unused-function','-fobjc-arc','-fblocks','-I',str(RT),str(f),'-framework','Cocoa','-framework','Metal','-framework','QuartzCore','-o',str(exe)],capture_output=True,text=True)
             assert p.returncode==0,p.stderr[-3500:]
             p=subprocess.run([str(exe)],capture_output=True,text=True)
             summary=p.stdout.strip()

@@ -17,6 +17,8 @@
 #include <pthread.h>
 
 #include "host.h"
+#include "settings.h"
+#include "stream_key.h"
 #include "gpuclients.h"
 
 int app_native_fullscreen(void);
@@ -42,6 +44,8 @@ typedef struct {
     int visible;
     int full;             // shown full screen (the Mac's choice, ns_fullscreen)
     int native_transition, mode_logged;
+    int mode_pending;     // latest NFS_FULLSCREEN_MODE is applied after Cocoa finishes changing Space
+    int reenter;          // Native Space left for a Borderless change: fill the screen again once it is out
     NSWindow *ns;
     NSView *view;
 } Win;
@@ -100,6 +104,7 @@ static void release_keys(uint32_t hwnd);
 static void ns_set_fullscreen(Win *w, int full);
 static void ns_apply_mode(Win *w);
 static void ns_mode_changed(Win *w);
+static void ns_reconcile_mode(Win *w);
 static int cursor_hidden;               // ShowCursor count < 0: no system cursor over the game (it draws its own)
 
 // ---------------- Cocoa ----------------
@@ -151,23 +156,28 @@ static int cursor_hidden;               // ShowCursor count < 0: no system curso
     (void)n; Win *w = win(self.hwnd); if (!w) return;
     w->native_transition = 0; w->full = 1;
     if (app_bundled) app_pref_set("fullscreen", "1");
-    ns_mode_changed(w);
+    if (w->mode_pending) ns_reconcile_mode(w);
+    else ns_mode_changed(w);
 }
 - (void)windowDidExitFullScreen:(NSNotification *)n {
     (void)n; Win *w = win(self.hwnd); if (!w) return;
     w->native_transition = 0; w->full = 0;
-    ns_apply_mode(w);
-    if (app_bundled) app_pref_set("fullscreen", "0");
-    ns_mode_changed(w);
+    if (w->reenter) { w->reenter = 0; w->full = 1; }   // F10 Full screen mode: keep filling the screen
+    else if (app_bundled) app_pref_set("fullscreen", "0");
+    ns_reconcile_mode(w);
 }
 - (void)windowDidFailToEnterFullScreen:(NSWindow *)window {
     (void)window; Win *w = win(self.hwnd); if (!w) return;
-    w->native_transition = 0; w->full = 0; ns_apply_mode(w); ns_mode_changed(w);
+    w->native_transition = 0;
+    if (!w->mode_pending) w->full = 0;
+    ns_reconcile_mode(w);
     fprintf(stderr, "boot: native full screen entry failed\n");
 }
 - (void)windowDidFailToExitFullScreen:(NSWindow *)window {
     (void)window; Win *w = win(self.hwnd); if (!w) return;
-    w->native_transition = 0; w->full = 1; ns_mode_changed(w);
+    w->native_transition = 0; w->full = 1; w->reenter = 0;
+    if (w->mode_pending) ns_reconcile_mode(w);
+    else ns_mode_changed(w);
     fprintf(stderr, "boot: native full screen exit failed\n");
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; user32_request_close(); return NO; }  // cleanup before WM_CLOSE
@@ -184,6 +194,7 @@ static int cursor_hidden;               // ShowCursor count < 0: no system curso
 // n is nil for BOOT_KEYS unfocus:/hide: steps, which always pause. A real focus loss pauses the game in NFSMW.app;
 // runtime/boot keeps running in the background for scripted runs (NFS_PAUSE_INACTIVE=0|1 overrides).
 - (void)windowDidResignKey:(NSNotification *)n {
+    void replay_controls_cancel(void); replay_controls_cancel();
     if (diag_on) diag_event("window lost focus");
     feedback_suppress(FEEDBACK_FOCUS, 1);
     release_keys(self.hwnd);
@@ -341,6 +352,13 @@ static void pump(int wait) {
                                               dequeue:YES];
             if (!e) break;
             wait = 0;
+            if(stream_key_route_event(e)) {
+                if(e.type==NSEventTypeKeyUp) {
+                    KeyMap released=e.keyCode<128?mac_keys[e.keyCode]:(KeyMap){0,0};
+                    portmenu_key(released.vk,0,0); // retire the menu's opening press too
+                }
+                continue;
+            }
             uint32_t hwnd = focus_hwnd;
             Win *w = win(hwnd);
             const NSEventMask input = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged | NSEventMaskMouseMoved |
@@ -572,6 +590,24 @@ static Win *game_window(void) {
     return NULL;
 }
 int user32_fullscreen(void) { Win *w = game_window(); return w && ns_fullscreen(w); }
+// F10 > Full screen (live_picture.c): NFS_FULLSCREEN_MODE has changed. No device Reset: the back buffer stays the game's size.
+void app_fullscreen_mode_reset(void);   // app.m: Auto decides from the screen again
+static void ns_reconcile_mode(Win *w) {
+    if (w->native_transition) { w->mode_pending = 1; return; }
+    w->mode_pending = 0;
+    if ((w->ns.styleMask & NSWindowStyleMaskFullScreen) && !app_native_fullscreen()) {   // out of the Space first, then borderless
+        w->native_transition = 1; w->reenter = 1;
+        app_request_fullscreen_space(w->ns, 0);
+        return;
+    }
+    ns_apply_mode(w);
+    if (!w->native_transition) ns_mode_changed(w);
+}
+void user32_fullscreen_mode_changed(void) {
+    Win *w = game_window();
+    app_fullscreen_mode_reset();
+    if (w && w->ns) ns_reconcile_mode(w);
+}
 void user32_toggle_fullscreen(void) { Win *w = game_window(); if (w) ns_set_fullscreen(w, !w->full); }
 // portmenu.m: before the menu takes the input, keys and mouse buttons held now go up for the game (as on focus loss).
 void user32_menu_opening(void) { release_keys(focus_hwnd); }
@@ -595,7 +631,7 @@ int user32_request_close(void) {
 void user32_pump(void) { pump(0); }
 
 // BOOT_KEYS=frame:KEY[,frame:KEY...]: scripted key presses (down at `frame`, up 4 frames later) for runs without a
-// keyboard. KEY: RETURN ESCAPE SPACE BACK UP DOWN LEFT RIGHT F10 TAB, or a letter/digit (also typed, as WM_CHAR, like a real
+// keyboard. KEY: RETURN ESCAPE SPACE BACK UP DOWN LEFT RIGHT F6 F7 F8 F10 TAB, or a letter/digit (also typed, as WM_CHAR, like a real
 // keyboard: name entry reads characters).
 static void press(const char *name, int down, uint64_t frame) {
     static const struct { const char *n; uint8_t vk, scan; } keys[] = {
@@ -603,6 +639,9 @@ static void press(const char *name, int down, uint64_t frame) {
         {"LEFT", 0x25, 0x4B}, {"RIGHT", 0x27, 0x4D}, {"BACK", 0x08, 0x0E}, {"F10", 0x79, 0x44}, {"TAB", 0x09, 0x0F}};
     uint8_t vk = 0, scan = 0;
     for (unsigned k = 0; k < sizeof keys / sizeof *keys; ++k) if (!strcmp(keys[k].n, name)) { vk = keys[k].vk; scan = keys[k].scan; }
+    if(!vk && name[0]=='F' && name[1]>='6' && name[1]<='8' && !name[2]) {
+        vk=(uint8_t)(0x75+name[1]-'6'); scan=(uint8_t)(0x40+name[1]-'6');
+    }
     if (!vk && strlen(name) == 1) for (int k = 0; k < 128; ++k) if (mac_keys[k].vk == (uint8_t)toupper(name[0])) { vk = mac_keys[k].vk; scan = mac_keys[k].scan; }
     if (!vk) return;
     key_event(focus_hwnd, vk, scan, down, 0);
@@ -689,9 +728,9 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     const char *p = spec;
     for (int k = 0; k < step && p; ++k) { p = strchr(p, ','); if (p) ++p; }
     if (!p || !*p) return;
-    char tok[32];
+    char tok[128];
     int n = 0;
-    while (p[n] && p[n] != ',' && n < 31) { tok[n] = p[n]; ++n; }
+    while (p[n] && p[n] != ',' && n < 127) { tok[n] = p[n]; ++n; }
     tok[n] = 0;
     if (!step_start) step_start = frame;
     if (!strncmp(tok, "skipmovies", 10)) {
@@ -732,6 +771,44 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         if (!strcmp(w, "x360") || !strcmp(w, "pc")) materials_set_car_flake(!strcmp(w, "x360"));
         else if (!strncmp(w, "tint", 4)) materials_flake_test(atoi(w + 4), materials_flake_force);
         else materials_flake_test(materials_flake_tint, !strcmp(w, "force0") ? 0 : !strcmp(w, "force1") ? 1 : -1);
+        ++step; step_start = 0;
+    } else if (!strcmp(tok, "cliprec")) {   // test only: the F10 Video clip row's action (start, or stop and save)
+        void cliprec_action(int unused), cliprec_status(char *buf, int size);
+        char st[160]; cliprec_status(st, sizeof st);
+        cliprec_action(0);
+        if (diag_on) diag_event("script: cliprec (row was \"%s\")", st);
+        ++step; step_start = 0;
+    } else if (!strncmp(tok, "sweep:", 6)) {
+        void live_picture_sweep_step(const char *phase);
+        live_picture_sweep_step(tok + 6);
+        ++step; step_start = 0;
+    } else if (!strcmp(tok, "livego")) {   // test only: Go live to the loopback fake ingest (NFS_TEST_LIVE_FAKE, live_fake.m)
+        void live_fake_go(void);
+        if (diag_on) live_fake_go();
+        if (diag_on) diag_event("script: livego");
+        ++step; step_start = 0;
+    } else if (!strcmp(tok, "replayarm") || !strcmp(tok, "replaysave")) {
+        void replay_arm_action(int), replay_save_action(int);
+        if(!strcmp(tok,"replayarm")) replay_arm_action(0); else replay_save_action(0);
+        if(diag_on) diag_event("script: %s",tok);
+        ++step; step_start=0;
+    } else if (!strncmp(tok, "set:", 4)) {   // private diagnostics only: an F10 row set live, "set:graphics.look_reflections=pc"
+#ifndef NFS_PUBLIC
+        if (diag_on) {
+            char id[96], *eq = strchr(tok + 4, '=');
+            Setting *row = NULL;
+            if (eq && (size_t)(eq - tok - 4) < sizeof id) {
+                snprintf(id, sizeof id, "%.*s", (int)(eq - tok - 4), tok + 4);
+                row = settings_find(id);
+            }
+            int v = -1;
+            if (row) { for (int i = 0; i < row->nchoices || (row->type == SET_TOGGLE && i < 2); ++i) {
+                char sp[32]; const char *l = row->values ? row->values[i] : row->choices ? row->choices[i] : i ? "on" : "off";
+                snprintf(sp, sizeof sp, "%s", l); if (!strcasecmp(sp, eq + 1)) { v = i; break; } } }
+            int changed = row && v >= 0 ? settings_set(row, v) : -1;
+            diag_event("script: %s -> %d", tok, changed);
+        }
+#endif
         ++step; step_start = 0;
     } else if (!strcmp(tok, "shot")) {
         diag_shot_request(real_frame + 3);   // a full-size frame shot a few frames on (diag runs)
@@ -1526,10 +1603,13 @@ static void pad_slot_connect(GCController *ctl) {
         for (int i = 0; i < 2; ++i) if (!pad_slots[i]) { pad_slots[i] = ctl; return; }
     }
 }
+static void padlink_refresh(void);
 static void pad_slot_disconnect(GCController *ctl) {
     padfx_disconnect((__bridge void *)ctl);
     @synchronized (GCController.class) {
+        padlink_detach((__bridge void *)ctl);
         for (int i = 0; i < 2; ++i) if (pad_slots[i] == ctl) pad_slots[i] = nil;
+        padlink_refresh();
     }
 }
 static void pad_slots_init(void) {
@@ -1539,7 +1619,10 @@ static void pad_slots_init(void) {
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             padfx_connect((__bridge void *)n.object);
-            if (pad_count() == 2) pad_slot_connect(n.object);
+            @synchronized (GCController.class) {
+                if (pad_count() == 2) pad_slot_connect(n.object);
+                padlink_refresh();
+            }
         }];
         [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             pad_slot_disconnect(n.object);
@@ -1556,6 +1639,25 @@ static GCController *pad_controller_n(int idx) {
         return nil;
     }
     @synchronized (GCController.class) { return pad_slots[idx]; }
+}
+// Logging uses the same selection as input, including preserved two-pad slots.
+static void padlink_observe(GCController *ctl) {
+    padlink_select((__bridge void *)ctl, ctl ? [NSString stringWithFormat:@"%@ (%@)",
+        ctl.vendorName ?: @"controller", ctl.productCategory ?: @"?"].UTF8String : NULL);
+}
+static void padlink_refresh(void) {
+    @synchronized (GCController.class) { padlink_observe(pad_controller_n(0)); }
+}
+void user32_pad_report(char *text, size_t n) {
+    @synchronized (GCController.class) {
+        GCController *ctl = pad_controller_n(0);
+        padlink_observe(ctl);
+        if (!ctl) snprintf(text, n, "none");
+        else snprintf(text, n, "%s (%s)%s", ctl.vendorName.UTF8String ?: "controller", ctl.productCategory.UTF8String ?: "?",
+            getenv("BOOT_PAD") ? ", BOOT_PAD simulated" : "");
+        GCDeviceBattery *b = getenv("BOOT_PAD") ? nil : ctl.battery;
+        if (b) padlink_battery((__bridge void *)ctl, b.batteryLevel, (int)b.batteryState);
+    }
 }
 static uint64_t start_ns;                 // BOOT_PAD=sim:...@T: seconds since start-up
 static uint64_t pad_enum_ns;              // shared epoch for both simulated slots' @e timelines
@@ -1611,7 +1713,7 @@ int pad_read_n(int idx, PadState *st) {
                 q = *e == '-' ? e + 1 : e + strlen(e);
             }
         }
-        if (!on) { pad_presence(idx, 0, NULL); if (!idx) prompts_pad_seen(0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+        if (!on) { void replay_controls_disconnect(void); if(!idx) replay_controls_disconnect(); pad_presence(idx, 0, NULL); if (!idx) prompts_pad_seen(0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
         st->connected = 1;
         int word_kind = -1;
         for (const char *p = sim + 4; p < end;) {
@@ -1675,16 +1777,20 @@ int pad_read_n(int idx, PadState *st) {
         if (!idx) padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
         return 1;
     }
-    if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }   // another app has focus: centred, nothing pressed
     @autoreleasepool {
-        GCController *ctl = pad_controller_n(idx);
+        GCController *ctl;
+        @synchronized (GCController.class) {
+            ctl = pad_controller_n(idx);
+            if (!idx) padlink_observe(ctl);
+        }
+        if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }
         GCExtendedGamepad *g = ctl.extendedGamepad;
         if ((g != nil) != pad_presents[idx])
             pad_presence(idx, g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
                                         ctl.productCategory ?: @"?", (unsigned long)GCController.controllers.count].UTF8String : NULL);
         if (idx == 0) prompts_pad_seen(g != nil);
         padfx_player_update(idx, (__bridge void *)ctl);
-        if (!g) { if (!idx) padfx_update(NULL, 0, 0, 0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
+        if (!g) { void replay_controls_disconnect(void); if(!idx) replay_controls_disconnect(); if (!idx) padfx_update(NULL, 0, 0, 0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
         // Pad 1 feedback would hook here once the model and legacy single-output HID transport have player routing.
         if (idx == 0) rumble_update();
         st->connected = 1;

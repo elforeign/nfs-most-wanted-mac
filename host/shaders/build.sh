@@ -28,8 +28,14 @@ mkdir -p "$W"
 trap 'rc=$?; if [ $rc = 0 ]; then rm -rf "$W"; else echo "build.sh FAILED (exit $rc); work dir kept: host/shaders/$W" >&2; fi' EXIT
 CXX="clang++ -std=c++17 -O2 -Wall -Wextra"
 [ "$release" = 0 ] || CXX="$CXX -arch arm64 -mmacosx-version-min=14.5"
-$CXX -c sm_parse.cpp -o $W/sm_parse.o
-$CXX -c sm_msl.cpp -o $W/sm_msl.o
+$CXX \
+    -c \
+    sm_parse.cpp \
+    -o $W/sm_parse.o
+$CXX \
+    -c \
+    sm_msl.cpp \
+    -o $W/sm_msl.o
 rm -f $W/libsmtranslate.a
 ar rcs $W/libsmtranslate.a $W/sm_parse.o $W/sm_msl.o
 if [ "$release" = 1 ]; then
@@ -40,14 +46,47 @@ mv -f build/.libsmtranslate.a.$$ build/libsmtranslate.a
 [ "$mode" = lib ] && exit 0
 
 L=$W/libsmtranslate.a
-clang -std=c99 -Wall -Wextra -pedantic -c tests/c_api_test.c -o $W/c_api_test.o
-clang++ $W/c_api_test.o $L -o $W/c_api_test
-$CXX tests/disasm_check.cpp $L -o $W/disasm_check
-$CXX tests/translate_all.cpp $L -o $W/translate_all
+clang \
+    -std=c99 \
+    -Wall \
+    -Wextra \
+    -pedantic \
+    -c \
+    tests/c_api_test.c \
+    -o $W/c_api_test.o
+clang++ \
+    $W/c_api_test.o \
+    $L \
+    -o $W/c_api_test
+$CXX \
+    tests/disasm_check.cpp \
+    $L \
+    -o $W/disasm_check
+$CXX \
+    tests/translate_all.cpp \
+    $L \
+    -o $W/translate_all
 OBJC="clang++ -std=c++17 -O1 -Wall -Wextra -fobjc-arc -ffp-contract=off"
-$OBJC tests/numeric_check.mm tests/sm_interp.cpp $L -framework Metal -framework Foundation -o $W/numeric_check
-$OBJC tests/link_check.mm $L -framework Metal -framework Foundation -o $W/link_check
-$OBJC tests/render_check.mm tests/sm_interp.cpp $L -framework Metal -framework Foundation -o $W/render_check
+$OBJC \
+    tests/numeric_check.mm \
+    tests/sm_interp.cpp \
+    $L \
+    -framework Metal \
+    -framework Foundation \
+    -o $W/numeric_check
+$OBJC \
+    tests/link_check.mm \
+    $L \
+    -framework Metal \
+    -framework Foundation \
+    -o $W/link_check
+$OBJC \
+    tests/render_check.mm \
+    tests/sm_interp.cpp \
+    $L \
+    -framework Metal \
+    -framework Foundation \
+    -o $W/render_check
 
 R=../../../render_diff/hdr_dof/pc_effects
 # Missing reference: before exit 1, now SKIP/exit 0; a present decoder failure (exit 7) still exits 7.

@@ -9,3 +9,9 @@ void underglow_save_complete(int committed);
 /* Explicit owned-car API for later controls/rendering. Invalid context is Off. */
 unsigned underglow_get(uint32_t profile, uint32_t handle);
 int underglow_set(uint32_t profile, uint32_t handle, unsigned preset);
+int underglow_owned(uint32_t profile, uint32_t handle);
+void underglow_adopt(uint32_t profile);
+
+/* Independent native light choice; colour selection alone never enables it. */
+unsigned underglow_light_get(uint32_t profile, uint32_t handle);
+int underglow_light_set(uint32_t profile, uint32_t handle, unsigned on);

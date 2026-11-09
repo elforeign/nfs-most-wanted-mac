@@ -72,6 +72,9 @@ static int clipboardWrites, clipboardOK = 1;
 #ifndef REPORT_ORIGINAL_PROBES
 #include "report_submit.m"
 #endif
+#include "stream_key.h"
+int stream_key_editing(void) { return 0; }
+void stream_key_close(void) {}
 #include "portmenu.m"
 
 uint8_t *G;

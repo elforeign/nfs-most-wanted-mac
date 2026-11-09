@@ -1,10 +1,11 @@
 """Depth-aware Physical particle shader and pass regression proof.
 
 Production: 0/90 fade failures; disabled-fade control: 60/90. The current
-selector is 0/8; main's Retail-fade behavior is reproduced by a 5/8 mutant.
+selector is 0/8; the no-Physical-gate (Retail-fade) mutant fails 4/8 (5/8 before Physical became the default).
 Retail source digest is pinned at e09a0440 with the optional coverage epilogue
 normalized. The actual draw gate submits 1,000 Off draws with zero variant
-lookups/snapshots. Six particle variants and four depth/copy shaders compile.
+lookups/snapshots; a draw whose stage 0 is the car ground shadow (CARSHADOW) is never
+selected (render.m before that exclusion: exit 13). Six particle variants and four depth/copy shaders compile.
 Native scene-light/phase tests live in particles_physical_test.py.
 
 --validate checks identical raw command inputs and fixed road/car contact ROIs;
@@ -203,18 +204,22 @@ int main(void) {
             assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
             print(label, result.stdout.strip())
         selector = function(renderer, 'soft_smoke_on')
+        cache = renderer[renderer.index('static int soft_smoke_cached ='):renderer.index('static int soft_smoke_on(')]
+        # the production selector itself (default Physical), not a copy
+        physical_enabled = re.search(r'int particles_physical_enabled\(void\) \{.*?\n\}',
+                                     (RT / 'particles_physical.c').read_text(), re.S)[0]
         mutant = selector.replace('particles_physical_enabled() && ', '')
         assert mutant != selector
-        for label, body, expected in (('production', selector, 0), ('Retail fade mutant', mutant, 5)):
+        for label, body, expected in (('production', selector, 0), ('Retail fade mutant', mutant, 4)):
             (tmp / 'default.c').write_text(
-                '#include <stdlib.h>\n#include <string.h>\n'
+                '#include <stdlib.h>\n#include <string.h>\n#include <pthread.h>\n'
                 'static int diag_on;\n'
                 'static int postfx_look_variant(const char *v) {(void)v; return 0;}\n'
-                'int particles_physical_enabled(void) {const char *e=getenv("NFS_PARTICLES"); return e && !strcmp(e,"physical");}\n'
-                + body + '\nint main(void) {return soft_smoke_on();}\n')
+                'static int physical = -1;\n' + physical_enabled + '\n'
+                + cache + body + '\nint main(void) {return soft_smoke_on();}\n')
             run(['clang', '-Wall', '-Wextra', '-Werror', tmp / 'default.c', '-o', tmp / 'default'])
             failures = 0
-            cases = ((None,None,0), ('retail',None,0), ('pc',None,0), ('x360',None,0),
+            cases = ((None,None,1), ('retail',None,0), ('pc',None,0), ('x360',None,0),
                      ('garbage',None,0), ('physical',None,1), ('physical','off',0), ('physical','on',1))
             for mode, fade, wanted in cases:
                 case_env = {k:v for k,v in env.items() if k not in ('NFS_PARTICLES','NFS_SOFT_SMOKE')}
@@ -361,7 +366,9 @@ def main():
 #define MAT_VARIANT_SOFT_SMOKE 0x104
 #define MAT_VARIANT_SOFT_SMOKE_RESOLVED 0x105
 typedef struct { int mat, pending, ok; } ShaderEntry;
-static struct { uint32_t viewport[6]; } dev;
+static struct { uint32_t viewport[6], tex[8]; } dev;
+static int ground;   // decal_depth.m: stage 0 holds the car ground shadow
+static int decal_depth_ground(uint32_t t) {(void)t;return ground;}
 static struct { void *ms, *tex; } bb_rt, ad_rt;
 static int diag_on, ssao_replay, lamp_replay, q_active, enabled, view_ok=1;
 static int gpt_on;
@@ -396,8 +403,9 @@ int main(void) {
     ssao_replay=1;if(select_draw(rs,bb_rt.tex,ad_rt.tex))return 9;ssao_replay=0;
     lamp_replay=1;if(select_draw(rs,bb_rt.tex,ad_rt.tex))return 10;lamp_replay=0;
     dev.viewport[5]=0;if(select_draw(rs,bb_rt.tex,ad_rt.tex))return 11;
+    dev.viewport[5]=0x3F800000u;ground=1;if(select_draw(rs,bb_rt.tex,ad_rt.tex))return 13;ground=0;
     if(variants!=1||snapshots!=1)return 12;
-    puts("PASS actual draw selection: Off 1000 draws / 0 variant lookups / 0 snapshots; 9 excluded states");
+    puts("PASS actual draw selection: Off 1000 draws / 0 variant lookups / 0 snapshots; 10 excluded states");
     return 0;
 }
 '''

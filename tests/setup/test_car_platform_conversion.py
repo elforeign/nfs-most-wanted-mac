@@ -14,6 +14,8 @@ Four broken policies fail 1/5/1/1 assertions (stripped labels/mips/dependency/la
 Lamp default-Off regression: reviewed code fails 2/2 PC/X360 output checks; fixed 0/2.
 No conversion or recognized input is an appearance approval.
 --assets exits 3 without inputs.
+Texture-namespace dependency: omitting the shared helper fails 1/1 identity
+test; including it passes the PC/X360 dependency assertions.
 """
 import copy
 import hashlib
@@ -503,7 +505,7 @@ class PlatformConversion(unittest.TestCase):
             result = self.run_conversion(platform,platform+'-amplitudes',
                 lighting={'amplitudes':True,'gains':cl.Gains(.25,1,1)})
             self.assertTrue(result['lighting']['rows'])
-            expected = {'car_convert.py','huff.py','car_lighting.py','car_paint.py',
+            expected = {'car_convert.py','car_texture_namespace.py','huff.py','car_lighting.py','car_paint.py',
                         'car_physics.py','car_sources.py','x360.py','xdvdfs.py'}
             if platform == 'x360': expected |= {'car_x360.py','car_x360_inputs.py','x360_tex.py','texture_compare.py'}
             self.assertEqual(set(result['converter_policy']['modules']),expected)

@@ -295,7 +295,7 @@ int vinyls_init(Cpu *c) {
     LoadTimes lt = {0};
     double t_check = 0;
     if (hash - SKIN_HASH0 < 4) {
-        // composite target: 2x the PC size, level 0 upscaled from the PC texture (overwritten by every composite)
+        // composite target: 2x the PC size, level 0 enlarged from the PC texture (overwritten by every composite)
         if (pfmt != FMT_ARGB || pw != 512 || ph != 512) return 0;
         w = 2 * pw; h = 2 * ph;
         if (vmips) for (uint32_t s = w > h ? w : h; s > 1; s >>= 1) ++levels;
@@ -556,10 +556,10 @@ void f_0073B010(Cpu *c) {                                  // int CompositeSkin3
         diag_event("vinyls: composite %u into %08X %ux%u (%u levels), %d layer(s)%s, layer %08X remap %d%s, base %08X, %.1f ms", ncomposites, M32(target + 0x24),
                    T->w, T->h, T->levels, n, n ? (L[0].w == T->w ? " same size" : " resampled") : "", n ? lhash[0] : 0, n ? L[0].remap : 0, sw,
                    M32(p + 4), ms);
-        // the PNG comparison costs ~15x the composite: the first 30 composites, then every 8th (its time is logged apart;
-        // NFS_VINYL_PNG=0: none, for timing runs)
+        // PNG comparisons are opt-in (NFS_VINYL_PNG=1): the first 30 composites, then every 8th.
+        // They cost ~15x the composite; their time is logged separately. Unset or 0 writes none.
         static int png = -1;
-        if (png < 0) { const char *e = getenv("NFS_VINYL_PNG"); png = !(e && !strcmp(e, "0")); }
+        if (png < 0) { const char *e = getenv("NFS_VINYL_PNG"); png = e && !strcmp(e, "1"); }
         if (png && T->w > 512 && (ncomposites <= 30 || ncomposites % 8 == 0)) {
             uint64_t td = host_ticks();
             diag_composite(T, M32(target + 0x24), M32(p + 4), regions, L, lhash, mhash, n);

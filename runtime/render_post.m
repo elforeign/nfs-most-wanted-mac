@@ -3,6 +3,7 @@
 #include "hdrclip.h"
 #include "post_cuts.h"
 #include "sign_diag.h"
+#include "slowlog.h"
 #include "gen/x360_shader_lits.inc"   // tools/gen_tables.py: X360S_VT_* (the X360 visualtreatment PS literals, fs_vt)
 #include "gen/x360_engine.inc"         // X360E_DROP_* (the lens raindrops, from default.xex)
 
@@ -178,7 +179,7 @@ id<MTLRenderPipelineState> post_cuts_curve_pipeline(id<MTLDevice> device, MTLPix
     unsigned slot=format==MTLPixelFormatRGBA16Float;
     if (!pipelines[slot]) {
         NSError *error=nil;
-        if (!lib) lib=[device newLibraryWithSource:hdrclip_shader([NSString stringWithUTF8String:post_cuts_curve_source()]) options:nil error:&error];
+        if (!lib) lib=pipeline_library_source(hdrclip_shader([NSString stringWithUTF8String:post_cuts_curve_source()]),"post_curve",&error);
         if (!lib) return nil;
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
         d.vertexFunction=[lib newFunctionWithName:@"vs_full"];
@@ -410,6 +411,8 @@ void render_x360_post_reset(void) { ++x_mode_generation; }
 static id<MTLTexture> xt_white;
 static id<MTLRenderPipelineState> lp_source, lp_taps, lp_vt[2][9];
 static id<MTLLibrary> lp_libraries[2];
+static id<MTLLibrary> x_post_library(unsigned slot);
+static id<MTLRenderPipelineState> lamp_pipeline(NSUInteger samples, int view);
 static id<MTLLibrary> lp_lib;
 float x360_post_alpha = -1, x360_post_masked = -1;   // last readback's mean scene alpha and masked bloom-source luminance
 
@@ -420,50 +423,54 @@ static id<MTLRenderPipelineState> x_pso(id<MTLLibrary> lib, NSString *fs, MTLPix
     pd.colorAttachments[0].pixelFormat = f0;
     if (f1) pd.colorAttachments[1].pixelFormat = f1;
     NSError *err = nil;
-    id<MTLRenderPipelineState> p = pipeline_build(pd, __func__, &err);
+    id<MTLRenderPipelineState> p = pipeline_cached_library(pd, lib, __func__, &err);
     if (!p) fprintf(stderr, "boot: x360 post: pipeline %s: %s\n", fs.UTF8String, err.localizedDescription.UTF8String);
     return p;
 }
-static id<MTLRenderPipelineState> x_edr_pipeline(NSString *fs, NSUInteger samples, int lamp) {
-    static id<MTLLibrary> libraries[2];
-    static NSMutableDictionary *states;
-    if(!states)states=[NSMutableDictionary new];
-    NSString *key=[NSString stringWithFormat:@"%@/%lu/%d",fs,(unsigned long)samples,lamp];
-    id<MTLRenderPipelineState> p=states[key];if(p)return p;
-    if(!libraries[lamp]) {
-        NSString *src=[NSString stringWithUTF8String:x360_src];
-        if(lamp) {
-            src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
-            src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin,uv).rgb;\n    if (patch) bl = 0;"];
-        }
-        NSError *error=nil;
-        libraries[lamp]=[mtl newLibraryWithSource:hdrclip_shader(x_edr_source(src)) options:nil error:&error];
-        if(!libraries[lamp]) { fprintf(stderr,"boot: EDR post: %s\n",error.localizedDescription.UTF8String);return nil; }
-    }
+enum { X_EDR_VT=6, X_EDR_PASSES };
+static NSString *const x_edr_names[X_EDR_PASSES]={@"fs_downscale",@"fs_lum",@"fs_bright",@"fs_taps",@"fs_dofdown",@"fs_tdown",@"fs_vt"};
+// Each entry's descriptor is fixed by its index: the libraries live for the
+// process, on the one device, and the formats are constant. An SDR/EDR switch
+// selects a different call, not a different entry, so nothing invalidates.
+                                                                              
+static id<MTLRenderPipelineState> x_edr_states[X_EDR_PASSES][9][2];
+static id<MTLRenderPipelineState> x_edr_slot(unsigned fs, NSUInteger samples, int lamp) {
+    if (fs>=X_EDR_PASSES || samples>8) return nil;
+    id<MTLRenderPipelineState> p=x_edr_states[fs][samples][lamp];
+    if (p) return p;
+    id<MTLLibrary> library=x_post_library(1+lamp);
+    if (!library) return nil;
     MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
-    d.vertexFunction=[libraries[lamp] newFunctionWithName:@"vs_full"];
-    d.fragmentFunction=[libraries[lamp] newFunctionWithName:fs];
+    d.vertexFunction=[library newFunctionWithName:@"vs_full"];
+    d.fragmentFunction=[library newFunctionWithName:x_edr_names[fs]];
     d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;
-    if([fs isEqualToString:@"fs_downscale"])d.colorAttachments[1].pixelFormat=MTLPixelFormatRGBA16Float;
+    if(!fs)d.colorAttachments[1].pixelFormat=MTLPixelFormatRGBA16Float;
     d.rasterSampleCount=samples;
-    p=pipeline_build(d, "edr", NULL);if(p)states[key]=p;
-    return p;
+    return x_edr_states[fs][samples][lamp]=pipeline_cached_library(d,library,"edr",NULL);
+}
+static id<MTLRenderPipelineState> x_edr_pipeline(NSString *fs, NSUInteger samples, int lamp) {
+    unsigned i=0;
+    while (i<X_EDR_PASSES && ![fs isEqualToString:x_edr_names[i]]) ++i;
+    return x_edr_slot(i,samples,lamp);
 }
 static int x_pipeline_init(void);
 static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format);
-// All EDR source and PSO work completes at device loading, including both lamp variants.
+                                                                           
+// independent of the switch controlling background scene descriptor replay.
+// The smoke multiply is render_post_lazy_warm's (another worker thread): warming it here too would race its statics.
 void render_post_prewarm(void) {
-    const char *setting=getenv("NFS_PSO_PREWARM");
-    if (!setting || !atoi(setting)) return;
-    int failed=!x_pipeline_init(); // the EDR chain also uses the original post setup
-    failed+=!x_contact_smoke_multiply(MTLPixelFormatBGRA8Unorm);
-    failed+=!x_contact_smoke_multiply(MTLPixelFormatRGBA16Float);
+    int failed=0;
+    for (unsigned slot=0;slot<5;++slot) failed+=!x_post_library(slot);
+    failed+=!x_pipeline_init(); // the EDR chain also uses the original post setup
     for (int lamp=0;lamp<2;++lamp) {
         for (NSString *fs in @[@"fs_downscale", @"fs_lum", @"fs_bright", @"fs_taps", @"fs_dofdown", @"fs_tdown"])
             failed+=!x_edr_pipeline(fs,1,lamp);
         for (NSUInteger samples=1;samples<=8;samples*=2)
             if ([mtl supportsTextureSampleCount:samples]) failed+=!x_edr_pipeline(@"fs_vt",samples,lamp);
     }
+    for (int view=0;view<2;++view)
+        for (NSUInteger samples=1;samples<=8;samples*=2)
+            if ([mtl supportsTextureSampleCount:samples]) failed+=!lamp_pipeline(samples,view);
     if(failed && diag_on)diag_event("pipeline_prewarm: failed=post count=%d",failed);
 }
 static id<MTLTexture> x_rt_format(uint32_t w, uint32_t h, int shared, MTLPixelFormat format) {
@@ -477,9 +484,8 @@ static id<MTLTexture> x_rt(uint32_t w, uint32_t h, int shared) {
 }
 static int x_pipeline_init(void) {
     if (!xp_vt_bgra) {
-        NSError *err = nil;
-        id<MTLLibrary> lib = x_lib = [mtl newLibraryWithSource:hdrclip_shader([NSString stringWithUTF8String:x360_src]) options:nil error:&err];
-        if (!lib) { fprintf(stderr, "boot: x360 post: %s\n", err.localizedDescription.UTF8String); return 0; }
+        id<MTLLibrary> lib = x_lib = x_post_library(0);
+        if (!lib) return 0;
         MTLPixelFormat f = MTLPixelFormatRGBA8Unorm;
         xp_down = x_pso(lib, @"fs_downscale", f, f);
         xp_lum = x_pso(lib, @"fs_lum", f, 0);
@@ -522,8 +528,8 @@ static int x_init(uint32_t w, uint32_t h) {
 static const char *x_tag = "";   // diag label suffix (BOOT_DIAG_GPUPASS): which logical pass a 960x540 encoder is
 static void x_pass(id<MTLRenderPipelineState> pso, id<MTLTexture> dst, id<MTLTexture> dst1, id<MTLTexture> src, id<MTLSamplerState> smp, const XK *k, id<MTLTexture> src1, unsigned hc_stage) {
     if(x_edr_processing) {
-        NSString *fs=pso==xp_down?@"fs_downscale":pso==xp_lum?@"fs_lum":pso==xp_bright?@"fs_bright":pso==xp_taps?@"fs_taps":pso==xp_dofdown?@"fs_dofdown":pso==xp_tdown?@"fs_tdown":nil;
-        if(fs)pso=x_edr_pipeline(fs,1,0);
+        unsigned fs=pso==xp_down?0:pso==xp_lum?1:pso==xp_bright?2:pso==xp_taps?3:pso==xp_dofdown?4:pso==xp_tdown?5:X_EDR_PASSES;
+        if(fs<X_EDR_PASSES)pso=x_edr_slot(fs,1,0);
         if(!pso)abort();
     }
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -567,7 +573,7 @@ static id<MTLRenderPipelineState> x_view_pso(NSUInteger samples) {
     static id<MTLLibrary> lib;
     static id<MTLRenderPipelineState> pipelines[9];
     if (samples>8) return nil;
-    if (!lib) lib=[mtl newLibraryWithSource:hdrclip_shader(x_view_source([NSString stringWithUTF8String:x360_src])) options:nil error:nil];
+    if (!lib) lib=pipeline_library_source(hdrclip_shader(x_view_source([NSString stringWithUTF8String:x360_src])),__func__,NULL);
     if (!pipelines[samples]) {
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
         d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_vt"];
@@ -576,32 +582,51 @@ static id<MTLRenderPipelineState> x_view_pso(NSUInteger samples) {
     }
     return pipelines[samples];
 }
-// Optional pipelines are compiled only when the lamp supplement is used. The
-// original fs_vt and every Off pass remain byte-for-byte the original source.
+// Source variants are byte-identical to their former demand-compiled versions.
+// dispatch_once also makes standalone/offline callers safe; render_init prepares
+                                                                   
+static id<MTLLibrary> x_post_library(unsigned slot) {
+    static id<MTLLibrary> libraries[5];
+    static dispatch_once_t once[5];
+    if (slot>=5) return nil;
+    dispatch_once(&once[slot], ^{
+        NSString *src=[NSString stringWithUTF8String:x360_src];
+        if (slot==2) {
+            src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
+            src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin,uv).rgb;\n    if (patch) bl = 0;"];
+        }
+        if (slot==1 || slot==2) src=x_edr_source(src);
+        if (slot>=3) {
+            if (slot==4) src=x_view_source(src);
+            src=[src stringByReplacingOccurrencesOfString:@"fragment float4 fs_vt(" withString:@"fragment float4 fs_vt_lamp("];
+            src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
+            src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin, uv).rgb;\n    if (patch) bl = 0;"];
+            src=[src stringByAppendingString:[NSString stringWithUTF8String:lampglow_src]];
+        }
+        NSError *error=nil;
+        libraries[slot]=pipeline_library_source(hdrclip_shader(src),"post",&error);
+        if (!libraries[slot]) fprintf(stderr,"boot: post library %u: %s\n",slot,error.localizedDescription.UTF8String);
+    });
+    return libraries[slot];
+}
+static id<MTLRenderPipelineState> lamp_pipeline(NSUInteger samples, int view) {
+    if (samples>8) return nil;
+    lp_lib=lp_libraries[view]=x_post_library(3+view);
+    if (!lp_lib) return nil;
+    if (lp_vt[view][samples]) return lp_vt[view][samples];   // memoized, as x_edr_states
+    if (!lp_source) {
+        lp_source=x_pso(lp_lib,@"fs_lamp_source",MTLPixelFormatRGBA16Float,0);
+        lp_taps=x_pso(lp_lib,@"fs_taps",MTLPixelFormatRGBA16Float,0);
+    }
+    MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
+    d.vertexFunction=[lp_lib newFunctionWithName:@"vs_full"];
+    d.fragmentFunction=[lp_lib newFunctionWithName:@"fs_vt_lamp"];
+    d.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;
+    d.rasterSampleCount=samples;
+    return lp_vt[view][samples]=pipeline_cached_library(d,lp_lib,"lamp_post_init",NULL);
+}
 static int lamp_post_init(uint32_t w, uint32_t h, NSUInteger samples, int view) {
-    lp_lib=lp_libraries[view];
-    if (!lp_lib) {
-        NSString *src = [NSString stringWithUTF8String:x360_src];
-        if (view) src=x_view_source(src);
-        src = [src stringByReplacingOccurrencesOfString:@"fragment float4 fs_vt(" withString:@"fragment float4 fs_vt_lamp("];
-        src = [src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
-        src = [src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin, uv).rgb;\n    if (patch) bl = 0;"];
-        src = [src stringByAppendingString:[NSString stringWithUTF8String:lampglow_src]];
-        NSError *err = nil;
-        lp_lib = [mtl newLibraryWithSource:hdrclip_shader(src) options:nil error:&err];
-        if (!lp_lib) { fprintf(stderr, "boot: lampglow shader: %s\n", err.localizedDescription.UTF8String); return 0; }
-        lp_libraries[view]=lp_lib;
-        lp_source = x_pso(lp_lib, @"fs_lamp_source", MTLPixelFormatRGBA16Float, 0);
-        lp_taps = x_pso(lp_lib, @"fs_taps", MTLPixelFormatRGBA16Float, 0);
-    }
-    if (samples > 8 || !lp_source || !lp_taps) return 0;
-    if (!lp_vt[view][samples]) {
-        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-        d.vertexFunction = [lp_lib newFunctionWithName:@"vs_full"];
-        d.fragmentFunction = [lp_lib newFunctionWithName:@"fs_vt_lamp"];
-        d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm; d.rasterSampleCount = samples;
-        lp_vt[view][samples] = pipeline_build(d, __func__, NULL);
-    }
+    if (!lamp_pipeline(samples,view) || !lp_source || !lp_taps) return 0;
     if (!lt_source || lt_source.width != w / 4 || lt_source.height != h / 4) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w / 4 height:h / 4 mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate;
@@ -801,12 +826,29 @@ static id<MTLRenderPipelineState> x_contact_multiply(id<MTLLibrary> library,MTLP
     d.colorAttachments[0].writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
     return pipeline_build(d, __func__, NULL);
 }
+// A half-size smoke layer (soft_smoke_half.m) blends here too, through its nearest-depth upsample (texture 5: half depth).
+static id<MTLRenderPipelineState> x_contact_smoke_half_multiply(MTLPixelFormat format) {
+    static id<MTLRenderPipelineState> pso[3];unsigned n=format==MTLPixelFormatRGBA16Float?2:format==MTLPixelFormatBGRA8Unorm;
+    if(!pso[n]){
+        extern const char soft_half_up_msl[];
+        NSString *src=[NSString stringWithFormat:@"%s%s%s%s",x360_src,ssao_src,soft_half_up_msl,
+            "\nfragment float4 fs_ao_smoke_half(VOut i [[stage_in]], depth2d<float> z [[texture(1)]], texture2d<float> ao [[texture(2)]], texture2d<float> mask [[texture(3)]], texture2d<float> smoke [[texture(4)]], depth2d<float> hz [[texture(5)]], constant AK &k [[buffer(0)]]) { float4 p=half_up(smoke,hz,z,i.pos.xy,0);float a=ao_at(i.uv,z,ao,mask,k);return float4(p.rgb*a,(1.0f-p.a)*a); }\n"];
+        static id<MTLLibrary> lib;
+        if(!lib)lib=pipeline_library_source(src,__func__,NULL);
+        MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_ao_smoke_half"];
+        d.colorAttachments[0].pixelFormat=format;d.colorAttachments[0].blendingEnabled=YES;d.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorOne;d.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorSourceAlpha;
+        d.colorAttachments[0].writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
+        if(lib)pso[n]=pipeline_build(d, __func__, NULL);
+    }
+    return pso[n];
+}
 static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format) {
     static id<MTLRenderPipelineState> pso[3];unsigned n=format==MTLPixelFormatRGBA16Float?2:format==MTLPixelFormatBGRA8Unorm;
     if(!pso[n]){
         NSString *src=[[[NSString stringWithUTF8String:x360_src] stringByAppendingString:[NSString stringWithUTF8String:ssao_src]] stringByAppendingString:
             @"\nfragment float4 fs_ao_smoke(VOut i [[stage_in]], depth2d<float> z [[texture(1)]], texture2d<float> ao [[texture(2)]], texture2d<float> mask [[texture(3)]], texture2d<float> smoke [[texture(4)]], constant AK &k [[buffer(0)]]) { constexpr sampler pt(coord::normalized,filter::nearest,address::clamp_to_edge); float4 p=smoke.sample(pt,i.uv);float a=ao_at(i.uv,z,ao,mask,k);return float4(p.rgb*a,(1.0f-p.a)*a); }\n"];
-        id<MTLLibrary> lib=[mtl newLibraryWithSource:src options:nil error:nil];
+        static id<MTLLibrary> lib;
+        if(!lib)lib=pipeline_library_source(src,__func__,NULL);
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_ao_smoke"];
         d.colorAttachments[0].pixelFormat=format;d.colorAttachments[0].blendingEnabled=YES;d.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorOne;d.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorSourceAlpha;
         d.colorAttachments[0].writeMask=MTLColorWriteMaskRed|MTLColorWriteMaskGreen|MTLColorWriteMaskBlue;
@@ -930,12 +972,13 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
             MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
             rp.colorAttachments[0].texture=target;rp.colorAttachments[0].loadAction=pass==3&&multiplied?MTLLoadActionLoad:MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
             id<MTLTexture> smoke=pass==3 && variant==0 && !view?render_soft_smoke_layer():nil;
-            id<MTLRenderPipelineState> smoke_pso=smoke?x_contact_smoke_multiply(target.pixelFormat):nil;
+            id<MTLTexture> smoke_hz=smoke?render_soft_smoke_half_depth():nil;
+            id<MTLRenderPipelineState> smoke_pso=smoke_hz?x_contact_smoke_half_multiply(target.pixelFormat):smoke?x_contact_smoke_multiply(target.pixelFormat):nil;
             if (gpt_on) gpt_render(rp,"%s",smoke_pso?"ssao multiply + soft smoke":pass==3&&variant==0?"ssao multiply":labels[pass]);
             id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];
             if (gpt_on) gpt_name(e);
             [e setRenderPipelineState:smoke_pso?:variant==2?(pass==0?legacy_kernel:pass==3?legacy_apply:legacy_blur):(pass==0?kernel:pass==3?(multiplied?multiply:apply):blur)];
-            if(smoke_pso){[e setFragmentTexture:smoke atIndex:4];render_soft_smoke_layer_applied();}
+            if(smoke_pso){[e setFragmentTexture:smoke atIndex:4];if(smoke_hz)[e setFragmentTexture:smoke_hz atIndex:5];render_soft_smoke_layer_applied();}
             if(pass!=3||!multiplied)[e setFragmentTexture:input atIndex:0];[e setFragmentTexture:depth atIndex:1];
             if (pass==0||pass==3) [e setFragmentTexture:variant==4?uncovered:variant==3?cpu_mask:variant==2?reference_mask:mask atIndex:3];
             if (pass==3) [e setFragmentTexture:chain[0] atIndex:2];
@@ -985,7 +1028,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         if (diag_on && n++ < 3) diag_event("x360 post: not drawn (source %d, target %d, format %lu)", sg && sg->tex, out != nil, (unsigned long)out.pixelFormat);
         return -2;
     }
-    id<MTLRenderPipelineState> composite=x_edr_processing?x_edr_pipeline(@"fs_vt",out.sampleCount,0):view ? x_view_pso(out.sampleCount) : (out.sampleCount>1 ? x_vt_ms(out.sampleCount):xp_vt_bgra);
+    id<MTLRenderPipelineState> composite=x_edr_processing?x_edr_slot(X_EDR_VT,out.sampleCount,0):view ? x_view_pso(out.sampleCount) : (out.sampleCount>1 ? x_vt_ms(out.sampleCount):xp_vt_bgra);
     if (!composite) return -2;
     RenderTex *depth_rt = view ? surface_rt(view->depth_surface) : &ad_rt;
     id<MTLTexture> depth_tex = depth_rt ? depth_rt->tex : nil;
@@ -1017,10 +1060,11 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
                 wait_serial(slot->serial);
                 uint64_t waited=host_ticks()-w0;
                 diag_idle_ns[IDLE_GPU]+=waited;
-                if (diag_on) lum_wait_ns+=waited;
+                lum_wait_ns+=waited;
             }
         }
     }
+    if (lum_wait_ns) slowlog_lum_wait(lum_wait_ns);
     uint64_t completed = __atomic_load_n(&done_serial, __ATOMIC_ACQUIRE);
     struct XLumSlot *newest = NULL, *writable = NULL;
     for (unsigned i=0;i<X_LUM_SLOTS;++i) {
@@ -1242,7 +1286,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) { gpt_name(e); gpt_phase = "after-vt"; }
     if (view) x_destination(e,view->destination);
-    if(x_edr_processing && lamp)composite=x_edr_pipeline(@"fs_vt",out.sampleCount,1);
+    if(x_edr_processing && lamp)composite=x_edr_slot(X_EDR_VT,out.sampleCount,1);
     [e setRenderPipelineState:x_edr_processing?composite:lamp ? lp_vt[view!=NULL][out.sampleCount] : composite];
     if (HDRCLIP_ACTIVE) hdrclip_bind(e,HC_FINAL);
     [e setFragmentTexture:scene atIndex:0];
@@ -1304,14 +1348,14 @@ static const char *drops_src =
 // call below, so during loading) instead of the first rain frame, where the Metal compile cost a 119 ms frame.
 static id<MTLRenderPipelineState> drops_pso;
 static id<MTLSamplerState> s_wrap, s_clamp;
-static int raindrops_prepare(NSUInteger samples, MTLPixelFormat format) {
-    static id<MTLLibrary> lib;
-    static NSUInteger pso_samples;
-    static MTLPixelFormat pso_format;
+static id<MTLLibrary> drops_lib;
+// The library and samplers: compiled at load (render_post_lazy_warm); the pipeline follows the target.
+static int raindrops_library(void) {
+    id<MTLLibrary> lib = drops_lib;
     if (!lib) {
         uint64_t t0 = host_ticks();
         NSError *err = nil;
-        lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:drops_src] options:nil error:&err];
+        lib = pipeline_library_source([NSString stringWithUTF8String:drops_src], "raindrops", &err);
         if (!lib) { fprintf(stderr, "boot: raindrops: %s\n", err.localizedDescription.UTF8String); return 0; }
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
         sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
@@ -1321,7 +1365,15 @@ static int raindrops_prepare(NSUInteger samples, MTLPixelFormat format) {
         s_clamp = [mtl newSamplerStateWithDescriptor:sd];
         ++render_static_made;
         if (diag_on) diag_event("render: raindrops library %.1f ms", (host_ticks() - t0) / 1e6);
+        drops_lib = lib;
     }
+    return lib != nil;
+}
+static int raindrops_prepare(NSUInteger samples, MTLPixelFormat format) {
+    static NSUInteger pso_samples;
+    static MTLPixelFormat pso_format;
+    if (!raindrops_library()) return 0;
+    id<MTLLibrary> lib = drops_lib;
     if (!drops_pso || pso_samples != samples || pso_format != format) {
         uint64_t t0 = host_ticks();
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
@@ -1418,4 +1470,22 @@ int render_x360_raindrops_view(uint32_t dst, const RainDrop *d, int n, uint32_t 
     if (r->ms) r->stale = 1;
     pass_dirty = 1;
     return n;
+}
+
+// Post libraries first used by an effect's first frame (soft smoke over AO, split view, rain on the lens, the cuts
+// curve) are compiled here at load, on a shader worker thread, whatever NFS_PSO_PREWARM says: a source compile on the frame
+// thread costs one long frame (34 ms warm, 370 ms on a cold Metal cache for the smoke multiply).
+void render_post_lazy_warm(void) {
+    int failed=!x_contact_smoke_multiply(MTLPixelFormatBGRA8Unorm);
+    failed+=!x_contact_smoke_multiply(MTLPixelFormatRGBA16Float);
+    failed+=!x_contact_smoke_half_multiply(MTLPixelFormatBGRA8Unorm);
+    failed+=!x_contact_smoke_half_multiply(MTLPixelFormatRGBA16Float);
+    for (NSUInteger samples=1;samples<=8;samples*=2)
+        if ([mtl supportsTextureSampleCount:samples]) failed+=!x_view_pso(samples);
+    failed+=!raindrops_library();
+    if (post_cuts_enabled()) {
+        failed+=!post_cuts_curve_pipeline(mtl,MTLPixelFormatBGRA8Unorm);
+        failed+=!post_cuts_curve_pipeline(mtl,MTLPixelFormatRGBA16Float);
+    }
+    if(failed && diag_on)diag_event("pipeline_prewarm: failed=lazy_post count=%d",failed);
 }

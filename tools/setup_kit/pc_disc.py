@@ -6,8 +6,8 @@ server.dll, ...) are listed in that disc's common_filelist.txt as "disc,flag,pat
 of the set. Each disc's autorun.inf carries its number and the set's id ([Special] Disk=, ProductGuiID=).
 
 A disc is an .iso image (read here, never mounted) or a folder holding the disc's files (a disc mounted in Finder, or a
-copy of one). Only root directories are read, and every extent is checked against the image, so a malformed image can
-neither read outside itself nor name a path outside the folder it is unpacked into.
+copy of one). The root and loose MOVIES tree are read; every extent and path component is checked. Movies can instead
+be inside the archives. common_filelist.txt is not a complete inventory of movie data.
 """
 import io
 import itertools
@@ -20,6 +20,8 @@ SECTOR = 2048
 MAX_DESCRIPTORS = 32
 MAX_DIRECTORY = 1 << 20      # a disc root holds a few dozen entries
 MAX_ROOT_FILES = 4096
+MAX_MOVIE_ENTRIES = 20000
+MAX_MOVIE_DEPTH = 16
 MAX_INFO = 64 << 10          # autorun.inf and common_filelist.txt are a few hundred bytes
 MAX_SIBLINGS = 256           # entries beside the chosen disc that are looked at for the rest of its set
 JOLIET = (b"%/@", b"%/C", b"%/E")
@@ -113,15 +115,15 @@ def _extent(data, pos):
     return start, count
 
 
-def _listing(f, size, extent, length, joliet):
-    """{casefolded name: (name, offset, size)} of the root directory's files; folders are not needed."""
+def _listing(f, size, extent, length, joliet, directories=None):
+    """Checked files in one directory, optionally collecting its subdirectory extents as well."""
     if not 0 < length <= MAX_DIRECTORY or extent * SECTOR + length > size:
         raise DiscError("The disc image's root directory is damaged.")
     f.seek(extent * SECTOR)
     data = f.read(length)
     if len(data) != length:
         raise DiscError("The disc image is truncated.", "Make the disc image again.")
-    files, pos = {}, 0
+    files, seen, pos = {}, set(), 0
     while pos < length:
         n = data[pos]
         if n == 0:  # records never cross a sector; the rest of this one is padding
@@ -132,7 +134,7 @@ def _listing(f, size, extent, length, joliet):
         start, count = _extent(data, pos)
         flags, raw = data[pos + 25], data[pos + 33:pos + 33 + data[pos + 32]]
         pos += n
-        if raw in (b"\0", b"\1") or flags & 0x02:
+        if raw in (b"\0", b"\1"):
             continue
         if start is None:
             raise DiscError("The disc image's root directory is damaged.")
@@ -148,18 +150,74 @@ def _listing(f, size, extent, length, joliet):
         if start * SECTOR + count > size:
             raise DiscError(f"The disc image is truncated: {name} lies past its end.",
                             "Make the disc image again, or download it again if the download was interrupted.")
-        if name.casefold() in files or len(files) >= MAX_ROOT_FILES:
+        if name.casefold() in seen or len(seen) >= MAX_ROOT_FILES:
             raise DiscError(f"The disc image lists {name} twice, or too many files.")
-        files[name.casefold()] = (name, start * SECTOR, count)
+        seen.add(name.casefold())
+        if flags & 0x02:
+            if directories is not None:
+                directories[name.casefold()] = (name, start, count)
+        else:
+            files[name.casefold()] = (name, start * SECTOR, count)
+    return files
+
+
+def _image_movies(f, size, joliet, directory):
+    """Flatten only MOVIES, with bounds and cycle detection independent of the image's directory records."""
+    files, visited, entries = {}, set(), 0
+    def walk(prefix, extent, length, depth):
+        nonlocal entries
+        if depth > MAX_MOVIE_DEPTH or extent in visited:
+            raise DiscError("The disc image's MOVIES folder is damaged (too deep or a directory loop).")
+        visited.add(extent)
+        directories = {}
+        children = _listing(f, size, extent, length, joliet, directories)
+        entries += len(children) + len(directories)
+        if entries > MAX_MOVIE_ENTRIES:
+            raise DiscError("The disc's MOVIES folder holds far too many files.")
+        for name, offset, count in children.values():
+            path = prefix + "/" + name
+            files[path.casefold()] = (path, offset, count)
+        for name, sub, count in directories.values():
+            walk(prefix + "/" + name, sub, count, depth + 1)
+    walk(*directory, 0)
+    return files
+
+
+def _folder_movies(root, folder):
+    files, entries = {}, 0
+    def walk(path, depth):
+        nonlocal entries
+        if depth > MAX_MOVIE_DEPTH:
+            raise DiscError("The disc's MOVIES folder is too deep.")
+        seen = set()
+        for p in path.iterdir():
+            entries += 1
+            if entries > MAX_MOVIE_ENTRIES:
+                raise DiscError("The disc's MOVIES folder holds far too many files.")
+            safe_name(p.name)
+            if p.name.casefold() in seen:
+                raise DiscError("The disc's MOVIES folder lists a name twice (in different case).")
+            seen.add(p.name.casefold())
+            if p.is_symlink():
+                raise DiscError("The disc's MOVIES folder contains a link.")
+            if p.is_dir():
+                walk(p, depth + 1)
+            elif p.is_file():
+                name = p.relative_to(root).as_posix()
+                files[name.casefold()] = (name, None, p.stat().st_size)
+            else:
+                raise DiscError("The disc's MOVIES folder contains a special file.")
+    walk(folder, 0)
     return files
 
 
 class Disc:
-    """One disc: an .iso image or a folder with the disc's files. Lists its root files and reads its autorun.inf."""
+    """One disc: root files and loose MOVIES, from an .iso image or a mounted/copied disc folder."""
     def __init__(self, path):
         self.path, self.handle = Path(path), None
         if self.path.is_dir():
             self.files = {}
+            movies = None
             for seen, p in enumerate(self.path.iterdir()):
                 if seen >= MAX_ROOT_FILES:  # every entry counts, folders and links too
                     raise DiscError("The disc folder holds far too many files.")
@@ -167,11 +225,22 @@ class Disc:
                     if p.name.casefold() in self.files:
                         raise DiscError(f"The disc folder has {p.name} twice (in different case).")
                     self.files[p.name.casefold()] = (p.name, None, p.stat().st_size)
+                if p.name.casefold() == "movies":
+                    if p.is_symlink() or not p.is_dir() or movies is not None:
+                        raise DiscError("The disc's MOVIES folder is a link, duplicated or not a folder.")
+                    safe_name(p.name)
+                    movies = p
+            if movies is not None:
+                self.files.update(_folder_movies(self.path, movies))
         elif self.path.is_file():
             self.handle = self.path.open("rb")
             try:
                 size = os.fstat(self.handle.fileno()).st_size
-                self.files = _listing(self.handle, size, *_root(self.handle, size))
+                extent, length, joliet = _root(self.handle, size)
+                directories = {}
+                self.files = _listing(self.handle, size, extent, length, joliet, directories)
+                if "movies" in directories:
+                    self.files.update(_image_movies(self.handle, size, joliet, directories["movies"]))
             except BaseException:
                 self.close()
                 raise
@@ -216,8 +285,9 @@ class Disc:
 
 
 def install_list(disc):
-    """(numbers of every disc of the set, loose files of disc 1 the installer copies) from common_filelist.txt.
-    Entries with a folder or wildcard are the installer's help and support files, not the game's."""
+    """(disc numbers, loose root files of disc 1) from common_filelist.txt.
+    This is not the game's full inventory: the caller also installs loose MOVIES from every disc, independently
+    of this list, and the archive contents. Support/help wildcard entries are not game payloads."""
     numbers, files = {1}, []
     listing = disc.text("common_filelist.txt")
     for line in listing.splitlines():

@@ -1,3 +1,4 @@
+// Link proof: fixed PASS 47/47; retained transport / unkeyed old behavior each FAIL 1/47.
 // Offline HID queue regression: actual rumble.m, intercepted IOHIDDeviceSetReport, no device opened.
 // cc -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp runtime/rumble_test.m \
 //   -framework Foundation -framework IOKit -lz -o /tmp/rumble_test && /tmp/rumble_test
@@ -36,7 +37,7 @@ static uint8_t motor_h, motor_l;
 static float model_h = 0.8f, model_l = 0.4f;
 static uint64_t clock_ns = 1000000000;
 static int reject_zeros, rejected, detached, invalidations;
-static int real_opens;
+static int real_opens, stale_link_test;
 IOHIDManagerRef test_manager_create(CFAllocatorRef allocator, IOOptionBits options) {
     (void)allocator; (void)options; ++real_opens; abort(); // forbidden discovery trap, never a real HID manager
 }
@@ -45,6 +46,8 @@ void feedback_levels(float *h, float *l) { *h = model_h; *l = model_l; }
 void feedback_invalidate_effects(void) { model_h = model_l = 0; ++invalidations; }
 CFTypeRef test_property(IOHIDDeviceRef d, CFStringRef key) { (void)d; (void)key; return bluetooth ? CFSTR("Bluetooth") : CFSTR("USB"); }
 void diag_event(const char *fmt, ...) { (void)fmt; }
+#define PADLINK_HOOK_TEST
+#include "padlink_test.c"
 void padfx_close(void) {}
 IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType type, CFIndex id, const uint8_t *bytes, CFIndex n) {
     (void)device; (void)type;
@@ -52,6 +55,11 @@ IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType type, CFIndex id
     const uint8_t *c = bytes + (id == 0x31 ? 2 : 1);
     if (n != (id == 0x31 ? 78 : 48)) abort();
     ++reports;
+    if (stale_link_test) {
+        stale_link_test = 0;
+        padlink_detach((void *)device);
+        padlink_hid((void *)device, bluetooth);
+    }
     if (detached || ((!c[2] && !c[3]) && reject_zeros)) {
         if (reject_zeros > 0) --reject_zeros;
         ++rejected; return kIOReturnError;
@@ -85,6 +93,22 @@ int main(void) {
     manager = (IOHIDManagerRef)(uintptr_t)1;
     pad = (IOHIDDeviceRef)CFRetain(CFSTR("fake-pad"));
     hid_q = dispatch_queue_create("nfsmw.rumble.test", DISPATCH_QUEUE_SERIAL);
+    // Actual found/remove/send hooks: transport is specific to the HID link.
+    diag_on = 1;
+    padlink_select((void *)3, "framework pad");
+    padlink_hid((void *)pad, 1);
+    removed(NULL, 0, NULL, pad); drain();
+    CHECK(links[1].transport == -1 && links[0].transport == -1);
+    bluetooth = 0;
+    found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
+    CHECK(links[1].transport == 0 && links[0].transport == -1);
+    dispatch_sync(hid_q, ^{
+        unsigned count = links[1].total[0];
+        send(0, 0); CHECK(links[1].total[0] == count + 1);
+        stale_link_test = 1; send(0, 0);
+        CHECK(links[1].total[0] == 0); // completion belongs to the detached epoch
+    });
+    diag_on = 0; model_h = .8f; model_l = .4f;
     for (int transport = 0; transport < 2; ++transport) {
         bluetooth = transport;
         update(); CHECK(motor_h > 0 && motor_l > 0);

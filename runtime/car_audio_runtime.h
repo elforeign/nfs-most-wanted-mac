@@ -3,7 +3,7 @@
 #include "car_audio_engine_class.h"
 #include "car_audio_backend.h"
 
-/* Dormant Mac execution adapter. No hooks, registration or admission switch.
+/* Mac execution adapter. Hook and admission ownership belongs to car_audio.c.
  * The embedding loader serializes calls and verifies resource SHA-256 and the
  * complete instruction/state manifest before calling load. This is not an
  * untrusted x86 validator. Plans use original file offsets, never host pointers.
@@ -58,7 +58,7 @@ struct CarAudioRuntimeInstance {
     CarAudioPlayer *players;
     CarAudioRuntimeControl *controls;
     CarAudioEngineClass engine;
-    uint8_t destroying;
+    uint8_t destroying, executing;
 };
 
 /* All borrowed buffers/plans must remain stable until unload returns. Source,

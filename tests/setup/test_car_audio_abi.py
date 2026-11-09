@@ -12,6 +12,10 @@ after; slash-path control 1/1 before and after, using generated valid bank bytes
 Ramp layout regression: target +18, cached duration +0C (008985D6/0081A707).
 Measured: 0/1 before the inventory correction; 1/1 after; --mutant ramp fails 1/1.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 import copy
 import hashlib
 import json
@@ -222,6 +226,8 @@ class Proof(unittest.TestCase):
         self.assertIn('A5-player', report['blockers'])
         with self.assertRaisesRegex(ValueError, 'sound admission blocked'):
             abi.require_sound_admission(data, resource(data))
+        with self.assertRaisesRegex(ValueError, 'sound admission blocked'):
+            abi.require_sound_admission(data, resource(data), closure='jaguarxk:stock-v1')
         self.assertEqual(data, before)
 
     def test_manifest_exact_coverage(self):
@@ -389,7 +395,7 @@ def target_csis(folder):
 
 
 def private_proof():
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     target = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition'))
     roster = ROOT / 'tools_snapshot/private_cars.py'
     if not (source / 'GLOBAL/attributes.bin').is_file() or not roster.is_file():
@@ -409,6 +415,18 @@ def private_proof():
     ordinals = {i['ordinal'] for i in imports}
     assert ordinals == set(abi.ARITHMETIC) | set(abi.LIFECYCLE)
     assert all(not b['sound_admissible'] and b['blockers'] for b in banks.values())
+    accepted = 0
+    for path, bank in banks.items():
+        row = car_audio.Resources({path: resources[path]}).get(Path(path).name)
+        try:
+            admitted = abi.require_sound_admission(resources[path], row, closure='jaguarxk:stock-v1')
+        except ValueError:
+            assert bank['sha256'] not in abi.STOCK_EXECUTION
+        else:
+            assert admitted['sound_admissible'] and not admitted['blockers']
+            assert bank['sha256'] in abi.STOCK_EXECUTION
+            accepted += 1
+    assert accepted == 2
     assert not [i for i in imports + interfaces if i['classification'] == abi.UNSUPPORTED and i.get('name') != 'CAR_ENG']
     players = [p for m in modules for p in m['players']]
     assert all(p['initial_handle'] == 0 and p['source_type_byte'] == 255 and
@@ -458,7 +476,7 @@ def private_proof():
     (SCRATCH / 'manifest.json').write_text(json.dumps(report, sort_keys=True, separators=(',', ':')))
     (SCRATCH / 'counts.json').write_text(json.dumps(counts, indent=2))
     print('private closure:', json.dumps(counts, sort_keys=True))
-    print('sound admission: 0 accepted; every bank remains blocked for unresolved executable contracts')
+    print('generic sound admission: 0/69; exact stock execution profile: 2/69')
     return True
 
 

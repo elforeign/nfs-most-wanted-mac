@@ -16,7 +16,6 @@ static Obj *obj(uint32_t h) { return h<512 ? &objects[h]:NULL; }
 static RenderTex *gpu_tex(Obj *o) { return o?o->gpu:NULL; }
 static int is_depth_fmt(uint32_t f) { return f==75; }
 // This companion checks retail reflection surfaces with the near experiment Off.
-static id<MTLTexture> shadow_near_surface(uint32_t surface) { (void)surface; return nil; }
 #include "splitcapture_surface.inc"
 
 static void clear(id<MTLCommandBuffer> cb,uint32_t handle,MTLClearColor colour,id<MTLTexture> depth) {

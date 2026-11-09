@@ -9,13 +9,19 @@ Measured original 88/127 -> fixed 127/127 interfaces across 69 banks,
 PCM channel samples, zero state/PCM mismatches or sanitizer invalid accesses;
 3,940/3,940 PCM borrows retired and 454/454 control objects released.
 Generated: 5/9 -> 9/9 interfaces, paired 2/4 -> 4/4; 244 state snapshots,
-5,120 PCM samples, 60/60 borrows and 16/16 objects released. Four compiled
-ownership/selector/dispatch controls all fail; fixed exits 0, original exits 1.
+5,120 PCM samples, 60/60 borrows and 16/16 objects released. Six compiled
+detach/selector/ordinal/control/unlink/overlap controls all fail without private
+banks; fixed exits 0, original exits 1. External destroy unlink: 0/1 -> 1/1;
+duplicate and overlapping plans: 0/2 -> 2/2 rejected before image writes.
 Independent PCM/filter tolerance 2e-6; scalar/cursor tolerance 2e-7, each scaled
 by max(1, magnitude). Complete source/native module traces match exactly.
 Private mode exits 3 when its source banks or either executable is absent.
 No hooks or sound admission are installed; no Windows files are rewritten.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[1] / "tools"))
+from setup_kit.input_paths import input_path
 import argparse
 import hashlib
 import importlib.util
@@ -287,6 +293,29 @@ int main(int argc,char **argv) {
             refs[nr-1].interface.member_words=old_words;
             refs[nr-1].interface.id=old_id;
         }
+        /* Generated paired fixture has room for two descriptor rows. Both
+         * duplicate and partially overlapping, individually valid plans must
+         * fail before image mutation, without relying on private banks. */
+        if(nm==2 && mods[0].player_count==1 && mods[0].control_count==1) {
+            CarAudioRuntimeModule *plans=malloc(nm*sizeof(*plans)); assert(plans);
+            memcpy(plans,mods,nm*sizeof(*plans));
+            CarAudioRuntimePlayerPlan players[2]={mods[0].players[0],mods[0].players[0]};
+            plans[0].players=players; plans[0].player_count=2; plans[0].control_count=0;
+            for(unsigned kind=0;kind<2;kind++) {
+                memcpy(bad,source,size); memset(dest,0xa5,size);
+                uint32_t descriptor=plans[0].descriptor;
+                bad[descriptor+36]=2; bad[descriptor+39]=0;
+                if(kind) {
+                    players[0].size=128; players[1].offset=players[0].offset+100; players[1].size=28;
+                    uint8_t *state=bad+plans[0].state+players[1].offset;
+                    memset(state,0,28); memcpy(state+4,&players[1].selector,4); state[16]=255;
+                }
+                memcpy(bad+descriptor+64,&players[1].offset,4);
+                assert(car_audio_runtime_load(&rejected,bad,dest,size,0x10000,77,plans,nm,refs,nr,reg,nt,&backend,&classes)<0);
+                for(unsigned k=0;k<size;k++) assert(dest[k]==0xa5);
+            }
+            free(plans);
+        }
         free(bad); free(dest);
         for(unsigned module=0;module<nm;module++) {
             puts("{\"event\":\"reset\"}");
@@ -350,6 +379,8 @@ int main(int argc,char **argv) {
             uint32_t at=instance.address+m->destroy_offset,result;
             M32(at+12)=1;
             assert(car_audio_runtime_import(&instance,4,at,&result)==0);
+            assert(!instance.bank && !bank.instances);
+            for(size_t j=0;j<m->control_count;j++) assert(!M32(0x200000+m->controls[j]+8));
             car_audio_runtime_destroy(&instance); car_audio_runtime_destroy(&instance);
             assert(objects==0); puts("{\"event\":\"reset\"}");
             for(size_t j=0;j<backend.capacity;j++) assert(!voices[j].owned);
@@ -515,6 +546,8 @@ def compile_proof(folder, original=False, source_exe=None, mutant=None):
         'selector': ('b->source+plan->selector,', 'b->source+plan->selector+12,'),
         'ordinal': ('car_audio_player_update(p->players+i)', '(int)0'),
         'control': ('c->object=NULL; wr(p->state+c->offset+8,0);', '(void)c;'),
+        'unlink': ('if(!p->executing) car_audio_runtime_destroy(p);', '(void)p;'),
+        'overlap': ('if((uint64_t)p->offset < (uint64_t)q->offset+q->size &&', 'if(0 && (uint64_t)p->offset < (uint64_t)q->offset+q->size &&'),
     }
     if mutant:
         old, new = changes[mutant]
@@ -904,7 +937,7 @@ def paired_fixture():
 
 
 def private_inputs():
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     native = Path(os.environ.get('NFS_SPEED_EXE', ROOT.parent / 'Need For Speed Most Wanted Black Edition/speed.exe'))
     roster = ROOT / 'tools_snapshot/private_cars.py'
     if not all(p.is_file() for p in (source / 'GLOBAL/attributes.bin', source / 'NFSC.exe', native, roster)):
@@ -928,7 +961,7 @@ def main():
     parser.add_argument('--private', action='store_true')
     parser.add_argument('--original', action='store_true')
     parser.add_argument('--generated', action='store_true')
-    parser.add_argument('--mutant', choices=('detach', 'selector', 'ordinal', 'control'))
+    parser.add_argument('--mutant', choices=('detach', 'selector', 'ordinal', 'control', 'unlink', 'overlap'))
     args = parser.parse_args()
     inputs = private_inputs() if args.private else None
     if args.private and inputs is None:
@@ -974,7 +1007,7 @@ def main():
             before = run(original, payload)[0]
             assert (before['bound'], before['total']) == (2, 4)
             print('paired generated interfaces: original 2/4 -> fixed 4/4')
-            for mutant in ('detach', 'selector', 'ordinal', 'control'):
+            for mutant in ('detach', 'selector', 'ordinal', 'control', 'unlink', 'overlap'):
                 broken = compile_proof(folder / mutant, mutant=mutant)
                 try:
                     verify(run(broken, payload))

@@ -4,6 +4,11 @@ Bare stock-lit/missing-stock fixture: old 3 failures (2 dark each), fixed 0; fin
 Missing source paint attributes: old 1/1 conversion errors; fixed 1/1 donor retained, 1 log line.
 
 Local car format proof using original synthetic bytes, with no bundled assets.
+Retail donor regression: pinned original rejects 1/1; current rejects 0/1.
+Original-function swap: 1/1 regression test fails (exit 1); current 1/1 passes (exit 0).
+Five malformed index/draw/padding controls and strict output header still reject.
+--catalog-assets checks 16 PC and 16 X360 conversions using NFS_CARBON_PC,
+NFS_CARBON_X360 and NFS_GAME; exits 3 when those inputs are absent.
 
 Plan: exercise the extracted pack/assembly writers with independently built
 geometry, TPK and VPAK fixtures; audit outputs and input digests; reject malformed
@@ -46,6 +51,99 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from setup_kit import car_convert as cc
 from setup_kit import car_paint as paint
 from setup_kit import huff
+
+
+# Original function fragments; dependencies use the module namespace.
+ORIGINAL_DONOR_VALIDATION = r'''def validate_model(m, *, source=False):
+    h, mesh = m['header'], m['mesh']
+    require(len(h) >= 164 and len(mesh) == 48 and words(h, 12, '<H')[0] == 22, 'solid header version/size')
+    name = text_at(h, 160)
+    require(name == m['name'] and u32(h, 16) == name_hash(name), 'solid name/hash mismatch')
+    require(len(m['textures']) == h[25] and len(m['lights']) == h[26], 'resource table counts')
+    require(len(m['records']) == len(m['names']) == u32(mesh, 16) > 0, 'material table counts')
+    v, ix = m['vertices'], m['indices']
+    require(v.ndim == 2 and v.shape[1] == 36 and 0 < len(v) < 65536, 'vertex shape')
+    floats = v.copy().view('<f4').reshape(-1, 9)
+    require(np.isfinite(floats[:, :6]).all() and np.isfinite(floats[:, 7:]).all(), 'nonfinite vertex fields')
+    lo, hi = words(h, 32, '<3f'), words(h, 48, '<3f')
+    require(np.isfinite(lo).all() and np.isfinite(hi).all() and (np.array(lo) <= hi).all(), 'solid bounds')
+    require((floats[:, :3] >= np.array(lo) - .002).all() and
+            (floats[:, :3] <= np.array(hi) + .002).all(), 'vertex outside solid bounds')
+    matrix = np.frombuffer(span(h, 64, 64), '<f4').reshape(4, 4)
+    require(np.isfinite(matrix).all() and abs(np.linalg.det(matrix.astype(float))) > 1e-12, 'invalid solid transform')
+    require(len(ix) > 0 and len(ix) == u32(mesh, 44) == u32(h, 20) * 3 and ix.max() < len(v), 'mesh index totals')
+    require(np.abs(np.linalg.norm(floats[ix, 3:6], axis=1) - 1).max() < .001, 'referenced normal is not unit length')
+    first = base = 0
+    for r, nm in zip(m['records'], m['names']):
+        require(len(r) == 104 and u32(r, 48) == 4, 'draw record size/effect')
+        nv, nt, fi = words(r, 60, '<III')
+        count = u32(r, 92)
+        require(nv > 0 and fi == first and count == nt * 3 > 0 and count <= len(ix) - fi, 'draw index range')
+        require(all(t < len(m['textures']) for t in r[24:29]) and
+                (r[29] == 255 or r[29] < len(m['lights'])), 'draw resource indices')
+        q = ix[fi:fi + count]
+        require(q.min() >= base and q.max() < base + nv <= len(v), 'draw vertex range')
+        require(b'\0' in nm and len(nm) <= 256, 'material name')
+        first += count
+        base += nv
+    require(first == len(ix) and base == len(v), 'draws do not cover mesh')
+    markers = marker_records(m)
+    # Source marker arrays can be present with a zero cached header count.
+    # Assembly rewrites that count from the checked 80-byte records.
+    require(len(markers) < 256 and (source or len(markers) == h[27]), 'marker count')
+    for record in markers:
+        require(np.isfinite(np.frombuffer(span(record, 16, 64), '<f4')).all(), 'nonfinite marker transform')
+    return m
+
+def validate_geometry(data, carbon=False, *, input_pack=False):
+    end = u32(data, 4) + 8
+    require(u32(data) == 0x80134000 and 8 < end <= len(data), 'geometry root range')
+    row_ids = set()
+    for cid, off, size in children(data, end):
+        if cid == 0x135200 and not carbon:
+            r = span(data, off + 8, size)
+            require(size == 168 and u32(r, 8) == 3, 'unexpected light material')
+            name = text_at(r, 20, 48)
+            identity = u32(r, 12)
+            require(identity == name_hash(name) and identity not in row_ids and
+                    (name in ('CARBON_MAGMATTE', 'CARBON_LAMP_BRAKE', 'CARBON_LAMP_HEAD') or
+                     re.fullmatch(r'IMP_[0-9A-F]{20}', name)), 'unexpected light material identity')
+            require(np.isfinite(np.frombuffer(r[48:], '<f4')).all(), 'nonfinite light material')
+            row_ids.add(identity)
+            info, _ = find(data, 0x134002)
+            require(struct.unpack_from('<II', data, info + 8 + 0x68) ==
+                    (end, len(data) - end), 'material streaming range')
+        else:
+            require(cid == 0 and not any(span(data, off + 8, size)), 'unexpected geometry trailer')
+    result = {}
+    for hs, solid in solids(data):
+        require(u32(solid) == 0x80134010 and u32(solid, 4) + 8 == len(solid), 'indexed solid envelope')
+        list(walk(solid))
+        h = payload(solid, 0x134011, 16)
+        span(h, 0, 164)
+        name = text_at(h, 160)
+        require(name and u32(h, 16) == hs == name_hash(name), 'indexed solid name/hash')
+        for cid, count in ((0x134012, h[25]), (0x134013, h[26])):
+            require(len(payload(solid, cid)) == count * 8, 'solid resource table size')
+        m = model(solid) if carbon else native_wheel_model(solid)
+        if not carbon:
+            m['extras'] = [(cid, span(solid, (off + 23) & ~15, off + 8 + size - ((off + 23) & ~15))
+                                  if cid == 0x13401a else span(solid, off + 8, size))
+                           for cid, off, size in children(solid, 8)
+                           if cid not in (0x134011, 0x134012, 0x134013, 0x80134100)]
+        validate_model(m, source=carbon or input_pack)
+        require(name not in result, 'duplicate model name')
+        result[name] = m
+    return result
+'''
+ORIGINAL_DONOR_VALIDATION_SHA = '7c5cc5ebffddf623cd2f26bb9342ded26734d3a11e51d2d4fc4946537b90fdfd'
+
+
+def original_donor_validation():
+    assert hashlib.sha256(ORIGINAL_DONOR_VALIDATION.encode()).hexdigest() == ORIGINAL_DONOR_VALIDATION_SHA
+    namespace = dict(vars(cc))
+    exec(ORIGINAL_DONOR_VALIDATION, namespace)
+    return namespace['validate_geometry']
 
 
 def pack(cid, raw):
@@ -100,7 +198,7 @@ def triangle(name, carbon, effect=0, texture_role='DIFFUSE'):
         chunks += aligned(cid, 8 + len(chunks), raw, boundary)
     meshpos = 8 + len(chunks)
     mesh = bytearray()
-    ib = struct.pack('<3H', 0, 1, 2) + (bytes(2) if carbon else b'')
+    ib = struct.pack('<3H', 0, 1, 2) + bytes(2)
     for cid, raw, boundary in ((0x134900, meshhead, 16), (0x134B02, material, 16),
                                (0x134B03, ib, 16), (0x134B01, vb, 16 if carbon else 128)):
         mesh += aligned(cid, meshpos + 8 + len(mesh), raw, boundary)
@@ -653,6 +751,40 @@ class CarConversion(unittest.TestCase):
             with self.assertRaises(cc.FormatError): cc.source_rim_rows(broken,mw)
         print('finish: old 0 distinct rows; fixed 1; 44 source bytes, 76 MW lighting bytes exact; 2 mutants rejected')
 
+    def test_retail_donor_stale_polygon_header(self):
+        path = self.donor / 'GEOMETRY.BIN'
+        original = bytearray(path.read_bytes())
+        _, off, size, _, _, _ = cc.index(original)[0]
+        solid = original[off:off + size]
+        header = (cc.find(solid, 0x134011)[0] + 23) & ~15
+        struct.pack_into('<I', original, off + header + 20, 3)
+        path.write_bytes(original)
+        with self.assertRaisesRegex(cc.FormatError, 'mesh index totals'):
+            original_donor_validation()(original, input_pack=True)
+        self.assertEqual(len(cc.validate_geometry(original, input_pack=True)), len(stock_names('DONOR')))
+        with self.assertRaisesRegex(cc.FormatError, 'mesh index totals'):
+            cc.validate_geometry(original)
+        self.convert()
+        cc.validate_geometry((self.out / 'GEOMETRY.BIN').read_bytes())
+
+    def test_retail_donor_physical_index_controls(self):
+        original = bytearray((self.donor / 'GEOMETRY.BIN').read_bytes())
+        _, off, size, _, _, _ = cc.index(original)[0]
+        solid = original[off:off + size]
+        mesh = (cc.find(solid, 0x134900)[0] + 23) & ~15
+        draw = (cc.find(solid, 0x134B02)[0] + 23) & ~15
+        indices = (cc.find(solid, 0x134B03)[0] + 23) & ~15
+        for label, at, fmt, value in (
+                ('mesh extent', mesh + 44, '<I', 6),
+                ('mesh coverage', mesh + 44, '<I', 4),
+                ('draw range', draw + 68, '<I', 1),
+                ('padding', indices + 6, '<H', 1),
+                ('vertex index', indices, '<H', 65535)):
+            data = bytearray(original)
+            struct.pack_into(fmt, data, off + at, value)
+            with self.subTest(label=label), self.assertRaises(cc.FormatError):
+                cc.validate_geometry(data, input_pack=True)
+
     def test_mesh_and_texture_audit_mutants(self):
         original = geometry('CAR', True)
         hs, off, size, _, _, _ = cc.index(original)[0]
@@ -921,5 +1053,48 @@ class InstalledCarParity(unittest.TestCase):
             sys.path.remove(str(oracle_dir))
 
 
+def catalog_assets():
+    from setup_kit import car_sources, car_x360_inputs
+    from setup_kit.x360 import Source
+
+    names = ('NFS_CARBON_PC', 'NFS_CARBON_X360', 'NFS_GAME')
+    if any(not os.environ.get(name) for name in names):
+        print('SKIP: supply local PC/X360/MW inputs')
+        return 3
+    pc, xenon, mw = (Path(os.environ[name]).expanduser().resolve() for name in names)
+    # Independent regression population, including all four stale-header donors.
+    donors = dict(zip(
+        '240SX 300C 997GT3RS 997TT BRERA CAMARON CCX CORVETTEZ06 EUROPA G35 JAGUARXK MAZDASPEED3 MR2 MUSTANGSHLBYN R32 R8'.split(),
+        'RX7 CTS 997S 911TURBO TT MUSTANGGT CARRERAGT CORVETTE ELISE IS300 DB9 GTI ELISE MUSTANGGT A3 GALLARDO'.split()))
+    if (not xenon.exists() or not (pc / 'GLOBAL').is_dir() or not (mw / 'GLOBAL').is_dir() or
+            any(not (root / 'CARS' / car / name).is_file()
+                for source, donor in donors.items() for root, car in ((pc, source), (mw, donor))
+                for name in ('GEOMETRY.BIN', 'TEXTURES.BIN'))):
+        print('SKIP: selected local car/donor inputs are absent')
+        return 3
+    recognition = car_sources.recognise(xenon)
+    cache = ROOT / '.metal-cache'
+    cache.mkdir(exist_ok=True)
+    counts = dict(pc=0, x360=0)
+    with contextlib.closing(Source(xenon)) as source:
+        for platform in counts:
+            for car, donor in donors.items():
+                with tempfile.TemporaryDirectory(prefix='catalog-convert-', dir=cache) as scratch:
+                    try:
+                        if platform == 'pc':
+                            cc.convert(pc / 'CARS' / car, mw / 'CARS' / donor, pc / 'GLOBAL', Path(scratch) / car)
+                        else:
+                            bundle = car_x360_inputs.resolve(source, car, donor, recognition=recognition)
+                            cc.convert_x360(bundle, mw / 'CARS' / donor, Path(scratch) / car, mw_root=mw)
+                        counts[platform] += 1
+                        print(f'PASS: {platform} {car} donor={donor}', flush=True)
+                    except (cc.ConversionError, car_sources.SourceError) as error:
+                        print(f'FAIL: {platform} {car}: {error}', flush=True)
+    print(f'converted: PC {counts["pc"]}/16, X360 {counts["x360"]}/16', flush=True)
+    return 0 if counts == dict(pc=16, x360=16) else 1
+
+
 if __name__ == '__main__':
+    if '--catalog-assets' in sys.argv:
+        raise SystemExit(catalog_assets())
     unittest.main(verbosity=2)

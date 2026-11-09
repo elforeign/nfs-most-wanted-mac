@@ -28,6 +28,7 @@ uint8_t *G;int diag_on,boot_trace;__thread uint32_t last_error;
 uint64_t diag_idle_ns[IDLE_N];volatile uint64_t perf_nframes;
 uint64_t host_ticks(void){return 0;}
 uint64_t host_filetime(void){return 0;}
+void diag_begin_exit(void) {}
 void diag_event(const char *f,...){(void)f;}
 const char *diag_symbol(uint32_t a,uint32_t *off){(void)a;if(off)*off=0;return "";}
 uint32_t galloc(uint32_t n){(void)n;return 0x600000;}

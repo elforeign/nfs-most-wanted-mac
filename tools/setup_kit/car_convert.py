@@ -22,7 +22,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from setup_kit import huff
+from setup_kit import huff, car_texture_namespace
 
 MAX_FILE = 512 << 20
 MAX_ENTRY = 128 << 20
@@ -384,15 +384,20 @@ def bake_driver_positions(models):
         driver['records'] = records
 
 
-def native_wheel_model(s):
+def native_wheel_model(s, *, input_pack=False):
     h = payload(s, 0x134011, 16)
     mesh, rb = payload(s, 0x134900, 16), payload(s, 0x134b02, 16)
     require(len(mesh) == 48 and len(rb) == u32(mesh, 16) * 104, 'native wheel mesh layout')
     require(all(u32(rb, i + 48) == 4 for i in range(0, len(rb), 104)), 'native wheel effect')
+    indices = payload(s, 0x134b03, 16)
+    index_bytes = u32(mesh, 44) * 2
+    if input_pack:
+        require(len(indices) == ((index_bytes + 3) & ~3) and
+                not any(indices[index_bytes:]), 'native index extent/padding')
     return dict(header=h, name=h[160:].split(b'\0')[0].decode(), mesh=mesh,
                 records=[rb[i:i + 104] for i in range(0, len(rb), 104)],
                 names=[s[o + 8:o + 8 + z] for cid, o, z in walk(s) if cid == 0x134c02],
-                indices=np.frombuffer(payload(s, 0x134b03, 16)[:u32(mesh, 44) * 2], '<u2').astype(np.uint32),
+                indices=np.frombuffer(indices[:index_bytes], '<u2').astype(np.uint32),
                 vertices=np.frombuffer(payload(s, 0x134b01, 128), np.uint8).reshape(-1, 36).copy(),
                 textures=[h for h, _ in struct.iter_unpack('<II', payload(s, 0x134012))],
                 lights=[h for h, _ in struct.iter_unpack('<II', payload(s, 0x134013))], extras=[], groups=1)
@@ -881,25 +886,6 @@ def convert_textures(d, mw, extras=None, aliases=None, *, exclude=(), source_sam
         renamed[hs] = (r, pl, pixels)
     source = renamed
     source = {h: value for h, value in source.items() if h not in exclude}
-    origin = {}
-    if namespace:
-        slot, prefix = namespace
-        private = {}
-        for hs, (r, pl, pixels) in source.items():
-            name = bytes(r[89:89 + r[88] - 1]).decode('ascii')
-            if name.startswith(slot + '_'):
-                target = prefix + name[len(slot):]
-                r = bytearray(r[:89]) + target.encode('ascii') + b'\0'
-                r[88] = len(target) + 1; struct.pack_into('<I', r, 12, name_hash(target))
-                origin[name_hash(target)] = hs
-                hs = name_hash(target)
-            require(hs not in private, 'texture namespace collision')
-            private[hs] = (r, pl, pixels)
-        source = private
-        if renames is not None:
-            renames.extend(sorted((old, new) for new, old in origin.items()))
-    refs = {h: v for h, v in refs.items() if h not in origin.values()} | {
-        new: refs[old] for new, old in origin.items() if old in refs}
     fallbacks = sorted(set(refs) - source.keys())
     blobs, hashes, placement = [], [], 0
     for hs in sorted(source.keys() | refs.keys()):
@@ -928,8 +914,11 @@ def convert_textures(d, mw, extras=None, aliases=None, *, exclude=(), source_sam
         struct.pack_into('<I', rec, 48, placement); placement += len(pixels)
         struct.pack_into('<I', rec, 52, 0xffffffff)
         blobs.append((hs, pixels + rec + platform)); hashes.append(struct.pack('<II', hs, 0))
-
-
+    if namespace:
+        blobs, mapping = car_texture_namespace.rename(blobs, source, namespace, name_hash, require)
+        hashes = [struct.pack('<II', hs, 0) for hs, _ in blobs]
+        if renames is not None:
+            renames.extend(mapping)
     def header(table):
         return chunk(0xB3310000, chunk(0x33310001, hp) + chunk(0x33310002, b''.join(hashes)) +
                      chunk(0x33310003, table))
@@ -1418,7 +1407,7 @@ def collision_sidecar(data, car, donor):
     return struct.pack('<5I', 0x31544C43, 1, hash32(car.lower()), hash32(donor.lower()), len(raw)) + raw
 
 
-def validate_model(m, *, source=False):
+def validate_model(m, *, source=False, input_pack=False):
     h, mesh = m['header'], m['mesh']
     require(len(h) >= 164 and len(mesh) == 48 and words(h, 12, '<H')[0] == 22, 'solid header version/size')
     name = text_at(h, 160)
@@ -1435,7 +1424,9 @@ def validate_model(m, *, source=False):
             (floats[:, :3] <= np.array(hi) + .002).all(), 'vertex outside solid bounds')
     matrix = np.frombuffer(span(h, 64, 64), '<f4').reshape(4, 4)
     require(np.isfinite(matrix).all() and abs(np.linalg.det(matrix.astype(float))) > 1e-12, 'invalid solid transform')
-    require(len(ix) > 0 and len(ix) == u32(mesh, 44) == u32(h, 20) * 3 and ix.max() < len(v), 'mesh index totals')
+    # Retail packs can retain stale polygon statistics; drawing uses mesh indices.
+    require(len(ix) > 0 and len(ix) == u32(mesh, 44) and
+            (input_pack or len(ix) == u32(h, 20) * 3) and ix.max() < len(v), 'mesh index totals')
     require(np.abs(np.linalg.norm(floats[ix, 3:6], axis=1) - 1).max() < .001, 'referenced normal is not unit length')
     first = base = 0
     for r, nm in zip(m['records'], m['names']):
@@ -1490,13 +1481,13 @@ def validate_geometry(data, carbon=False, *, input_pack=False):
         require(name and u32(h, 16) == hs == name_hash(name), 'indexed solid name/hash')
         for cid, count in ((0x134012, h[25]), (0x134013, h[26])):
             require(len(payload(solid, cid)) == count * 8, 'solid resource table size')
-        m = model(solid) if carbon else native_wheel_model(solid)
+        m = model(solid) if carbon else native_wheel_model(solid, input_pack=input_pack)
         if not carbon:
             m['extras'] = [(cid, span(solid, (off + 23) & ~15, off + 8 + size - ((off + 23) & ~15))
                                   if cid == 0x13401a else span(solid, off + 8, size))
                            for cid, off, size in children(solid, 8)
                            if cid not in (0x134011, 0x134012, 0x134013, 0x80134100)]
-        validate_model(m, source=carbon or input_pack)
+        validate_model(m, source=carbon or input_pack, input_pack=input_pack)
         require(name not in result, 'duplicate model name')
         result[name] = m
     return result
@@ -1800,7 +1791,7 @@ def _lighting_rows(data, size):
     return rows
 
 
-def _converter_policy(platform, lighting, tracked):
+def _converter_policy(platform, lighting, tracked, mac_audio=False):
     """Hash executable policy dependencies separately from local asset inputs."""
     from . import car_lighting, car_paint, car_physics, car_sources, x360, xdvdfs
     require(lighting is None or isinstance(lighting, Mapping), 'lighting options must be a mapping')
@@ -1812,9 +1803,12 @@ def _converter_policy(platform, lighting, tracked):
         require(isinstance(gains, car_lighting.Gains), 'invalid lighting gains')
         gains.validate()
         settings['gains'] = vars(gains)
-    modules = [Path(__file__), Path(huff.__file__), Path(car_lighting.__file__),
+    modules = [Path(__file__), Path(huff.__file__), Path(car_texture_namespace.__file__), Path(car_lighting.__file__),
                Path(car_paint.__file__), Path(car_physics.__file__),
                Path(car_sources.__file__), Path(x360.__file__), Path(xdvdfs.__file__)]
+    if mac_audio:
+        from . import car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank
+        modules += [Path(m.__file__) for m in (car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank)]
     if platform == 'x360':
         from . import car_x360, car_x360_inputs
         modules += [Path(m.__file__) for m in (car_x360, car_x360_inputs)]
@@ -1832,7 +1826,7 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
                      attributes, mw_donor_dir, mw_root, out_dir, tracked, platform,
                      source_inputs, source_check, code, policy, lighting,
                      shared_textures=None, source_aliases=None, runtime_bindings=(),
-                     runtime_materials=()):
+                     runtime_materials=(), audio_pack=None):
     """One assembly, resource, sidecar and audited writer path for both platforms."""
     from . import car_lighting, car_paint, car_physics
     mw, mw_tex = (tracked.read(mw_donor_dir / n) for n in ('GEOMETRY.BIN', 'TEXTURES.BIN'))
@@ -1890,6 +1884,8 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     validate_geometry(geometry)
     wheels = wheel_sidecar(attributes, car, donor, fit=True)
     files = {'GEOMETRY.BIN': geometry, 'TEXTURES.BIN': textures_out, 'SOLIDMAP.BIN': solidmap, 'WHEELFIT.BIN': wheels}
+    if audio_pack is not None:
+        files['AUDIO.BIN'] = audio_pack
     physics = car_physics.metadata(attributes, car, donor)
     if physics is not None:
         files['PHYSICS.BIN'] = physics
@@ -1923,13 +1919,14 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
         material_policy='MW roles and MW-derived lamp rows; classified neutral vertex illumination')
 
 
-def convert(car_dir, mw_donor_dir, shared, out_dir, *, lighting=None):
+def convert(car_dir, mw_donor_dir, shared, out_dir, *, lighting=None, mac_audio=False):
     """Convert PC files, preserving the original positional API.
 
     Every source and MW dependency is tracked. Structural success never approves
     recognition, emitted output hashes, or appearance for activation.
     """
     try:
+        require(type(mac_audio) is bool, 'mac_audio must be boolean')
         car_dir, mw_donor_dir, out_dir = (Path(p).expanduser().resolve() for p in (car_dir, mw_donor_dir, out_dir))
         car, donor = car_dir.name.upper(), mw_donor_dir.name.upper()
         require(all(re.fullmatch(r'[A-Z0-9_]{1,15}', n) for n in (car, donor)), 'invalid car or donor identity')
@@ -1944,23 +1941,30 @@ def convert(car_dir, mw_donor_dir, shared, out_dir, *, lighting=None):
         source_root = car_dir.parent.parent if car_dir.parent.name.casefold() == 'cars' else car_dir
         tracked = _Inputs(out_dir, (source_root, mw_root, car_dir, mw_donor_dir, global_path.parent, attributes.parent))
         code = _Inputs(out_dir, ())
-        policy, options = _converter_policy('pc', lighting, code)
+        policy, options = _converter_policy('pc', lighting, code, mac_audio)
         source, source_tex = (tracked.read(car_dir / n) for n in ('GEOMETRY.BIN', 'TEXTURES.BIN'))
         models = validate_geometry(source, carbon=True)
         textures = pc_texture_entries(source_tex)
         shared_raw = unpack_file(tracked.read(global_path))
         attr = tracked.read(attributes)
+        audio_pack = None
+        if mac_audio:
+            from . import car_audio_pack
+            audio_pack = car_audio_pack.from_directory(attr, car, source_root, tracked.read)
         def source_inputs():
             from .car_sources import path_hash
             logical = {car_dir / 'GEOMETRY.BIN': f'CARS/{car}/GEOMETRY.BIN',
                        car_dir / 'TEXTURES.BIN': f'CARS/{car}/TEXTURES.BIN',
                        global_path: 'GLOBAL/GLOBALB.LZC', attributes: 'GLOBAL/ATTRIBUTES.BIN'}
+            if mac_audio:
+                logical.update({p: p.relative_to(source_root).as_posix() for p in tracked.buffers
+                                if p.is_relative_to(source_root / 'SOUND/ENGINE')})
             return {path_hash(name): dict(size=len(tracked.buffers[p.resolve()]), sha256=tracked.hashes[p.resolve()], catalogued=False)
                     for p, name in logical.items()}
         return _convert_decoded(car=car, donor=donor, source=source, source_tex=source_tex, models=models,
             textures=textures, shared_raw=shared_raw, attributes=attr, mw_donor_dir=mw_donor_dir,
             mw_root=mw_root, out_dir=out_dir, tracked=tracked, platform='pc', source_inputs=source_inputs,
-            source_check=tracked.check, code=code, policy=policy, lighting=options)
+            source_check=tracked.check, code=code, policy=policy, lighting=options, audio_pack=audio_pack)
     except ConversionError:
         raise
     except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, UnicodeError, np.linalg.LinAlgError) as exc:

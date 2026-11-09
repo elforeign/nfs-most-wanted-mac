@@ -133,10 +133,24 @@ class ApplyTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.signing = mock.patch.object(ins, "codesign_ok", return_value=True)
         self.signing.start()
+        # Setup counts any path-shaped NFS_* variable as a root override; one inherited from the caller
+        # (an unresolvable relative path) made every prune skip. Tests see none of them.
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        for key in [k for k in os.environ if k.startswith("NFS_")]:
+            del os.environ[key]
 
     def tearDown(self):
+        self.env.stop()
         self.signing.stop()
         self.temp.cleanup()
+
+    def test_caller_nfs_paths_ignored(self):
+        # Before the setUp scrub: rc 1 (prune skipped, before_ack=3 after_ack=3); after: rc 0.
+        env = dict(os.environ, NFS_TESTING_MD="../no-such-folder/notes.md")
+        rc = subprocess.run([sys.executable, "-I", __file__, "ApplyTests.test_update_collects_setup_generations"],
+                            env=env, capture_output=True).returncode
+        self.assertEqual(rc, 0)
 
     def fixture(self, name="fixture", **kw):
         path = self.root / name

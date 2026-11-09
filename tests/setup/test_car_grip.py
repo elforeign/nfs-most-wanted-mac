@@ -8,6 +8,10 @@ The retained-donor control repeats those failures; shifted-key and promoted
 unresolved-semantics controls must fail. Synthetic checks run without assets;
 exit 3 then marks only the private 16-car comparison unavailable.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 import copy
 import ctypes as ct
 import hashlib
@@ -258,7 +262,7 @@ def validation(tmp, dll):
 
 
 def private_comparisons(tmp, dll):
-    source = Path(os.environ.get('NFS_CARBON', Path.home() / 'Downloads/NFSC')) / 'GLOBAL/attributes.bin'
+    source = input_path('NFSC') / 'GLOBAL/attributes.bin'
     donor = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')) / 'GLOBAL/ATTRIBUTES.BIN'
     if (not source.is_file() or not donor.is_file() or
             not (ROOT / 'tools_snapshot/test_driver_seats.py').is_file()):

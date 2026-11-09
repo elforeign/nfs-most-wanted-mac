@@ -4,6 +4,9 @@
 //   build/dstest fake       only the output-device logic on media's fake HDMI TV (NFS_AUDIO_FAKE_DEVICE): the game
 //                           re-creating its device keeps the output; a device that goes away is followed. No audio.
 #ifdef MEDIA_AUDIO_CALLBACK_TEST
+// Settled default, attached output: 144 checks / 0 failures (diag on/off, exit 0).
+// Original detached-output state via detach(): 34 checks / 2 failures (exit 1).
+// The settle waits for the actual fake default; attachment, health and queue assertions remain required.
 // Standalone build: compile only this source, with MEDIA_AUDIO_CALLBACK_TEST and the usual FFmpeg/framework
 // flags. Including the implementations lets this fixture exercise the actual IOProc and parking decision with
 // synthetic buffers, without adding callback/clock mutation controls to the production API.
@@ -144,6 +147,14 @@ int main() {
         owner.out = take_parked(owner.cfg, 0, &mode, &rate, &from, &closed_dev);
         check(!owner.out && closed_dev != 0, "take_parked rejects an invalid-index output despite callback arrivals");
     }
+    // Closing the preceding hogged TV restores the fake default after 300 ms.
+    // Opening PCM during that interval follows the changing default and can
+    // clear device->out while the synthetic callback fixture reads it (SIGSEGV
+    // at main+4688). Settle that transition before testing a stable PCM device.
+    auto restored = Clock::now() + std::chrono::seconds(1);
+    while (media::default_output_device() != media::kFakeTv && Clock::now() < restored)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check(media::default_output_device() == media::kFakeTv, "fake default restored after passthrough close");
     media::AudioOutput pcm;
     check(pcm.open_offline(media::OutputMode::Stereo), "PCM offline fixture opens");
     auto &q = media::AudioOutputTest::impl(pcm);
@@ -153,7 +164,7 @@ int main() {
     check(media::now_ns() - q.last_callback.load() < 500000000 && samples[0] == 0 && samples[7] == 0,
           "valid empty PCM callback refreshes health and supplies zeros");
     // Large-period negative control: remove the minimum_queue_frames floor from output_latency.
-    // Fixed: 141 checks, 0 failed (diag on/off); floor removed: 12 failed, 48 underruns/mode.
+    // Fixed: 144 checks, 0 failed (diag on/off); floor removed: 12 failed, 48 underruns/mode.
     // Stereo: 0/1445376 zero/total bytes fixed; 1052160/1445376 broken (72.8%).
     check(media::pcm_queue_frames(4096, 128, 48000, 44100) == 7644,
           "4096-frame period and safety offset scale upward to 44100 Hz");
@@ -168,6 +179,8 @@ int main() {
         if (!device) continue;
         stop_thread(*device);
         device->out->stop_for_test();
+        check(device->out != nullptr, "large-period PCM output remains attached");
+        if (!device->out) { ds_device_release(device); continue; }
         auto &pcm_impl = media::AudioOutputTest::impl(*device->out);
         { std::vector<float> old(pcm_impl.fq.size()); pcm_impl.fq.take(old.data(), old.size()); }
         pcm_impl.stats = {};
@@ -179,8 +192,10 @@ int main() {
             // Synthetic device clock: permit a full refill between 85 ms device periods, then pull one
             // whole period. No wall-clock scheduling claim: the real mixer and real queue are exercised.
             auto deadline = Clock::now() + std::chrono::seconds(1);
-            while (device->out->queued_frames() < (size_t)device->cfg.latency_frames && Clock::now() < deadline)
+            while (device->out->queued_frames() < (size_t)device->cfg.latency_frames && Clock::now() < deadline) {
+                pcm_impl.last_callback.store(media::now_ns()); // paused synthetic clock remains healthy while refilling
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             check(device->out->queued_frames() >= (size_t)device->cfg.latency_frames, "mixer refills to target");
             pcm_impl.callback_begin();
             pcm_impl.take_floats(pull.data(), pull.size());

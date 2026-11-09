@@ -75,3 +75,27 @@ WIN_API BOOL ResetEvent(HANDLE);
 WIN_API DWORD GetLastError(void);
 WIN_API BOOL CloseHandle(HANDLE);
 #endif
+
+// PCM endpoint declarations; native SDK builds use the actual WinMM layouts.
+#if !defined(RECOMP_WINDOWS_COMPILE_ONLY) && !defined(NFS_WIN_TEST)
+#include <mmsystem.h>
+#else
+typedef void *HWAVEOUT;
+typedef struct {
+    char *lpData;
+    DWORD dwBufferLength, dwBytesRecorded;
+    uintptr_t dwUser;
+    volatile DWORD dwFlags;
+    DWORD dwLoops;
+    void *lpNext;
+    uintptr_t reserved;
+} WAVEHDR;
+typedef struct WinWaveFormat WAVEFORMATEX;
+char *getenv(const char *);
+WIN_API unsigned waveOutOpen(HWAVEOUT *, unsigned, const WAVEFORMATEX *, uintptr_t, uintptr_t, DWORD);
+WIN_API unsigned waveOutPrepareHeader(HWAVEOUT, WAVEHDR *, unsigned);
+WIN_API unsigned waveOutWrite(HWAVEOUT, WAVEHDR *, unsigned);
+WIN_API unsigned waveOutUnprepareHeader(HWAVEOUT, WAVEHDR *, unsigned);
+WIN_API unsigned waveOutReset(HWAVEOUT);
+WIN_API unsigned waveOutClose(HWAVEOUT);
+#endif

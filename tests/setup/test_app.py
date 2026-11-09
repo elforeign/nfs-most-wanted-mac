@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 """T11: Setup app protocol, cancel, environment and legacy-updater checks (offline; temp dirs only).
 
+X360 choices: 8/8 combinations pass; original all-enabled loading violates 7/8.
+Car selections: two ticked PC cars reproduce 2/2 pinned specs; defaults empty;
+zero ticks and missing sources produce zero import arguments. Edited metadata
+exits 1 (FAIL refusal), packaged metadata exits 0 (PASS). Removing the empty
+selection guard produces 1 unwanted import command; restored guard produces 0.
+
+Review regressions (violations, old -> new): engine messages 3 -> 0;
+refresh loses recognition/plan/Import eligibility 3 -> 0. Compiled controls
+restore the original generic failure and unconditional launch-state reset.
+
+Extras proof: 23 compiled checks pass. The pinned original mode dispatch
+violates 12 extras expectations; current decoding violates zero. Broken busy
+skip, cancellation and retry controls each fail their state oracle. Actual
+F-T events decode at one-byte boundaries, including measured per-car approval.
+Install and extras cancellation both wait for the backend's transaction boundary.
+
 Run: python3 -I tests/setup/test_app.py        (needs swiftc; no network, no window, no game files)
 
 The app's pure logic is compiled from tools/installer/SetupApp.swift and driven through its headless modes
@@ -30,7 +46,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SWIFT = ROOT / 'tools/installer/SetupApp.swift'
 BUILD = ROOT / 'tools/installer/build_installer.sh'
-_CACHE = Path(tempfile.mkdtemp(prefix='setup-app-test-', dir=os.environ.get('TMPDIR')))
+(ROOT / '.metal-cache').mkdir(exist_ok=True)
+_CACHE = Path(tempfile.mkdtemp(prefix='setup-app-test-', dir=ROOT / '.metal-cache'))
 _built = {}
 
 
@@ -81,7 +98,7 @@ def run_protocol(binary, text, status, chunk, mode, cancelled=False, tmp=None):
 def protocol_failures(binary, which=None):
     """Returns the list of violated expectations (empty when the app behaves as specified)."""
     bad = []
-    with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
+    with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
         app = Path(tmp) / 'NFSMW.app'
         app.mkdir()
         stages = [ev(ev='stage', id=i, title=i) for i in ('preflight', 'pc', 'recompile')]
@@ -126,6 +143,121 @@ def protocol_failures(binary, which=None):
     return bad
 
 
+def car_protocol_failures(binary):
+    bad = []
+    with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+        recognition = ev(ev='cars-recognition', game='carbon', platform='pc', approval_available=True,
+                         output_verified=False, cars=[{'car_hash': 'deadbeef', 'status': 'importable'}])
+        volume = dict(device='1', paths=['/work', '/catalog'], extraction_bytes=100,
+                      staging_bytes=None, output_bytes=None, retention_bytes=0, margin_bytes=16,
+                      available_bytes=1000, required_bytes=None, sufficient=None)
+        plan = ev(ev='cars-plan', measured=False, approved=False, volumes=[volume], cars=[])
+        progress = ev(ev='cars-progress', phase='converted', slot=11, done=1, total=1)
+        result = dict(ev='cars-result', operation='import', verified=True, generation='g-' + 'a' * 64,
+                      message='', selection=[11], cars=[dict(slot=11, name='Synthetic café', state='ready', selected=True)],
+                      generations=[])
+        text = recognition + plan + progress + ev(**result)
+        def want(name, text, outcome='success', mode='carsImport', status=0, cancelled=False, chunk=1, **extra):
+            got = run_protocol(binary, text, status, chunk, mode, cancelled=cancelled, tmp=tmp)
+            for key, value in dict(outcome=outcome, **extra).items():
+                if got.get(key) != value:
+                    bad.append('%s: %s = %r, wanted %r' % (name, key, got.get(key), value))
+        for chunk in (1, 3, 29, 65536):
+            want('split extras %d' % chunk, text, chunk=chunk, carOperation='import', carSelection=[11],
+                 carPhase='converted', carSlot=11, carVolumes=1, carApproved=False,
+                 recognition={'platform': 'pc', 'approval': True, 'count': 1})
+        want('no newline', text.rstrip('\n'), carOperation='import')
+        want('no result', recognition + plan, 'failed')
+        want('done is not car success', recognition + ev(ev='done', app=tmp), 'failed')
+        want('wrong operation', ev(**dict(result, operation='check')), 'failed')
+        want('failed exit', text, 'failed', status=1)
+        want('cancelled optional', recognition, 'cancelled', status=130, cancelled=True)
+        want('committed before cancel', text, cancelled=True)
+        want('unverified result', ev(**dict(result, verified=False)), 'failed')
+        want('error beats result', text + ev(ev='error', id='cars', msg='failed', fix='retry', log=''), 'failed')
+        want('result is not install success', text, 'failed', mode='build')
+        want('unknown fields', ev(**dict(result, approval_override=True)), 'failed')
+        want('nested unknown fields', ev(**dict(result, cars=[dict(result['cars'][0], policy='local')])), 'failed')
+        want('wrong bool type', ev(**dict(result, verified=1)), 'failed')
+        want('wrong slot type', ev(**dict(result, selection=[True])), 'failed')
+        want('invalid generation', ev(**dict(result, generation='g-../source')), 'failed')
+        want('missing committed generation', ev(**dict(result, generation='')), 'failed')
+        want('slot out of range', ev(**dict(result, selection=[76])), 'failed')
+        want('unverified retained directory', ev(**dict(result, operation='list', generations=[dict(generation='g-invalid', verified=False)])), mode='carsList')
+        want('retained swap slot', ev(**dict(result, operation='list', cars=[dict(slot=89, name='', state='absent', selected=False)])),
+             mode='carsList', carOperation='list')
+    return bad
+
+
+def car_message_failures(binary):
+    bad = []
+    with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+        for operation in ('import', 'remove', 'restore'):
+            message = 'Retained pack failed verification: ' + operation
+            event = ev(ev='cars-result', operation=operation, verified=False, generation='g-' + 'b' * 64,
+                       message=message, selection=[], cars=[], generations=[])
+            got = run_protocol(binary, event, 0, 1, 'cars' + operation.capitalize(), tmp=tmp)
+            if (got.get('outcome'), got.get('message')) != ('failed', message):
+                bad.append(operation)
+        # Missing/mismatched/empty messages still use the generic fallback.
+        for event in ('', ev(ev='cars-result', operation='remove', verified=False,
+                            generation='g-' + 'b' * 64, message='wrong operation', selection=[], cars=[], generations=[]),
+                      ev(ev='cars-result', operation='import', verified=False,
+                         generation='g-' + 'b' * 64, message='', selection=[], cars=[], generations=[])):
+            got = run_protocol(binary, event, 0, 1, 'carsImport', tmp=tmp)
+            if got.get('message') != 'The extras operation ended without a verified result.':
+                bad.append('generic fallback')
+    return bad
+
+
+def refresh_failures(source):
+    """Exercise runCars and launch's real reset; replace only the child transport."""
+    start = source.index('        let python = bundledPython()', source.index('    private func launch('))
+    end = source.index('    func consume(', start)
+    source = source[:start] + '''        state.carResult = CarResult(operation: "list", verified: true, generation: "",
+                                    message: "", selection: [], cars: [], generations: [])
+        finish(.success(app: nil), state)
+    }
+
+''' + source[end:]
+    harness = '''
+        if args.count > 1, args[1] == "--refresh-review-test" {
+            let s = Setup()
+            s.carbon = URL(fileURLWithPath: "/source")
+            let choice = CarChoice(platform: "pc", slot: 1, folder: "300C", spec: [:])
+            s.carChoices = [choice]; s.selectedCarIDs = [choice.id]
+            s.state.recognition = CarRecognition(game: "carbon", platform: "pc", approval_available: true,
+                                                output_verified: false, cars: [RecognizedCar(car_hash: choice.carHash, status: "importable")])
+            s.state.carPlan = CarPlan(measured: true, approved: true, volumes: [], cars: [])
+            s.runCars(.carsList)
+            let keptRecognition = s.state.recognition != nil
+            let keptPlan = s.state.carPlan?.approved == true
+            let importEnabled = !s.busy && s.carbon != nil && s.availableCarSelection && s.state.carPlan?.approved == true
+            let installedUpdated = s.installedCars?.operation == "list"
+            s.selectedCarIDs = []
+            s.runCars(.carsCheck)
+            print(jsonString(["recognition": keptRecognition, "plan": keptPlan, "import": importEnabled,
+                              "installed": installedUpdated, "newCheckClears": s.state.recognition == nil && s.state.carPlan == nil]))
+            exit(0)
+        }
+'''
+    source = source.replace('        let args = CommandLine.arguments', '        let args = CommandLine.arguments\n' + harness)
+    binary = compile_app(source)
+    result = subprocess.run([str(binary), '--refresh-review-test'], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    got = json.loads(result.stdout)
+    return [key for key in ('recognition', 'plan', 'import', 'installed', 'newCheckClears') if not got.get(key)]
+
+
+def extras_flow_failures(binary):
+    result = subprocess.run([str(binary), '--extras-flow-test'], capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        return ['extras flow failed to run']
+    got = json.loads(result.stdout)
+    names = ('busySkipRefused', 'failureIsOptional', 'retryReset', 'cancelled', 'skipped', 'completed', 'retryAfterSuccess', 'retryAfterSkip', 'pageOrder')
+    return [key for key in names if got.get(key) is not True]
+
+
 def env_failures(binary):
     env = dict(os.environ, NFS_FOO='1', NFS_ROOTS='/evil', BOOT_RACE='1', PYTHONPATH='/evil', PYTHONHOME='/evil',
                VIRTUAL_ENV='/evil', PYTHONSTARTUP='/evil', NFSMW_SETUP_HOME='/kept/for/tests')
@@ -161,8 +293,8 @@ def cancel_failures(binary):
 def install_cancel_failures(binary):
     """Cancel in the install stage must let the backend finish its rollback; elsewhere KILL still follows TERM."""
     bad = []
-    with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
-        for stage, want in (('install', {'exit': 130, 'restored': True}), ('recompile', {'exit': 137, 'restored': False})):
+    with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+        for stage, want in (('install', {'exit': 130, 'restored': True}), ('cars', {'exit': 130, 'restored': True}), ('recompile', {'exit': 137, 'restored': False})):
             marker = Path(tmp) / ('restored-' + stage)
             r = subprocess.run([str(binary), '--install-cancel-test', stage, '1', str(marker)],
                                capture_output=True, text=True, timeout=30)
@@ -231,6 +363,75 @@ class AppTests(unittest.TestCase):
             raise unittest.SkipTest('swiftc not available')
         cls.real = compile_app(SWIFT.read_text())
 
+    def test_packaged_car_selection_arguments(self):
+        sys.path.insert(0, str(ROOT / 'tools'))
+        from setup_kit import car_selection, car_sources
+        rows = car_selection.load()
+        pc = [r for r in rows if r['origin']['platform'] == 'pc'][:2]
+        recognition = dict(game='carbon', platform='pc', approval_available=True, output_verified=False,
+                           cars=[dict(car_hash=car_sources.path_hash('CARS/' + r['origin']['folder']),
+                                      status='importable') for r in pc])
+        selected = ['pc:' + str(r['slot']) for r in pc]
+        with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as td:
+            def call(binary, ticks, metadata=car_selection.METADATA, source=recognition):
+                result = subprocess.run([str(binary), '--car-selections-test', str(metadata), td,
+                                         json.dumps(source), json.dumps(ticks)], capture_output=True, text=True, timeout=30)
+                return result, json.loads(result.stdout) if result.returncode == 0 else None
+            result, got = call(self.real, selected)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(Path(got['spec']).read_text()), [car_selection.spec(r) for r in pc])
+            self.assertIn('--cars-import', got['arguments'])
+            self.assertEqual(got['arguments'][got['arguments'].index('--cars-spec') + 1], got['spec'])
+            self.assertEqual(got['defaults'], [])
+            self.assertIn('Chrysler 300C', got['names'])
+            self.assertIn('Porsche 911 GT3 RS', got['names'])
+            for ticks, source in (([], recognition), (selected, dict(recognition, cars=[])),
+                                  (selected, dict(recognition, platform='x360'))):
+                result, got = call(self.real, ticks, source=source)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(got['arguments'], [])
+                self.assertEqual(got['spec'], '')
+            changed = Path(td) / 'edited.json'
+            changed.write_bytes(car_selection.METADATA.read_bytes().replace(b'300C', b'300X', 1))
+            result, _ = call(self.real, selected, metadata=changed)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('failed verification', result.stderr)
+            broken = compile_app(mutate('    if operation == "import" && selection == nil { return [] }', ''))
+            _, got = call(broken, [])
+            self.assertIn('--cars-import', got['arguments'])
+        text = SWIFT.read_text()
+        self.assertNotIn('chooseCarSelection', text)
+        self.assertNotIn('Choose a car selection file', text)
+        self.assertIn('Toggle(car.name', text)
+        self.assertIn('ForEach(["pc", "x360"]', text)
+
+    def test_x360_optional_choices_arguments_and_space(self):
+        def violations(binary):
+            bad = []
+            for mask in range(8):
+                names = [n for i, n in enumerate(("arrest", "textures", "ui")) if mask & (1 << i)]
+                saved = json.dumps(dict(x360_extras=names))
+                result = subprocess.run([str(binary), "--x360-extras-test", saved], capture_output=True, text=True, timeout=20)
+                row = json.loads(result.stdout)
+                expected_bytes = sum(size for n, size in (("arrest", 239_000_000), ("textures", 253_000_000), ("ui", 39_000_000)) if n in names)
+                args = row["arguments"]
+                if row["names"] != names or row["bytes"] != expected_bytes or "--x360-extras" not in args:
+                    bad.append(mask)
+                elif args[args.index("--x360-extras") + 1] != ",".join(names):
+                    bad.append(mask)
+                elif abs(row["requiredGB"] - (12 - (531_000_000 - expected_bytes - (146_000_000 if "textures" in names and "arrest" not in names else 0)) / 1e9)) > 1e-8:
+                    bad.append(mask)
+            return bad
+        self.assertEqual(violations(self.real), [])
+        broken = compile_app(mutate('return X360Extras(arrest: names.contains("arrest"), textures: names.contains("textures"), ui: names.contains("ui"))', 'return X360Extras()'))
+        self.assertEqual(len(violations(broken)), 7)
+        text = SWIFT.read_text()
+        for binding in ("arrest", "textures", "ui"):
+            self.assertIn('isOn: $s.x360Extras.' + binding, text)
+        self.assertIn('x360Extras: x360Extras)', text)
+        pick = text.split('    func chooseX360() {', 1)[1].split('    func chooseCarbon()', 1)[0]
+        self.assertNotIn('runCheck(', pick, 'conversion must wait until the extras have been selected')
+
     # -- the app compiles (arm64, floor 14.5) and behaves on the protocol --
     def test_protocol_real(self):
         self.assertEqual(protocol_failures(self.real), [])
@@ -244,6 +445,70 @@ class AppTests(unittest.TestCase):
     def test_protocol_control_split_line(self):
         broken = compile_app(mutate('pending.append(chunk)', 'pending = chunk'))
         self.assertGreaterEqual(len(protocol_failures(broken, 'split')), 1)
+
+    def test_car_protocol_split_strict_results_and_cancel(self):
+        self.assertEqual(car_protocol_failures(self.real), [])
+
+    def test_unverified_engine_message_and_original_control(self):
+        source = SWIFT.read_text()
+        start = source.index('            if let result = carResult, result.operation == operation, !result.verified,')
+        end = source.index('            guard let result = carResult', start)
+        broken = compile_app(source[:start] + source[end:])
+        self.assertEqual(car_message_failures(broken), ['import', 'remove', 'restore'])
+        self.assertEqual(car_message_failures(self.real), [])
+        print('Engine message violations: old 3 -> new 0')
+
+    def test_refresh_retains_plan_and_original_control(self):
+        source = SWIFT.read_text()
+        start = source.index('        let previous = state\n', source.index('    private func launch('))
+        end = source.index('        let python = bundledPython()', start)
+        original = '        state = RunState(); lines = []; stderrTail = []; splitter = LineSplitter(); cancelled = false; stopping = false\n'
+        broken = source[:start] + original + source[end:]
+        self.assertEqual(refresh_failures(broken), ['recognition', 'plan', 'import'])
+        self.assertEqual(refresh_failures(source), [])
+        print('Refresh state violations: old 3 -> new 0')
+
+    def test_real_backend_events_decode_in_compiled_app(self):
+        sys.path.insert(0, str(ROOT / 'tests/setup'))
+        import test_car_setup_flow as flow
+        fixture = flow.CarSetupLifecycle('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        _, events = fixture.call('--cars-check', '--carbon', str(fixture.f.carbon),
+                                 '--cars-spec', str(fixture.selection), '--cars-measure')
+        with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+            result = run_protocol(self.real, ''.join(ev(**event) for event in events), 0, 1, 'carsCheck', tmp=tmp)
+        self.assertEqual(result['outcome'], 'success')
+        self.assertEqual(result['approvedCars'], [11])
+        self.assertEqual(result['carSlot'], 11)
+        self.assertGreater(result['carBytes'], 0)
+
+    def test_car_protocol_original_mode_dispatch_control(self):
+        # Pinned original dispatch silently treated any new mode as a check.
+        original = '    let mode: RunMode = a[3] == "build" ? .build : .check'
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         'aad5baf103fe8c3da2ccc90d83aa0aad01ab414acf865e52d24017704ea45413')
+        broken = compile_app(mutate('    guard let mode = RunMode(rawValue: a[3]) else { return 2 }', original))
+        bad = car_protocol_failures(broken)
+        self.assertGreaterEqual(len(bad), 1)
+        print('Original extras dispatch: %d violated expectations' % len(bad))
+
+    def test_extras_flow_retry_skip_cancel_and_page_order(self):
+        self.assertEqual(extras_flow_failures(self.real), [])
+
+    def test_extras_skip_busy_control(self):
+        broken = compile_app(mutate('mutating func skip() { guard !busy else { return };',
+                                    'mutating func skip() {'))
+        self.assertIn('busySkipRefused', extras_flow_failures(broken))
+
+    def test_extras_retry_control(self):
+        broken = compile_app(mutate('busy = true; skipped = false; completed = false;',
+                                    'busy = true; skipped = false;'))
+        self.assertIn('retryAfterSuccess', extras_flow_failures(broken))
+
+    def test_extras_cancel_control(self):
+        broken = compile_app(mutate('case .cancelled: completed = false;', 'case .cancelled: completed = true;'))
+        self.assertIn('cancelled', extras_flow_failures(broken))
 
     # -- environment --
     def test_environment_real(self):
@@ -266,7 +531,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(install_cancel_failures(self.real), [])
 
     def test_install_cancel_control_old_unconditional_kill(self):
-        broken = compile_app(mutate('func forceStopAllowed(stage: String) -> Bool { stage != "install" }',
+        broken = compile_app(mutate('func forceStopAllowed(stage: String) -> Bool { stage != "install" && stage != "cars" }',
                                     'func forceStopAllowed(stage: String) -> Bool { true }'))
         self.assertGreaterEqual(len(install_cancel_failures(broken)), 1)
 

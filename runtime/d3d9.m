@@ -13,6 +13,7 @@
 #include "envcube.m"
 #include "realworld_materials.h"
 #include "materials.h"
+#include "live_picture.h"
 
 void *user32_metal_layer(uint32_t hwnd);
 void user32_client_size(uint32_t hwnd, int *cw, int *ch);
@@ -570,7 +571,7 @@ void aa_game_apply(int level) {
     if ((uint32_t)level == M32(FSAA_LEVEL)) return;
     M32(FSAA_LEVEL) = (uint32_t)level;
     boot_reg_set_dword("g_FSAALevel", (uint32_t)level);
-    G[0x00982C39u] = 1;                  // LoadedFlagMaybe: the next eDisplayFrame runs the full device Reset
+    live_picture_request("antialiasing");   // LoadedFlagMaybe: the next eDisplayFrame runs the full device Reset
 }
 void first_run_settings(Cpu *c, const char *where) {     // also from widescreen.c's __getResolutionByIndex (WinMain's call)
     int boot_reg_first_run(void), boot_reg_override(const char *name);
@@ -641,6 +642,7 @@ static int v_SetCursorPosition(Cpu *c) { RET(0, 4); }
 static int v_ShowCursor(Cpu *c) { RET(0, 2); }
 static int v_GetNumberOfSwapChains(Cpu *c) { RET(1, 1); }
 static int v_Reset(Cpu *c) {
+    live_picture_on_reset(c);                  // state read once at start-up (capture cube) is read again
     mat_bone_reset();
     memcpy(dev.pp, G + arg(c, 1), sizeof dev.pp);
     setup_swapchain();
@@ -821,7 +823,9 @@ static Obj *make_texture(int kind, uint32_t vt, uint32_t w, uint32_t h, uint32_t
     return t;
 }
 static int v_CreateTexture(Cpu *c) {           // (this, w, h, levels, usage, fmt, pool, pp, shared)
-    if (getenv("BOOT_TEXLOG")) fprintf(stderr, "tex %ux%u levels %u usage %X fmt %X pool %u\n", arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6));
+    static int texlog = -1;
+    if (texlog < 0) texlog = getenv("BOOT_TEXLOG") != NULL;
+    if (texlog) fprintf(stderr, "tex %ux%u levels %u usage %X fmt %X pool %u\n", arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), arg(c, 6));
     uint32_t w = arg(c, 1), h = arg(c, 2);
     x360_shadow_texture_size(&w, &h);           // X360 shadow-map size
     x360_reflection_size(&w, &h);               // X360 road reflection size

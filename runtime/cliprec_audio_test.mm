@@ -1,22 +1,35 @@
-// Actual six-channel DirectSound PCM and synthetic drawables traverse the
-// production Metal -> VT -> MP4 path. Independent AVAssetReader decode retains
-// PCM timestamps in the oracle and checks content, channel order and A/V drift.
-// Measured controls: original 0/1 audio tracks with 36 decoded video frames;
-// float-PCM control 10 s, 600 video frames / 480000 stereo frames, 0 ms markers,
-// RMS 0.001458, exact container end. Five requested broken controls fail.
-// Startup guard: early accepted/epoch 0/0; removed guard 1/1, rejected (exit 1).
-// Jittered stamps (-5..+5 ms per block): pre-fix RMS 1.339511, markers to 147 ms
-// -> fixed 0.012352, 0 ms. 8 s video pause: pre-fix overflow after 5.467 s ->
-// fixed records on, markers 0 ms after the pause.
-// AAC passes where the codec is available; the probe exits 3 only where the codec
-// factory is restricted. A PCM control never substitutes for decoded AAC
-// priming, padding or quality checks.
+// Load proof: old startup/clock exit 1, fixed AAC/PCM 0 (2.1 s / 20 ms delays); stalled file old 270 written at 5.571 s, fixed 0 at 5.604 s (1 s pause).
+// Six-channel DirectSound PCM and synthetic drawables traverse Metal, VT,
+// independent packet sinks and MP4; AVAssetReader verifies decoded content.
+// Drain regression: original completed=0, Saving=1 at deadline+0.252 s;
+// fixed completed=1, Saving=0 at +0.009 s, restart accepted=1 before I/O
+// returns. Blocked file append: completed=1 at +0.004 s, then safe cleanup.
+// Failed-file endpoint: original requested 1.000000 s for 10 frames;
+// fixed requested/decoded 0.166667/0.166667 s. MOV already decoded to that
+// length on the original; the requested endpoint check detects the bug too.
+// Control: 600 video frames / 480000 stereo samples, markers/drift 0/0 ms,
+// RMS 0.001459, exact endpoint. Removed drain: 46880/48000 samples,
+// tail RMS 0.667342 vs 0.002014; real/removed drain pass/fail 5/5 each.
+// File stalled >=5 s: healthy 360/360 video and all audio packets; 0 missing,
+// decoded file offset/drift 0/0 ms. Failed file: healthy 60/60, file prefix 10.
+// Callback fold mutant 12673 ns >9260 ns budget; shared queue 0/300 vs 300/300
+// (clip_packets_test.py). Both broken runs exit 1; controls pass.
+// Delayed file append: captured endpoint 48000 while one video packet waits.
+// Startup: accepted/epoch 0/0, removed guard 1/1 (exit 1). Jitter +-5 ms:
+// RMS 0.012352, markers 0 ms; 8 s pause: resumed RMS 0.001445, markers 0 ms.
+// Live focus gap (12 s without frames, real ClipAudio, host AAC: the TS muxer takes AAC only): the file with live
+// matches the run without live (864000 samples, 480128 zero samples) and live cuts 6 segments from 346 held frames;
+// the old shared target (file sound to the held frames' end) gives 0 zero samples, live sound stopped at the video
+// end gives 0 gap segments, and a leaked held surface 120 pool drops (capture overloaded). All three exit/compare fail.
+// Actual AAC priming/padding and quality run separately when the codec factory
+// is available. A PCM or synthetic converter contract pass never substitutes.
 #define CLIPREC_AUDIO_TEST 1
 #include "../host/audio/dsound_host.h"
 #include <vector>
 #include <cmath>
 #include <algorithm>
 #include <mach/mach_time.h>
+#include <objc/runtime.h>
 struct AudioBlock { DsTimedMixBlock meta; std::vector<float> pcm; };
 static std::vector<AudioBlock> oracle;
 static DsCaptureFn recorderReceive;
@@ -39,10 +52,19 @@ static DsResult fixtureCaptureStart(DsCaptureFn fn,void *context) {
     return ds_capture_start(receiveOracle,nullptr);
 }
 #define ds_capture_start fixtureCaptureStart
+#if defined(CLIPREC_CASE) && (CLIPREC_CASE==8 || CLIPREC_CASE==9)
+// Live without a network poster: the capture side sees a running stream; segments go nowhere.
+extern "C" int fixtureLiveStatus(void) { return 1; }
+#define livestream_status fixtureLiveStatus
+#endif
+#include <Foundation/Foundation.h>
+static double fixtureStartupTime=-1;
+static double fixtureUptime() { return fixtureStartupTime<0 ? NSProcessInfo.processInfo.systemUptime : fixtureStartupTime; }
 #define main video_fixture_main
 #include "cliprec_test.mm"
 #undef main
 #undef ds_capture_start
+#undef livestream_status
 // Include the actual mixer to exercise rate rebases without a physical device.
 #include "../host/audio/dsound_host.cpp"
 static double ticksToSeconds(uint64_t ticks) {
@@ -67,6 +89,7 @@ struct AudioFixture {
         for(int k=0;k<4;k++) { w[4+k]=48000u>>(8*k); w[8+k]=(48000u*24)>>(8*k); }
         require(ds_device_create_buffer(d,0,source.size()*sizeof(float),w,source.data(),&b)==DS_OK,"six-channel float buffer");
         require(ds_buffer_play(b,DSBPLAY_LOOPING)==DS_OK,"play generated PCM");
+        if(!oracle.empty()) d->manual_host_time=oracle.back().meta.first_sample_host_time+frame_ticks(oracle.back().meta.frames,oracle.back().meta.sample_rate);
     }
     void render(size_t count=256) {
         while(count) {
@@ -82,7 +105,8 @@ struct AudioFixture {
             if(++attempts>=4000) { fprintf(stderr,"oracle blocks=%zu last=%.9f want=%.9f\n",oracle.size(),oracle.empty()?0:ticksToSeconds(oracle.back().meta.first_sample_host_time),time); require(false,"bounded fixture audio clock advance"); } render();
         }
     }
-    void rate(unsigned rate) { std::lock_guard<std::mutex> lock(d->m); rebase_rate(*d,rate); }
+    void rate(unsigned rate) { std::lock_guard<std::mutex> lock(d->m);
+        auto next=d->manual_host_time+frame_ticks(d->written-d->manual_frame,d->cfg.mix_rate); rebase_rate(*d,rate); d->manual_host_time=next; }
     ~AudioFixture() { ds_buffer_release(b); ds_device_release(d); }
 };
 static std::vector<float> reference(double epoch,unsigned frames) {
@@ -170,32 +194,92 @@ static double rmsError(const std::vector<float> &decoded,const std::vector<float
     }
     return sqrt(e/fmax(p,1e-20));
 }
+// Delay actual writer readiness so its own sink thread must retry.
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==3
+static id delayedInput;
+static std::atomic<bool> releaseInput{false};
+static BOOL (*originalReady)(id,SEL);
+static BOOL delayedReady(id input,SEL selector) {
+    return input==delayedInput && !releaseInput ? NO : originalReady(input,selector);
+}
+#endif
 static void audioProof(bool fallback,bool hdr,unsigned seconds,bool drops=false,bool transitions=false,bool jitter=false) {
     oracle.clear(); jitterSeconds=jitter?0.005:0; auto fixture=std::make_unique<AudioFixture>();
+    fixtureStartupTime=NSProcessInfo.processInfo.systemUptime;
     ClipSession *s=start(fallback,W,H,hdr?linearPattern(0):nil,1,[&] {
         fixture->render(4096);
         require(oracle.size()==16,"PCM subscription starts before video preparation");
     });
     double epoch=ticksToSeconds(oracle.front().meta.first_sample_host_time)+0.2007;
     double firstAudio=ticksToSeconds(oracle.front().meta.first_sample_host_time);
+    if(getenv("CLIPREC_FIXTURE_LOAD")) usleep(2100000);
     frame(s,0,firstAudio-0.05);
+    fixtureStartupTime=-1;
     printf("startup: early_video_accepted=%u epoch_set=%u required=0/0\n",s->accepted.load(),s->epoch!=0); fflush(stdout);
     require(!s->epoch && s->accepted==0 && !s->stopping,"video waits for PCM spanning first presentation");
     unsigned total=seconds*60;
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==4
+    std::atomic<unsigned> videoPackets{0},audioPackets{0};
+    std::atomic<bool> packetFormatOK{true};
+    std::vector<clip::OwnedPacket> retained;
+    auto healthy=std::make_shared<clip::Sink>([&](const clip::OwnedPacket& p) {
+        if(p->track==clip::Track::video) ++videoPackets;
+        else {
+            ++audioPackets;
+            const auto *asbd=CMAudioFormatDescriptionGetStreamBasicDescription(p->format());
+#ifdef CLIPREC_PCM_CONTROL
+            if(!asbd || asbd->mFormatID!=kAudioFormatLinearPCM) packetFormatOK=false;
+#else
+            size_t cookie=0; CMAudioFormatDescriptionGetMagicCookie(p->format(),&cookie);
+            if(!asbd || asbd->mFormatID!=kAudioFormatMPEG4AAC || !cookie) packetFormatOK=false;
+#endif
+            if(!asbd || asbd->mSampleRate!=48000 || asbd->mChannelsPerFrame!=2 || !p->bytes) packetFormatOK=false;
+        }
+        retained.push_back(p); return clip::Result::consumed;
+    });
+    dispatch_sync(s->work,^{ s->outputs.add(healthy); s->stallFile=true; });
+    double stallStart=NSProcessInfo.processInfo.systemUptime;
+    auto released=std::make_shared<std::atomic<uint64_t>>(0);
+#endif
     for(unsigned i=0;i<total;i++) {
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==4
+        while(NSProcessInfo.processInfo.systemUptime<stallStart+(double)i/60) usleep(500);
+        if(i==270) {
+            if(getenv("CLIPREC_FIXTURE_LOAD")) usleep(1000000); while(videoPackets<270 && !healthy->failed()) usleep(500);
+            printf("stalled_file: elapsed=%.3f healthy_video=%u expected=270 file_video=%u\n",NSProcessInfo.processInfo.systemUptime-stallStart,videoPackets.load(),s->accepted.load()); fflush(stdout);
+            require(videoPackets==270 && s->accepted==0,"five-second file stall does not delay healthy packets");
+        }
+        if(i==300) { released->store(llround((NSProcessInfo.processInfo.systemUptime-stallStart)*1000000)); s->stallFile=false; }
+#endif
         if(s->stopping) { fprintf(stderr,"unexpected stop frame=%u reason=%s\n",i,s->error.UTF8String); require(false,"recording remains active"); }
         double time=epoch+(double)i/60;
         if(transitions) {
-            while(ticksToSeconds(mach_absolute_time())<time) usleep(500);
+            if(getenv("CLIPREC_FIXTURE_LOAD")) usleep(20000);
             if(i==30) fixture->rate(44100);
             if(i==45) fixture=std::make_unique<AudioFixture>();
         }
+        // On the work queue, latch every ordinary pump off before the last
+        // frame advances videoEnd. Only stop's final=true pump may drain it.
+        if(i+1==total) dispatch_sync(s->work,^{ s->audio->forcePressure=true; });
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==3
+        if(i+1==total) {
+            double deadline=NSProcessInfo.processInfo.systemUptime+10;
+            while(!s->fileSink->drained() && NSProcessInfo.processInfo.systemUptime<deadline) usleep(500);
+            require(s->fileSink->drained(),"file prefix drains before readiness injection");
+        }
+        if(i+1==total) dispatch_sync(s->work,^{
+            delayedInput=s->file->input;
+            Method ready=class_getInstanceMethod([delayedInput class],@selector(isReadyForMoreMediaData));
+            originalReady=(BOOL (*)(id,SEL))method_getImplementation(ready);
+            method_setImplementation(ready,(IMP)delayedReady);
+        });
+#endif
         // Deliberately leave the last audio block for stop's final drain.
         if(i+1<total) fixture->through(time+1.0/60-0.010);
         if(drops && i==total/2) {
-            s->forceBackpressure=true;
+            s->forceEncoderPressure=true;
             frame(s,i%N,time,true,false,true,hdr?linearPattern(i%N):nil);
-            s->forceBackpressure=false;
+            s->forceEncoderPressure=false;
         } else frame(s,i%N,time,true,i%2,true,hdr?linearPattern(i%N):nil);
     }
     fixture->through(epoch+seconds+0.003);
@@ -205,7 +289,40 @@ static void audioProof(bool fallback,bool hdr,unsigned seconds,bool drops=false,
         inside|=begin<epoch+seconds && begin+(double)block.meta.frames/block.meta.sample_rate>epoch+seconds;
     }
     require(inside,"stop trims through the middle of a PCM block");
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==3
+    dispatch_sync(s->work,^{
+        printf("delayed_append: video_end_samples=%lld queued=%lu capture_required=48000\n",
+            (long long)llround(s->videoEnd*48000),(unsigned long)s->fileSink->queued()); fflush(stdout);
+        require(llround(s->videoEnd*48000)==48000 && s->fileSink->queued()>=1,"capture endpoint advances independently of file readiness");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_MSEC),s->work,^{ releaseInput=true; });
+    });
+#endif
+    // The encoder-to-capture-thread barrier determines the captured endpoint,
+    // independently of any file input's readiness.
+    double deadline=NSProcessInfo.processInfo.systemUptime+5;
+    __block bool appended=false;
+    do {
+        dispatch_sync(s->work,^{ appended=llround(s->videoEnd*48000)==seconds*48000; });
+        if(appended || s->stopping) break;
+        usleep(1000);
+    } while(NSProcessInfo.processInfo.systemUptime<deadline);
+    require(appended,"bounded wait for last compressed video packet");
+    dispatch_sync(s->work,^{
+        int64_t endSamples=llround(s->videoEnd*48000);
+        bool drained=s->audio->drained(s->videoEnd);
+        printf("before_shutdown: video_end_samples=%lld expected=%u audio_drained=%u required=0\n",
+            (long long)endSamples,seconds*48000,drained); fflush(stdout);
+        require(endSamples==seconds*48000,"last video frame reaches expected sample count");
+        require(!drained,"final audio remains undrained until shutdown");
+    });
     cliprec_shutdown(); finishedOK(s); jitterSeconds=0;
+#if defined(CLIPREC_CASE) && CLIPREC_CASE==4
+    printf("fanout: video=%u/%u audio=%u missing=%u format_ok=%u peak_file_bytes=%zu stall_us=%llu\n",videoPackets.load(),total,audioPackets.load(),total-videoPackets.load(),packetFormatOK.load(),s->fileSink->peakBytes(),(unsigned long long)released->load()); fflush(stdout);
+    require(released->load()>=5000000,"file sink remained stalled for five seconds");
+    require(videoPackets==total && audioPackets>0 && packetFormatOK && !healthy->failed(),"owned video/audio packets reach healthy sink with no gaps");
+    require(healthy->delivered()==s->fileSink->delivered(),"file and healthy sinks receive the same packet set");
+    require(!retained.empty() && CMSampleBufferDataIsReady(retained.back()->sample()),"packets and formats survive encoder shutdown");
+#endif
     AVURLAsset *asset=[AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:s->destination] options:nil];
     AVAssetTrack *video=[asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     AVAssetReader *vr=[[AVAssetReader alloc] initWithAsset:asset error:nil];
@@ -343,7 +460,7 @@ static void pauseProof() {
         maxOffset=fmax(maxOffset,fabs(offset)); worst=fmax(worst,best);
     }
     double tail=rmsError(audio.pcm,expected,(before+pause)*800,after*800);
-    printf("pause: video_frames=%u duration=%.6f audio_tracks=%u resumed_RMS=%.6f silence=%llu queue_peak=%llu/262144\n",
+    printf("pause: video_frames=%u duration=%.6f audio_tracks=%u resumed_RMS=%.6f silence=%llu queue_peak=%llu/96000\n",
         video.count,video.duration,audio.tracks,tail,(unsigned long long)s->audioSilence,(unsigned long long)s->audioQueuePeak); fflush(stdout);
     require(video.count==before+after && fabs(audio.duration-videoEnd)<0.001,"paused clip keeps both sides of the gap");
     require(audio.tracks==1 && maxOffset<=10 && worst<=0.05 && tail<=0.05,"A/V markers in sync after the pause");
@@ -384,12 +501,12 @@ static void pressureProof() {
     }
     for(unsigned i=0;i<200;i++) {
         __block bool drained=false;
-        dispatch_sync(s->work,^{ s->audio->pump(s->epoch,s->videoEnd,false); drained=s->accepted==N && s->packets.count==0 && s->queuedPackets==0 && s->audio->drained(s->videoEnd); });
+        dispatch_sync(s->work,^{ s->audio->pump(s->epoch,s->videoEnd,false); drained=s->accepted==N && s->fileSink->drained() && s->queuedPackets==0 && s->audio->drained(s->videoEnd); });
         if(drained) break;
         usleep(5000);
     }
     dispatch_sync(s->work,^{ s->audio->forcePressure=true; });
-    fixture.render(262144+4096);
+    fixture.render(96000+4096);
     dispatch_sync(s->work,^{ if(s->audio) s->audio->forcePressure=false; });
     require(!dispatch_group_wait(s->finished,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"audio pressure stop bounded");
     require(s->ended && s->published && s->error && [s->error containsString:@"Audio capture queue"],"capture overflow surfaces error and publishes valid prefix");
@@ -398,8 +515,185 @@ static void pressureProof() {
     auto audio=decodeAudio(s->destination);
     printf("overflow prefix: tracks=%u frames=%zu videoEnd=%.6f\n",audio.tracks,audio.pcm.size()/2,s->videoEnd); fflush(stdout);
     require(audio.tracks==1 && audio.pcm.size()/2>=(size_t)llround(s->videoEnd*48000),"audio overflow retains complete prior audio prefix");
-    require(s->audioQueuePeak<=262144 && s->queuedPackets==0 && s->outstanding==0,"queues stay bounded and retire");
-    printf("pressure: prefix_frames=%u audio_frames=%zu queue_peak=%llu/262144 error=%s\n",prefix.count,audio.pcm.size()/2,(unsigned long long)s->audioQueuePeak,s->error.UTF8String); fflush(stdout);
+    require(s->audioOverflow>0,"callback overflow remains counted after shutdown");
+    require(s->audioQueuePeak<=96000 && s->queuedPackets==0 && s->outstanding==0,"queues stay bounded and retire");
+    printf("pressure: prefix_frames=%u audio_frames=%zu queue_peak=%llu/96000 error=%s\n",prefix.count,audio.pcm.size()/2,(unsigned long long)s->audioQueuePeak,s->error.UTF8String); fflush(stdout);
+}
+static CMTime requestedFileEnd=kCMTimeInvalid;
+static void (*originalEndSession)(id,SEL,CMTime);
+static void observeEndSession(id writer,SEL selector,CMTime end) {
+    requestedFileEnd=end;
+    originalEndSession(writer,selector,end);
+}
+static void failedSinkProof() {
+    Method method=class_getInstanceMethod(AVAssetWriter.class,@selector(endSessionAtSourceTime:));
+    originalEndSession=(void(*)(id,SEL,CMTime))method_setImplementation(method,(IMP)observeEndSession);
+    requestedFileEnd=kCMTimeInvalid;
+    oracle.clear(); AudioFixture fixture;
+    ClipSession *s=start(false,W,H,nil,1,[&]{ fixture.render(4096); });
+    double epoch=ticksToSeconds(oracle.front().meta.first_sample_host_time)+0.2007;
+    std::atomic<unsigned> video{0},audio{0};
+    auto healthy=std::make_shared<clip::Sink>([&](const clip::OwnedPacket& p) {
+        if(p->track==clip::Track::video) ++video; else ++audio;
+        return clip::Result::consumed;
+    });
+    dispatch_sync(s->work,^{ s->outputs.add(healthy); });
+    for(unsigned i=0;i<60;++i) {
+        fixture.through(epoch+(i+1)/60.0+0.01);
+        if(i==10) s->forceFileFailure=true;
+        frame(s,i%N,epoch+i/60.0);
+        require(!s->stopping && active,"file failure leaves capture and healthy sink active");
+    }
+    cliprec_shutdown(); finishedOK(s);
+    printf("failed_file: healthy_video=%u/60 audio=%u file_failed=%d file_video=%u stopping_error=%s\n",video.load(),audio.load(),s->fileSink->failed(),s->accepted.load(),s->error.UTF8String); fflush(stdout);
+    require(video==60 && audio>0 && !healthy->failed() && s->fileSink->failed(),"failed file induces zero healthy sink gaps");
+    Decoded prefix=decode(s->destination);
+    double expected=s->accepted.load()/60.0;
+    method_setImplementation(method,(IMP)originalEndSession);
+    double requested=CMTimeGetSeconds(requestedFileEnd);
+    printf("failed_file endpoint: frames=%u duration=%.6f requested=%.6f expected=%.6f capture=%.6f\n",prefix.count,prefix.duration,requested,expected,s->videoEnd); fflush(stdout);
+    require(s->error && s->published && prefix.valid,"failed file retains an explicit-error decodable prefix");
+    require(prefix.count==10 && fabs(prefix.duration-expected)<0.001 && fabs(requested-expected)<0.001,"failed file ends at its last written frame");
+}
+static void blockedSinkProof() {
+    oracle.clear(); AudioFixture fixture;
+    ClipSession *s=start(false,W,H,nil,1,[&]{ fixture.render(4096); });
+    struct Block { dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0); std::atomic<bool> returned{false}; };
+    auto block=std::make_shared<Block>();
+    auto sink=std::make_shared<clip::Sink>([block](const clip::OwnedPacket&) {
+        dispatch_semaphore_signal(block->entered);
+        dispatch_semaphore_wait(block->release,DISPATCH_TIME_FOREVER);
+        block->returned=true; return clip::Result::consumed;
+    });
+    std::weak_ptr<clip::Sink> weak=sink;
+    auto *registration=&sink;
+    dispatch_sync(s->work,^{ s->outputs.add(*registration); });
+    double epoch=ticksToSeconds(oracle.front().meta.first_sample_host_time)+0.2007;
+    for(unsigned i=0;i<3;++i) { fixture.through(epoch+(i+1)/60.0+0.01); frame(s,i,epoch+i/60.0); }
+    require(!dispatch_semaphore_wait(block->entered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"fake sink is blocked in I/O");
+    cliprec_stop(); syncWork(s);
+    double deadline=s->stopDeadline+6;
+    double remaining=fmax(0,deadline-NSProcessInfo.processInfo.systemUptime)+0.25;
+    bool completed=!dispatch_group_wait(s->finished,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(remaining*NSEC_PER_SEC)));
+    char status[256]; cliprec_status(status,sizeof status);
+    printf("blocked_sink: completed=%u deadline_delta=%.3f saving=%u returned=%u\n",completed,
+        NSProcessInfo.processInfo.systemUptime-deadline,!strcmp(status,"Saving..."),block->returned.load()); fflush(stdout);
+    require(completed && strcmp(status,"Saving...") && !block->returned,"blocked I/O cannot extend drain deadline");
+    require(sink->failed() && sink->queued()==0,"timed-out sink fails and releases queued packets");
+    sink.reset();
+    require(weak.expired(),"recorder releases failed sink references without joining blocked I/O");
+    cliprec_action(0); ClipSession *next=current;
+    printf("blocked_sink restart: accepted=%u\n",next!=s && active.load()); fflush(stdout);
+    require(next!=s && active,"menu accepts a new recording before old I/O returns");
+    cliprec_shutdown();
+    dispatch_semaphore_signal(block->release);
+    for(unsigned i=0;i<1000 && !block->returned;++i) usleep(1000);
+    require(block->returned,"detached consumer safely returns after session completion");
+}
+#if defined(CLIPREC_CASE) && (CLIPREC_CASE==8 || CLIPREC_CASE==9)
+#ifndef CLIPREC_LIVE_GAP
+#define CLIPREC_LIVE_GAP 1
+#endif
+static uint64_t liveSegmentCount(ClipSession *s) {
+    __block uint64_t n=0;
+    dispatch_sync(s->work,^{ n=s->liveSegments?s->liveSegments->stats().segments:0; });
+    return n;
+}
+// A focus gap (Space swipe) through the real ClipAudio path: 3 s presented at 60 fps, 12 s with no frame while the
+// mixer keeps running, 3 s presented. Case 8 records a file (with or without live: its sound must be identical);
+// case 9 is live only. Live must keep cutting segments through the gap from held frames and its own sound.
+static void liveGapProof(bool live,bool file) {
+    oracle.clear(); AudioFixture fixture; testClock=0;
+    { std::lock_guard<std::mutex> lock(control); current=nil; }
+    liveState=0;
+    ClipSession *s=nil;
+    if(file) { cliprec_action(0); s=current; if(live) { s->broadcast=true; liveState=1; } }
+    else { require(cliprec_live_start()==1,"live-only Go"); s=current; }
+    fixture.render(4096);
+    @autoreleasepool {
+        TestDrawable *d=drawable();
+        d.texture=[gpu newTextureWithDescriptor:[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:W height:H mipmapped:NO]];
+        id<MTLCommandBuffer> cb=[commands commandBuffer];
+        cliprec_present(cb,pattern(0),d,1);
+        [cb commit]; [cb waitUntilCompleted]; syncWork(s);
+    }
+    require(s->ready && (!live || (liveState==2 && s->liveEncoder)),"capture and live prepared");
+    double epoch=ticksToSeconds(oracle.front().meta.first_sample_host_time)+0.2007;
+    const unsigned before=180,gap=720,after=180,total=before+gap+after;
+    uint64_t atGap=0,afterGap=0;
+    for(unsigned i=0;i<total && !s->stopping;i++) {
+        double time=epoch+(double)i/60;
+        testClock=time;
+        if(i+1<total) fixture.through(time+1.0/60-0.010);
+        if(i==before) atGap=liveSegmentCount(s);
+        if(i<before || i>=before+gap) frame(s,i%N,time);
+        // The recorder's 10 ms tick, run synchronously since the fixture is faster than real time.
+        else dispatch_sync(s->work,^{ if(![s pumpAudio:s->epoch final:false]) [s fail:s->audio->error]; [s pump]; });
+        if(live) dispatch_sync(s->work,^{ if(s->liveEncoder) s->liveEncoder->complete(); });
+        if(i+1==before+gap) afterGap=liveSegmentCount(s);
+    }
+    __block uint64_t held=0; __block bool failed=false; __block const char *reason=nullptr;
+    dispatch_sync(s->work,^{
+        held=s->liveHeldFrames;
+        if(s->liveSegments) { auto stats=s->liveSegments->stats(); failed=stats.failed; reason=stats.reason; }
+    });
+    printf("live_gap: live=%d file=%d gap_s=%.1f segments_at_gap=%llu gap_segments=%llu held=%llu live_state=%d failed=%d reason=%s pool_drops=%u stopping=%u error=%s\n",
+        live,file,gap/60.0,(unsigned long long)atGap,(unsigned long long)(afterGap-atGap),(unsigned long long)held,liveState.load(),failed,
+        reason?reason:"none",s->poolDrops.load(),s->stopping.load(),s->error?s->error.UTF8String:"none"); fflush(stdout);
+    require(!s->stopping && !s->error,"capture survives the focus gap");
+    // Held frames and the same capture surfaces: no presented frame is dropped for a free surface.
+    require(s->poolDrops==0,"live and its held surface leave the recording its surfaces at 60 fps");
+    if(live) require(liveState==2 && !failed && afterGap-atGap>=4 && held>=300,"live keeps cutting segments through the gap");
+    fixture.through(epoch+total/60.0+0.003);
+    cliprec_shutdown();
+    if(!file) { require(!dispatch_group_wait(s->finished,dispatch_time(DISPATCH_TIME_NOW,10*NSEC_PER_SEC)),"live-only stop finalizes"); return; }
+    finishedOK(s);
+    DecodedAudio audio=decodeAudio(s->destination);
+    size_t samples=audio.pcm.size()/2,zero=0;
+    for(size_t n=0;n<samples;n++) zero+=audio.pcm[2*n]==0 && audio.pcm[2*n+1]==0;
+    double videoEnd=total/60.0;
+    auto expected=reference(epoch,(unsigned)llround(videoEnd*48000));
+    double tail=rmsError(audio.pcm,expected,(before+gap)*800,after*800);
+    // Compared verbatim with the same run without live by cliprec_audio_test.py.
+    printf("live_gap_file: video_end_samples=%lld audio_samples=%zu zero_samples=%zu duration=%.6f resumed_RMS=%.3f\n",
+        (long long)llround(videoEnd*48000),samples,zero,audio.duration,tail); fflush(stdout);
+    require(audio.tracks==1 && fabs(audio.duration-videoEnd)<0.001 && tail<=0.05,"file keeps both sides of the gap in sync");
+}
+#endif
+static dispatch_semaphore_t fileIOEntered,fileIORelease;
+static BOOL (*originalAppend)(id,SEL,CMSampleBufferRef);
+static BOOL blockedAppend(id input,SEL selector,CMSampleBufferRef sample) {
+    dispatch_semaphore_signal(fileIOEntered);
+    dispatch_semaphore_wait(fileIORelease,DISPATCH_TIME_FOREVER);
+    return originalAppend(input,selector,sample);
+}
+static void blockedFileProof() {
+    oracle.clear(); AudioFixture fixture;
+    ClipSession *s=start(false,W,H,nil,1,[&]{ fixture.render(4096); });
+    std::weak_ptr<ClipFile> oldFile=s->file;
+    fileIOEntered=dispatch_semaphore_create(0); fileIORelease=dispatch_semaphore_create(0);
+    Method method=class_getInstanceMethod(AVAssetWriterInput.class,@selector(appendSampleBuffer:));
+    originalAppend=(BOOL(*)(id,SEL,CMSampleBufferRef))method_setImplementation(method,(IMP)blockedAppend);
+    double epoch=ticksToSeconds(oracle.front().meta.first_sample_host_time)+0.2007;
+    fixture.through(epoch+0.03); frame(s,0,epoch);
+    require(!dispatch_semaphore_wait(fileIOEntered,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC)),"file append is blocked in I/O");
+    cliprec_stop(); syncWork(s);
+    double deadline=s->stopDeadline+6;
+    double remaining=fmax(0,deadline-NSProcessInfo.processInfo.systemUptime)+0.25;
+    bool completed=!dispatch_group_wait(s->finished,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(remaining*NSEC_PER_SEC)));
+    printf("blocked_file: completed=%u deadline_delta=%.3f writer_owned_by_consumer=%u\n",completed,
+        NSProcessInfo.processInfo.systemUptime-deadline,!oldFile.expired()); fflush(stdout);
+    require(completed && !s->file && !s->fileSink && !oldFile.expired(),"blocked file state detaches without concurrent writer finalization");
+    require(s->error && !s->published && !s->encoder && !s->audio,"blocked file retires capture resources with an error");
+    cliprec_action(0); ClipSession *next=current;
+    require(next!=s && active,"new recording starts while old file append is blocked");
+    cliprec_shutdown();
+    dispatch_semaphore_signal(fileIORelease);
+    for(unsigned i=0;i<2000 && (!oldFile.expired() ||
+            [NSFileManager.defaultManager fileExistsAtPath:s->temporary]);++i) usleep(1000);
+    method_setImplementation(method,(IMP)originalAppend);
+    require(oldFile.expired(),"blocked file resources retire after its in-flight append returns");
+    require(![NSFileManager.defaultManager fileExistsAtPath:s->temporary],"abandoned file is removed after I/O returns");
 }
 int main(int argc, char **argv) { @autoreleasepool {
     require(argc==2,"injected worktree scratch");
@@ -425,13 +719,27 @@ int main(int argc, char **argv) { @autoreleasepool {
     UInt32 bytes=sizeof(b);
     OSStatus rc=AudioFormatGetProperty(kAudioFormatProperty_FormatInfo,0,nullptr,&bytes,&b);
     if(!rc) rc=AudioConverterNew(&a,&b,&converter);
-    if(rc) { printf("SKIP: AAC encoder unavailable rc=%d; original silent clip confirmed\n",(int)rc); return 3; }
+    if(rc) { printf("SKIP: AAC encoder unavailable: codec factory rc=%d\n",(int)rc); return 3; }
     AudioConverterDispose(converter);
 #endif
 #if defined(CLIPREC_CASE) && CLIPREC_CASE==1
     audioProof(false,false,3,false,false,true); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==3
+    audioProof(false,false,1); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==7
+    blockedFileProof(); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==6
+    blockedSinkProof(); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==5
+    failedSinkProof(); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==4
+    audioProof(false,false,6); puts("cliprec_audio: PASS"); return 0;
 #elif defined(CLIPREC_CASE) && CLIPREC_CASE==2
     pauseProof(); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==8
+    liveGapProof(CLIPREC_LIVE_GAP,true); puts("cliprec_audio: PASS"); return 0;
+#elif defined(CLIPREC_CASE) && CLIPREC_CASE==9
+    liveGapProof(true,false); puts("cliprec_audio: PASS"); return 0;
 #endif
     audioProof(false,false,1);
 #ifndef CLIPREC_MUTANT

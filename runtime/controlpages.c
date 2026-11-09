@@ -15,6 +15,8 @@ void f_0051D6E0_orig(Cpu *c);
 void f_0052A780_orig(Cpu *c);
 void f_0051D410(Cpu *c);
 void f_0052AC70(Cpu *c);
+void trigopt_controls(Cpu *c);
+int trigopt_options(Cpu *c, int event);
 
 static void select_page(uint32_t self) {
     if (controls_owner != self) {
@@ -29,7 +31,10 @@ void f_0052AC70(Cpu *c) {
     // its capture widgets. A revisit takes a new baseline, as the PC screen does.
     select_page(c->ecx);
     padbind_controls_dump(controls_page == PAGE_DRAG ? "controls snapshot: Drag" : "controls snapshot: Default");
+    uint32_t self = c->ecx;
     f_0052AC70_orig(c);
+    Cpu q = *c; q.ecx = self;
+    trigopt_controls(&q);
 }
 
 void f_0052AF20(Cpu *c) {
@@ -67,12 +72,15 @@ void f_0052AB90(Cpu *c) {
 
 void f_0051D4B0(Cpu *c) {
     select_page(c->ecx);
+    Cpu q = *c;
     f_0051D4B0_orig(c);                 // retail returns true when UNCHANGED
+    if (!trigopt_options(&q, 0)) c->eax &= ~255u;
 }
 
 void f_0051D590(Cpu *c) {
     uint32_t self = c->ecx;
     select_page(self);
+    trigopt_options(c, 1);
     f_0051D590_orig(c);
     select_page(self);                // publish restored records, never the discarded edit
     padbind_controls_dump("controls page cancelled");
@@ -80,6 +88,7 @@ void f_0051D590(Cpu *c) {
 
 void f_0051D6E0(Cpu *c) {
     select_page(c->ecx);
+    trigopt_options(c, 2);
     if (controls_page != PAGE_DRAG) { f_0051D6E0_orig(c); return; }
     padbind_drag_defaults(c);
     // Drag ignores the shared Control Type preset. Do not reset Default's flag.
@@ -87,6 +96,7 @@ void f_0051D6E0(Cpu *c) {
 }
 
 void f_0052A780(Cpu *c) {
+    trigopt_options(c, 3);
     if (controls_owner == c->ecx) {
         padbind_edit_set(PADBIND_DEFAULT);
         controls_owner = 0;

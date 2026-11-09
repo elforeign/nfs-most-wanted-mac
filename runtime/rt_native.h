@@ -19,3 +19,10 @@ typedef void (*RTNativeEncode)(id<MTLCommandBuffer> buffer, const void *bytes,
 // is added to buffers which never call this function. Recording is single-threaded.
 void rt_native_encode(id<MTLCommandBuffer> buffer, RTNativeEncode encode,
                       const void *bytes, size_t size, NSArray *resources);
+
+// Replays a recorded render list into a target 1/div the size of the one it was recorded for: viewports and
+// scissors are divided (scissors clamped to width x height), fragment texture `from` is bound as `to`, and when
+// bytes_length is non-zero the fragment-bytes block of that index and length gets bytes_value at bytes_offset.
+// keep: leave the list's recording in place for a later replay (a diagnostic second replay of the same draws).
+typedef struct { uint32_t div, width, height; void *from, *to; uint32_t bytes_index, bytes_length, bytes_offset; float bytes_value; } RTListScale;
+void rt_render_list_replay_scaled(id list, id<MTLRenderCommandEncoder> encoder, const RTListScale *s, int keep);

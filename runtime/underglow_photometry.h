@@ -5,6 +5,10 @@ typedef struct { double flux, x, y; } UGPrimary;
 extern const UGPrimary ug_primaries[3];
 /* Presets are RGB bit masks; 0 is Off. No UI policy is implied. */
 int ug_preset_rgb(unsigned preset, double rgb[3]);
+/* Controller duties for a preset's named colour: single channels run at full duty; a
+ * two-channel mix balances its two Rec.709 channels (yellow, cyan, magenta hues) and
+ * all three solve for equal Rec.709 channels (D65 white). The largest duty is 1. */
+int ug_preset_duties(unsigned preset, double duties[3]);
 int ug_mix_xyz(const double rgb[3], double xyz[3]);
 /* Nonnegative, unbounded linear Rec.709; clipping followed by Y restoration.
  * relative_y_error reports the signed final Y error, before exposure/tone mapping. */

@@ -1,4 +1,5 @@
 """Public report review, consent, privacy and actual F10 input; fake transports only.
+Wall time (same load, back to back): 195 s with the 51 builds in sequence, 52 s with four at a time; identical result lines.
 
 Proof: public 401 checks/0 failures; private 6/0; 49 broken controls rejected.
 Pinned original 13984ab7: 16 checks/11 failures, including fake creation, fallback copy,
@@ -15,6 +16,7 @@ Room-code checks cover both destination snapshots and all six text attachments.
 Both sides' large-input cases use the snapshot section/body bounds and constant fallback URL.
 
 """
+import concurrent.futures
 import os
 import runpy
 from unittest.mock import patch
@@ -93,7 +95,7 @@ def build_and_run(base, name, mutation=None, public=True):
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-Wno-unused-variable', '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fobjc-arc', f'-DNFS_PUBLIC={int(public)}',
                '-I' + str(ROOT / 'recomp'), '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME),
-               str(work / 'report_github_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'),
+               str(work / 'report_github_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'ImageIO', '-framework', 'QuartzCore', '-framework', 'Metal',
                '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
@@ -187,10 +189,12 @@ def main():
     print('archive proof: 0 history lookups; pinned behavioral proof completed', flush=True)
     with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache', prefix='github-report-') as directory:
         base = Path(directory)
-        build_and_run(base, 'good_public')
-        build_and_run(base, 'good_private', public=False)
-        for name, mutation in MUTANTS.items():
-            build_and_run(base, name, mutation, public=name != 'private')
+        # Every build has its own directory and binary, so they compile four at a time.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(build_and_run, base, 'good_public'), pool.submit(build_and_run, base, 'good_private', public=False)]
+            futures += [pool.submit(build_and_run, base, name, mutation, public=name != 'private') for name, mutation in MUTANTS.items()]
+            for future in futures:
+                future.result()
     print(f'PASS: GitHub/Discord snapshot/clipboard/privacy/consent and F10 input; {len(MUTANTS)} broken controls rejected')
 
 

@@ -29,6 +29,7 @@ static int x360_post_chain_on(void) { return 0; }
 static uint32_t gstr(const char *s) { (void)s; return 4; }
 static const char *strings[] = {"", "Beschleunigen", "Accelerate (game)", "Accelerate", "Saving %s."};
 uint32_t prompts_action_text(uint32_t h) { return h == 0x619B23B0u ? 3 : 0; }
+uint32_t underglow_menu_text(uint32_t h) { (void)h; return 0; }
 void f_0056BB80_orig(Cpu *c) {
     ++original_calls;
     c->eax = c->edx == 0x619B23B0u ? (uint32_t)supplied :

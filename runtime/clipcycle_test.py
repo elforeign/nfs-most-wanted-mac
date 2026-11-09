@@ -39,7 +39,7 @@ source = (RT / 'cliprec.mm').read_text()
 callbacks = source[source.index('void cliprec_action(int unused) {'):]
 notice = re.search(r'            NSString \*name = destination.lastPathComponent;\n.*portmenu_status.*\n', source)[0]
 settings = (RT / 'settings_port.c').read_text()
-rows = settings[settings.index('static Setting s_cliprec ='):settings.index('// ---------------- Graphics')]
+rows = settings[settings.index('static Setting s_cliprec ='):settings.index('// The key is never a Setting.text value')]
 assert 'REG(s_clips_open);' in settings
 assert not re.search(r'NSWorkspace|portmenu_open_folder|activateFileViewer', (RT / 'render_present.m').read_text())
 assert 'NSWorkspace' not in source and source.count('portmenu_open_folder(') == 2
@@ -90,7 +90,8 @@ static std::mutex control;
 @public
     dispatch_group_t finished;
     dispatch_queue_t work;
-    bool published;
+    bool published, replayOnly, fileRequested;
+    std::atomic<unsigned> retiringFiles;
     NSString *destination, *error, *codec;
     unsigned resolution, width, height;
     double started;
@@ -102,7 +103,7 @@ static std::mutex control;
 @implementation ClipSession
 - (instancetype)init {
     if ((self=[super init])) {
-        ++starts; finished=dispatch_group_create(); dispatch_group_enter(finished);
+        retiringFiles=0; ++starts; finished=dispatch_group_create(); dispatch_group_enter(finished);
         work=dispatch_get_main_queue(); destination=savedPath;
     }
     return self;
@@ -110,6 +111,7 @@ static std::mutex control;
 - (void)stop { ++stops; stopping=true; }
 @end
 static ClipSession *current;
+static __attribute__((unused)) bool cliprec_shared_action(ClipSession *) { return false; }
 extern "C" void cliprec_shutdown(void) {}
 int settings_get(const char *id) { check(!strcmp(id,"display.clip_resolution")); return 1; }
 @CALLBACKS@

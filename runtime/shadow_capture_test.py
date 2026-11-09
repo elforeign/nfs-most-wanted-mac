@@ -1,12 +1,11 @@
-"""Execute the production sequence-capture block without a GPU.
-Six requested bursts export 384 frames, at most 64 retained buffers; the
-original missing-reset control exports only 64 and fails. Near AB exports zero
-legacy frames; removing its guard duplicates 384 frames and fails. HDR source selection
-and single-shot export stay in the production block, with recording sinks.
+"""Production bounded capture block. Six bursts export 384 frames with at most
+64 retained buffers; missing-reset control exports 64 and fails. HDR source
+selection and single-shot export stay covered with recording sinks.
 """
 from pathlib import Path
 import subprocess
 import tempfile
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = r'''
@@ -44,8 +43,7 @@ static Sink *mtl, *backbuffer_tex, *capture_tex, *encoder;
 - (void)endEncoding {}
 @end
 static struct { uint64_t frames; } dev;
-static int diag_on = 1, near_ab;
-static int shadow_near_ab_enabled(void) {return near_ab;}
+static int diag_on = 1;
 static const char *diag_dir = "capture";
 static id cmd;
 // Sign diagnostic hooks inside the extracted block stay off in this harness.
@@ -75,7 +73,7 @@ static void present(void) {
 /* PRODUCTION */
 }
 int main(int argc,char **argv) { @autoreleasepool {
- (void)argv;near_ab=argc>1;
+ (void)argc; (void)argv;
  setenv("BOOT_DIAG_SEQ","100,200,300,400,500,600:99",1);
  mtl=[Sink new]; backbuffer_tex=[Sink new]; capture_tex=[Sink new]; encoder=[Sink new];
  backbuffer_tex.width=16; backbuffer_tex.height=8;
@@ -84,7 +82,7 @@ int main(int argc,char **argv) { @autoreleasepool {
  }
  // Exercise the separate one-shot path after all bursts, without counting its buffer.
  shot=(id)[NSObject new]; present(); shot=nil;
- unsigned expected=near_ab?0:384, expected_peak=near_ab?0:64;
+ unsigned expected=384, expected_peak=64;
  printf("capture: exported=%u/%u peak=%u/%u live=%u HDR=%u copies=%u single=%u\n",
         exported,expected,peak,expected_peak,live,hdr_calls,copies,singles);
  return exported != expected || peak != expected_peak || live || copies != expected || hdr_calls != expected || singles != 1;
@@ -101,9 +99,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         for name, code, args, expected in [
                 ('production',block,[],0),
-                ('near-ab',block,['--near'],0),
-                ('missing-reset',block.replace(reset,''),[],1),
-                ('duplicate-near',block.replace(' && !shadow_near_ab_enabled()',''),['--near'],1)]:
+                ('missing-reset',block.replace(reset,''),[],1)]:
             src, binary = Path(d)/f'{name}.m', Path(d)/name
             src.write_text(HARNESS.replace('/* PRODUCTION */', code))
             subprocess.run(['clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror',

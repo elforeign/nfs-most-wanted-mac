@@ -5,9 +5,6 @@ Production lookup/scheduling: normal frame-thread compile_entry calls 0; broken 
 Cache round-trip: normal 10 records; broken AUX whitelist 1 record;
 broken Clear-lamp whitelist 6 records; broken film whitelist 7 records;
 broken material whitelist Glass/Chrome 8/9 records.
-Near-cache review P3, original/fixed: warmed records 1 -> 6 of 6; duplicate bytes on
-successive launches 2710/0 and 5420/0; failures 4/0. Unknown bits/bases rejected.
-Unknown-flag control: overly broad mask/production failures 1/0.
 Readiness after publication: normal pending 0; broken 1.
 Concurrent identical-source requests: normal 1 compile; broken cache 4.
 Cold profile (2026-10-28): source compiles before/after 13/0, hangs 0/0,
@@ -63,7 +60,6 @@ PRELUDE = r'''
 enum { MAT_VARIANT_WATER=0x100, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
        MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_REAL_GLASS, MAT_VARIANT_REAL_CHROME, MAT_VARIANT_AUX=0x200 };
-enum { SHADOW_NEAR_VARIANT=0x40000000u };
 typedef struct {
  uint64_t key; SmResult refl; volatile int pending; int ok; dispatch_semaphore_t ready;
  uint32_t *tokens, ntokens; SmOptions opt; uint32_t variant;
@@ -202,37 +198,8 @@ int main(int argc, char **argv) { @autoreleasepool {
    free(t);
  }
  printf("PASS: frame_sync=%d; exact MSL comparisons=%d\n",frame_sync,comparisons);
- // A separate profile models repeated launches with near records interleaved
- // before a normal record. Warm lookups must neither lose later entries nor
- // append another copy of the same near shader on every launch.
- char cache[1024];cache_path(cache,sizeof cache);if(unlink(cache))return 2;
- uint32_t near_variants[]={0,SHADOW_NEAR_VARIANT,SHADOW_NEAR_VARIANT|10,
-    SHADOW_NEAR_VARIANT|MAT_VARIANT_ROAD_FILM,SHADOW_NEAR_VARIANT|MAT_VARIANT_REAL_GLASS,MAT_VARIANT_AUX};
- nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
- Obj near_s={0};near_s.tokens=tokens;near_s.ntokens=token_bytes/4;
- for(unsigned i=0;i<6;++i)get_shader_variant(&near_s,&o,near_variants[i]);
- for(unsigned i=0;i<6;++i)dispatch_semaphore_signal(allow_compile);
- for(int i=0;i<4;++i)dispatch_sync(shader_workers[i], ^{});
- FILE *near_file=fopen(cache,"rb");if(!near_file)return 2;
- fseek(near_file,0,SEEK_END);long original_bytes=ftell(near_file);fclose(near_file);
- int near_failures=0;
- for(int launch=0;launch<2;++launch) {
-   nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
-   shader_cache_warm();int warmed=nshaders;
-   near_failures+=check(warmed==6,"warm accepts near variants and later base record");
-   near_s=(Obj){0};near_s.tokens=tokens;near_s.ntokens=token_bytes/4;
-   for(unsigned i=0;i<6;++i)get_shader_variant(&near_s,&o,near_variants[i]);
-   near_file=fopen(cache,"rb");if(!near_file)return 2;
-   fseek(near_file,0,SEEK_END);long bytes=ftell(near_file);fclose(near_file);
-   near_failures+=check(bytes==original_bytes,"warm near lookup does not append duplicates");
-   printf("near cache launch %d: warm=%d/6 duplicate_bytes=%ld\n",launch+1,warmed,bytes-original_bytes);
-   for(int i=0;i<nshaders;++i)dispatch_semaphore_signal(allow_compile);
-   for(int i=0;i<4;++i)dispatch_sync(shader_workers[i], ^{});
- }
- if(near_failures)return 1;
- if(check(!shader_cache_variant_valid(SHADOW_NEAR_VARIANT|11) &&
-          !shader_cache_variant_valid(SHADOW_NEAR_VARIANT|0x80000000u) &&
-          !shader_cache_variant_valid(0x80000000u),"unknown cache flags and base variants rejected"))return 1;
+ if(check(!shader_cache_variant_valid(11) && !shader_cache_variant_valid(0x80000000u),
+          "unknown cache flags and base variants rejected"))return 1;
  return 0;
 }}
 '''
@@ -411,12 +378,6 @@ def offline():
             profile = tmp / (name + "-profile"); profile.mkdir()
             return [str(exe), str(profile), str(synthetic)]
         print(run(build("normal", code) + [str(p) for p in fixtures]).strip())
-        broken_near = code.replace("    variant &= ~SHADOW_NEAR_VARIANT;", "    (void)variant;")
-        assert broken_near != code
-        print("broken near cache: " + run(build("broken-near-cache", broken_near), 1).strip())
-        broken_flags = code.replace("    variant &= ~SHADOW_NEAR_VARIANT;", "    variant &= 0x3FFFFFFFu;")
-        assert broken_flags != code
-        print("broken cache flags: " + run(build("broken-cache-flags", broken_flags), 1).strip())
         broken = code.replace("    shader_submit(e);\n    cache_append(e);", "    compile_entry(e);\n    cache_append(e);")
         assert broken != code
         print("broken scheduling: " + run(build("broken", broken), 1).strip())

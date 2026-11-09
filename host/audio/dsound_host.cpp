@@ -20,13 +20,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <mach/mach_time.h>
 #include <mutex>
-#include <pthread.h>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
+
+#if defined(_WIN32) || defined(NFS_WIN_AUDIO)
+#include "windows_clock.h"
+#else
+#include <mach/mach_time.h>
+#include <pthread.h>
+#include <unistd.h>
+#endif
 
 #include "../../media/media.h"
 

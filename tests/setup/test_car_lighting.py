@@ -11,6 +11,10 @@ Original role-only policy fails 12/18 synthetic constants; translation fails 0.
 Lamp default-Off regression: reviewed default-On code fails 2/2 lamp cases; fixed 0/2.
 No source asset records are embedded. Optional local census needs both bundles.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[2] / "tools"))
+from setup_kit.input_paths import input_path
 import copy
 import hashlib
 import math
@@ -208,7 +212,7 @@ class RowPolicy(unittest.TestCase):
 
 class LocalCensus(unittest.TestCase):
     def test_local_endpoints_and_five_controls(self):
-        source_root = Path(os.environ.get('NFS_CARBON_PC', os.environ.get('NFS_CARBON', Path.home() / 'Downloads/NFSC')))
+        source_root = input_path('NFSC')
         mw_root = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition'))
         paths = [p / 'GLOBAL/GLOBALB.LZC' for p in (source_root, mw_root)]
         if not all(p.is_file() for p in paths):

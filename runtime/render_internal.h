@@ -92,6 +92,7 @@ void msaa_resolve(RenderTex *r);
 void ms_attach(MTLRenderPassAttachmentDescriptor *a, RenderTex *r, int slot);
 int render_soft_depth_store(void); // 0 original; 1 nearest resolve on store; 2 sampled resolved depth (no resolve attachment)
 id<MTLTexture> render_soft_smoke_layer(void);
+id<MTLTexture> render_soft_smoke_half_depth(void);   // non-nil: the layer is half size (soft_smoke_half.m)
 void render_soft_smoke_layer_applied(void);
 void render_soft_smoke_late_finish(id<MTLTexture> scene);
 id<MTLTexture> pass_depth(id<MTLTexture> rt0, id<MTLTexture> ds);
@@ -103,19 +104,7 @@ void query_stats_log(void);
 extern float q_bb[4];                        // diag: the last counted fan's x/y range (render.m writes it)
 
 void render_post_prewarm(void);
+void render_post_lazy_warm(void);   // effect-first-use post libraries, compiled at load (render_post.m)
+void render_present_warm(void);     // the gamma ramp library, compiled at load (render_present.m)
 
-// Optional independent near shadow resources; surface remapping is scoped to
-// the replay and never replaces the guest's retail texture objects.
-id<MTLTexture> shadow_near_surface(uint32_t surface);
-uint64_t shadow_near_draw_begin(void);
-void shadow_near_draw_end(uint64_t before, uint32_t primitives);
-void shadow_near_draw_note(int shader_kill);
-void render_shadow_near_restore(void);
-void render_shadow_near_suspend(void);
-enum { SHADOW_NEAR_VARIANT = 0x40000000u, SHADOW_NEAR_BUFFER = 28, SHADOW_NEAR_TEXTURE = 30 };
-typedef struct ShadowNearUniforms {
-    float rows[4][4], usable[4], blend[4];
-    uint32_t mode, taps, pad[2];
-} ShadowNearUniforms;
-char *shadow_near_shader(const char *source, const SmResult *reflection, const uint32_t *tokens, uint32_t n);
-id<MTLTexture> shadow_near_receiver(uint32_t source, ShadowNearUniforms *uniforms);
+int x360_shadow_edge(void);

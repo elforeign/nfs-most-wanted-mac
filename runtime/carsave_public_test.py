@@ -17,6 +17,9 @@ remain separate, unchanged coverage in carsave_metadata_test.py.
 Guest class/type/part/audio helpers are contract doubles; four profile functions
 are production translated C. Native catalog approval and all filesystem/journal
 code are real. No game, real profile, Unicorn or music implementation is linked.
+Export closure: the omitted private file fixture made the shipped proof skip
+(exit 3). The public fixture passes 55 invocations, 889 parent/84 retry-child
+assertions, retaining all original refusal and durability controls.
 """
 from pathlib import Path
 import copy
@@ -31,13 +34,13 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-if any(not (ROOT / name).is_file() for name in ('runtime/auditfix_test.py', 'runtime/car_catalog_test.py')):
+if any(not (ROOT / name).is_file() for name in ('runtime/save_file_fixture.py', 'runtime/car_catalog_test.py')):
     print('SKIP: optional native test fixtures are absent')
     raise SystemExit(3)
 sys.path.insert(0, str(ROOT / 'tools'))
 from setup_kit import car_catalog as cc
 sys.path.insert(0, str(ROOT / 'runtime'))
-import auditfix_test as audit
+import save_file_fixture as audit
 
 GUARD = r'''
 #include <stdio.h>

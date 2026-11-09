@@ -56,3 +56,6 @@ static inline uint32_t win_arg(Cpu *c, unsigned i) { return M32(c->esp + 4 + 4*i
 static inline int win_ret(Cpu *c, uint32_t v, unsigned n) {
     c->eax = v; c->esp += 4 + 4*n; return 1;
 }
+// Internal adapter lookup, while holding the guest GIL. Allows native audio
+// notifications to signal registered guest events without interpreting handles.
+WinAdapter win_import_adapter(const char *);

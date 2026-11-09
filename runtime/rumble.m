@@ -57,6 +57,7 @@ static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
         pad = dev;
         CFTypeRef t = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
         bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() && CFStringFind(t, CFSTR("Bluetooth"), 0).location != kCFNotFound;
+        padlink_hid((void *)dev, bluetooth);
         invalidate_motors();
         flush();                                           // neutral before the next feedback publication
         if (diag_on) diag_event("rumble: DualSense over %s", bluetooth ? "Bluetooth" : "USB");
@@ -65,7 +66,7 @@ static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
 static void removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
     dispatch_async(hid_q, ^{
-        if (dev == pad) { invalidate_motors(); CFRelease(pad); pad = NULL; finish_clear(); }
+        if (dev == pad) { invalidate_motors(); padlink_detach((void *)dev); CFRelease(pad); pad = NULL; finish_clear(); }
     });
 }
 static void rumble_open(void) {
@@ -94,7 +95,9 @@ static int send(uint8_t heavy, uint8_t light) {
         uLong crc = crc32(crc32(0, &hdr, 1), r, 74);
         r[74] = crc & 0xFF; r[75] = crc >> 8 & 0xFF; r[76] = crc >> 16 & 0xFF; r[77] = crc >> 24 & 0xFF;
     }
+    uint64_t link = diag_on ? padlink_token((void *)pad) : 0;
     IOReturn ok = IOHIDDeviceSetReport(pad, kIOHIDReportTypeOutput, r[0], r, n);
+    if (diag_on) padlink_output(link, PADLINK_RUMBLE, ok == kIOReturnSuccess);
     static int logs;
     if (diag_on && (ok != kIOReturnSuccess || logs < 20) && logs++ < 40)
         diag_event("rumble: heavy %u light %u -> %s (0x%X)", heavy, light, ok == kIOReturnSuccess ? "sent" : "failed", ok);

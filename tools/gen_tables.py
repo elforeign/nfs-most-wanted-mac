@@ -14,7 +14,8 @@ pubtables_gen.py's PC look/shader tables come from the PC folder. Other tables a
 X360 data laid over the PC's (both copies are read): with no X360 root each is written as an empty
 table, the feature has nothing to apply and stays PC (its F10 row is hidden by roots_x360_has("world"/"audio")).
 x360_shader_lits.inc (tools_snapshot/x360_shader_lits.py): the X360 shaders' literal constants the port's Metal shaders
-use, from <x360_root>/NFS/ZZDATA0.BIN (NFS_X360_ZZDATA0 / --zzdata0 override it; development layout: the 2 MB slice
+use, from <x360_root>/NFS/zzdata0_09bb7000.bin (legacy full NFS/ZZDATA0.BIN takes precedence;
+NFS_X360_ZZDATA0 / --zzdata0 override both; development layout: the 2 MB slice
 <x360_root>/../shaders/zzdata0_9B00000.bin); none: zeros with X360_SHADER_LITS 0 (the runtime keeps those features PC).
 It also holds the X360 effect parameter defaults the C code uses (X360F_*). x360_shader_body.inc
 (tools_snapshot/x360_shader_body.py): the bodies of the X360 shader programs materials.m runs, translated from the same
@@ -109,10 +110,11 @@ def inputs(pc, x360, zz=None):
     return files
 
 
-def zzdata0_path(x360, arg=None):
+def zzdata0_path(x360, arg=None, environment=None):
     """The X360 NFS/ZZDATA0.BIN (shader literals), or None: --zzdata0 / NFS_X360_ZZDATA0, <x360_root>/NFS/ZZDATA0.BIN,
-    else a zzdata0_<base>.bin slice in <x360_root>/../shaders (a development extract)."""
-    e = arg or os.environ.get("NFS_X360_ZZDATA0")
+    else the installed NFS/zzdata0_09bb7000.bin, then a zzdata0_<base>.bin slice
+    in <x360_root>/../shaders (a development extract)."""
+    e = arg or (os.environ if environment is None else environment).get("NFS_X360_ZZDATA0")
     if e:
         return Path(e)
     if not x360:
@@ -120,6 +122,9 @@ def zzdata0_path(x360, arg=None):
     for p in (x360 / "NFS/ZZDATA0.BIN", x360.parent / "NFS/ZZDATA0.BIN"):
         if p.exists():
             return p
+    retained = x360 / "NFS/zzdata0_09bb7000.bin"
+    if retained.exists():
+        return retained
     slices = sorted((x360.parent / "shaders").glob("zzdata0_*.bin")) if (x360.parent / "shaders").is_dir() else []
     return slices[0] if slices else None
 
@@ -142,12 +147,21 @@ def content_hash(f):
 
 
 def stamp_text(pc, x360, zz=None):
-    lines = ["pc=%s" % pc, "x360=%s" % (x360 or "-"), "zzdata0=%s" % (zz or "-")]
+    # Roles, not installation paths: verified tables survive a source-copy move.
+    # A slice's basename carries its base offset and therefore is a real input.
+    lines = ["inputs-v2", "x360=%s" % bool(x360), "zzdata0=%s" % (zz.name if zz else "-")]
     for f in inputs(pc, x360, zz):          # content, not size/mtime: a same-size, same-mtime edit still regenerates
+        label = next((role + "/" + str(f.relative_to(base)) for role, base in
+                      (("source", ROOT), ("pc", pc), ("x360", x360)) if base and f.is_relative_to(base)), f.name)
         try:
-            lines.append("%s\t%s" % (f, content_hash(f)))
+            lines.append("%s\t%s" % (label, content_hash(f)))
         except OSError:
-            lines.append("%s\tmissing" % f)
+            lines.append("%s\tmissing" % label)
+    # names.py uses directory names to label/order vault rows; it does not read
+    # car content. Keep new/removed names in the key without hashing those files.
+    for role, base in (("pc", pc), ("x360", x360)):
+        cars = base / "CARS" if base else None
+        lines.append("%s-cars=%s" % (role, sorted(p.name for p in cars.iterdir()) if cars and cars.is_dir() else []))
     for s in sorted([Path(__file__).resolve()] + [ROOT / p for p in GENERATORS]):
         lines.append("%s\t%s" % (s.relative_to(ROOT), hashlib.sha256(s.read_bytes()).hexdigest()))
     return "\n".join(lines) + "\n"

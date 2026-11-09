@@ -157,6 +157,9 @@ def main():
             with staged.open('w', newline='\n', encoding='utf-8') as stream:
                 stream.write(source.read_text(encoding='utf-8'))
             staged_units.append(staged)
+        # Audio is the first shared C++ host component. Keep the original paths
+        # so its local includes and the media interface resolve identically.
+        staged_units.extend([ROOT / 'host/audio/dsound_host.cpp', host_dir / 'audio_output.cpp'])
     extra = shlex.split(os.environ.get('RECOMP_CFLAGS', ''))
     base = command(args.compiler, [*extra, '-I', str(ROOT / 'runtime/win')], args.sdk_headers)
     fingerprint = load_inputs().toolchain(target=TARGET, compiler=args.compiler)
@@ -164,7 +167,13 @@ def main():
 
     def compile_one(unit):
         obj, log = objects / (unit.stem + '.obj'), logs / (unit.stem + '.log')
-        argv = [*base, '-c', str(unit), '-o', str(obj)]
+        cpp = []
+        if unit.suffix == '.cpp':
+            cpp = ['-std=c++17', '-fno-exceptions', '-fno-rtti', '-DNFS_WIN_AUDIO',
+                   '-D_CRT_SECURE_NO_WARNINGS']
+            if not args.sdk_headers:
+                cpp += ['-I', str(ROOT / 'runtime/win/audio_compile')]
+        argv = [*base, *cpp, '-c', str(unit), '-o', str(obj)]
         with log.open('w') as stream:
             result = subprocess.run(argv, stdout=stream, stderr=subprocess.STDOUT)
         success = result.returncode == 0 and obj.is_file()
@@ -199,6 +208,14 @@ def main():
         generated = [objects / (u.stem + '.obj') for u in staged_units if u.stem in generated_stems]
         host = [objects / (u.stem + '.obj') for u in staged_units if u.stem not in generated_stems]
         combined = symbols.read_symbols(symbols.find_nm(args.compiler), [*generated, *host])
+        if args.sdk_headers:
+            # Exact archive definitions, not a namespace/prefix exemption for
+            # SDK-specific Microsoft STL ABI dependencies of the shared mixer.
+            spec = importlib.util.spec_from_file_location('windows_audio_symbols', HERE / 'windows_audio_symbols.py')
+            audio_symbols = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(audio_symbols)
+            symbols.DESKTOP.update(audio_symbols.native_cpp_symbols(
+                symbols.find_nm(args.compiler), set(combined['remaining']) - symbols.DESKTOP.keys()))
         try:
             coverage.check_definitions(rows, 'windows', set(combined['defined']), originals=True)
         except ValueError:

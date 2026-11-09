@@ -67,11 +67,12 @@ int main(void) {
         assert result.returncode == expected and not result.stderr, result.stdout + result.stderr
         print(label, result.stdout.strip(), flush=True)
 
-    selector = re.search(r'int x360_post_ssao_enabled\(void\) \{.*?\n\}', post, re.S)[0]
+    ssao_cache = post[post.index('static int ssao_cached ='):post.index('int x360_post_ssao_enabled(')]
+    selector = '#include <pthread.h>\n' + ssao_cache + re.search(r'int x360_post_ssao_enabled\(void\) \{.*?\n\}', post, re.S)[0]
     for label, body, expected in (
             ('ssao', selector, 0),
-            ('ssao_default_off', selector.replace('return !e || strcasecmp(e, "off");',
-                                                   'return e && !strcasecmp(e, "on");'), 3)):
+            ('ssao_default_off', selector.replace('on = !e || strcasecmp(e, "off") != 0;',
+                                                   'on = e && !strcasecmp(e, "on");'), 3)):
         c = tmp / f'{label}.c'
         c.write_text('#include <stdlib.h>\n#include <strings.h>\n'
                      'static int look_var_is(const char *v) { (void)v; return 0; }\n' + body +
@@ -90,13 +91,14 @@ int main(void) {
     # Compile the actual hidden rows with the production selectors: obsolete keys
     # remain ignored, while the look's own keys export Off before renderer startup.
     smoke_source = (RT / 'render.m').read_text()
-    smoke = re.search(r'static int soft_smoke_on\(void\) \{.*?\n\}', smoke_source, re.S)[0]
+    smoke_cache = smoke_source[smoke_source.index('static int soft_smoke_cached ='):smoke_source.index('static int soft_smoke_on(')]
+    smoke = smoke_cache + re.search(r'static int soft_smoke_on\(void\) \{.*?\n\}', smoke_source, re.S)[0]
     physical = re.search(r'int particles_physical_enabled\(void\) \{.*?\n\}',
                          (RT / 'particles_physical.c').read_text(), re.S)[0]
     hidden = '\n'.join(re.search(r'static Setting ' + name + r' = \{.*?\};', port, re.S)[0]
                        for name in ('s_look_contact', 's_look_smoke'))
     c = tmp / 'retail_hidden.c'
-    c.write_text(stubs + '\n' + hidden + '\n' +
+    c.write_text(stubs + '\nvoid live_picture_apply_reload(int v) { (void)v; }\n' + hidden + '\n' +
                  'static int look_var_is(const char *v) { (void)v; return 0; }\n'
                  'static int postfx_look_variant(const char *v) { (void)v; return 0; }\n'
                  'static int physical = -1;\n' + physical + '\n' + selector + '\n' + smoke + r'''
@@ -113,7 +115,7 @@ int main(int argc, char **argv) {
     int failures = settings_rows(SET_PICTURE, rows, 8) != 0;
     failures += x360_post_ssao_enabled() != (argc == 1);
     const char *mode=getenv("NFS_PARTICLES");
-    failures += soft_smoke_on() != (mode && !strcmp(mode,"physical") && argc == 1);
+    failures += soft_smoke_on() != ((!(mode && *mode) || !strcmp(mode,"physical")) && argc == 1);
     printf("retail hidden: %d failures; contact=%d smoke=%d rows=%d\n", failures,
            x360_post_ssao_enabled(), soft_smoke_on(), settings_rows(SET_PICTURE, rows, 8));
     return failures;

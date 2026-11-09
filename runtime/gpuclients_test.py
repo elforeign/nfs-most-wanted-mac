@@ -2,14 +2,15 @@
 """GPU telemetry without a game or private assets; discovered by offline_tests.sh.
 
 Report controls: correct 3/3 verdicts; ignores-other_ms mutant 2/3 (must fail).
-Native counter/clock fixtures: fixed 27/27; lifetime-total mutant fails check 8.
+Native counter/clock/residency/cache fixtures: fixed 31/31; lifetime-total mutant fails check 8;
+omitted-residency and omitted-cache-publication mutants fail their exact assertions (exit 1).
 Live Metal proof (no synthetic load / 18 CPU busy loops): direct-child minimum of five
 thread-CPU samples 2.200 / 1.643 ms; recursive service-plane walk 17.543 / 16.434 ms
 (FAIL cpu_min<3); service-only client lookup self GPU 0 / 0 (FAIL total_self>0).
 The old wall mean was 2.181 / 2.250 ms (FAIL sum/5<2); historical recursive wall mean 6.25 ms.
 Use thread CPU to exclude descheduling and the best of five to exclude transient registry
 contention. The 3 ms budget leaves headroom above good 2.200 ms while rejecting the >16 ms
-recursive control. Wall mean/max remain diagnostics. Live builds use production -O1 without
+recursive control. Wall mean/max remain diagnostics. Live builds use production -O2 without
 sanitizers; native fixtures retain ASan/UBSan. Both live mutants must fail on every GPU run.
 The bare test compiles the live harness but never creates a Metal device; --gpu,
 CODEX_GPU_CHECK=1 or the trusted GPU test sandbox enables the live proof.
@@ -88,12 +89,15 @@ static int fixtures(void) {
     states = @{@0:@{@"name":@"IDLE",@"res":@9000}, @1:@{@"name":@"500 MHz",@"res":@1}, @2:@{@"name":@"1 GHz",@"res":@3}};
     empty_sample(&out); clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"-"));
     clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"875.0"));
+    CHECK(!strcmp(out.states,"1_GHz:0.03,500_MHz:0.01,IDLE:99.96") && !strcmp(out.clock_status,"decoded_mhz"));
     states = @{@0:@{@"name":@"OFF",@"res":@100}, @1:@{@"name":@"P1",@"res":@1}, @2:@{@"name":@"P2",@"res":@3}};
     clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"state=P2"));
+    CHECK(!strcmp(out.states,"OFF:96.15,P1:0.96,P2:2.88") && !strcmp(out.clock_status,"decoded_residency"));
     states = @{@0:@{@"name":@"500",@"res":@100}};
     clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"state=500"));
     states = @{@0:@{@"name":@"IDLE",@"res":@100}};
     empty_sample(&out); clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"-"));
+    CHECK(!strcmp(out.states,"IDLE:100.00") && !strcmp(out.clock_status,"idle_residency"));
     if (s.before) CFRelease(s.before);
     s.before = NULL; s.subscription = NULL;
     clock_sample(&s,&out); CHECK(!strcmp(out.mhz,"-"));
@@ -106,6 +110,9 @@ static int fixtures(void) {
     empty_sample(&cache); cache.other_ms=123; cache_time=monotime();
     gpuclients_cached(&out); CHECK(out.other_ms == 123);
     cache_time=monotime()-4; gpuclients_cached(&out); CHECK(isnan(out.other_ms));
+    GPUClientsSample fresh; empty_sample(&fresh); fresh.other_ms=321; strcpy(fresh.mhz,"state=P1");
+    gpuclients_publish(&fresh); gpuclients_cached(&out);
+    CHECK(out.other_ms==321 && !strcmp(out.mhz,"state=P1"));
     printf("PASS native GPU-client fixtures: %d checks\n",checks);
     return 0;
 }
@@ -250,7 +257,7 @@ def main():
         (tmp / "gpuclients.m").write_text(source)
         (tmp / "gpuclients.h").write_text((HERE / "gpuclients.h").read_text())
         def build(name, sanitize=True):
-            run(["clang", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fobjc-arc",
+            run(["clang", "-O1" if sanitize else "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-fobjc-arc",
                  *(["-fsanitize=address,undefined"] if sanitize else []), tmp / "harness.m", "-framework", "Foundation",
                  "-framework", "IOKit", "-framework", "Metal", "-o", tmp / name])
         build("sampler")
@@ -261,6 +268,18 @@ def main():
         build("broken")
         run([tmp / "broken"], expected=1, required_error="FAIL check 8:")
         print("PASS lifetime-total mutant rejected at check 8 (exit 1)")
+        mutation = 'if (parts.count) snprintf(out->states, sizeof out->states, "%s", [parts componentsJoinedByString:@","].UTF8String);'
+        assert source.count(mutation) == 1
+        (tmp / "gpuclients.m").write_text(source.replace(mutation, 'if (parts.count) strcpy(out->states, "-");'))
+        build("no_residency")
+        run([tmp / "no_residency"], expected=1, required_error='out.states')
+        print("PASS omitted-residency mutant rejected (exit 1)")
+        mutation = 'cache = *s; cache_time = monotime();'
+        assert source.count(mutation) == 1
+        (tmp / "gpuclients.m").write_text(source.replace(mutation, '(void)s; cache_time = 0;'))
+        build("no_cache_publish")
+        run([tmp / "no_cache_publish"], expected=1, required_error='out.other_ms==321')
+        print("PASS omitted-cache-publication mutant rejected (exit 1)")
         if "--registry" in sys.argv:
             print(run([tmp / "sampler", "--registry"]), end="")
         if ("--gpu" in sys.argv or os.environ.get("CODEX_GPU_CHECK") == "1"

@@ -311,7 +311,7 @@ ENGINE = [
     ("X360E_DROP_LIFE", 0x82062D68),        #   raindrop alpha = life x this
     ("X360E_SHADOW_FOCUS_FE", 0x820B0324),  # 824439B0: shadow focus distance in the front end
     ("X360E_SHADOW_FOCUS_RACE", 0x8206292C),  #   in a race
-    ("X360E_SHADOW_NEAR", 0x82061D04),      #   shadow fit near plane
+    ("X360E_SHADOW_FOCUS_NEAR", 0x82061D04),      #   shadow fit near plane
     # ShadowMap_FitLiSPSM 82456030 (x360_shadow_fit.cpp): the light's lowest z, the n scale/offset, the eye pull-back, the
     # y and depth scales of the perspective
     ("X360E_SHADOW_LIGHT_Z_MIN", 0x82062AC0),

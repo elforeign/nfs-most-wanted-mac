@@ -74,7 +74,10 @@ def main():
         boot = (ROOT / 'runtime/boot.c').read_text().split('// ---------------- deterministic race start')[0]
         harness = tmp / 'harness.c'
         save_stubs=tmp/'save-stubs.c'
-        save_stubs.write_text('int carsave_public_save_allowed(void){return 1;}\n'
+        save_stubs.write_text('#include "host.h"\n'
+                              'int car_audio_dispatch(Cpu *c,uint32_t t){(void)c;(void)t;return 0;}\n'
+                              'int car_audio_code_region(uint32_t a){(void)a;return 0;}\n'
+                              'int carsave_public_save_allowed(void){return 1;}\n'
                               'int carsave_public_save_prepare(const char *p){(void)p;return 1;}\n'
                               'void carsave_public_save_complete(int c){(void)c;}\n'
                               'int carsave_public_backup_before_write(const char *a,const char *b){(void)a;(void)b;return 1;}\n')

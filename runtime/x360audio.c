@@ -839,8 +839,9 @@ void f_004F0330(Cpu *c) {   // SFXObj_Reverb::UpdateParams: once a second, the p
 }
 // FX renderer (mixer thread, cdecl (frames)): bus 0 input RMS and the wet signal it adds to the outputs (after - before).
 void f_00820DA3_orig(Cpu *c);
+void reverbfade_mix(Cpu *c);
 void f_00820DA3(Cpu *c) {
-    if (!diag_on) { f_00820DA3_orig(c); return; }
+    if (!diag_on) { reverbfade_mix(c); return; }
     static double in_sq, wet_sq, wet_peak, wet_ch[6]; static unsigned frames_acc, calls, idle;
     static float before[6][1024];
     unsigned n = g32(c->esp + 4), ch = M8(0x009C2319);
@@ -850,7 +851,7 @@ void f_00820DA3(Cpu *c) {
     if (g32(0x009C22F8) >= 2999) idle++;
     for (unsigned i = 0; inb && i < n; ++i) { float v = MF32(inb + 4 * i); in_sq += (double)v * v; }
     for (unsigned k = 0; k < ch; ++k) { uint32_t o = g32(0x009C2410 + 4 * k); for (unsigned i = 0; o && i < n; ++i) before[k][i] = MF32(o + 4 * i); }
-    f_00820DA3_orig(c);
+    reverbfade_mix(c);
     for (unsigned k = 0; k < ch; ++k) {
         uint32_t o = g32(0x009C2410 + 4 * k);
         for (unsigned i = 0; o && i < n; ++i) { double d = MF32(o + 4 * i) - before[k][i]; wet_sq += d * d; wet_ch[k] += d * d; if (fabs(d) > wet_peak) wet_peak = fabs(d); }

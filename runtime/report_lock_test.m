@@ -209,11 +209,21 @@ int main(int argc, char **argv) {
         FILE *source = fopen(stderr_path, "w"); fputs("build: log fixture\npassword=\"SyntheticSecret\"\n", source); fclose(source);
         if (!freopen(stderr_path, "a", stderr)) return 2;
         snprintf(shot_file, sizeof shot_file, "%s/source.png", profile);
+#if REPORT_LOCK_BASELINE
         shot_at = host_ticks() / 1e9;
+#endif
         FILE *shot = fopen(shot_file, "w"); fputs("synthetic image bytes", shot); fclose(shot);
         report_shot_ready(shot_file);
+        reports_dir(); // Initialize the capture directory before enabling the writer-only filesystem gate.
         if (argc > 2 && !strcmp(argv[2], "--exit")) {
             guest_enter(); report_save(0); guest_leave();
+#if !REPORT_LOCK_BASELINE
+            char exit_path[1100] = "";
+            CHECK(report_shot(exit_path, sizeof exit_path));
+            shot = fopen(exit_path, "w"); CHECK(shot != NULL);
+            if (shot) { fputs("synthetic image bytes", shot); fclose(shot); }
+            report_shot_ready(exit_path);
+#endif
             free(G);
             return 0;
         }
@@ -242,6 +252,19 @@ int main(int argc, char **argv) {
         memset(secs, 0, sizeof secs);
         memset(notes, 0, sizeof notes);
         guest_leave();
+#if !REPORT_LOCK_BASELINE
+        char fresh_path[1100] = "";
+        CHECK(report_shot(fresh_path, sizeof fresh_path));
+        shot = fopen(fresh_path, "w"); CHECK(shot != NULL);
+        if (shot) { fputs("synthetic image bytes", shot); fclose(shot); }
+        report_shot_ready(fresh_path);
+        // The writer has retained this report's image before a later menu request replaces the cache.
+        for (int i = 0; i < 1000 && atomic_load(&block_image); ++i) usleep(1000);
+        CHECK(!atomic_load(&block_image));
+        report_request_shot();
+        fresh_path[0] = 0;
+        CHECK(report_shot(fresh_path, sizeof fresh_path));
+#endif
         shot = fopen(shot_file, "w"); fputs("later menu image", shot); fclose(shot);
         report_shot_ready(shot_file);
         if (image_gate) dispatch_semaphore_signal(image_gate);
@@ -288,6 +311,8 @@ int main(int argc, char **argv) {
         pump_until(3);
         CHECK(strstr(status, "Report saved:") == status);
         CHECK(strcmp(previous, report_last_path()));
+        CHECK([Read(report_last_path(), @"report.txt") containsString:@"screenshot: omitted"]);
+        CHECK(Read(report_last_path(), @"screenshot.png") == nil);
         // The synchronous API still attaches crash diagnostics and omits screenshots.
         char attach[1400]; snprintf(attach, sizeof attach, "%s/diagnostic.txt", profile);
         FILE *a = fopen(attach, "w"); fputs("synthetic crash diagnostic\n", a); fclose(a);

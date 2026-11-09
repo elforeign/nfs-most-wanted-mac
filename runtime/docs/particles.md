@@ -1,8 +1,8 @@
 # Particles
 
 F10 World > **Particles: Retail / Physical / PC / X360**,
-`NFS_PARTICLES=retail|physical|pc|x360`, applies live. Retail is the default,
-using the X360 shading and size clamp when its data is available. PC and X360
+`NFS_PARTICLES=retail|physical|pc|x360`, applies live. Physical is the default
+(a saved Retail, PC or X360 stays). Retail uses the X360 shading and size clamp when its data is available. PC and X360
 retain their original shading and size behavior in saved settings, environment
 overrides and live changes. Physical adds fading and lighting to the X360 style.
 PC/X360 look presets restore their respective style with Physical disabled.
@@ -15,7 +15,9 @@ with the existing AO pass; the fallback snapshots depth before particle draws.
 Both split-screen player views use that fallback, each with its own viewport,
 inverse view-projection and depth camera. Shadowless t0 uses fully lit shadow
 visibility; t1/t2 retain their existing shadow samples.
-Rain streaks and additive sparks retain their authored lighting. These are
+Rain streaks and additive sparks retain their authored lighting. The car ground shadow
+(CARSHADOW strip, `decal_depth.m`) uses the particle shader but lies on the road, so it skips the depth fade;
+check `runtime/carshadow_check.sh <dir>` (one guarded race; the old code fails it, 17.3 levels). These are
 cards with single scattering, without volume density or multiple scattering.
 
 The shader uses the world's current ambient and direct sun inputs, including
@@ -82,11 +84,21 @@ start-line burnout, the fixed road/car contact-gradient counts fall by 8.11% /
 shows both player views at a held frame with Physical Off, On and lighting
 disabled while fading remains enabled.
 
-Shared diagnostic run: nine held Off/On pairs at sim 6, 15 and 25 s give median
-GPU pass-sum deltas +0.464 / -0.243 / +0.107 ms; all-pair median +0.107 ms.
-The smoke-heavy frame keeps 47 non-rain particle batches in both modes, with
-48 batches (including rain) replayed into one Physical layer. The first Physical
-pair is cold (+6.768 ms); it remains in these statistics. Retail particles share
-the main scene encoder, so their GPU cost is not isolated from world geometry.
-The Physical particle encoder median is 6.017 ms at that 4K burnout, replacing
-the original particle work. These are diagnostics, not solo timing acceptance.
+Shared diagnostic run: nine held Off/On pairs at sim 6, 15 and 25 s give an all-pair median GPU pass-sum delta of
++0.107 ms (first pair cold, +6.768 ms). Retail particles share the main scene encoder, so their cost is not isolated.
+
+**Half-resolution smoke** (default; `NFS_SOFT_SMOKE_HALF=0` selects the full-resolution layer for A/B;
+`soft_smoke_half.m`): off-screen particles after Cantlay, "High-Speed, Off-Screen Particles", GPU Gems 3
+ch. 23. The late lists replay into a layer of half the width and height (viewports and scissors scaled at replay,
+`rt_render_list_replay_scaled`) against a half-size copy of the opaque depth keeping the nearest of each 2x2. The AO
+multiply (without AO, its own pass) blends it back with nearest-depth upsampling: bilinear where the four texels
+lie within 10 % of the pixel's view depth, else the texel nearest in depth. Thin rain streaks in the layer soften.
+`soft_smoke_half_test.m` runs the production downsample and upsample on a 64x32 edge fixture: 0 wrong pixels;
+plain bilinear 97 (holes), farthest depth + bilinear 92 (halo). `BOOT_DIAG_SOFT_SMOKE_HALF_AB=1` (with
+`BOOT_DIAG_GPUPASS=1`) replays each frame's lists again at the other size and once with the depth fade off.
+
+Cost at the race 15.1.1 start burnout (3840x2160, 2x AA, the same draws in one frame): full layer 4.90 ms, full
+with the fade off 4.90 ms, half layer 1.27 ms + depth copy 0.04 ms + upsample in the AO pass 0.07 ms = 1.38 ms
+(28 %). The pass is fill-bound; the depth fade costs nothing measurable. Busiest seconds: 71-72 fps (max 15.1 ms)
+full, 96-102 fps (max 10.8 ms) half. Same held frame: [half](../../run_shots/softsmoke_lowres_on.jpg),
+[full](../../run_shots/softsmoke_lowres_off.jpg).

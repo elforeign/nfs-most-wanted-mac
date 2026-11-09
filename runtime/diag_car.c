@@ -162,3 +162,74 @@ void diag_car_end(Cpu *c, DiagCarRender *s) {
     }
     diag_event("%s", line);
 }
+
+// BOOT_DIAG cartex: car texture hashes shared by two streaming packs. StreamingTexturePackLoader (0091A098) keeps its
+// packs in an MRU list at +0x18 (pack +0 next, +8 name, +0E unusable flag, +24 entry table, +28 count; entry 0x18 bytes:
+// +0 hash, +11 flags, +12 refs, +14 data). LoadStreamingEntry (00508560) gives each hash to the first pack in that list
+// holding it; UnloadAllStreamingEntries (00501050) forces every loaded entry of a deleted pack to refs 1 and frees it,
+// so another car's reference to a shared hash dies with that pack. Read-only walks; the list order is never touched.
+#define CARTEX_LOADER 0x0091A098u
+static int cartex_car_pack(uint32_t pack) {
+    uint32_t name = pack ? M32(pack + 8) : 0;
+    return name && !strncmp(gptr(name), "CARS\\", 5);
+}
+static uint32_t cartex_entry(uint32_t pack, uint32_t hash) {
+    uint32_t table = M32(pack + 0x24), count = M32(pack + 0x28);
+    if (!table || M8(pack + 0xe) || count > 65536) return 0;
+    for (uint32_t i = 0; i < count; ++i)
+        if (M32(table + i * 0x18) == hash) return table + i * 0x18;
+    return 0;
+}
+// Other usable packs holding hash, as " NAME(refs r, loaded|absent)"; returns how many.
+static int cartex_others(uint32_t loader, uint32_t skip, uint32_t hash, char *out, size_t cap) {
+    int n = 0; size_t used = 0;
+    if (cap) *out = 0;
+    for (uint32_t p = M32(loader + 0x18), k = 0; p && p != loader + 0x18 && k < 4096; p = M32(p), ++k) {
+        uint32_t e = p == skip ? 0 : cartex_entry(p, hash);
+        if (!e) continue;
+        ++n;
+        append(out, cap, &used, " %s(refs %u, %s)", gptr(M32(p + 8)), M16(e + 0x12), M32(e + 0x14) ? "loaded" : "absent");
+    }
+    return n;
+}
+void diag_cartex_request(Cpu *c) {
+    if (c->ecx != CARTEX_LOADER) return;
+    uint32_t hashes = arg(c, 0), n = arg(c, 1);
+    if (!hashes || n > 4096) return;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t h = M32(hashes + i * 4), first = 0, k = 0;
+        for (uint32_t p = M32(CARTEX_LOADER + 0x18); p && p != CARTEX_LOADER + 0x18 && k < 4096; p = M32(p), ++k)
+            if (cartex_entry(p, h)) { first = p; break; }
+        char others[1024];
+        if (first && cartex_others(CARTEX_LOADER, first, h, others, sizeof others))
+            diag_event("cartex: resolve hash %08X -> %s (refs %u); also in%s", h, gptr(M32(first + 8)),
+                       M16(cartex_entry(first, h) + 0x12), others);
+    }
+}
+void diag_cartex_unload(Cpu *c) {
+    uint32_t name = arg(c, 0);
+    if (c->ecx == CARTEX_LOADER && name && !strncmp(gptr(name), "CARS\\", 5)) {
+        uint32_t pack = 0, k = 0;
+        for (uint32_t p = M32(CARTEX_LOADER + 0x18); p && p != CARTEX_LOADER + 0x18 && k < 4096; p = M32(p), ++k)
+            if (M32(p + 8) && !strcmp(gptr(M32(p + 8)), gptr(name))) { pack = p; break; }
+        char line[8192]; size_t used = 0; unsigned loaded = 0;
+        uint32_t table = pack ? M32(pack + 0x24) : 0, count = pack ? M32(pack + 0x28) : 0;
+        for (uint32_t i = 0; table && i < count && i < 65536; ++i) {
+            uint32_t e = table + i * 0x18;
+            if (!M32(e + 0x14)) continue;
+            append(line, sizeof line, &used, " %08X:%u", M32(e), M16(e + 0x12));
+            ++loaded;
+        }
+        diag_event("cartex: unload pack %s: %u of %u entries loaded (hash:refs, all freed):%s", gptr(name), loaded, count,
+                   used ? line : "");
+    }
+}
+void diag_cartex_free(Cpu *c) {
+    uint32_t pack = arg(c, 0), e = arg(c, 1);
+    if (c->ecx == CARTEX_LOADER && e && cartex_car_pack(pack)) {
+        char others[1024];
+        if (cartex_others(CARTEX_LOADER, pack, M32(e), others, sizeof others))
+            diag_event("cartex: SHARED free hash %08X from %s refs %u; also in%s", M32(e), gptr(M32(pack + 8)),
+                       M16(e + 0x12), others);
+    }
+}

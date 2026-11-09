@@ -7,6 +7,7 @@ documented rule, and never hangs on an unusable directory."""
 # the orphan-child case admits a third suite, and the stress run reaches 6 at once.
 # The earlier symlink/.lock version failed the review's release-between-ln-and-check, legacy-directory and
 # orphaned-nested cases; this kernel-lock version has no such window.
+# Solo/suite proof: 21/21; retro fixed gate / old other; held suite refuses solo (75), removed guard admits (0), ledger 1/1; quiet 0/0.
 # Acquisition log proof: one waited holder emits one acquisition line; immediate holders emit none.
 import os
 from pathlib import Path
@@ -126,7 +127,25 @@ def main():
         check('[ $# -eq 0 ]' in src and 'suite_slot_acquire' in src, 'offline_tests.sh does not take a slot for whole runs')
         # Review 3: a test that leaves a child running (test_apply's signal.pause child) pinned the slot forever; each test
         # and its watchdog start with fd 9 closed. Pin: removing either `9>&-` fails this check.
-        check(src.count('9>&-') >= 2 and 'run_one "$n" "$OT_DIR/work/$n" ) 9>&-' in src, 'tests or their watchdog inherit the slot fd')
+        check(src.count('9>&-') >= 2 and 'run_one "$n" "$OT_DIR/work/$n" ) 8>&- 9>&-' in src, 'tests or their watchdog inherit the slot fd')
+        # Solo/suite exclusion: held suite -> 75, old admission -> 0 with ledger 1/1.
+        e = dict(env, NFS_RUNS=str(base/'runs'), NFS_SLOT='solo', NFS_SLOT_WAIT='0', TOOLS_PY=sys.executable)
+        h = subprocess.Popen(['sh', '-c', f'. {RT}/suite_slot.sh; suite_slot_acquire; echo held; read release'],
+                             env=e, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        assert h.stdout.readline().strip() == 'held'
+        original = (RT/'game_slot.sh').read_text()
+        mutant = base/'game_slot.sh'; mutant.write_text(original.replace('[ "$slot_suites" = 0 ] && suite_slot_guard exclusive', 'true'))
+        for script, want in ((RT/'game_slot.sh', 75), (mutant, 0)):
+            p = subprocess.run(['sh', '-c', f'. {script}; slot_games() {{ :; }}; slot_note=gate.fixture; slot_acquire fixture; slot_release 0'],
+                               cwd=RT.parent, env=e, capture_output=True, text=True, timeout=20)
+            check(p.returncode == want, f'solo beside suite: {script.name} rc={p.returncode}, expected {want}: {p.stderr}')
+        check((base/'runs/ledger.tsv').read_text().splitlines()[-1].split('\t')[-2:] == ['1','1'], 'suite start/end counts absent')
+        kind=next(line.split(' = ',1)[1] for line in (RT/'retro.py').read_text().splitlines() if line.lstrip().startswith('k = ')); row=(base/'runs/ledger.tsv').read_text().splitlines()[-1].split('\t')
+        check(eval(kind,dict(r=row)) == 'gate' and eval(kind.replace('r[10]','r[-1]'),dict(r=row)) == 'other', 'retro loses diagnostics with suite columns')
+        h.communicate('release\n', timeout=10)
+        p = subprocess.run(['sh', '-c', f'. {RT}/game_slot.sh; slot_games() {{ :; }}; slot_acquire fixture; sh -c "exec 8>&-; . {RT}/suite_slot.sh; suite_slot_guard shared" && exit 3; slot_release 0'],
+                           cwd=RT.parent, env=e, capture_output=True, text=True, timeout=20)
+        check(p.returncode == 0 and (base/'runs/ledger.tsv').read_text().splitlines()[-1].split('\t')[-2:] == ['0','0'], 'solo admission or reverse exclusion failed')
     print(f'suite_slot_test: FAIL {n - len(bad)}/{n}: ' + '; '.join(bad) if bad else f'suite_slot_test: PASS {n}/{n}')
     return 1 if bad else 0
 

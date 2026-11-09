@@ -9,6 +9,10 @@ removed-term controls fail their designated fixture; 73 invalid cases reject. Th
 solver slices, NOT an import-failure baseline or a moving-branch checkout.
 Private comparisons exit 3 only after all self-contained checks have run.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[1] / "tools"))
+from setup_kit.input_paths import input_path
 import ctypes as ct
 import hashlib
 import math
@@ -352,7 +356,7 @@ def curve_proof():
 
 
 def private_proof(dll, original):
-    source = Path(os.environ.get('NFS_CARBON', Path.home() / 'Downloads/NFSC')) / 'GLOBAL/attributes.bin'
+    source = input_path('NFSC') / 'GLOBAL/attributes.bin'
     donor = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')) / 'GLOBAL/ATTRIBUTES.BIN'
     if not source.is_file() or not donor.is_file() or not (ROOT / 'tools_snapshot/test_driver_seats.py').is_file():
         print('SKIP: private force comparison requires both attribute vaults and fixture manifest')

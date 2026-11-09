@@ -242,6 +242,11 @@ def bundle_check(root, release):
     shutil.copy2(ROOT / 'bundle.sh', runtime / 'bundle.sh')
     (runtime / 'docs').mkdir()
     shutil.copy2(ROOT / 'docs/guide.md', runtime / 'docs/guide.md')
+    for name in ('NOTICE', 'LICENSE', 'media/PREBUILT.md', 'media/licenses/LGPL-2.1.txt',
+                 'media/licenses/FFmpeg-notices.txt'):
+        target = runtime.parent / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT.parent / name, target)
     for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h', 'pub_update_write.h', 'bundle_roots.h'):
         shutil.copy2(ROOT / name, runtime / name)
     shutil.copy2(release, runtime / 'boot')

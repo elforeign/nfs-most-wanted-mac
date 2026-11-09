@@ -69,7 +69,6 @@
 #define SKIP_CAREER_INTRO   0x00926125u    // SkipCareerIntro (2 bytes)
 
 static const char *const k_markers[] = {"1", "2", "3", "4", "5", "6"};
-static const char *const k_junkman[] = {"Unlimited", "Retail"};
 static const char *const k_heat[] = {"Game", "1", "2", "3", "4", "5", "6"};
 
 static volatile int heat_apply_pending, barriers_pending = -1;
@@ -88,9 +87,6 @@ static Setting opts[] = {
     {.id = "gameplay.markers", .category = SET_GAMEPLAY, .order = 10, .label = "Markers per Rival",
      .help = "Reward cards you turn after beating a Blacklist rival (the original game: 2 of 6).", .type = SET_CHOICE,
      .choices = k_markers, .nchoices = 6, .def = 5, .env = "NFS_MARKERS"},
-    {.id = "gameplay.junkman", .category = SET_GAMEPLAY, .order = 15, .label = "Junkman parts after the career",
-     .help = "After the final pursuit, use every compatible Junkman part without spending reward markers. Changes apply on the next shop visit.",
-     .type = SET_CHOICE, .choices = k_junkman, .nchoices = 2, .def = 0, .env = "NFS_JUNKMAN"},
     {.id = "gameplay.heat", .category = SET_GAMEPLAY, .order = 20, .label = "Heat Level",
      .help = "Sets your heat and keeps it there in free roam, above the career's cap too (Game: the game decides).",
      .type = SET_CHOICE, .choices = k_heat, .nchoices = 7, .def = 0, .env = "NFS_HEAT", .apply = apply_heat},
@@ -116,7 +112,7 @@ static Setting opts[] = {
      .help = "On makes rivals race at their own pace, in career races too, while Off keeps the original catch-up that speeds them up when behind.",
      .type = SET_TOGGLE, .def = 1, .env = "NFS_NO_CATCHUP"},
 };
-enum { O_MARKERS, O_JUNKMAN, O_HEAT_LEVEL, O_BLACK_EDITION, O_STARTING_BONUS, O_UNLOCK_ALL, O_OPEN_MAP, O_SKIP_MOVIES,
+enum { O_MARKERS, O_HEAT_LEVEL, O_BLACK_EDITION, O_STARTING_BONUS, O_UNLOCK_ALL, O_OPEN_MAP, O_SKIP_MOVIES,
        O_SKIP_PROLOGUE, O_NO_CATCHUP };
 static int markers_limit(void) { return opts[O_MARKERS].value + 1; }
 static int heat_level(void) { return opts[O_HEAT_LEVEL].value; }          // 0 = the game's, else 1..6
@@ -421,19 +417,9 @@ void f_004D5A10(Cpu *c) {
 
 // Junkman stock is virtual only after HasBeatenCareer (0050E400). Never grant markers: the 63 records are saved.
 // Keep all car/installed-part compatibility checks in their original callers, including the BMW backroom guard.
-#define CUSTOMIZE_HAS_CONTROL 0x009B9E8Cu
-static int junkman_shop_option;
-// TakeControl ignores repeated calls while it has control; RelinquishControl clears the game's flag.
-// Latch before the original builds the shop, keeping availability, cart prices and checkout on one policy.
-void f_007C3690_orig(Cpu *c);
-void f_007C3690(Cpu *c) {
-    if (!M8(CUSTOMIZE_HAS_CONTROL)) junkman_shop_option = opts[O_JUNKMAN].value;
-    f_007C3690_orig(c);
-}
 static int junkman_active(void) {
     uint32_t db = M32(FE_DATABASE), profile = db ? M32(db + 0x10) : 0;
-    int option = M8(CUSTOMIZE_HAS_CONTROL) ? junkman_shop_option : opts[O_JUNKMAN].value;
-    return option == 0 && profile && (M32(profile + 0xAC) & 0x4000u);
+    return profile && (M32(profile + 0xAC) & 0x4000u);
 }
 static int junkman_marker(uint32_t type, uint32_t payload) { return type >= 1 && type <= 7 && payload == 0; }
 static uint32_t junkman_stock(uint32_t manager, uint32_t type) {

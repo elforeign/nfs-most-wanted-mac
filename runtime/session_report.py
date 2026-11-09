@@ -90,6 +90,48 @@ def gpu_cause(stretch, race_mhz, f, race_state=None):
         fmt(other), top, fmt(mhz), fmt(race_mhz), state_text, verdict)
 
 
+def slowlog_evidence(rows):
+    """Merge wait deltas by background interval, retaining switch-boundary evidence."""
+    if 'lum_wait_sum_ms' not in rows[0]:
+        return '; (no luminance/power-source columns in this log)'
+    unique = {}
+    additive = ('lum_wait_sum_ms', 'lum_wait_count', 'lum_wait_dropped')
+    for i, row in enumerate(rows):
+        serial = row.get('slowlog_sample', str(i))
+        if serial == '0':
+            continue
+        merged = dict(row)
+        if serial in unique:
+            previous = unique[serial]
+            for key in (*additive, 'lum_wait_max_ms'):
+                values = [v for r in (previous, row) if (v := gpu_number(r, key)) is not None]
+                if values:
+                    merged[key] = sum(values) if key in additive else max(values)
+        unique[serial] = merged
+    samples = list(unique.values())
+    def values(key):
+        return [v for r in samples if (v := gpu_number(r, key)) is not None]
+    sums, maxima, counts = values('lum_wait_sum_ms'), values('lum_wait_max_ms'), values('lum_wait_count')
+    states = ','.join(sorted({r.get('gpu_pstates', '-') for r in samples})) or '-'
+    status = ','.join(sorted({r.get('gpu_clock_status', '-') for r in samples})) or '-'
+    paths = ','.join(sorted({r.get('post_path', '-') for r in rows}))
+    enabled = ','.join(sorted({str(r.get('slowlog_enabled', '-')) for r in rows}))
+    dt, age, drops = values('slowlog_dt'), values('slowlog_age_ms'), values('lum_wait_dropped')
+    return '; post_path %s, slowlog_enabled %s, slowlog_sample %d unique, slowlog_dt %.3f-%.3f s, slowlog_age_ms max %.1f; lum_wait_sum_ms total %.3f, per-second max %.3f, lum_wait_max_ms %.3f, lum_wait_count %.0f, lum_wait_dropped %.0f; gpu_pstates %s, gpu_clock_status %s' % (
+        paths, enabled, len(samples), min(dt, default=0), max(dt, default=0), max(age, default=0),
+        sum(sums), max(sums, default=0), max(maxima, default=0), sum(counts), sum(drops), states, status)
+
+
+def power_episode(rows):
+    if 'power_source' not in rows[0]:
+        return '  power-source: unknown (no power_source/battery_pct columns in this log)'
+    sources = ' -> '.join(r['power_source'] for i, r in enumerate(rows)
+                          if i == 0 or r['power_source'] != rows[i - 1]['power_source'])
+    charge = [v for r in rows if (v := gpu_number(r, 'battery_pct')) is not None]
+    battery = '%.1f -> %.1f%% (range %.1f-%.1f%%)' % (charge[0], charge[-1], min(charge), max(charge)) if charge else '-'
+    return '  power-source: %s; battery_pct %s' % (sources, battery)
+
+
 def gpu_slow_stretches(rows, f):
     """Race seconds with gpu_mean > 2x the median at a similar draw count, as stretches with the system columns."""
     rs = [r for r in rows if r["state"] == "race" and f(r, "gpu_mean") > 0 and f(r, "draws") > 0]
@@ -132,7 +174,8 @@ def gpu_slow_stretches(rows, f):
                 sum(int(r["occluded"]) for r in g), sum(int(r["fullscreen"]) for r in g), sum(f(r, "gpu_wall") for r in g) / len(g))
         else:
             line += "; (no thermal/low_power/active/gpu_wall columns in this log)"
-        print(line + gpu_cause(c, race_mhz, f, race_state))
+        print(line + gpu_cause(c, race_mhz, f, race_state) + slowlog_evidence(g))
+        print(power_episode(g))
 
 
 def main():

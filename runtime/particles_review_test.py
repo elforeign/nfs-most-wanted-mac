@@ -951,7 +951,8 @@ def player_two(files, tmp):
 #define MAT_VARIANT_SOFT_SMOKE 0x104
 #define MAT_VARIANT_SOFT_SMOKE_RESOLVED 0x105
 typedef struct {int mat,pending,ok;} ShaderEntry;
-static struct {uint32_t viewport[6];} dev;
+static struct {uint32_t viewport[6],tex[8];} dev;
+static int decal_depth_ground(uint32_t t){(void)t;return 0;}
 static struct {void *ms,*tex;} bb_rt,ad_rt;
 static int diag_on,ssao_replay,lamp_replay,q_active,gpt_on,particles_rain;
 static unsigned particle_vid;

@@ -57,8 +57,10 @@ struct Setting {
     int restart;                      // 1: takes effect at the next start
     int live_from_default;            // live only in a run started with the default; else needs a restart
     int own_pref;                     // the feature reads its app.txt key itself: never exported to `env`
+    int live_env;                     // a change is exported to `env` before `apply` runs (the code reads the switch while running)
     void (*apply)(int value);         // live change (game thread); SET_TEXT: submit on Enter; NULL for restart-only settings
     int (*get)(void);                 // the live value when it can change elsewhere (NULL: the registry's copy)
+    int derived;                     // getter summarizes other rows; apply is a command, not a round-trip value
     void (*value_text)(char *buf, int n);   // SET_INFO / SET_ACTION: the value column (NULL: none)
     // ---- filled in by the registry ----
     int value;                        // current value (what get() returns when there's no get)

@@ -8,7 +8,7 @@ void traffic_detail_set(int on) { enabled = on != 0; }
 int traffic_detail_on(void) {
     if (enabled < 0) {
         const char *e = getenv("NFS_TRAFFIC_DETAIL");
-        enabled = e && !strcmp(e, "on");
+        enabled = !(e && *e) || !strcmp(e, "on");   // unset: On
     }
     return enabled;
 }

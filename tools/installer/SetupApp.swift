@@ -18,6 +18,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import CryptoKit
 
 // The oldest macOS this Setup promises is chosen in build_installer.sh (MIN_MACOS), the single place that sets it.
 
@@ -42,6 +43,78 @@ let stageTable: [(id: String, title: String)] = [
 /// Xbox 360 copy, plus 2.8 GB for an unpacked .zip or disc set.
 let requiredFreeGB = 12.0
 
+// Optional extras use a separate terminal result. Source recognition never
+// implies that a converted pack has passed the packaged approval policy.
+struct RecognizedCar: Codable, Equatable {
+    var car_hash: String
+    var status: String
+}
+struct CarRecognition: Codable, Equatable {
+    var game: String
+    var platform: String
+    var approval_available: Bool
+    var output_verified: Bool
+    var cars: [RecognizedCar]
+}
+struct CarVolume: Codable, Equatable {
+    var device: String
+    var paths: [String]
+    var extraction_bytes: Int
+    var staging_bytes: Int?
+    var output_bytes: Int?
+    var retention_bytes: Int
+    var margin_bytes: Int
+    var available_bytes: Int
+    var required_bytes: Int?
+    var sufficient: Bool?
+}
+struct PlannedCar: Codable, Equatable {
+    var slot: Int
+    var name: String
+    var car_hash: String
+    var approved: Bool
+    var reused: Bool
+    var reason: String
+}
+struct CarPlan: Codable, Equatable {
+    var measured: Bool
+    var approved: Bool
+    var volumes: [CarVolume]
+    var cars: [PlannedCar]
+}
+struct CarProgress: Codable, Equatable {
+    var phase: String
+    var slot: Int
+    var done: Int
+    var total: Int
+}
+struct InstalledCar: Codable, Equatable {
+    var slot: Int
+    var name: String
+    var state: String
+    var selected: Bool
+}
+struct RetainedGeneration: Codable, Equatable {
+    var generation: String
+    var verified: Bool
+}
+struct CarResult: Codable, Equatable {
+    var operation: String
+    var verified: Bool
+    var generation: String
+    var message: String
+    var selection: [Int]
+    var cars: [InstalledCar]
+    var generations: [RetainedGeneration]
+}
+
+func exactKeys(_ object: [String: Any], _ names: String) -> Bool {
+    Set(object.keys) == Set(names.split(separator: " ").map(String.init))
+}
+func validGeneration(_ value: String) -> Bool {
+    value.count == 66 && value.hasPrefix("g-") && value.dropFirst(2).allSatisfy { "0123456789abcdef".contains($0) }
+}
+
 enum SetupEvent: Equatable {
     case stage(id: String, title: String)
     case progress(id: String, done: Int, total: Int)
@@ -49,6 +122,10 @@ enum SetupEvent: Equatable {
     case error(id: String, msg: String, fix: String, log: String)
     case features(x360: Bool, missing: [String])
     case done(app: String)
+    case carsRecognition(CarRecognition)
+    case carsPlan(CarPlan)
+    case carsProgress(CarProgress)
+    case carsResult(CarResult)
 }
 
 func parseEvent(_ line: String) -> SetupEvent? {
@@ -56,15 +133,69 @@ func parseEvent(_ line: String) -> SetupEvent? {
     guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8),
           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let ev = obj["ev"] as? String else { return nil }
-    func str(_ k: String) -> String { obj[k] as? String ?? "" }
-    func int(_ k: String) -> Int { (obj[k] as? NSNumber)?.intValue ?? 0 }
+    let decoder = JSONDecoder()
+    func str(_ k: String) -> String? { obj[k] as? String }
     switch ev {
-    case "stage": return .stage(id: str("id"), title: str("title"))
-    case "progress": return .progress(id: str("id"), done: int("done"), total: int("total"))
-    case "warn": return .warn(id: str("id"), msg: str("msg"))
-    case "error": return .error(id: str("id"), msg: str("msg"), fix: str("fix"), log: str("log"))
-    case "features": return .features(x360: (obj["x360"] as? Bool) ?? false, missing: (obj["missing"] as? [String]) ?? [])
-    case "done": return .done(app: str("app"))
+    case "stage":
+        guard exactKeys(obj, "ev id title"), let id = str("id"), let title = str("title"),
+              (stageTable.map { $0.id } + ["stage", "cars"]).contains(id) else { return nil }
+        return .stage(id: id, title: title)
+    case "progress":
+        struct Progress: Decodable { var id: String; var done: Int; var total: Int }
+        guard exactKeys(obj, "ev id done total"), let row = try? decoder.decode(Progress.self, from: data),
+              row.done >= 0, row.total >= 0 else { return nil }
+        return .progress(id: row.id, done: row.done, total: row.total)
+    case "warn":
+        guard exactKeys(obj, "ev id msg"), let id = str("id"), let msg = str("msg") else { return nil }
+        return .warn(id: id, msg: msg)
+    case "error":
+        guard exactKeys(obj, "ev id msg fix log"), let id = str("id"), let msg = str("msg"),
+              let fix = str("fix"), let log = str("log") else { return nil }
+        return .error(id: id, msg: msg, fix: fix, log: log)
+    case "features":
+        struct Features: Decodable { var x360: Bool; var missing: [String] }
+        guard exactKeys(obj, "ev x360 missing"), let row = try? decoder.decode(Features.self, from: data) else { return nil }
+        return .features(x360: row.x360, missing: row.missing)
+    case "done":
+        guard exactKeys(obj, "ev app"), let app = str("app") else { return nil }
+        return .done(app: app)
+    case "cars-recognition":
+        guard exactKeys(obj, "ev game platform approval_available output_verified cars"),
+              let row = try? decoder.decode(CarRecognition.self, from: data), row.game == "carbon",
+              ["pc", "x360"].contains(row.platform), !row.output_verified,
+              let raw = obj["cars"] as? [[String: Any]], raw.allSatisfy({ exactKeys($0, "car_hash status") }),
+              row.cars.allSatisfy({ $0.car_hash.count == 8 && $0.car_hash.allSatisfy { "0123456789abcdef".contains($0) }
+                  && ["importable", "missing", "unknown"].contains($0.status) }) else { return nil }
+        return .carsRecognition(row)
+    case "cars-plan":
+        guard exactKeys(obj, "ev measured approved volumes cars"), let row = try? decoder.decode(CarPlan.self, from: data),
+              let raw = obj["volumes"] as? [[String: Any]], raw.allSatisfy({ exactKeys($0,
+                  "device paths extraction_bytes staging_bytes output_bytes retention_bytes margin_bytes available_bytes required_bytes sufficient") }),
+              let cars = obj["cars"] as? [[String: Any]], cars.allSatisfy({ exactKeys($0, "slot name car_hash approved reused reason") }),
+              row.cars.allSatisfy({ (0...75).contains($0.slot) && $0.car_hash.count == 8
+                  && $0.car_hash.allSatisfy { "0123456789abcdef".contains($0) } }),
+              row.volumes.allSatisfy({ v in
+                  [v.extraction_bytes, v.staging_bytes ?? 0, v.output_bytes ?? 0, v.retention_bytes,
+                   v.margin_bytes, v.available_bytes, v.required_bytes ?? 0].allSatisfy { $0 >= 0 }
+              }) else { return nil }
+        return .carsPlan(row)
+    case "cars-progress":
+        guard exactKeys(obj, "ev phase slot done total"), let row = try? decoder.decode(CarProgress.self, from: data),
+              ["extracted", "converted", "prepared", "verification"].contains(row.phase),
+              (-1...75).contains(row.slot), row.done >= 0, row.total >= 0 else { return nil }
+        return .carsProgress(row)
+    case "cars-result":
+        guard exactKeys(obj, "ev operation verified generation message selection cars generations"),
+              let row = try? decoder.decode(CarResult.self, from: data),
+              ["check", "import", "list", "remove", "restore"].contains(row.operation),
+              row.generation.isEmpty || validGeneration(row.generation),
+              !["import", "remove", "restore"].contains(row.operation) || validGeneration(row.generation),
+              row.selection.allSatisfy({ (0...75).contains($0) }),
+              let raw = obj["cars"] as? [[String: Any]], raw.allSatisfy({ exactKeys($0, "slot name state selected") }),
+              let gens = obj["generations"] as? [[String: Any]], gens.allSatisfy({ exactKeys($0, "generation verified") }),
+              row.cars.allSatisfy({ (0...89).contains($0.slot) && ["ready", "absent"].contains($0.state) }),
+              row.generations.allSatisfy({ !$0.verified || validGeneration($0.generation) }) else { return nil }
+        return .carsResult(row)
     default: return nil
     }
 }
@@ -101,7 +232,19 @@ enum Outcome: Equatable {
     case failed(FailureInfo)
 }
 
-enum RunMode { case check, build, exportApp }
+enum RunMode: String {
+    case check, build, exportApp, carsCheck, carsImport, carsList, carsRemove, carsRestore
+    var carOperation: String? {
+        switch self {
+        case .carsCheck: return "check"
+        case .carsImport: return "import"
+        case .carsList: return "list"
+        case .carsRemove: return "remove"
+        case .carsRestore: return "restore"
+        default: return nil
+        }
+    }
+}
 
 struct RunState {
     var currentStage = ""
@@ -112,6 +255,10 @@ struct RunState {
     var error: FailureInfo?
     var features: (x360: Bool, missing: [String])?
     var appPath: String?
+    var recognition: CarRecognition?
+    var carPlan: CarPlan?
+    var carProgress: CarProgress?
+    var carResult: CarResult?
 
     mutating func apply(_ ev: SetupEvent) {
         switch ev {
@@ -124,6 +271,10 @@ struct RunState {
         case let .error(id, msg, fix, log): error = FailureInfo(stage: id, message: msg, fix: fix, log: log)
         case let .features(x360, missing): features = (x360, missing)
         case let .done(app): appPath = app.isEmpty ? nil : app
+        case let .carsRecognition(row): recognition = row
+        case let .carsPlan(row): carPlan = row
+        case let .carsProgress(row): carProgress = row
+        case let .carsResult(row): carResult = row
         }
     }
 
@@ -137,12 +288,31 @@ struct RunState {
     /// have said "done" with an app path, and that app must exist. Any error event fails the run whatever the status.
     func outcome(mode: RunMode, status: Int32, cancelled: Bool, stderrTail: String = "",
                  appExists: (String) -> Bool) -> Outcome {
+        // A mutating extras result is emitted only after F-T commits. A late
+        // click on Cancel cannot turn that completed transaction into failure.
+        if let operation = mode.carOperation, ["import", "remove", "restore"].contains(operation),
+           status == 0, error == nil, let result = carResult,
+           result.operation == operation, result.verified, validGeneration(result.generation) {
+            return .success(app: nil)
+        }
         if cancelled { return .cancelled }
         if let e = error { return .failed(e) }
         guard status == 0 else {
             let tail = stderrTail.isEmpty ? "The setup stopped (exit \(status))." : stderrTail
             return .failed(FailureInfo(stage: currentStage, message: tail,
                                        fix: "Open the log to see why, then try again.", log: ""))
+        }
+        if let operation = mode.carOperation {
+            if let result = carResult, result.operation == operation, !result.verified,
+               operation != "list", !result.message.isEmpty {
+                return .failed(FailureInfo(stage: "cars", message: result.message,
+                                           fix: "Retry or skip extras. Your previous catalog is retained.", log: ""))
+            }
+            guard let result = carResult, result.operation == operation, (operation == "list" || result.verified) else {
+                return .failed(FailureInfo(stage: "cars", message: "The extras operation ended without a verified result.",
+                                           fix: "Retry or skip extras. Your previous catalog is retained.", log: ""))
+            }
+            return .success(app: nil)
         }
         if mode == .check { return .success(app: nil) }
         guard let app = appPath else {
@@ -230,13 +400,32 @@ func bundledVersion() -> String {
     return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// Unpacks the bundled source (and the FFmpeg tarball the build needs) into the support folder, once per version.
+/// This pin stays in the signed app; the extracted source cache is writable.
+func bundledPrebuiltDigest() -> String? {
+    guard let url = Bundle.main.url(forResource: "prebuilt-manifest", withExtension: "sha256"),
+          let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+    let digest = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return digest.count == 64 && digest.allSatisfy { "0123456789abcdef".contains($0) } ? digest : nil
+}
+
+func copyOptionalPrebuilt(from source: URL, to destination: URL) {
+    let fm = FileManager.default
+    do {
+        try fm.copyItem(at: source, to: destination)
+    } catch {
+        // A partial copy must not prevent the required source build.
+        try? fm.removeItem(at: destination)
+    }
+}
+
+/// Refresh the source when its version or signed library pin changes.
 func prepareSource() throws {
     let fm = FileManager.default
     let version = bundledVersion()
+    let identity = version + "\nprebuilt=" + (bundledPrebuiltDigest() ?? "source")
     let src = sourceDir()
     let marker = src.appendingPathComponent(".source-version")
-    if (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == version,
+    if (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == identity,
        fm.fileExists(atPath: src.appendingPathComponent("tools/setup.py").path) { return }
     guard let archive = Bundle.main.url(forResource: "source", withExtension: "tar.gz") else {
         throw NSError(domain: "Setup", code: 1, userInfo: [NSLocalizedDescriptionKey:
@@ -256,14 +445,39 @@ func prepareSource() throws {
             try fm.copyItem(at: dl.appendingPathComponent(name), to: to.appendingPathComponent(name))
         }
     }
-    try version.write(to: tmp.appendingPathComponent(".source-version"), atomically: true, encoding: .utf8)
+    if let prebuilt = Bundle.main.resourceURL?.appendingPathComponent("prebuilt"), fm.fileExists(atPath: prebuilt.path) {
+        copyOptionalPrebuilt(from: prebuilt, to: tmp.appendingPathComponent("prebuilt"))
+    }
+    try identity.write(to: tmp.appendingPathComponent(".source-version"), atomically: true, encoding: .utf8)
     try? fm.removeItem(at: src)
     try fm.createDirectory(at: supportDir(), withIntermediateDirectories: true)
     try fm.moveItem(at: tmp, to: src)
 }
 
+struct X360Extras {
+    var arrest = true
+    var textures = true
+    var ui = true
+    var names: [String] { [("arrest", arrest), ("textures", textures), ("ui", ui)].filter { $0.1 }.map { $0.0 } }
+    var bytes: Int { (arrest ? 239_000_000 : 0) + (textures ? 253_000_000 : 0) + (ui ? 39_000_000 : 0) }
+    var summary: String {
+        let labels = ["arrest": "Arrest scenes", "textures": "HD textures", "ui": "Menu art"]
+        return names.isEmpty ? "None (PC assets)" : names.compactMap { labels[$0] }.joined(separator: ", ")
+    }
+    func requiredGB(hasX360: Bool) -> Double {
+        let shared = textures && !arrest ? 146_000_000 : 0
+        return requiredFreeGB - Double(531_000_000 - (hasX360 ? bytes + shared : 0)) / 1_000_000_000
+    }
+    static func load(_ data: Data?) -> X360Extras {
+        guard let data, let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let names = saved["x360_extras"] as? [String], Set(names).count == names.count,
+              names.allSatisfy({ ["arrest", "textures", "ui"].contains($0) }) else { return X360Extras() }
+        return X360Extras(arrest: names.contains("arrest"), textures: names.contains("textures"), ui: names.contains("ui"))
+    }
+}
+
 func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL,
-                      pcUpdate: URL? = nil, pcExe: URL? = nil, pcDiscs: [URL] = []) -> [String] {
+                      pcUpdate: URL? = nil, pcExe: URL? = nil, pcDiscs: [URL] = [], x360Extras: X360Extras? = nil) -> [String] {
     if mode == .exportApp {
         return ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
                 "--export-all-in-one", "--app", pc.path, "--dest", dest.path, "--work", work.path, "--events"]
@@ -274,8 +488,107 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL,
     if let e = pcExe { a += ["--pc-exe", e.path] }
     for d in pcDiscs { a += ["--pc-disc", d.path] }
     if let x = x360 { a += ["--x360", x.path] }
+    if let extras = x360Extras { a += ["--x360-extras", extras.names.joined(separator: ",")] }
     a += ["--dest", dest.path, "--work", work.path, "--events"]
+    if let digest = bundledPrebuiltDigest() { a += ["--prebuilt-manifest-sha256", digest] }
     return a
+}
+
+// Generated from the policy-validated metadata by test_car_release.py --generate-selections.
+let carSelectionsSHA256 = "7deace4b65e40706c1907e625228ffd4d516c4b8046474a53b5e4fa093442107"
+
+struct CarChoice: Identifiable {
+    let platform: String
+    let slot: Int
+    let folder: String
+    let spec: [String: Any]
+    var id: String { platform + ":" + String(slot) }
+    var name: String {
+        let names = ["300C": "Chrysler 300C", "997GT3RS": "Porsche 911 GT3 RS",
+                     "BRERA": "Alfa Romeo Brera", "CCX": "Koenigsegg CCX",
+                     "CORVETTEZ06": "Chevrolet Corvette Z06", "EUROPA": "Lotus Europa S",
+                     "JAGUARXK": "Jaguar XK", "MR2": "Toyota MR2", "R32": "Volkswagen Golf R32", "R8": "Audi R8"]
+        return names[folder] ?? folder
+    }
+    var carHash: String {
+        var hash: UInt32 = 0xffffffff
+        for byte in ("CARS/" + folder).replacingOccurrences(of: "/", with: "\\").utf8 {
+            hash = hash &* 33 &+ UInt32(byte)
+        }
+        return String(format: "%08x", hash)
+    }
+    func reason(_ recognition: CarRecognition?) -> String? {
+        guard let recognition else { return "Choose a Carbon source to check availability." }
+        guard recognition.platform == platform else {
+            return "Needs a Carbon " + (platform == "pc" ? "PC" : "Xbox 360") + " source; skipped."
+        }
+        let status = recognition.cars.first { $0.car_hash == carHash }?.status
+        if status == "importable" { return nil }
+        return status == "unknown" ? "Source files differ from the reviewed copy; skipped." : "Missing from this Carbon copy; skipped."
+    }
+    static func load(_ url: URL) throws -> [CarChoice] {
+        let data = try Data(contentsOf: url)
+        guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == carSelectionsSHA256,
+              let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw NSError(domain: "Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "The bundled car selections failed verification."])
+        }
+        return try rows.map { row in
+            guard let origin = row["origin"] as? [String: String], let platform = origin["platform"],
+                  let folder = origin["folder"], let slot = row["slot"] as? Int else {
+                throw NSError(domain: "Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "The bundled car selections are incomplete."])
+            }
+            var spec = row.filter { ["slot", "display", "bindings", "donors", "parts"].contains($0.key) }
+            spec["folder"] = folder
+            return CarChoice(platform: platform, slot: slot, folder: folder, spec: spec)
+        }
+    }
+}
+
+func writeCarSelection(choices: [CarChoice], selected: Set<String>, recognition: CarRecognition?, work: URL) throws -> URL? {
+    let rows = choices.filter { selected.contains($0.id) && $0.reason(recognition) == nil }
+        .sorted { $0.slot < $1.slot }.map { $0.spec }
+    guard !rows.isEmpty else { return nil }
+    try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+    let url = work.appendingPathComponent("car-selection.json")
+    try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys]).write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    return url
+}
+
+func carArguments(mode: RunMode, carbon: URL?, selection: URL?, work: URL, mw: URL? = nil,
+                  slots: [Int] = [], generation: String? = nil, measure: Bool = false, repair: Bool = false) -> [String] {
+    guard let operation = mode.carOperation else { return [] }
+    if operation == "import" && selection == nil { return [] }
+    var args = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path, "--cars-" + operation]
+    if operation == "remove" { args += slots.map(String.init) }
+    if operation == "restore", let generation { args.append(generation) }
+    if operation == "check" || operation == "import" {
+        if let carbon { args += ["--carbon", carbon.path] }
+        if let selection { args += ["--cars-spec", selection.path] }
+        if let mw { args += ["--cars-mw-pc", mw.path] }
+        if measure { args.append("--cars-measure") }
+        if repair { args.append("--cars-repair") }
+    }
+    args += ["--work", work.appendingPathComponent("extras").path, "--events"]
+    return args
+}
+
+/// Keep optional work separate from the install result, including retry and skip.
+struct ExtrasFlow {
+    var busy = false
+    var skipped = false
+    var completed = false
+    var message = "Choose a Carbon source, or skip extras."
+    mutating func begin() { busy = true; skipped = false; completed = false; message = "Checking extras…" }
+    mutating func finish(_ outcome: Outcome) {
+        busy = false
+        switch outcome {
+        case .success: completed = true; message = "Extras operation completed."
+        case .cancelled: completed = false; message = "Extras cancelled. Retry or skip."
+        case let .failed(f): completed = false; message = f.message + "\n" + f.fix
+        }
+    }
+    mutating func skip() { guard !busy else { return }; skipped = true; message = "Extras skipped." }
 }
 
 /// The disc numbers a failed check could not find ("Disc 2, 3 of the set (4 discs) was not found ..."), so the page can
@@ -362,7 +675,7 @@ final class ChildProcess {
 
 /// No SIGKILL during the install transaction: after TERM the backend is putting the previous app, roots and
 /// preferences back and must be allowed to finish (an interrupted one is still recovered by the next run's journal).
-func forceStopAllowed(stage: String) -> Bool { stage != "install" }
+func forceStopAllowed(stage: String) -> Bool { stage != "install" && stage != "cars" }
 
 enum QuitPlan: String { case now, cancelAndWait = "cancel-wait", askThenCancelAndWait = "ask-cancel-wait" }
 
@@ -374,7 +687,7 @@ func quitPlan(childActive: Bool, building: Bool) -> QuitPlan {
 
 // MARK: - App model
 
-enum Page: Int { case welcome, pc, x360, review, build, finished }
+enum Page: Int { case welcome, pc, x360, extras, review, build, finished }
 
 /// An installed game folder (or its .zip), or the PC disc images, which also take the 1.3 update and, as both carry a
 /// copy-protected speed.exe, a speed.exe that has the 1.3 code.
@@ -383,6 +696,7 @@ enum PCKind: Int { case folder, disc }
 final class Setup: ObservableObject {
     static let shared = Setup()
 
+    @Published var showReadMe = false
     @Published var page: Page = .welcome
     @Published var tools = hasCommandLineTools()
     @Published var installingTools = false
@@ -396,6 +710,13 @@ final class Setup: ObservableObject {
     @Published var pcOK = false
     @Published var x360: URL?
     @Published var x360Status = ""
+    @Published var x360Extras = X360Extras.load(try? Data(contentsOf: supportDir().appendingPathComponent("source-choices.json")))
+    @Published var carbon: URL?
+    @Published var carChoices: [CarChoice] = []
+    @Published var selectedCarIDs: Set<String> = []
+    @Published var extras = ExtrasFlow()
+    @Published var managingExtras = false
+    @Published var installedCars: CarResult?
     @Published var features: (x360: Bool, missing: [String])?
     @Published var dest: URL
     @Published var checking = false
@@ -423,11 +744,12 @@ final class Setup: ObservableObject {
 
     var installedApp: URL { dest.appendingPathComponent("NFS Most Wanted Native.app") }
     var freeGB: Double? { freeSpaceGB(at: dest) }
-    var enoughSpace: Bool { (freeGB ?? requiredFreeGB) >= requiredFreeGB }
+    var requiredGB: Double { x360Extras.requiredGB(hasX360: x360 != nil) }
+    var enoughSpace: Bool { (freeGB ?? requiredGB) >= requiredGB }
 
-    func pickFolder(message: String, files: Bool = false, types: [UTType] = []) -> URL? {
+    func pickFolder(message: String, files: Bool = false, types: [UTType] = [], folders: Bool = true) -> URL? {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
+        panel.canChooseDirectories = folders
         panel.canChooseFiles = files
         if !types.isEmpty { panel.allowedContentTypes = types }
         panel.allowsMultipleSelection = false
@@ -500,8 +822,75 @@ final class Setup: ObservableObject {
     func chooseX360() {
         guard let url = pickFolder(message: "Choose your Xbox 360 copy: its folder, or the .iso file.", files: true) else { return }
         x360 = url
-        runCheck(forX360: true)
+        features = nil
+        x360Status = "Copy selected. Your chosen extras will be checked when building."
     }
+
+    func chooseCarbon() {
+        guard !busy, let url = pickFolder(message: "Choose your Carbon game folder or its Xbox 360 ISO.", files: true) else { return }
+        carbon = url
+        state.recognition = nil
+        runCars(.carsCheck)
+    }
+
+    func loadCarChoices() {
+        do {
+            try prepareSource()
+            carChoices = try CarChoice.load(sourceDir().appendingPathComponent("tools/setup_kit/car_selections.json"))
+        } catch { carChoices = []; extras.message = error.localizedDescription }
+    }
+
+    func selectCar(_ car: CarChoice, enabled: Bool) {
+        if enabled { selectedCarIDs.insert(car.id) } else { selectedCarIDs.remove(car.id) }
+        state.carPlan = nil
+    }
+
+    var availableCarSelection: Bool {
+        carChoices.contains { selectedCarIDs.contains($0.id) && $0.reason(state.recognition) == nil }
+    }
+
+    func runCars(_ mode: RunMode, slots: [Int] = [], generation: String? = nil, measure: Bool = false, repair: Bool = false) {
+        guard !busy else { return }
+        let requiresSource = mode == .carsCheck || mode == .carsImport
+        let selection: URL?
+        do {
+            selection = requiresSource ? try writeCarSelection(choices: carChoices, selected: selectedCarIDs,
+                                                               recognition: state.recognition, work: workDir()) : nil
+        } catch { extras.message = error.localizedDescription; return }
+        if mode == .carsImport && selection == nil {
+            extras.message = "No available cars are ticked. No cars were imported."
+            return
+        }
+        extras.begin(); checking = true
+        // The preceding PC check has already unpacked a ZIP/disc into pc_src.
+        let mw = managingExtras ? nil : (pcKind == .disc || pc?.pathExtension.lowercased() == "zip"
+            ? workDir().appendingPathComponent("pc_src") : pc)
+        let args = carArguments(mode: mode, carbon: carbon, selection: selection,
+                                work: workDir(), mw: requiresSource && selection != nil ? mw : nil,
+                                slots: slots, generation: generation, measure: measure, repair: repair)
+        launch(mode: mode, pc: pc ?? dest, x360: nil, arguments: args) { [weak self] outcome, state in
+            guard let self else { return }
+            self.checking = false
+            self.extras.finish(outcome)
+            if case .success = outcome {
+                if let result = state.carResult, mode == .carsList { self.installedCars = result }
+                if mode == .carsCheck, let recognition = state.recognition {
+                    let count = recognition.cars.filter { $0.status == "importable" }.count
+                    self.extras.message = "Recognized Carbon \(recognition.platform.uppercased()): \(count) verified source pairs. "
+                        + (state.carPlan?.approved == true ? "Selected outputs passed packaged approval. Import to activate them."
+                           : recognition.approval_available ? "Packaged approval is available; selected outputs must still verify."
+                           : "No packaged output approval is available. Import is unavailable.")
+                }
+            }
+        }
+    }
+
+    func skipExtras() {
+        guard !busy else { return }
+        extras.skip(); page = managingExtras ? .welcome : .review
+    }
+
+    func manageExtras() { managingExtras = true; page = .extras; runCars(.carsList) }
 
     func chooseDest() {
         let panel = NSOpenPanel()
@@ -523,8 +912,14 @@ final class Setup: ObservableObject {
 
     // One backend run, check or build; all state changes happen on the main queue.
     private func launch(mode: RunMode, pc: URL, x360: URL?, destination: URL? = nil,
+                        arguments: [String]? = nil,
                         finish: @escaping (Outcome, RunState) -> Void) {
+        let previous = state
         state = RunState(); lines = []; stderrTail = []; splitter = LineSplitter(); cancelled = false; stopping = false
+        if mode == .carsList {
+            state.recognition = previous.recognition
+            state.carPlan = previous.carPlan
+        }
         let python = bundledPython()
         let work = workDir()
         do {
@@ -533,9 +928,9 @@ final class Setup: ObservableObject {
             let env = childEnvironment(inherited: ProcessInfo.processInfo.environment, python: python,
                                        roots: work.appendingPathComponent("roots.txt").path)
             let disc = pcKind == .disc
-            let c = try ChildProcess(exe: python, args: backendArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work,
+            let c = try ChildProcess(exe: python, args: arguments ?? backendArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work,
                                                                        pcUpdate: disc ? pcUpdate : nil, pcExe: disc ? pcExe : nil,
-                                                                       pcDiscs: disc ? pcDiscs.keys.sorted().compactMap { pcDiscs[$0] } : []),
+                                                                       pcDiscs: disc ? pcDiscs.keys.sorted().compactMap { pcDiscs[$0] } : [], x360Extras: x360Extras),
                                      env: env, cwd: sourceDir().path)
             child = c
             c.run(onOut: { [weak self] data in
@@ -590,6 +985,8 @@ final class Setup: ObservableObject {
                 else {
                     self.pcStatus = self.pcKind == .disc ? "Your disc images can be used."
                         : pc.pathExtension.lowercased() == "zip" ? "Your game .zip can be used." : "Your game folder can be used."
+                    // Notes on the game itself, e.g. no MOVIES folder (backend movie_note).
+                    for note in st.warnings where note.hasPrefix("pc: ") { self.pcStatus += "\n" + note.dropFirst(4) }
                     self.pcOK = true
                 }
             case let .failed(f):
@@ -714,20 +1111,20 @@ struct ReadMeView: View {
 
 struct ContentView: View {
     @ObservedObject var s: Setup
-    @State private var showReadMe = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Text("NFS Most Wanted Native Setup").font(.title).bold()
                 Spacer()
-                Button("Read Me") { showReadMe = true }
+                Button("Read Me") { s.showReadMe = true }
             }
-            .sheet(isPresented: $showReadMe) { ReadMeView(shown: $showReadMe) }
+            .sheet(isPresented: $s.showReadMe) { ReadMeView(shown: $s.showReadMe) }
             switch s.page {
             case .welcome: welcome
             case .pc: pcPage
             case .x360: x360Page
+            case .extras: extrasPage
             case .review: review
             case .build: buildPage
             case .finished: finished
@@ -741,7 +1138,7 @@ struct ContentView: View {
         HStack {
             if let back { Button("Back") { s.page = back }.disabled(s.checking) }
             Spacer()
-            if let next { Button(nextTitle) { s.page = next }.keyboardShortcut(.defaultAction)
+            if let next { Button(nextTitle) { if next == .pc { s.managingExtras = false }; s.page = next }.keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent).disabled(!nextEnabled || s.checking) }
         }
     }
@@ -761,6 +1158,7 @@ struct ContentView: View {
                 }.padding(4)
             }
             nav(back: nil, next: .pc, nextEnabled: s.tools)
+            Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
             Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
             Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -832,8 +1230,115 @@ struct ContentView: View {
                     featureList
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
-            nav(back: .pc, next: .review, nextEnabled: true)
+            nav(back: .pc, next: .extras, nextEnabled: true)
         }
+    }
+
+    var extrasPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !s.managingExtras {
+                        GroupBox("Xbox 360 extras") {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Toggle("Arrest scenes — 146 MB sources + about 93 MB scenes", isOn: $s.x360Extras.arrest)
+                                Toggle("HD textures — about 253 MB", isOn: $s.x360Extras.textures)
+                                Toggle("Menu art — about 39 MB", isOn: $s.x360Extras.ui)
+                                Text(s.x360 == nil ? "Choose a Most Wanted Xbox 360 copy on the previous page to install these extras." : "Unticked extras use PC assets. Choices are saved when installation succeeds.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                            .disabled(s.busy)
+                        }
+                    }
+                    Text("Extras from your other games").font(.headline)
+                    Text("Optional cars from your own Carbon PC or Xbox 360 copy. Choose this independently of your Most Wanted copies. Later-game cars remain Off until enabled in game settings.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    choice("Carbon source", s.carbon, "Folder or ISO", s.chooseCarbon)
+                    ForEach(["pc", "x360"], id: \.self) { platform in
+                        GroupBox(platform == "pc" ? "Carbon PC cars" : "Carbon Xbox 360 cars") {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(s.carChoices.filter { $0.platform == platform }) { car in
+                                    Toggle(car.name, isOn: Binding(get: { s.selectedCarIDs.contains(car.id) },
+                                                                  set: { s.selectCar(car, enabled: $0) }))
+                                    if let reason = car.reason(s.state.recognition) {
+                                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+                        }.disabled(s.busy)
+                    }
+                    Text("All cars start unticked. Tick the cars you want, then check and import them. Missing sources are skipped.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(s.extras.message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    if let recognition = s.state.recognition, s.state.carPlan == nil {
+                        ScrollView {
+                            VStack(alignment: .leading) {
+                                ForEach(recognition.cars, id: \.car_hash) { car in
+                                    Text("\(car.car_hash): \(car.status == "importable" ? "source verified; output needs approval" : car.status)")
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxHeight: 100)
+                    }
+                    if let plan = s.state.carPlan {
+                        ScrollView {
+                            VStack(alignment: .leading) {
+                                ForEach(plan.cars, id: \.slot) { car in
+                                    Text(car.name + ": " + (car.approved ? "Approved and importable" : car.reason))
+                                        .font(.caption)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxHeight: 80)
+                        ForEach(plan.volumes, id: \.device) { volume in
+                            Text(volume.required_bytes.map { "Extras on volume \(volume.device): \(ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file)) required." }
+                                 ?? "Extras on volume \(volume.device): conversion output size is unknown until measured.")
+                                .font(.caption)
+                        }
+                        Text(plan.approved ? "Selected outputs approved." : "Selected outputs have not passed packaged approval.")
+                            .font(.caption)
+                    }
+                    if let progress = s.state.carProgress {
+                        Text("\(progress.phase) \(progress.slot >= 0 ? "— slot \(progress.slot)" : ""): \(progress.done)/\(progress.total)")
+                            .font(.caption).monospacedDigit()
+                    }
+                    HStack {
+                        Button("Retry check") { s.runCars(.carsCheck, measure: true) }.disabled(s.busy || s.carbon == nil)
+                        Button("Import selected extras") { s.runCars(.carsImport) }
+                            .disabled(s.busy || s.carbon == nil || !s.availableCarSelection || s.state.carPlan?.approved != true)
+                        Button("Retry import") { s.runCars(.carsImport, repair: true) }
+                            .disabled(s.busy || s.carbon == nil || !s.availableCarSelection || s.state.recognition?.approval_available != true)
+                        Button("Refresh installed extras") { s.runCars(.carsList) }.disabled(s.busy)
+                        if s.busy { Button("Cancel extras") { s.cancel() }.disabled(s.stopping) }
+                    }
+                    if let installed = s.installedCars {
+                        if !installed.message.isEmpty { Text(installed.message).font(.caption).foregroundStyle(.orange) }
+                        ScrollView {
+                            VStack(alignment: .leading) {
+                                ForEach(installed.cars.filter { $0.state == "ready" }, id: \.slot) { car in
+                                    HStack {
+                                        Text("\(car.name) (slot \(car.slot)) — \(car.selected ? "selected" : "retained")")
+                                        Spacer()
+                                        if car.selected { Button("Remove") { s.runCars(.carsRemove, slots: [car.slot]) }.disabled(s.busy) }
+                                    }
+                                }
+                                ForEach(installed.generations.filter { $0.verified }, id: \.generation) { generation in
+                                    HStack {
+                                        Text("Retained \(generation.generation.prefix(14))…").font(.caption)
+                                        Button("Restore") { s.runCars(.carsRestore, generation: generation.generation) }.disabled(s.busy)
+                                    }
+                                }
+                            }
+                        }.frame(maxHeight: 100)
+                    }
+                }
+            }
+            HStack {
+                Button("Back") { s.page = s.managingExtras ? .welcome : .x360 }.disabled(s.busy)
+                Spacer()
+                Button("Skip car extras for now") { s.skipExtras() }.disabled(s.busy)
+                Button(s.managingExtras ? "Done" : "Continue to Review") { s.page = s.managingExtras ? .welcome : .review }
+                    .disabled(s.busy)
+            }
+        }.onAppear { s.loadCarChoices() }
     }
 
     @ViewBuilder var featureList: some View {
@@ -860,12 +1365,14 @@ struct ContentView: View {
                         if let e = s.pcExe { row("speed.exe", e.path) }
                     }
                     row("Xbox 360 copy", s.x360?.path ?? "None (PC game only)")
+                    row("Xbox 360 extras", s.x360 == nil ? "PC assets" : s.x360Extras.summary)
+                    row("Other-game extras", s.extras.skipped ? "Skipped" : s.extras.message)
                     HStack {
                         row("Install in", s.dest.path)
                         Button("Change…") { s.chooseDest() }
                     }
                     let free = s.freeGB.map { String(format: "%.0f GB free", $0) } ?? "free space unknown"
-                    Label("Needs about \(Int(requiredFreeGB)) GB while building; \(free) there.",
+                    Label("Needs about \(String(format: "%.1f", s.requiredGB)) GB while building; \(free) there.",
                           systemImage: s.enoughSpace ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(s.enoughSpace ? .green : .orange)
                     if s.enoughSpace == false { Text("Free some space or choose another place.").font(.caption) }
@@ -877,7 +1384,7 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
             HStack {
-                Button("Back") { s.page = .x360 }
+                Button("Back") { s.page = .extras }
                 Spacer()
                 Button("Build") { s.build() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(!s.enoughSpace || s.running)
             }
@@ -966,8 +1473,8 @@ struct ContentView: View {
             Text(s.installedPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             Text("The first launch takes a little longer while the Mac prepares the game's shaders.").font(.caption).foregroundStyle(.secondary)
             // Install-stage notes for the player, e.g. the 3.x career copy (backend migrate_3x_saves).
-            ForEach(s.state.warnings.filter { $0.hasPrefix("install: ") || $0.hasPrefix("bundle: ") }
-                .map { String($0.dropFirst($0.hasPrefix("install: ") ? 9 : 8)) }, id: \.self) { note in
+            ForEach(s.state.warnings.filter { $0.hasPrefix("install: ") || $0.hasPrefix("bundle: ") || $0.hasPrefix("pc: ") }
+                .map { String($0.drop(while: { $0 != " " }).dropFirst()) }, id: \.self) { note in
                 Label(note, systemImage: "info.circle").font(.callout).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -976,6 +1483,7 @@ struct ContentView: View {
                 Button("Show Log") { s.showLog() }
                 Spacer()
             }
+            Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
             Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
         }
     }
@@ -1021,7 +1529,7 @@ func protocolTest(_ a: [String]) -> Int32 {
     // STREAM_FILE EXIT_STATUS CHUNK_BYTES check|build [cancelled]
     guard a.count >= 4, let data = FileManager.default.contents(atPath: a[0]),
           let status = Int32(a[1]), let chunk = Int(a[2]), chunk > 0 else { return 2 }
-    let mode: RunMode = a[3] == "build" ? .build : .check
+    guard let mode = RunMode(rawValue: a[3]) else { return 2 }
     var splitter = LineSplitter()
     var st = RunState()
     var lines: [String] = []
@@ -1042,6 +1550,13 @@ func protocolTest(_ a: [String]) -> Int32 {
     case let .failed(f): out["outcome"] = "failed"; out["message"] = f.message; out["fix"] = f.fix; out["failedStage"] = f.stage
     }
     if let f = st.features { out["features"] = ["x360": f.x360, "missing": f.missing] }
+    if let r = st.recognition { out["recognition"] = ["platform": r.platform, "approval": r.approval_available, "count": r.cars.count] }
+    if let r = st.carResult { out["carOperation"] = r.operation; out["carSelection"] = r.selection }
+    if let p = st.carProgress { out["carPhase"] = p.phase; out["carSlot"] = p.slot; out["carBytes"] = p.done }
+    if let p = st.carPlan {
+        out["carApproved"] = p.approved; out["carVolumes"] = p.volumes.count
+        out["approvedCars"] = p.cars.filter { $0.approved }.map { $0.slot }
+    }
     print(jsonString(out))
     return 0
 }
@@ -1092,6 +1607,22 @@ func installCancelTest(_ a: [String]) -> Never {
 struct Entry {
     static func main() {
         let args = CommandLine.arguments
+        if args.count == 6, args[1] == "--car-selections-test" {
+            do {
+                let choices = try CarChoice.load(URL(fileURLWithPath: args[2]))
+                let recognition = try JSONDecoder().decode(CarRecognition.self, from: Data(args[4].utf8))
+                let selected = Set(try JSONDecoder().decode([String].self, from: Data(args[5].utf8)))
+                let work = URL(fileURLWithPath: args[3])
+                let selection = try writeCarSelection(choices: choices, selected: selected, recognition: recognition, work: work)
+                let command = carArguments(mode: .carsImport, carbon: URL(fileURLWithPath: "/carbon"),
+                                           selection: selection, work: work)
+                print(jsonString(["arguments": command, "names": choices.map { $0.name },
+                                  "ids": choices.map { $0.id }, "defaults": Array(Setup().selectedCarIDs),
+                                  "reasons": choices.map { $0.reason(recognition) ?? "" },
+                                  "spec": selection?.path ?? ""]))
+                exit(0)
+            } catch { fputs((error.localizedDescription + "\n"), stderr); exit(1) }
+        }
         if args.count > 1, args[1] == "--protocol-test" { exit(protocolTest(Array(args.dropFirst(2)))) }
         if args.count > 1, args[1] == "--cancel-test" { cancelTest() }
         if args.count > 1, args[1] == "--install-cancel-test" { installCancelTest(Array(args.dropFirst(2))) }
@@ -1099,6 +1630,38 @@ struct Entry {
             print(jsonString(["idle": quitPlan(childActive: false, building: false).rawValue,
                               "checking": quitPlan(childActive: true, building: false).rawValue,
                               "building": quitPlan(childActive: true, building: true).rawValue]))
+            exit(0)
+        }
+        if args.count > 1, args[1] == "--x360-extras-test" {
+            let data = args.count > 2 ? args[2].data(using: .utf8) : nil
+            let chosen = X360Extras.load(data)
+            let command = backendArguments(mode: .build, pc: URL(fileURLWithPath: "/pc"), x360: URL(fileURLWithPath: "/x360"),
+                                           dest: URL(fileURLWithPath: "/dest"), work: URL(fileURLWithPath: "/work"), x360Extras: chosen)
+            print(jsonString(["names": chosen.names, "bytes": chosen.bytes, "requiredGB": chosen.requiredGB(hasX360: true), "arguments": command]))
+            exit(0)
+        }
+        if args.count > 1, args[1] == "--extras-flow-test" {
+            var flow = ExtrasFlow()
+            flow.begin()
+            flow.skip()
+            let busySkipRefused = !flow.skipped
+            flow.finish(.failed(FailureInfo(stage: "cars", message: "failed", fix: "retry", log: "")))
+            let failureIsOptional = !flow.completed && !flow.busy
+            flow.begin()
+            let retryReset = !flow.completed && !flow.skipped && flow.busy
+            flow.finish(.cancelled)
+            let cancelled = !flow.completed && !flow.busy
+            flow.skip()
+            let skipped = flow.skipped
+            flow.begin()
+            flow.finish(.success(app: nil))
+            let completed = flow.completed
+            let retryAfterSkip = !flow.skipped
+            flow.begin()
+            let retryAfterSuccess = !flow.completed && flow.busy
+            print(jsonString(["busySkipRefused": busySkipRefused, "failureIsOptional": failureIsOptional,
+                              "retryReset": retryReset, "cancelled": cancelled, "skipped": skipped,
+                              "completed": completed, "retryAfterSuccess": retryAfterSuccess, "retryAfterSkip": retryAfterSkip, "pageOrder": Page.x360.rawValue < Page.extras.rawValue && Page.extras.rawValue < Page.review.rawValue]))
             exit(0)
         }
         if args.count > 1, args[1] == "--env-test" {

@@ -745,17 +745,24 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(ci._code('pc', [])[0].pins['car_catalog.py'], pins)
 
     def interleave(self, writer):
-        """A direct catalog client writes just after the engine reads its state."""
-        original, threads = self.engine._current, []
+        """A direct catalog client writes just after the engine reads its state.
 
-        def current(policy):
+        The engine takes its snapshot under the catalog writer lock, so a writer
+        started inside that read can only block on the lock and then race the
+        engine for it once released (whoever wins decides whether the engine
+        sees a change). Run the writer to completion after the snapshot instead.
+        """
+        original, threads = self.engine._snapshot, []
+
+        def snapshot(policy):
             result = original(policy)
             thread = threading.Thread(target=writer)
             thread.start()
-            thread.join(1)
+            thread.join(10)
+            self.assertFalse(thread.is_alive(), 'direct catalog writer did not finish')
             threads.append(thread)
             return result
-        return mock.patch.object(self.engine, '_current', side_effect=current), threads
+        return mock.patch.object(self.engine, '_snapshot', side_effect=snapshot), threads
 
     def test_import_cannot_undo_a_disable_that_lands_after_its_state_read(self):
         self.run_import()

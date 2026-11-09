@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Translated shop notification: original career gate vs optional confirmation extension.
-7e5d3dd0 control: 3 dialog failures / 96 cases; production: 0 / 96.
+"""Translated shop notification: original career gate vs built-in confirmation extension.
+7e5d3dd0 control: 3 dialog failures / 48 cases; production: 0 / 48.
 Confirmation continues through translated MaxOut call with career bits intact.
 """
 from pathlib import Path
@@ -14,17 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 function = runpy.run_path(str(ROOT/'runtime/padprompts_shop_test.py'))['function']
 PRE = r'''
 #include "host.h"
-#include "settings.h"
 #include <stdlib.h>
 #include <string.h>
-static Setting *row;
-void settings_add(Setting*s){row=s;}
 uint8_t *G;
 static int dialogs,refreshes,maxouts,bases,bad,career_bits,test_bits;
 static void context(void){bad+=M8(0x512C)!=career_bits||M8(0x9B9E8D)!=test_bits;}
 void dispatch(Cpu*c,uint32_t fn){context();if(fn!=0x12345678)abort();
  bad+=c->ecx!=0x1000;refreshes++;c->esp+=4;}
 void f_007BB680(Cpu*c){context();bases++;c->esp+=20;}
+void underglow_menu_notify(uint32_t self,uint32_t msg){}
 void f_007B5BB0(Cpu*c){context();maxouts++;bad+=c->ecx!=0x9B9EC0;c->esp+=4;}
 void f_00598DD0(Cpu*c){context();dialogs++;
  uint32_t want[]={0x6000,0x890978,3,0x70E01038,0x417B25E4,0x6820E23E,0xB4EDEB6D,0,0x892CB612};
@@ -40,13 +38,11 @@ POST = r'''
 int main(int argc,char**argv){
  G=calloc(1,16*1024*1024);if(!G)return 2;
  int errors=0,cases=0;
- errors+=!row||row->category!=SET_GAMEPLAY||row->type!=SET_CHOICE||row->order!=55||row->def!=0;
- errors+=strcmp(row->label,"Max Performance in career")||strcmp(row->values[0],"on")||strcmp(row->values[1],"retail");
- errors+=maxperf_on()!=atoi(argv[1]);
  uint32_t categories[]={0x802,0x801,0x103},events[]={0xC519BFC3,0x6820E23E,0xB4EDEB6D,0xDEADBEEF};
- for(int setting=0;setting<2;setting++)for(int career=0;career<2;career++)
+ const int setting=1;
+ for(int career=0;career<2;career++)
  for(int test=0;test<2;test++)for(int cat=0;cat<3;cat++)for(int event=0;event<4;event++){
-  row->apply(setting?0:1);dialogs=refreshes=maxouts=bases=bad=0;
+  dialogs=refreshes=maxouts=bases=bad=0;
   career_bits=0xA0|career;test_bits=test;
   M32(0x91CF90)=0x5000;M8(0x512C)=career_bits;M8(0x9B9E8D)=test_bits;
   M32(0x1000)=0x9000;M32(0x900C)=0x12345678;
@@ -84,7 +80,7 @@ def main():
             (tmp/'test.c').write_text(body)
             p = subprocess.run(['clang', '-O1', '-I'+str(ROOT/'runtime'), '-I'+str(ROOT/'recomp'), str(tmp/'test.c'), '-o', str(tmp/'test')],capture_output=True,text=True)
             assert p.returncode == 0, p.stderr[-3000:]
-            for spelling, expected in [(None, 1), ('on', 1), ('retail', 0)]:
+            for spelling, expected in [(None, 1), ('on', 1), ('retail', 1)]:
                 env = dict(os.environ);env.pop('NFS_MAXPERF_CAREER', None)
                 if spelling: env['NFS_MAXPERF_CAREER'] = spelling
                 p = subprocess.run([str(tmp/'test'), str(expected)], env=env,capture_output=True,text=True)

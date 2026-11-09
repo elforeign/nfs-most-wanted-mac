@@ -7,6 +7,10 @@ preparation requires a pass, so a skip cannot authorize uploading an untested ap
 The optional --proof repacks three broken source payloads and runs this same audit.
 Proof numbers: good exit 0; missing server_functions.tsv exit 1; restored Metal
 compiler requirement exit 1; leaked Testing.md exit 1 (3/3 broken runs rejected).
+Car extension: requires the shipped 12-command PC/X360 proof and 26 pin refusals,
+nonempty reviewed policy, and the exported build's native save proof. Missing
+Setup/input still exits 3. Offline guard proof: 4 checks pass; failed driver,
+incomplete receipt, wrong public-code pin, empty policy and changed trust artifact reject 5/5.
 
 Only real tools/builds/signatures are used. The driver selects Command Line Tools
 in the backend's child environment: production deliberately filters inherited
@@ -27,6 +31,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_NAME = 'NFS Most Wanted Native Setup.app'
@@ -38,16 +43,66 @@ GENERATED = ('attrib_x360', 'x360audio_attrib', 'attrib_light_data', 'trees_para
 # Keep the normal CLI and source intact; select the CLT for every build child,
 # including preflight (the app normally uses the system-selected developer tools).
 DRIVER = '''
-import runpy, sys
+import runpy, sys, shlex, time, json, atexit
 from pathlib import Path
 source = Path(sys.argv.pop(1))
 sys.path.insert(0, str(source / 'tools'))
 from setup_kit import backend, install
+command_seconds = {}
+stage_seconds = {}
+active_stage = None
+stage_started = time.monotonic()
+def finish_stage():
+    global stage_started
+    now = time.monotonic()
+    if active_stage is not None:
+        stage_seconds[active_stage] = stage_seconds.get(active_stage, 0) + now - stage_started
+    stage_started = now
+original_stage = backend.Events.stage
+def measured_stage(self, name):
+    global active_stage
+    finish_stage()
+    active_stage = name
+    return original_stage(self, name)
+backend.Events.stage = measured_stage
+original_run = backend.Runner.run
+def measured_run(self, argv, *args, **kwargs):
+    stages = {'recomp/build_all.py': 'recompile', 'media/build_ffmpeg.sh': 'ffmpeg',
+              'host/audio/build.sh': 'audio', 'host/shaders/build.sh': 'shaders',
+              'runtime/build.sh': 'runtime', 'runtime/bundle.sh': 'bundle'}
+    stage = next((stages[str(arg)] for arg in argv if str(arg) in stages), None)
+    started = time.monotonic()
+    try:
+        return original_run(self, argv, *args, **kwargs)
+    finally:
+        if stage:
+            command_seconds[stage] = command_seconds.get(stage, 0) + time.monotonic() - started
+backend.Runner.run = measured_run
+original_prebuilt = backend.prebuilt.install
+def measured_prebuilt(*args, **kwargs):
+    started = time.monotonic()
+    try:
+        return original_prebuilt(*args, **kwargs)
+    finally:
+        command_seconds['prebuilt'] = time.monotonic() - started
+backend.prebuilt.install = measured_prebuilt
+def save_timings():
+    finish_stage()
+    (source / 'stage-seconds.json').write_text(json.dumps(dict(stages=stage_seconds, commands=command_seconds)))
+atexit.register(save_timings)
+link_tools = source / '.link-tools'
+link_tools.mkdir()
+wrapper = link_tools / 'clang'
+wrapper.write_text('#!/bin/sh\\ncase " $* " in *" -o boot "*) exec /usr/bin/clang "$@" ' +
+                   shlex.quote('-Wl,-map,' + str(source / 'libraries-link.map')) +
+                   ' ;; *) exec /usr/bin/clang "$@" ;; esac\\n')
+wrapper.chmod(0o755)
 original = backend.child_environment
 def clt_environment(*args, **kwargs):
     env = original(*args, **kwargs)
     env['CFFIXED_USER_HOME'] = env['HOME']
     env['DEVELOPER_DIR'] = '/Library/Developer/CommandLineTools'
+    env['PATH'] = str(link_tools) + ':' + env['PATH']
     return env
 backend.child_environment = clt_environment
 transaction = backend.transactional_install
@@ -173,9 +228,43 @@ def extract(archive, target):
             p = Path(member.name)
             require(not p.is_absolute() and '..' not in p.parts and
                     (member.isfile() or member.isdir()), 'unsafe source payload member: ' + member.name)
-        # Members above are regular files/directories with relative paths only;
-        # keep compatibility with the supported Python 3.9 test driver.
-        tar.extractall(target)
+    # Match Setup's actual unpack command after validating every member.
+    subprocess.run(['/usr/bin/tar', '-xzf', str(archive), '-C', str(target)], check=True, capture_output=True)
+
+
+def audit_car_commands(source, python, scratch, env):
+    """Run shipped commands with shipped Python and disposable synthetic policy."""
+    driver = source / 'tests/setup/test_car_release.py'
+    require(nonempty(driver), 'missing shipped car lifecycle proof')
+    policy_path = source / 'tools/setup_kit/car_approvals.json'
+    require(nonempty(policy_path), 'missing shipped car approval policy')
+    before = {p: p.read_bytes() for p in (policy_path, source / 'runtime/car_approvals_public.h',
+                                        source / 'tools/setup_kit/car_catalog.py',
+                                        source / 'tools/setup_kit/car_sources.json')}
+    for flag in ('--verify-policy', '--synthetic'):
+        result = subprocess.run([str(python), '-I', str(driver), flag], cwd=scratch, env=env,
+                                capture_output=True, text=True, timeout=240)
+        require(result.returncode == 0, 'shipped car command proof failed: ' + flag + '\n' +
+                result.stdout[-1000:] + result.stderr[-2000:])
+    try:
+        proof = json.loads(result.stdout.splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError('missing shipped car command receipt') from exc
+    require(proof.get('synthetic') is True and proof.get('commands') == 12 and
+            proof.get('source_unchanged') is True and proof.get('saves_unchanged') is True,
+            'incomplete shipped car lifecycle receipt')
+    require({row['platform'] for row in proof['reports']} == {'pc', 'x360'} and
+            all(row['id'] == 95 and row['outputs'] == 7 and row['rejected_pin_mutants'] == 13
+                for row in proof['reports']), 'incomplete platform/pin proof')
+    codec_sha = hashlib.sha256((source / 'tools/setup_kit/huff.py').read_bytes()).hexdigest()
+    require(all(row.get('public_huff_sha256') == codec_sha for row in proof['reports']),
+            'car approvals do not pin the shipped decoder bytes')
+    require(all(p.read_bytes() == data for p, data in before.items()), 'synthetic policy escaped scratch proof')
+    doc = json.loads(before[policy_path])
+    accepted = sum(bool(row['variants']) for row in doc['slots'])
+    require(accepted > 0, 'no reviewed real-car approvals: synthetic success cannot establish player delivery')
+    print(f'shipped car commands: PASS (12 commands, PC/X360, 26 pin controls; {accepted} approved identities)')
+    return proof
 
 
 def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
@@ -184,6 +273,7 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     # Relocate the complete payload, including Python and its wheels. Any .pyc
     # generated by -I children stays here rather than changing the Setup app.
     resources = Path(shutil.copytree(resources, scratch / 'Setup Resources'))
+    unpack_started = time.monotonic()
     source = scratch / 'extracted source'
     source.mkdir()
     extract(resources / 'source.tar.gz', source)
@@ -196,6 +286,11 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     dl = resources / 'third_party/dl'
     require(dl.is_dir(), 'missing bundled FFmpeg source')
     shutil.copytree(dl, source / 'third_party/dl')
+    if (resources / 'prebuilt').is_dir():
+        shutil.copytree(resources / 'prebuilt', source / 'prebuilt')
+    unpack_seconds = time.monotonic() - unpack_started
+    pin = resources / 'prebuilt-manifest.sha256'
+    trusted_prebuilt = ['--prebuilt-manifest-sha256', pin.read_text().strip()] if pin.is_file() else []
     home = scratch / 'home'
     home.mkdir()
     work = scratch / 'work'
@@ -208,13 +303,16 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     env = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', HOME=str(home), CFFIXED_USER_HOME=str(home), TMPDIR=str(tmp),
                LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
                DEVELOPER_DIR=str(CLT))
+    audit_car_commands(source, python, scratch, env)
     # Prove this toolchain has no offline Metal compiler; never change xcode-select.
     probe = subprocess.run(['/usr/bin/xcrun', '--find', 'metal'], env=env, capture_output=True)
     require(probe.returncode != 0, 'CLT fixture unexpectedly supplies a Metal compiler')
     events_file = scratch / 'events.jsonl'
+    started = time.monotonic()
     with events_file.open('w') as events, (scratch / 'stderr.log').open('w') as errors:
         child = subprocess.Popen([str(python), '-I', '-c', DRIVER, str(source), '--build',
                                   '--pc', str(pc), '--dest', str(dest), '--work', str(work),
+                                  *trusted_prebuilt,
                                   *(['--x360', str(x360)] if x360 else []), '--events'],
                                  cwd=scratch, env=env, stdout=events, stderr=errors)
         try:
@@ -229,6 +327,7 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
                 child.kill()
                 child.wait()
             raise
+    install_seconds = time.monotonic() - started
     try:
         events = [json.loads(line) for line in events_file.read_text().splitlines()]
     except ValueError as e:
@@ -260,6 +359,11 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     guide = app / 'Contents/Resources/Guide.md'
     require(nonempty(guide) and guide.read_bytes() == (source / 'runtime/docs/guide.md').read_bytes(),
             'Guide.md missing or different')
+    licences = app / 'Contents/Resources/Licences.md'
+    require(nonempty(licences), 'missing in-app licence texts')
+    for name in ('NOTICE', 'LICENSE', 'media/PREBUILT.md', 'media/licenses/LGPL-2.1.txt',
+                 'media/licenses/FFmpeg-notices.txt'):
+        require((source / name).read_text() in licences.read_text(), 'missing in-app text: ' + name)
     require(not list(app.rglob('Testing.md')), 'Testing.md leaked into app')
     require(nonempty(app / 'Contents/Resources/AppIcon.icns'), 'missing app icon')
     signature = subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)],
@@ -274,6 +378,10 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
         require((cached / rel).read_bytes() == (source / rel).read_bytes(), 'build table differs: ' + rel)
     for name in GENERATED:
         require(nonempty(cached / f'runtime/gen/{name}.inc'), 'missing generated table: ' + name)
+    save_proof = subprocess.run([str(python), '-I', str(cached / 'runtime/carsave_public_test.py')],
+                                cwd=scratch, env=env, capture_output=True, text=True, timeout=240)
+    require(save_proof.returncode == 0, 'shipped native save proof failed or skipped:\n' +
+            save_proof.stdout[-1500:] + save_proof.stderr[-2000:])
     profile = home / 'Library/Application Support/NFSMW-port'
     roots = read_roots(profile)
     require(all(path.is_relative_to(scratch) for path in roots.values()), 'installed root escaped scratch')
@@ -291,6 +399,12 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
         require({k: snapshot(p) for k, p in old_roots.items()} == root_hashes, 'legacy input roots changed')
         print(f'legacy replacement: PASS ({len(protected)} protected files, preferences, {len(roots)} valid roots; inputs unchanged)')
     print(f'release artifact: PASS (3 binaries, Guide, 3 source tables, 7 generated tables; {len(events)} events; CLT only)')
+    timing = json.loads((source / 'stage-seconds.json').read_text())
+    stages = timing['stages']
+    stages['unpack'] = unpack_seconds
+    return dict(seconds=unpack_seconds + install_seconds, backend_seconds=install_seconds,
+                source=source, cached=cached, app=app, resources=resources, stage_seconds=stages,
+                command_seconds=timing['commands'])
 
 
 def prove(resources, pc, scratch, expected_version):

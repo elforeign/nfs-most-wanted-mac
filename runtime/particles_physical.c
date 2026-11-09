@@ -18,7 +18,7 @@ int particles_physical_enabled(void) {
                    postfx_look_variant("softlitoff") || postfx_look_variant("softhdoff"))) return 1;
     if (physical < 0) {
         const char *e = getenv("NFS_PARTICLES");
-        physical = e && !strcmp(e, "physical");
+        physical = !(e && *e) || !strcmp(e, "physical");   // unset: Physical
     }
     return physical;
 }
@@ -146,7 +146,9 @@ void particles_physical_constants(MatConsts *out, unsigned view_id, const uint32
     lighting_particle_scene(out->k[8],out->k[9],out->k[10]);
     // Mineral aerosol proxy, not a calibration of tyre smoke or this scene's dust.
     out->k[8][3]=0.682f;out->k[9][3]=0.93f;
-    if(diag_on && getenv("BOOT_DIAG_SOFT_SMOKE_COST")){
+    static int cost_diag=-1;
+    if(diag_on && cost_diag<0)cost_diag=getenv("BOOT_DIAG_SOFT_SMOKE_COST")!=NULL;
+    if(diag_on && cost_diag){
         static uint64_t noted;
         if(noted!=frame_serial){noted=frame_serial;
             diag_event("particle scene: frame %llu ambient %.4f %.4f %.4f sun %.4f %.4f %.4f direction %.4f %.4f %.4f lamps %u",

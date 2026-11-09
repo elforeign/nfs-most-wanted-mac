@@ -56,19 +56,46 @@ void underglow_profile_load(uint32_t profile, uint32_t buffer, uint32_t size) {
             ug_identity_equal(&car,&loaded.entries[i].car)) live.entries[live.count++]=loaded.entries[i];
     }
 }
-unsigned underglow_get(uint32_t profile, uint32_t handle) {
+static unsigned choice_get(uint32_t profile, uint32_t handle) {
     UGIdentity car;
     if (!identity(profile,handle,&car)) return 0;
     for (unsigned i=0;i<live.count;++i)
         if (ug_identity_equal(&car,&live.entries[i].car)) return live.entries[i].preset;
     return 0;
 }
-int underglow_set(uint32_t profile, uint32_t handle, unsigned preset) {
+/* A career created this session is named after UserProfile::Default ran, so its name no longer matches the one
+ * recorded there; the customise menu re-binds the profile it is working on (store entries of the same profile are
+ * kept, another profile starts empty). */
+void underglow_adopt(uint32_t profile) {
+    if (!profile_valid(profile) || active(profile)) return;
+    if (profile!=active_profile) underglow_profile_default(profile);
+    else memcpy(active_name,G+profile,32);
+}
+int underglow_owned(uint32_t profile, uint32_t handle) {
     UGIdentity car;
-    if (preset>7 || !identity(profile,handle,&car)) return 0;
+    return identity(profile,handle,&car);
+}
+unsigned underglow_get(uint32_t profile, uint32_t handle) {
+    return choice_get(profile,handle)&7u;
+}
+unsigned underglow_light_get(uint32_t profile, uint32_t handle) {
+    return !!(choice_get(profile,handle)&UG_LIGHT_ON);
+}
+static int choice_set(uint32_t profile, uint32_t handle, unsigned choice) {
+    UGIdentity car;
+    if (!identity(profile,handle,&car)) return 0;
     forget(handle);
-    if (preset) live.entries[live.count++]=(UGEntry){car,preset};
+    /* Zero is an explicit Light Off with no colour, distinct from no choice. */
+    live.entries[live.count++]=(UGEntry){car,choice};
     return 1;
+}
+int underglow_set(uint32_t profile, uint32_t handle, unsigned preset) {
+    if (preset>7) return 0;
+    return choice_set(profile,handle,(choice_get(profile,handle)&UG_LIGHT_ON)|preset);
+}
+int underglow_light_set(uint32_t profile, uint32_t handle, unsigned on) {
+    if (on>1) return 0;
+    return choice_set(profile,handle,(choice_get(profile,handle)&7u)|(on?UG_LIGHT_ON:0));
 }
 void underglow_profile_save(uint32_t profile, uint32_t buffer, uint32_t size) {
     underglow_save_begin();

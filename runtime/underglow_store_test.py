@@ -1,5 +1,7 @@
 """Production snapshot proof: bounded, restartable, checksummed atomic storage.
-Good 197/197 + restart 4/4; digest omission fails 3, rename 3, validation 8.
+Good 229/229 + restart 4/4; digest omission fails 3, rename 7, validation 6.
+Ignoring zero metadata fails 2; omitting its checksum fails 1. Explicit zero
+metadata shares the atomic data inode (attribute/write/fsync/rename faults).
 """
 from pathlib import Path
 import subprocess
@@ -16,7 +18,8 @@ MAIN=r'''
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-static int fail_write, fail_rename, fail_sync;
+#include <sys/xattr.h>
+static int fail_write, fail_rename, fail_sync, fail_attr;
 static ssize_t injected_write(int fd,const void *p,size_t n) {
     if(fail_write) { errno=ENOSPC; return write(fd,p,n/2); }
     return write(fd,p,n);
@@ -25,13 +28,18 @@ static int injected_rename(const char *a,const char *b) {
     if(fail_rename) { errno=EACCES; return -1; } return rename(a,b);
 }
 static int injected_sync(int fd) { if(fail_sync) { errno=EIO; return -1; } return fsync(fd); }
+static int injected_attr(int fd,const char *name,const void *data,size_t n,uint32_t pos,int flags) {
+    if(fail_attr) { errno=ENOTSUP;return -1; } return fsetxattr(fd,name,data,n,pos,flags);
+}
 #define write injected_write
 #define rename injected_rename
 #define fsync injected_sync
+#define fsetxattr injected_attr
 #include "STORE_SOURCE"
 #undef write
 #undef rename
 #undef fsync
+#undef fsetxattr
 static unsigned checks,failures;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; fprintf(stderr,"FAIL %u: %s\n",__LINE__,#x); } } while(0)
 static unsigned char payload[UG_SAVE_BYTES], original[UG_SAVE_BYTES];
@@ -75,6 +83,37 @@ int main(int argc,char **argv) {
     char path[4096]; snprintf(path,sizeof path,"%s/underglow.bin",dir);
     unsigned char bytes[CAPACITY+1], saved[CAPACITY+1];
     int fd=open(path,O_RDONLY); assert(fd>=0); ssize_t size=read(fd,saved,sizeof saved); close(fd); assert(size>0);
+    // Colour-only v1 files inherit Light On; v2 explicit Off remains Off.
+    memcpy(bytes,saved,(size_t)size);put32(bytes+8,1);reseal(bytes,(size_t)size);putfile(path,bytes,(size_t)size);
+    CHECK(ug_store_load(dir,snap.digest,&out));CHECK(out.entries[0].preset==(UG_LIGHT_ON|2));
+    put32(bytes+8,2);reseal(bytes,(size_t)size);putfile(path,bytes,(size_t)size);
+    CHECK(ug_store_load(dir,snap.digest,&out));CHECK(out.entries[0].preset==2);
+    put32(bytes+8,1);
+    put32(bytes+HEADER+36+20,UG_LIGHT_ON|2);reseal(bytes,(size_t)size);putfile(path,bytes,(size_t)size);
+    CHECK(!ug_store_load(dir,snap.digest,&out));
+    putfile(path,saved,(size_t)size);
+    replacement=snap;replacement.entries[0].preset=UG_LIGHT_ON;replacement.entries[1].preset=UG_LIGHT_ON|7;
+    CHECK(ug_store_publish(dir,&replacement));CHECK(ug_store_load(dir,snap.digest,&out));
+    CHECK(out.entries[0].preset==UG_LIGHT_ON && out.entries[1].preset==(UG_LIGHT_ON|7));
+    replacement.entries[0].preset=0;
+    for(unsigned f=0;f<4;++f) {
+        fail_attr=f==0;fail_write=f==1;fail_sync=f==2;fail_rename=f==3;
+        CHECK(!ug_store_publish(dir,&replacement));fail_attr=fail_write=fail_sync=fail_rename=0;
+        CHECK(ug_store_load(dir,snap.digest,&out));CHECK(out.entries[0].preset==UG_LIGHT_ON);
+    }
+    CHECK(ug_store_publish(dir,&replacement));CHECK(ug_store_load(dir,snap.digest,&out));
+    CHECK(out.entries[0].preset==0 && out.entries[1].preset==(UG_LIGHT_ON|7));
+    unsigned char metadata[ZERO_SIZE];
+    CHECK(getxattr(path,ZERO_ATTR,metadata,sizeof metadata,0,0)==sizeof metadata);
+    metadata[32]^=1;CHECK(!setxattr(path,ZERO_ATTR,metadata,sizeof metadata,0,0));
+    CHECK(!ug_store_load(dir,snap.digest,&out));
+    metadata[32]^=1;CHECK(!setxattr(path,ZERO_ATTR,metadata,sizeof metadata,0,0));
+    CHECK(ug_store_load(dir,snap.digest,&out) && out.entries[0].preset==0);
+    /* A copied data fork is still valid v2; missing optional metadata has the
+     * old None/Light On interpretation, never an unreadable snapshot file. */
+    CHECK(!removexattr(path,ZERO_ATTR,0));CHECK(ug_store_load(dir,snap.digest,&out));CHECK(out.entries[0].preset==UG_LIGHT_ON);
+    replacement.entries[0].preset=0x200;CHECK(!ug_store_publish(dir,&replacement));
+    putfile(path,saved,(size_t)size);
     // Every truncation boundary must reject, not partially restore a prefix.
     for(size_t cut=0;cut<(size_t)size;++cut) {
         putfile(path,saved,cut); memset(&out,0xFF,sizeof out);
@@ -84,7 +123,7 @@ int main(int argc,char **argv) {
     for(unsigned fault=0;fault<8;++fault) {
         memcpy(bytes,saved,(size_t)size);
         if(fault==0) bytes[0]^=1;
-        if(fault==1) put32(bytes+8,2);
+        if(fault==1) put32(bytes+8,4);
         if(fault==2) put32(bytes+12,UG_MAX_SNAPSHOTS+1);
         if(fault==3) put32(bytes+HEADER+32,UG_MAX_CARS+1);
         if(fault==4) put32(bytes+HEADER+36+20,8);
@@ -123,11 +162,13 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         d=Path(tmp)
         original=(ROOT/'underglow_store.c').read_text()
-        for mutation in ('good','digest','rename','validation'):
+        for mutation in ('good','digest','rename','validation','zero-metadata','zero-checksum'):
             source=original
             if mutation=='digest': source=source.replace('if (!memcmp(all[i].digest,digest,32))','if (1)')
             if mutation=='rename': source=source.replace('ok=SAVE_TIME("rename", rename(temp,path))==0;', '(void)SAVE_TIME("rename", rename(temp,path)); ok=1;')
             if mutation=='validation': source=source.replace('if (!valid(s)) return 0;', 'if (0) return 0;')
+            if mutation=='zero-metadata': source=source.replace('zero_extension=1;', 'zero_extension=0;')
+            if mutation=='zero-checksum': source=source.replace('if(memcmp(actual,zeros+32+ZERO_BYTES,32)) return 0;', '(void)actual;')
             assert source!=original or mutation=='good'
             production=d/(mutation+'-store.c'); production.write_text(source)
             driver=d/(mutation+'.c'); driver.write_text(MAIN.replace('STORE_SOURCE',str(production)))

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Guide loader, CoreText layout, shortcut and real F10 input/pause tests (no GPU/game).
 
-Proof (checks/failures): good 1700/0. Broken production source controls:
-missing 1700/2; empty 1700/1; UTF-8 3140/1; format 2420/10; clamp 1700/10;
-resize/cache 1700/1 each; wrap 620/120; clip 1700/1; priority 1696/88;
-ordering 1700/4; tap 1700/9; release 1700/4; hidden 1700/2; Back 1698/32;
-F10 1700/5; pause 1696/6; opening 1700/4; scale 1700/6; old fonts 2420/6;
-old step 1700/6; modified release 1700/1; wheel 1700/2; page/repeat 1700/4.
-25 controls rejected. Large panel 1960x1280; body 10, step 14; 28 lines
+Licences: wrong document 1917/4; omitted row 1917/9; good 1917/0.
+Proof (checks/failures): good 1917/0. Broken production source controls:
+missing 1917/2; empty 1917/1; UTF-8 3357/1; format 2637/10; clamp 1917/10;
+resize/cache 1917/1 each; wrap 837/120; clip 1917/1; priority 1913/88;
+ordering 1917/4; tap 1917/9; release 1917/4; hidden 1917/2; Back 1915/32;
+F10 1917/4; pause 1913/6; opening 1917/4; scale 1917/6; old fonts 2637/6;
+old step 1917/6; modified release 1917/1; wheel 1917/2; page/repeat 1917/4.
+31 controls rejected; replay key/pad/focus/disconnect: 1917 checks, 8/5/4/2 failures. Large panel 1960x1280; body 10, step 14; 28 lines
 versus 14 in each previous layout, for both Guide and What to test.
+Streaming input adds 10 checks: good 1921/0; repeat/editor-pad/close faults have 6/1/1 failures (1921 checks).
 Each control changes code in a scratch copy; a nonzero test exit is required.
 """
 import os
@@ -21,9 +23,12 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'runtime'
+PROOF=[]
 
 # Source changes, not fixture changes: these checks must detect a broken implementation.
 MUTATIONS = {
+    'licences': ('guide.m', 'testing == 2 ? @"Licences.md"', 'testing == 2 ? @"Guide.md"'),
+    'licences_row': ('guide.m', 'settings_add(&licences_row);', ''),
     'missing': ('guide.m', 'if (!source) source=@"This document could not be read. Press Back to return to Help.";',
                 'if (!source) source=@"Unavailable";'),
     'empty': ('guide.m', 'source=@"This document is empty. Press Back to return to Help.";', 'source=@"Unavailable";'),
@@ -74,10 +79,12 @@ def build_and_run(base, name, mutation=None):
         plistlib.dump({'CFBundleExecutable': 'GuideCheck', 'CFBundleIdentifier': 'test.guide',
                       'CFBundlePackageType': 'APPL'}, file)
     shutil.copyfile(RUNTIME / 'docs/guide.md', resources / 'Guide.md')
+    (resources / 'Licences.md').write_text('\n\n'.join((ROOT / name).read_text() for name in
+        ('NOTICE', 'LICENSE', 'media/PREBUILT.md', 'media/licenses/LGPL-2.1.txt', 'media/licenses/FFmpeg-notices.txt')))
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-fsanitize=address,undefined', '-fobjc-arc', '-I' + str(ROOT / 'recomp'),
                '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME), str(work / 'guide_test.m'),
-               str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'),
+               str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'QuartzCore',
                '-framework', 'Metal', '-Wl,-dead_strip', '-o', str(binary)]
     compiled = subprocess.run(command, capture_output=True, text=True)
@@ -90,6 +97,7 @@ def build_and_run(base, name, mutation=None):
         raise RuntimeError(name + ' did not finish:\n' + (result.stderr + result.stdout)[-5000:])
     checks, failures = map(int, counts.groups())
     print(f'{name}: {checks} checks, {failures} failures')
+    PROOF.append(f'{name}: {checks} checks, {failures} failures')
     if mutation:
         assert result.returncode != 0 and failures > 0, name + ' mutation escaped detection'
     else:
@@ -126,6 +134,18 @@ def main():
         build_and_run(base, 'good')
         for name, mutation in MUTATIONS.items():
             build_and_run(base, name, mutation)
+        for name,mutation in [
+            ('stream-repeat',('portmenu.m','(!repeat && !was_down)','((void)was_down, !repeat)')),
+            ('stream-editor-pad',('portmenu.m','if(stream_key_editing()) { last_phys=phys; hold_after_close=phys; return ~0u; }','if(0) { last_phys=phys; hold_after_close=phys; return ~0u; }')),
+            ('stream-close',('portmenu.m','if (!o) stream_key_close();','(void)o;')),
+            ('replay-key',('portmenu.m','if(replaySave) replay_save_action(0);','if(0 && replaySave) replay_save_action(0);')),
+            ('replay-pad',('portmenu.m','if(replayPad.save) replay_save_action(0);','if(0 && replayPad.save) replay_save_action(0);')),
+            ('replay-focus',('portmenu.m','replay_input_cancel(&replayInput);','(void)0;')),
+            ('replay-disconnect',('portmenu.m','replay_input_disconnect(&replayInput);','(void)0;')),
+        ]:
+            build_and_run(base,name,mutation)
+    cache=ROOT/'.metal-cache/guide'; cache.mkdir(parents=True,exist_ok=True)
+    (cache/'proof.log').write_text('\n'.join(PROOF)+'\n')
     print('guide_test PASS')
 
 

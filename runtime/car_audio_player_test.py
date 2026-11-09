@@ -23,6 +23,10 @@ All executable fixtures run with ASan/UBSan. No dynamic main read.
 Whole suite: OFFLINE PASS (215 tests, 524 seconds, five missing-input skips);
 host audio/shaders and publication passed, zero publication findings.
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[1] / "tools"))
+from setup_kit.input_paths import input_path
 import argparse
 import hashlib
 import json
@@ -538,7 +542,7 @@ def private_proof():
     The source/target layout census comes from A4, while the expected transition
     traces are specified by SourceExpectation, not by its classification labels.
     """
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     roster = ROOT / 'tools_snapshot/private_cars.py'
     if not (source / 'GLOBAL/attributes.bin').is_file() or not roster.is_file():
         print('SKIP private source inputs absent; synthetic lifecycle proof completed')

@@ -1,6 +1,8 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#define UG_LIGHT_ON 0x100u
+#define UG_CHOICE_MASK (UG_LIGHT_ON | 7u)
 #define UG_MAX_CARS 200
 #define UG_MAX_SNAPSHOTS 16
 #define UG_SAVE_BYTES 0xF848u
@@ -9,6 +11,9 @@
 typedef struct {
     uint32_t handle, frontend, vehicle, customization, kind;
 } UGIdentity;
+/* The in-memory choice packs RGB bits and the independent UG_LIGHT_ON.
+ * Zero retains explicit Light Off without a colour. The v2 data fork uses
+ * legacy label IDs; zero is distinguished by an optional inode attribute. */
 typedef struct { UGIdentity car; uint32_t preset; } UGEntry;
 typedef struct {
     unsigned char digest[32];
@@ -17,7 +22,8 @@ typedef struct {
 } UGSnapshot;
 int ug_identity_equal(const UGIdentity *a, const UGIdentity *b);
 int ug_save_digest(const void *bytes, size_t size, unsigned char digest[32]);
-/* Caller supplies a directory; only underglow.bin and its sibling temporary
- * are accessed. Rejection clears output; cosmetics never gate retail saves. */
+/* Caller supplies a directory; only underglow.bin (including its zero-choice
+ * attribute) and its sibling temporary are accessed. Rejection clears output;
+ * cosmetics never gate retail saves. */
 int ug_store_load(const char *directory, const unsigned char digest[32], UGSnapshot *out);
 int ug_store_publish(const char *directory, const UGSnapshot *snapshot);

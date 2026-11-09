@@ -23,7 +23,11 @@ for library, names in {
     'user32.lib': '''__imp_LoadCursorA __imp_RegisterClassA __imp_AdjustWindowRect
         __imp_CreateWindowExA __imp_ShowWindow __imp_DefWindowProcA
         __imp_DestroyWindow __imp_PostQuitMessage __imp_IsWindow
-        __imp_PeekMessageA __imp_TranslateMessage __imp_DispatchMessageA''',
+        __imp_PeekMessageA __imp_TranslateMessage __imp_DispatchMessageA
+        __imp_ValidateRect __imp_GetClientRect __imp_GetWindowRect __imp_SetWindowPos __imp_SetFocus
+        __imp_SetForegroundWindow __imp_SetCapture __imp_ReleaseCapture
+        __imp_GetCursorPos __imp_ShowCursor __imp_MapVirtualKeyA __imp_GetKeyNameTextA
+        __imp_RegisterRawInputDevices __imp_GetRawInputData''',
     'dxgi.lib': 'CreateDXGIFactory2 __imp_CreateDXGIFactory2',
     'd3d12.lib': '''D3D12CreateDevice __imp_D3D12CreateDevice
         D3D12SerializeRootSignature __imp_D3D12SerializeRootSignature''',
@@ -41,6 +45,17 @@ for library, names in {
 }.items():
     for name in names.split():
         DESKTOP[name] = library
+
+for name in ('waveOutOpen', 'waveOutPrepareHeader', 'waveOutWrite',
+             'waveOutUnprepareHeader', 'waveOutReset', 'waveOutClose'):
+    DESKTOP['__imp_' + name] = 'winmm.lib'
+DESKTOP['__imp_TryAcquireSRWLockExclusive'] = 'kernel32.lib'
+for name in '''??2@YAPEAX_K@Z ??3@YAXPEAX@Z ??3@YAXPEAX_K@Z
+               _Init_thread_epoch _Init_thread_footer _Init_thread_header
+               __dyn_tls_on_demand_init __tlregdtor __tls_guard
+               atexit atoi fabs fprintf fputc getenv llround memcmp pow snprintf
+               strlen strtod strtol vsnprintf'''.split():
+    DESKTOP[name] = 'ucrt/libcmt/vcruntime'
 
 
 def find_nm(compiler):

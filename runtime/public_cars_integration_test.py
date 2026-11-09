@@ -203,8 +203,8 @@ int main(int argc,char **argv) {
         free(standalone.collision_bytes);
         Addition unicode={0}; snprintf(unicode.display_name,sizeof unicode.display_name,"Caf\xc3\xa9");
         uint32_t histogram=gmalloc(516); M32(histogram)=256; M16(histogram+4+2*128)=0xE9;
-        M32(0x91CF7C)=histogram; uint32_t packed=packed_display(&unicode);
-        CHECK(!memcmp(G+packed,"Caf\x80",5)); M32(0x91CF7C)=0;
+        M32(0x91CF84)=histogram; uint32_t packed=packed_display(&unicode);
+        CHECK(!memcmp(G+packed,"Caf\x80",5)); M32(0x91CF84)=0;
         uint32_t allocator=gmalloc(4),vt=gmalloc(4); M32(0x8F7EA8)=allocator; M32(allocator)=vt; M32(vt)=0x1001000;
         uint32_t v=vault(),donor=test_key("MODEL_DONOR"),price=test_key("PRICE_DONOR"); menu_vault=v;
         uint32_t pv=collection(v,PVEHICLE,donor,0x74),pr=collection(v,PVEHICLE,price,0x74);

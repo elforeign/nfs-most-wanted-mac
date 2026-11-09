@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Translated CustomizeSub::RefreshHeader, real recursive visibility and pad hooks.
 7e5d3dd0 On regression and missing-mirror controls must fail; production must pass.
-Retail-gate control: 234 failures / 288 cases (216 before the career prompt moved above Cash/Total); fixed: 0 / 288. Missing-mirror control: 144 failures. Both groups and their children checked.
+Retail-gate control: 234 failures / 144 cases; fixed: 0 / 144. Missing-mirror control: 72 failures. Both groups and their children checked.
 Optional --source runs the identical harness against a frozen older source.
 No assets, game, controller or graphics device required.
 """
@@ -23,12 +23,10 @@ def function(source, name):
 PRE = r'''
 #include "host.h"
 #include <stdlib.h>
-#include "settings.h"
-void settings_add(Setting*s){(void)s;}
 void f_007BB870_orig(Cpu*c){(void)c;abort();}
 uint8_t *G;
 void dispatch(Cpu*c,uint32_t fn){(void)c;(void)fn;abort();}
-static int enabled, shop_mirror;
+static int shop_mirror;
 uint32_t galloc(uint32_t n){(void)n;return 0xA000;}
 static int prompt_mode, missing, layout_calls, layout_errors;
 static int mode(void) { return prompt_mode; }
@@ -59,7 +57,7 @@ uint32_t call_guest(Cpu*c,uint32_t fn,int n,const uint32_t*a) {
  case 0x00514CC0:f_00514CC0(c);break;case 0x00514C70:f_00514C70(c);break;
  case 0x005B8190: {
   uint32_t v=arg(c,0);float y;memcpy(&y,G+v+4,4);
-  int show=enabled && (M8(0x512C)||M8(0x9B9E8D)) && M32(0x1150)==0x802;
+  int show=(M8(0x512C)||M8(0x9B9E8D)) && M32(0x1150)==0x802;
   float want=c->ecx==0x2000?-103.0f:-87.0f; // keyboard 156<->53, console 117<->30
   layout_errors+=(c->ecx!=0x3000&&c->ecx!=0x2000) || arg(c,1)!=1 || y!=(show?want:-want);
   layout_errors+=M32(v)!=0||M32(v+8)!=0;layout_calls++;
@@ -74,10 +72,11 @@ POST = r'''
 int main(void) {
  G=calloc(1,16*1024*1024);if(!G)return 2;
  int errors=0,cases=0;uint32_t categories[]={0x802,0x801,0x103};
- for(int setting=0;setting<2;setting++)for(prompt_mode=0;prompt_mode<3;prompt_mode++)for(missing=0;missing<2;missing++)
+ const int setting=1;
+ for(prompt_mode=0;prompt_mode<3;prompt_mode++)for(missing=0;missing<2;missing++)
  for(int career=0;career<2;career++)for(int test=0;test<2;test++)
  for(int cat=0;cat<3;cat++)for(int hidden=0;hidden<2;hidden++) {
-  enabled=setting;layout_calls=layout_errors=0;M32(0x302C)=0x7000;
+  layout_calls=layout_errors=0;M32(0x302C)=0x7000;
   M32(0x7020)=0x42EA0000;M32(0x701C)=0xC35E0000;M32(0x7024)=0x43750000;
   M32(0x304C)=0xB000;M32(0x8A2BF0)=0x1C;
   M32(0x202C)=0x7100;M32(0x204C)=0;MF32(0x7100+0x1C)=-241;MF32(0x7100+0x20)=156;MF32(0x7100+0x24)=40;
@@ -105,13 +104,6 @@ int main(void) {
   else {errors+=(M32(0x301C)&1)!=hidden;errors+=(M32(0x311C)&1)!=hidden;}
   errors+=c.esp!=0x8004||c.ebx!=17||c.esi!=19||c.edi!=23||c.ebp!=29;
   errors+=(M32(0x301C)&0x40)==0;
-  // Live On/Retail transition restores the authored layout without changing X/Z tracks.
-  if(!missing){Cpu saved=c;enabled=!setting;maxperf_career_header(&c,0x1000);
-   float next_y=!setting&&(career||test)&&cat==0?30:117;
-   errors+=memcmp(&saved,&c,sizeof c)!=0||MF32(0x7020)!=next_y||MF32(0x7120)!=(!setting&&(career||test)&&cat==0?53:156);
-   for(int k=0;k<2;k++){uint32_t track=0xC000+k*0x100;
-    errors+=MF32(track+0x18)!=-222||MF32(track+0x1C)!=next_y||MF32(track+0x20)!=(k?125:245);}
-  }
   cases++;
  }
  printf("shop prompt cases=%d visibility/ABI failures=%d\n",cases,errors);

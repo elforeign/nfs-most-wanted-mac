@@ -1,14 +1,14 @@
 """Current-fit scenery selection, disabled parity and bounded frame-arena use.
 Production refresh + translated visibility (006CF2B0), DrawAScenery (00729120)
-and matrix allocator (00405ED0), ASan/UBSan, real X360/steady fits.
-Current: 3,956 checks / 0 failures; pinned main: 4,559 / 65;
-pinned reviewed branch: 6,378 / 88. Stale selections restored: main 0/10,
-current 10/10. Solo both Off reculls: reviewed 18, main/current 0.
-Frame arena bytes across 12 frames: main/current 23,424, reviewed 47,360;
+and matrix allocator (00405ED0), ASan/UBSan, real X360 fits.
+Current: 1,974 checks / 0 failures; pinned main: 2,261 / 34;
+pinned reviewed branch: 3,180 / 46. Stale selections restored: main 0/6,
+current 6/6. PC-fit reculls: reviewed 9, main/current 0.
+Frame arena bytes across retained cases: main/current 11,136, reviewed 22,784;
 every frame must match main and retain its last available matrix allocation.
-Guard-omission control: 4,550 / 22 vs current 3,956 / 0.
-Arena-leak control: 3,720 / 24 vs current 3,956 / 0.
-Plane/recull omission controls fail 11/23. SHA-pinned function baselines;
+Guard-omission control: 2,276 / 12 vs current 1,974 / 0.
+Arena-leak control: 1,854 / 12 vs current 1,974 / 0.
+Plane/recull omission controls fail 7/13. SHA-pinned function baselines;
 no GPU, game or emulation. Cull traversal and LOD are recording sinks;
 nonpacked matrix allocation and draw-table append execute translated code.
 Autodiscovered by offline_tests.sh.
@@ -16,7 +16,6 @@ Autodiscovered by offline_tests.sh.
 from pathlib import Path
 import hashlib
 import re
-import runpy
 import subprocess
 import tempfile
 
@@ -27,13 +26,16 @@ ORIGINAL_SHA = "5c6d13dfe222b19bb90df6a3ab0557483f74651eae38d1d29790d6f8f38ad0d0
 REVIEWED = 'void x360_shadow_casters(Cpu *c, uint32_t cull, uint32_t light_view) {\n    uint32_t plat = M32(light_view);\n    if (!cull || !plat) return;\n    uint32_t n = M32(cull + 0x9C0);\n    for (uint32_t i = 0; i < n; ++i) {\n        uint32_t entry = cull + i * 0xD0;\n        if (M32(entry + 0x80) != light_view) continue;\n        const float *m = (const float *)(G + plat + 0x80);\n        float planes[6][4];\n        for (int k = 0; k < 6; ++k) {\n            double norm = 0;\n            for (int r = 0; r < 4; ++r) {\n                planes[k][r] = k == 4 ? m[4*r+2] :\n                    m[4*r+3] + (k < 4 && !(k&1) ? 1 : -1)*m[4*r+k/2];\n                if (r < 3) norm += (double)planes[k][r]*planes[k][r];\n            }\n            if (!isfinite(norm) || norm <= 0) return;\n            norm = sqrt(norm);\n            for (int r = 0; r < 4; ++r) planes[k][r] /= norm;\n        }\n        memcpy(G + plat + 0x140, planes, sizeof planes);\n        Cpu saved = *c;\n        uint32_t a[3] = {light_view, entry, 0x4100};\n        call_guest(c, 0x004FAE40u, 3, a);\n        c->ecx = cull;\n        call_guest(c, 0x00731B80u, 0, NULL);\n        *c = saved;\n        break;\n    }\n}'
 REVIEWED_SHA = '633854ef8654cbd79bbcf09b736e964a727847089cfc427acc5249ddf6057607'
 
+FIT_CONSTANTS = '#define X360E_SHADOW_FOCUS_FE 31.0f\n#define X360E_SHADOW_FOCUS_RACE 70.0f\n#define X360E_SHADOW_FOCUS_NEAR 0.01f\n#define X360E_SHADOW_LIGHT_Z_MIN 0.7f\n#define X360E_SHADOW_N_SCALE 20.0f\n#define X360E_SHADOW_N_OFFSET 0.1f\n#define X360E_SHADOW_EYE_BACK 3.0f\n#define X360E_SHADOW_Y_SCALE 20.0f\n#define X360E_SHADOW_DEPTH_SCALE 10.0f\n#define X360E_SHADOW_SIZE 1600\n'
+FIT_CONSTANTS_SHA = 'aed9217d509d64415406135f61f596db10c68b283ee375ce3d531b88f94ef8b4'
+
 HARNESS = r'''
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 uint8_t *G;
 static unsigned checks,failures,refreshes,mode;
-static int fit=2, shadow_stable;
+static int fit=2;
 static unsigned allocations;
 static uint32_t gmalloc_try(uint32_t n) { (void)n; return 0xD00000; }
 static uint32_t shadow_source,shadow_cull;
@@ -118,7 +120,6 @@ static void update(Cpu *c,uint32_t cull,uint32_t view) {
 #endif
 }
 void x360_shadow_fit(const float *,float,float,const float *,float,float,float *);
-void x360_shadow_stable_fit(const float *,float,float,const float *,float,int,int,float *);
 static void view(float m[16],float x,float yaw) {
     memset(m,0,64);m[0]=cosf(yaw);m[2]=-sinf(yaw);m[4]=sinf(yaw);m[6]=cosf(yaw);m[9]=-1;m[15]=1;
     m[12]=-x*m[0];m[13]=1;m[14]=-x*m[2];
@@ -166,26 +167,23 @@ int main(void) {
     M32(0x400018)=0x420000;M32(0x400020)=0x410000;
     M32(0x420028)=M32(0x420030)=M32(0x420034)=0x500000;
     for(unsigned i=0;i<3;i++)M32(0x919650+i*0x70+0x40)=0x300000+i*0x1000;
-    for(mode=0;mode<2;mode++)for(unsigned stable=0;stable<2;stable++)for(unsigned motion=0;motion<3;motion++) {
-        fit=stable?0:2;shadow_stable=stable;
+    for(mode=0;mode<2;mode++)for(unsigned motion=0;motion<3;motion++) {
+        fit=2;
         memset(G+0x100000,0,0x1000);shadow_cull=0x100000;shadow_source=0x919650;
         M32(shadow_cull+0x9C0)=3;
         uint32_t views[3]={0x919650,0x919C70,0x9196C0};
         for(unsigned i=0;i<3;i++) {M32(views[i])=0x200000+i*0x1000;M32(shadow_cull+i*0xD0+0x80)=views[i];}
         float old[16],now[16],v[16],light[3]={-.467f,-.464f,.753f};
         view(v,0,0);
-        if(stable)x360_shadow_stable_fit(v,.84569f,1.50345f,light,70,1600,1,old);
-        else x360_shadow_fit(v,.84569f,1.50345f,light,20.1f,70,old);
+        x360_shadow_fit(v,.84569f,1.50345f,light,20.1f,70,old);
         view(v,motion==1?0:1.25f,motion==0?0:.02f);
-        if(stable)x360_shadow_stable_fit(v,.84569f,1.50345f,light,70,1600,1,now);
-        else x360_shadow_fit(v,.84569f,1.50345f,light,20.1f,70,now);
+        x360_shadow_fit(v,.84569f,1.50345f,light,20.1f,70,now);
         count=0;candidates(now);candidates(old);CHECK(count<=64);
         uint32_t plat=M32(0x919C70);memcpy(G+plat+0x80,now,64);
         planes(plat,now);uint64_t expected=0;
         for(unsigned b=0;b<count;b++)if(visible(0x919C70,boxes[b][0],boxes[b][1]))expected|=1ull<<b;
         planes(plat,old);uint64_t stale=0;
         for(unsigned b=0;b<count;b++)if(visible(0x919C70,boxes[b][0],boxes[b][1]))stale|=1ull<<b;
-        // A yaw-invariant stable map can remain unchanged for yaw-only motion.
         if(stale!=expected)++stale_cases;
         for(unsigned b=0;b<count;b++) {
             memcpy(G+0x410000+b*64,boxes[b][0],12);memcpy(G+0x41000C+b*64,boxes[b][1],12);
@@ -226,8 +224,8 @@ int main(void) {
         update(&c,shadow_cull,0x919C70);
         Cpu tail={.esp=0x820000};M32(tail.esp+4)=1;f_00405ED0(&tail);
         CHECK(tail.eax!=0 && M32(0x915F94)==0);
-        // Both switches Off: same memory/CPU, zero reculls and zero plane writes.
-        fit=0;shadow_stable=0;
+        // PC fit: same memory/CPU, zero reculls and zero plane writes.
+        fit=0;
         planes(plat,old);
         uint8_t *off_memory=malloc(0x1000000);memcpy(off_memory,G,0x1000000);
         unsigned off_refreshes=refreshes,off_culls=expected_rebuilds;
@@ -240,9 +238,9 @@ int main(void) {
         for(unsigned k=0;k<24;k++)CHECK(isfinite(MF32(plat+0x140+k*4)));
         CHECK(M32(shadow_cull+0x80)==views[0] && M32(shadow_cull+2*0xD0+0x80)==views[2]);
     }
-    CHECK(stale_cases>=8);CHECK(restored_cases==stale_cases);
+    CHECK(stale_cases==6);CHECK(restored_cases==stale_cases);
     printf("frame arena bytes: main %u, current %u; matrix writes %u\n",frame_main,frame_current,allocations);
-    printf("solo both Off reculls: %u\n",off_reculls);
+    printf("PC-fit reculls: %u\n",off_reculls);
     printf("caster refresh: %u checks, %u failures; stale cases %u, restored %u\n",checks,failures,stale_cases,restored_cases);
     free(G);return failures?1:0;
 }
@@ -264,14 +262,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix='shadow-caster-') as directory:
         work = Path(directory)
         # Reuse reviewed, SHA-checked tuning so this fixture needs no game data.
-        runpy.run_path(str(ROOT/'runtime/shadow_near_fit_test.py'))['pinned'](work)
+        assert hashlib.sha256(FIT_CONSTANTS.encode()).hexdigest() == FIT_CONSTANTS_SHA
+        (work/'gen').mkdir()
+        (work/'gen/x360_engine.inc').write_text(FIT_CONSTANTS)
         fit_source = work/'fit.cpp'
         fit_source.write_text((ROOT/'runtime/x360_shadow_fit.cpp').read_text())
         fit = work/'fit.o'
         subprocess.run(['clang++','-std=c++17','-fsanitize=address,undefined','-c',
                         '-I',str(ROOT/'runtime'),str(fit_source),'-o',str(fit)], check=True, capture_output=True)
         variants = [('current', production, False), ('original', production, True), ('reviewed', REVIEWED, False),
-                    ('disabled refresh', production.replace('if (fit != 2 && !shadow_stable) return;', ''), False),
+                    ('disabled refresh', production.replace('if (fit != 2) return;', ''), False),
                     ('frame arena leak', production.replace('M32(0x00915F84u) = storage + table_bytes;', '').replace(
                         'M32(0x00915F88u) = storage + table_bytes + matrix_bytes;', '').replace(
                         'memcpy(G + 0x00915F84u, arena, sizeof arena);', ''), False),

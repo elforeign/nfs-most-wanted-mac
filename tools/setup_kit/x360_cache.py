@@ -13,8 +13,9 @@ import shutil
 import tempfile
 
 from .install import InstallError, digest_tree, real_dir, remove
+from . import x360_extras
 
-CONVERTER_VERSION = 1
+CONVERTER_VERSION = 2  # retain the bounded shader window; full-archive entries are incompatible
 MAX_BYTES = 12 * 1024**3
 MAX_ENTRIES = 2
 ENTRY = re.compile(r"[0-9a-f]{64}\.[0-9a-f]{64}")
@@ -25,14 +26,14 @@ def _identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
-def preparation_key(content, pc, inventory, toolchain):
+def preparation_key(content, pc, inventory, toolchain, extras=None):
     # Snapshot converters import each other, including audit helpers. Include the
     # entire shipped snapshot set so a transitive helper cannot silently change.
     converters = {p: h for p, h in inventory.items() if p.startswith("tools_snapshot/") or
                   p in {"tools/setup_kit/x360.py", "tools/setup_kit/xdvdfs.py", "tools/setup_kit/huff.py",
-                        "tools/setup_kit/x360_cache.py", "runtime/huff.h"}}
+                        "tools/setup_kit/x360_cache.py", "tools/setup_kit/x360_extras.py", "runtime/huff.h"}}
     return _identity(dict(version=CONVERTER_VERSION, x360=content, pc=pc, converters=converters,
-                          toolchain=toolchain))
+                          toolchain=toolchain, **x360_extras.identity(extras)))
 
 
 def _roots(data, relative):

@@ -29,11 +29,11 @@ def main():
     render = (RT / 'render.m').read_text()
     settings = (RT / 'settings_port.c').read_text()
     assert 's = particles_physical_shader(s);' in material
-    assert 'return particles_physical_enabled() && (!e || strcmp(e, "off"));' in render
+    assert 'return particles_physical_enabled() && on;' in render
     assert 'particles_physical_constants(&mk' in render
     assert 'particles_physical_lamps(&lamps)' in render
     row = settings.split('static Setting s_particles =', 1)[1].split('};', 1)[0]
-    assert '.label = "Particles"' in row and '.def = 0' in row
+    assert '.label = "Particles"' in row and '.def = 1' in row
     assert '{"Retail", "Physical", "PC", "X360"}' in row
     assert '{"retail", "physical", "pc", "x360"}' in row
     assert 'particles_physical_lamp(c);' in (RT / 'mirror.c').read_text()
@@ -129,13 +129,13 @@ int main(int argc,char **argv){
         run(['clang', '-O1', '-DNFS_PUBLIC=1', '-I', RT, '-I', ROOT / 'recomp', path, RT / 'particles_physical.c', '-o', binary])
         print(run([binary]).strip())
         cases = 0
-        for value, expected in ((None, 0), ('retail', 0), ('physical', 1), ('pc', 0), ('x360', 0), ('junk', 0)):
+        for value, expected in ((None, 1), ('', 1), ('retail', 0), ('physical', 1), ('pc', 0), ('x360', 0), ('junk', 0)):
             env = {k:v for k,v in os.environ.items() if k!='NFS_PARTICLES'}
             if value is not None: env['NFS_PARTICLES']=value
             result = subprocess.run([str(binary), 'mode'], env=env, capture_output=True, text=True)
             assert result.returncode==expected and not result.stderr
             cases += 1
-        print(f'PASS {cases} fresh-process selectors; default Retail')
+        print(f'PASS {cases} fresh-process selectors; default Physical')
         for label, broken in (
             ('stale lamp mutant', source.replace('lamp_frame==frame_serial &&', '1 &&')),
             ('transposed inverse mutant', source.replace('input[4*r+c]', 'input[4*c+r]')),

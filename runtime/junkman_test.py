@@ -4,28 +4,23 @@
 Runs production hooks and complete translated functions with ASan/UBSan and
 translated ABI checks. Stubs capture UI output, draw heat, supply the induction
 label, control vehicle type/installed bits, and reject unvisited external calls.
-Results: actual 20,744 checks / 0 failures; retail control 20,744 / 1,190
-failures; mixed-header control 20,744 / 49 failures; pinned 5004371a live-option
-control 20,744 / 5 failures. The retail control
-disables the new policy, preserving today's bodies; the header control leaves
-cosmetic costs subtracted from virtual performance stock. Both are rejected.
-Covers all seven types, both options and completion states, empty/duplicate/full inventories, mixed carts, BMW entry,
-warning acknowledgement, 756 save bytes, profile bytes and ABI sentinels.
-Zero markers, completed career: queue under Unlimited, switch to Retail with
-the cart open, checkout using the visit's policy, then revisit using Retail.
-Also covers Retail-to-Unlimited, unbeaten careers and redundant TakeControl.
-Shop construction is stubbed; checkout, package installation and shop exit
-execute their complete translated bodies.
+Production: 10,643 checks / 0 failures; finite-stock control: 1,211 failures;
+mixed-header control: 49 failures.
+Covers all seven types and both completion states, empty/duplicate/full
+inventories, mixed carts, BMW entry, warning acknowledgement, 756 save bytes,
+profile bytes and ABI sentinels. The finite-stock and mixed-header controls
+must fail. Shop construction is stubbed; checkout, package installation and
+shop exit execute their complete translated bodies. A completed career keeps
+virtual stock through repeated visits and save reloads.
 UI policy: show real unspent stock, floored at 1, so empty types stay visible;
 Junkman costs are 0 and cosmetic costs never reduce that displayed stock.
 Game check pending: apply parts to two cars, inspect queued/cart counts and
-costs, save/reload, switch to Retail and check the original finite stock.
+costs and save/reload; unbeaten careers retain finite stock.
 The game tool starts fresh scratch userdata and provides no beaten-career
 seed/load mechanism; no game runs were used. Autodiscovered by offline_tests.sh.
 No game, GPU, desktop, save top-ups or emulation.
 """
 from pathlib import Path
-import hashlib
 import re
 import os
 import struct
@@ -33,7 +28,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-HOOKS = '00576E30 0058A680 00576ED0 00576F10 0058AE50 007A6160 007AED80 007B0620 007B13C0 007C3690'.split()
+HOOKS = '00576E30 0058A680 00576ED0 00576F10 0058AE50 007A6160 007AED80 007B0620 007B13C0'.split()
 FUNCTIONS = {
     '21': '00576C90 00576E30 00576ED0 00576F10 00575B00 00575B20 00575B40',
     '22': '0058A680 0058AE50',
@@ -43,7 +38,6 @@ FUNCTIONS = {
 PRE = r'''
 #include "funcs.h"
 #include "host.h"
-#include "settings.h"
 #include <stdlib.h>
 #include <limits.h>
 uint8_t *G;
@@ -65,7 +59,7 @@ void untranslated(Cpu *c,uint32_t t) { bad_jump(c,t); }
 #define FE_MARKER_MANAGER 0x0091D928u
 // Shop construction is an external boundary; retain its control-flag/ABI contract.
 // The actual translated RelinquishControl clears the flag at the end of each visit.
-void f_007C3690_orig(Cpu *c) { M8(0x9B9E8C)=1; c->esp+=12; }
+void f_007C3690(Cpu *c) { M8(0x9B9E8C)=1; c->esp+=12; }
 void f_00652B00(Cpu *c) { CHECK(!arg(c,0)); c->esp+=4; } // release empty temp slots
 void f_0056F120(Cpu *c) { c->eax=0x370000; c->esp+=8; } // career record lookup
 void f_0056F7B0(Cpu *c) { x87_push(c,1.0); c->esp+=4; } // career record heat
@@ -140,8 +134,8 @@ static void inventory(unsigned kind) {
  } else if(kind==2) for(unsigned i=0;i<63;i++) record(i,1+i%7,0,1);
  else if(kind==3) for(unsigned i=0;i<63;i++) record(i,8+i%8,0,1); // full, no Junkman
 }
-static void setup(unsigned retail,unsigned beaten,unsigned kind) {
- memcpy(G,image,0x1000000); opts[O_JUNKMAN].value=retail;
+static void setup(unsigned beaten,unsigned kind) {
+ memcpy(G,image,0x1000000);
  M8(0x9B9E8C)=0;
  M32(FE_DATABASE)=db; M32(db+0x10)=profile; M32(profile+0xAC)=0xA1000001|(beaten?0x4000:0);
  M32(db+0x12C)=1;
@@ -171,16 +165,11 @@ static void cart(unsigned count,unsigned checked,unsigned cosmetic) {
  M32(manager+0x1B8)=n?base+(n-1)*0x40+4:manager+0x1B4;
 }
 int main(int argc,char **argv) {
- CHECK(opts[O_JUNKMAN].category==SET_GAMEPLAY && opts[O_JUNKMAN].type==SET_CHOICE);
- CHECK(opts[O_JUNKMAN].def==0 && opts[O_JUNKMAN].nchoices==2);
- CHECK(opts[O_MARKERS].order<opts[O_JUNKMAN].order && opts[O_JUNKMAN].order<opts[O_HEAT_LEVEL].order);
- CHECK(!strcmp(opts[O_JUNKMAN].env,"NFS_JUNKMAN"));
- CHECK(!strcmp(opts[O_JUNKMAN].choices[0],"Unlimited") && !strcmp(opts[O_JUNKMAN].choices[1],"Retail"));
  G=calloc(1,0x1000000); image=calloc(1,0x1000000); if(!G||!image||argc!=2) return 2;
  FILE *file=fopen(argv[1],"rb"); if(!file||fread(image,1,0x1000000,file)!=0x1000000) return 2; fclose(file);
- for(unsigned retail=0;retail<2;retail++) for(unsigned beaten=0;beaten<2;beaten++)
+ for(unsigned beaten=0;beaten<2;beaten++)
  for(unsigned kind=0;kind<4;kind++) for(unsigned type=0;type<7;type++) {
-  setup(retail,beaten,kind); int active=!retail&&beaten; unsigned marker=mapping[type],n=raw(marker);
+  setup(beaten,kind); int active=beaten; unsigned marker=mapping[type],n=raw(marker);
   uint8_t before[756],expected[756],profile_before[0x100];
   memcpy(before,G+FE_MARKER_MANAGER,756); memcpy(expected,before,756); memcpy(profile_before,G+profile,0x100);
   Cpu c=cpu(FE_MARKER_MANAGER); M32(sp+4)=marker; M32(sp+8)=0; f_00576F10(&c);
@@ -200,15 +189,16 @@ int main(int argc,char **argv) {
   if(active) { // repeated application on another car must leave the same save payload
    c=cpu(FE_MARKER_MANAGER); M32(sp+4)=type; f_00576E30(&c); CHECK(!memcmp(before,G+FE_MARKER_MANAGER,756));
   }
-  // Switching to Retail immediately exposes exact original stock; simulate save/reload by copying its 756 bytes.
+  // Reload the unchanged save bytes; completed careers retain virtual stock.
   uint8_t saved[756]; memcpy(saved,G+FE_MARKER_MANAGER,756); memset(G+FE_MARKER_MANAGER,0,756);
-  memcpy(G+FE_MARKER_MANAGER,saved,756); opts[O_JUNKMAN].value=1;
-  c=cpu(FE_MARKER_MANAGER); M32(sp+4)=marker; M32(sp+8)=0; f_00576F10(&c); CHECK(c.eax==raw(marker));
+  memcpy(G+FE_MARKER_MANAGER,saved,756);
+  c=cpu(FE_MARKER_MANAGER); M32(sp+4)=marker; M32(sp+8)=0; f_00576F10(&c);
+  CHECK(c.eax==(active&&!raw(marker)?1:raw(marker)));
  }
  // Cart rows, remaining totals and per-item costs: every stock shape, queued/unchecked, 0..7 types.
- for(unsigned retail=0;retail<2;retail++) for(unsigned beaten=0;beaten<2;beaten++)
+ for(unsigned beaten=0;beaten<2;beaten++)
  for(unsigned kind=0;kind<4;kind++) for(unsigned count=0;count<=7;count++) for(unsigned checked=0;checked<2;checked++) {
-  setup(retail,beaten,kind); cart(count,checked,0); int active=!retail&&beaten;
+  setup(beaten,kind); cart(count,checked,0); int active=beaten;
   uint8_t before[756]; memcpy(before,G+FE_MARKER_MANAGER,756);
   cost=remaining=INT_MIN; rowmask=0;
   Cpu c=cpu(screen); f_007B0620(&c); abi(c,4);
@@ -230,25 +220,25 @@ int main(int argc,char **argv) {
  }
  // Mixed cart: only the seven performance items become free, cosmetic markers remain finite.
  for(unsigned mode=0;mode<=2;mode++) for(unsigned backroom=0;backroom<2;backroom++) {
-  setup(0,1,1); cart(7,1,1); M8(0x91D3D0)=backroom;
+  setup(1,1); cart(7,1,1); M8(0x91D3D0)=backroom;
   Cpu c=cpu(0x9B9EC0); M32(sp+4)=mode; f_007AED80(&c); abi(c,8);
   CHECK(c.eax==(mode==1?0:backroom?1:0));
  }
  // Mixed-cart header with more cosmetic costs than virtual performance stock must keep positive stock.
  for(unsigned kind=0;kind<4;kind++) for(unsigned cosmetic=1;cosmetic<=8;cosmetic++) {
-  setup(0,1,kind); cart(7,1,cosmetic); cost=remaining=INT_MIN;
+  setup(1,kind); cart(7,1,cosmetic); cost=remaining=INT_MIN;
   Cpu c=cpu(screen); f_007B0620(&c); abi(c,4);
   unsigned total=0; for(unsigned type=1;type<=7;type++) total+=raw(type)?raw(type):1;
   CHECK(cost==(int)cosmetic); CHECK(remaining==(int)total); CHECK(remaining>=7);
  }
  // Actual backroom notification: zero-stock entry, BMW exclusion, turbo/nitrous warning and acknowledgement.
- for(unsigned retail=0;retail<2;retail++) for(unsigned beaten=0;beaten<2;beaten++)
+ for(unsigned beaten=0;beaten<2;beaten++)
  for(unsigned kind=0;kind<4;kind++) for(unsigned bmw=0;bmw<2;bmw++) for(unsigned hasparts=0;hasparts<2;hasparts++) {
-  setup(retail,beaten,kind); M8(0x91D3D0)=0; car_type=bmw?0x29:0; installed=hasparts?127:0; switches=warnings=0;
+  setup(beaten,kind); M8(0x91D3D0)=0; car_type=bmw?0x29:0; installed=hasparts?127:0; switches=warnings=0;
   uint8_t before[756]; memcpy(before,G+FE_MARKER_MANAGER,756);
   Cpu c=cpu(screen); M32(sp+4)=0xC519BFC4; M32(sp+8)=M32(sp+12)=M32(sp+16)=0; f_007BFD30(&c); abi(c,20);
-  int can_enter=!bmw&&((!retail&&beaten)||kind>0);
-  int warn=can_enter&&!hasparts&&((!retail&&beaten)||kind==1||kind==2);
+  int can_enter=!bmw&&((beaten)||kind>0);
+  int warn=can_enter&&!hasparts&&((beaten)||kind==1||kind==2);
   CHECK(warnings==(unsigned)warn); CHECK(switches==(unsigned)(can_enter&&!warn));
   if(warn) {
    c=cpu(screen); M32(sp+4)=0x34DC1BEC; f_007BFD30(&c); abi(c,20);
@@ -256,19 +246,17 @@ int main(int argc,char **argv) {
   }
   CHECK(!memcmp(before,G+FE_MARKER_MANAGER,756));
  }
- // Completed career, zero markers: queue under Unlimited, switch to Retail with the cart open, checkout.
- // The visit keeps Unlimited prices/stock; the next visit must use Retail. Also test the reverse and unbeaten.
- for(unsigned retail=0;retail<2;retail++) for(unsigned beaten=0;beaten<2;beaten++) {
+ // Completed career, zero markers: queue, checkout and revisit with unchanged stock.
+ for(unsigned beaten=0;beaten<2;beaten++) {
   const uint32_t manager=0x9B9EC0;
-  setup(retail,beaten,0); M32(manager+4)=0x380200;
+  setup(beaten,0); M32(manager+4)=0x380200;
   uint8_t before[756]; memcpy(before,G+FE_MARKER_MANAGER,756);
   Cpu c=cpu(manager); M32(sp+4)=M32(sp+8)=0; f_007C3690(&c); abi(c,12);
   CHECK(M8(0x9B9E8C)==1);
   c=cpu(FE_MARKER_MANAGER); M32(sp+4)=6; M32(sp+8)=0; f_00576ED0(&c);
-  int active=!retail&&beaten; CHECK((c.eax&255)==active);
+  int active=beaten; CHECK((c.eax&255)==active);
   cart(active?1:0,1,0); // a checked engine Junkman item, only if actually available
-  opts[O_JUNKMAN].value=!retail;
-  // Redundant TakeControl must not begin a new visit or overwrite the latch.
+  // Repeated shop entry preserves the built-in policy.
   c=cpu(manager); f_007C3690(&c); abi(c,12);
   c=cpu(FE_MARKER_MANAGER); M32(sp+4)=6; M32(sp+8)=0; f_00576F10(&c); CHECK(c.eax==(unsigned)active);
   cost=remaining=INT_MIN; c=cpu(screen); f_007B0620(&c); abi(c,4);
@@ -279,16 +267,16 @@ int main(int argc,char **argv) {
   c=cpu(manager); f_007AEB10(&c); abi(c,4); CHECK(!M8(0x9B9E8C));
   c=cpu(manager); f_007C3690(&c); abi(c,12);
   c=cpu(FE_MARKER_MANAGER); M32(sp+4)=6; M32(sp+8)=0; f_00576F10(&c);
-  CHECK(c.eax==(retail&&beaten?1u:0u));
+  CHECK(c.eax==beaten);
  }
  // Non-Junkman records/payloads and absent databases retain the original answers.
  for(unsigned type=0;type<=16;type++) for(unsigned payload=0;payload<2;payload++) {
-  setup(0,1,3); Cpu actual=cpu(FE_MARKER_MANAGER),original=actual;
+  setup(1,3); Cpu actual=cpu(FE_MARKER_MANAGER),original=actual;
   M32(sp+4)=type; M32(sp+8)=payload; f_00576F10(&actual); f_00576F10_orig(&original);
   if(type<1||type>7||payload) CHECK(actual.eax==original.eax);
  }
  for(unsigned nullcase=0;nullcase<2;nullcase++) {
-  setup(0,1,0); if(nullcase) M32(db+0x10)=0; else M32(FE_DATABASE)=0;
+  setup(1,0); if(nullcase) M32(db+0x10)=0; else M32(FE_DATABASE)=0;
   Cpu c=cpu(FE_MARKER_MANAGER); M32(sp+4)=1; M32(sp+8)=0; f_00576F10(&c); CHECK(c.eax==0);
  }
  printf("%u checks, %u failures\n",checks,failures); free(G); free(image); return failures?1:0;
@@ -296,122 +284,6 @@ int main(int argc,char **argv) {
 '''
 
 
-
-# Baseline integrity proof: 1/1 authentic fragments accepted; 1/1 one-byte corruptions rejected.
-# Reviewed baseline fragment; its digest prevents accidental control drift.
-OLD_POLICY = r'''// Junkman stock is virtual only after HasBeatenCareer (0050E400). Never grant markers: the 63 records are saved.
-// Keep all car/installed-part compatibility checks in their original callers, including the BMW backroom guard.
-static int junkman_active(void) {
-    uint32_t db = M32(FE_DATABASE), profile = db ? M32(db + 0x10) : 0;
-    return opts[O_JUNKMAN].value == 0 && profile && (M32(profile + 0xAC) & 0x4000u);
-}
-static int junkman_marker(uint32_t type, uint32_t payload) { return type >= 1 && type <= 7 && payload == 0; }
-static uint32_t junkman_stock(uint32_t manager, uint32_t type) {
-    uint32_t n = 0;
-    for (unsigned i = 0; i < 63; ++i) {
-        uint32_t record = manager + 12 * i;
-        if (M32(record) == type && !M32(record + 4) && M32(record + 8) == 1) ++n;
-    }
-    return n;
-}
-void f_00576E30_orig(Cpu *c);
-void f_00576E30(Cpu *c) {
-    if (!junkman_active() || arg(c, 0) > 6) { f_00576E30_orig(c); return; }
-    c->esp += 8;                                           // thiscall ret 4
-}
-void f_0058A680_orig(Cpu *c);
-void f_0058A680(Cpu *c) {
-    uint32_t entity = arg(c, 1);
-    if (!junkman_active() || !(entity == 2 || (entity >= 4 && entity <= 10))) {
-        f_0058A680_orig(c); return;
-    }
-    c->eax = 1;
-    c->esp += 4;                                           // cdecl: caller pops three arguments
-}
-void f_00576ED0_orig(Cpu *c);
-void f_00576ED0(Cpu *c) {
-    if (!junkman_active() || !junkman_marker(arg(c, 0), arg(c, 1))) { f_00576ED0_orig(c); return; }
-    c->eax = 1;
-    c->esp += 12;                                          // thiscall ret 8
-}
-void f_00576F10_orig(Cpu *c);
-void f_00576F10(Cpu *c) {
-    int active = junkman_active() && junkman_marker(arg(c, 0), arg(c, 1));
-    f_00576F10_orig(c);
-    if (active && !c->eax) c->eax = 1;
-}
-// Both the entry zero check and the turbo/nitrous warning's acknowledgement compare this total (007BFD30).
-void f_0058AE50_orig(Cpu *c);
-void f_0058AE50(Cpu *c) {
-    uint32_t manager = c->ecx;
-    int active = junkman_active();
-    f_0058AE50_orig(c);
-    if (active) for (uint32_t type = 1; type <= 7; ++type)
-        if (!junkman_stock(manager, type)) ++c->eax;
-}
-// 007B01F0 subtracts a checked item before SetMarkerData. Show real stock, floored at one, without that debit.
-// This also keeps the marker group's zero-count script from hiding an available type. Cosmetic markers stay finite.
-void f_007A6160_orig(Cpu *c);
-void f_007A6160(Cpu *c) {
-    uint32_t index = arg(c, 0);
-    Cpu probe = *c;
-    if (junkman_active() && index >= 1 && index <= 7 && (call_guest(&probe, 0x00575B20u, 0, NULL) & 0xFF)) {
-        uint32_t stock = junkman_stock(FE_MARKER_MANAGER, M32(0x00906194u + 4 * (index - 1)));
-        M32(c->esp + 12) = stock ? stock : 1;
-    }
-    f_007A6160_orig(c);
-}
-// GetCartTotal counts checked backroom items as one marker each (007B0620 prints cost and stock minus cost).
-// Remove only valid performance items from that debit, preserving cosmetic costs even in a mixed cart.
-void f_007AED80_orig(Cpu *c);
-void f_007AED80(Cpu *c) {
-    uint32_t manager = c->ecx, mode = arg(c, 0), free_items = 0;
-    Cpu probe = *c;
-    if (junkman_active() && (mode == 0 || mode == 2) && (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF)) {
-        for (uint32_t link = M32(manager + 0x1B4); link && link != manager + 0x1B4; link = M32(link)) {
-            uint32_t item = link - 4, part = M32(item + 0xC);
-            if (M8(item + 0x14) && M8(part + 0x1C) && M32(part + 0x18) <= 6) ++free_items;
-        }
-    }
-    f_007AED80_orig(c);
-    c->eax -= free_items;
-}
-// The performance header shows seven Junkman balances, but its retail subtraction uses the entire mixed cart.
-// Cosmetic costs must not reduce these virtual balances; leave their actual cart cost and consumption intact.
-void f_007B0620_orig(Cpu *c);
-void f_007B0620(Cpu *c) {
-    uint32_t screen = c->ecx;
-    Cpu probe = *c;
-    int active = junkman_active() && (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF) &&
-                 (call_guest(&probe, 0x00575B20u, 0, NULL) & 0xFF);
-    f_007B0620_orig(c);
-    if (active) {
-        uint32_t total = 0;
-        for (uint32_t type = 1; type <= 7; ++type) {
-            uint32_t stock = junkman_stock(FE_MARKER_MANAGER, type);
-            total += stock ? stock : 1;
-        }
-        Cpu print = *c;
-        uint32_t args[] = {M32(screen + 0x10), 0x18661565u, 0x0089C2D0u, total};
-        call_guest(&print, 0x005252D0u, 4, args);
-    }
-}
-// Match the cart's zero cost in the selected performance part's header; keep its original heat/widgets.
-void f_007B13C0_orig(Cpu *c);
-void f_007B13C0(Cpu *c) {
-    uint32_t helper = c->ecx, category = arg(c, 1);
-    Cpu probe = *c;
-    int active = junkman_active() && category >= 0x201 && category <= 0x207 &&
-                 (call_guest(&probe, 0x00575B00u, 0, NULL) & 0xFF);
-    f_007B13C0_orig(c);
-    if (active) {
-        Cpu print = *c;
-        uint32_t args[] = {M32(helper + 4), 0x23D918FEu, 0x0089C2D0u, 0}; // FEPrintf("%$d", 0), cdecl
-        call_guest(&print, 0x005252D0u, 4, args);
-    }
-}
-'''
-assert hashlib.sha256(OLD_POLICY.encode()).hexdigest() == '0da55031bb588fbda91c87f88034647c88d1ab55dba20525dd140028dfc293cb', 'pinned baseline changed'
 
 def main():
     if not (ROOT/'recomp/out/speed_51.c').exists():
@@ -444,11 +316,6 @@ def main():
     hooks = (ROOT/'recomp/hooks.txt').read_text()
     for fn in HOOKS:
         assert len(re.findall(r'^'+fn+r'\s', hooks, re.M)) == 1, f'unregistered hook: {fn}'
-    # Compile the real setting metadata and enum, including their actual choice ordering/default.
-    choices = '\n'.join(re.findall(r'^static const char \*const k_(?:markers|junkman|heat)\[\] = .*?;', source, re.M))
-    registry = re.search(r'static Setting opts\[\] = \{.*?\n\};\nenum \{.*?\};', source, re.S).group()
-    callbacks = sorted(set(re.findall(r'\.apply = (\w+)', registry)))
-    registry = choices+'\n'+'\n'.join(f'static void {name}(int v) {{ (void)v; }}' for name in callbacks)+'\n'+registry
     production = '// Junkman stock is virtual only'+source.split('// Junkman stock is virtual only', 1)[1]
     used = set(re.findall(r'\bf_[0-9A-F]{8}(?:_orig)?(?=\()', '\n'.join(bodies)+production))
     defined = set(re.findall(r'void (f_[0-9A-F]{8}(?:_orig)?)\(Cpu \*', PRE+'\n'+'\n'.join(bodies)+production))
@@ -458,21 +325,17 @@ def main():
         tmp = Path(directory)
         image_path = tmp/'image.bin'
         image_path.write_bytes(image)
-        for variant in ('retail-control', 'mixed-header-control', 'live-option-control', 'actual'):
+        for variant in ('retail-control', 'mixed-header-control', 'actual'):
             policy = production
             if variant == 'retail-control':
-                policy, n = re.subn(r'return option == 0 && profile && \(M32\(profile \+ 0xAC\) & 0x4000u\);', 'return 0;', policy)
+                policy, n = re.subn(r'return profile && \(M32\(profile \+ 0xAC\) & 0x4000u\);', 'return 0;', policy)
                 assert n == 1
             elif variant == 'mixed-header-control':
                 original = 'f_007B0620_orig(c);\n    if (active) {'
                 assert policy.count(original) == 1
                 policy = policy.replace(original, 'f_007B0620_orig(c);\n    if (0) {')
-            elif variant == 'live-option-control':
-                # Pin the reviewed buggy production policy, without depending on a moving branch.
-                policy = OLD_POLICY
-                policy += '\nvoid f_007C3690(Cpu *c) { f_007C3690_orig(c); }\n'
             path, exe = tmp/f'{variant}.c', tmp/variant
-            path.write_text(PRE+registry+declarations+stubs+'\n'+'\n'.join(bodies)+'\n'+policy+'\n'+MAIN)
+            path.write_text(PRE+declarations+stubs+'\n'+'\n'.join(bodies)+'\n'+policy+'\n'+MAIN)
             command = ['clang', '-std=c11', '-g', '-O1', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                        '-DRECOMP_ABICHECK', '-I', str(ROOT/'recomp'), '-I', str(ROOT/'recomp/out'),
                        '-I', str(ROOT/'runtime'), str(path), '-o', str(exe)]
@@ -483,7 +346,7 @@ def main():
             assert run.returncode == (0 if variant == 'actual' else 1), (variant, run.returncode, run.stdout[-5000:])
             assert re.fullmatch(r'\d+ checks, \d+ failures', result), run.stdout[-3000:]
             print(f'{variant}: {result}')
-    print('junkman_test: PASS (retail, mixed-header and live-option controls rejected)')
+    print('junkman_test: PASS (retail and mixed-header controls rejected)')
 
 
 if __name__ == '__main__':

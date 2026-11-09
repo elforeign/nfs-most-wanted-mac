@@ -103,6 +103,7 @@ static uint32_t gstr(const char *s) {
     uint32_t p = used; used += (uint32_t)strlen(s) + 1;
     assert(used <= sizeof strings); strcpy(strings + p, s); return p;
 }
+uint32_t underglow_menu_text(uint32_t h) { (void)h; return 0; }
 static int diag_on, original_calls;
 static void diag_event(const char *fmt, ...) { (void)fmt; }
 static int x360_post_chain_on(void) { return 0; }

@@ -41,6 +41,7 @@ PRE = r'''
 #include <stdarg.h>
 // Split-menu cases have no saved LAN setting; lan_toggle_test covers the registry.
 Setting *settings_find(const char *id) { (void)id; return NULL; }
+void underglow_menu_option_added(uint32_t o) { (void)o; }
 uint8_t *G;
 int diag_on;
 static int checks, failures, added, allocations, fail_third, special_build;

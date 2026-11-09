@@ -44,6 +44,18 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 """
 import argparse
 import contextlib
@@ -64,6 +76,17 @@ from setup_kit import huff, x360, xdvdfs
 import texture_compare as compare
 import x360_tex as tex
 
+
+import importlib.util
+import inspect
+spec = importlib.util.spec_from_file_location("retention_tables", ROOT / "tools/gen_tables.py")
+tables = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tables)
+REAL_VALIDATE_SHADERS = x360._validate_shaders
+ORIGINAL_EXTRACT_PREFIX = '    raw, movies = stage / "files", stage / "Movies"\n    raw.mkdir()\n    prefix = "FILES/" if "FILES/GLOBAL/GLOBALB.BUN" in source.files else ""\n    for name, dest in (("DEFAULT.XEX", raw / "default.xex"), ("NFS/ZDIR.BIN", raw / "NFS/ZDIR.BIN"),\n                       ("NFS/ZZDATA0.BIN", raw / "NFS/ZZDATA0.BIN")):\n        key = name if name in source.files else prefix + name\n        if key not in source.files:\n            raise X360Error(f"X360 copy lacks {name}")\n        source.copy(key, dest)\n'
+ORIGINAL_EXTRACT_SHA = 'd30369dc3acc86df4d59c73dc956a036a3930d5ff76db6221b5a5d63cb0bcf93'
+ORIGINAL_DISCOVERY = 'def zzdata0_path(x360, arg=None, environment=None):\n    """The X360 NFS/ZZDATA0.BIN (shader literals), or None: --zzdata0 / NFS_X360_ZZDATA0, <x360_root>/NFS/ZZDATA0.BIN,\n    else a zzdata0_<base>.bin slice in <x360_root>/../shaders (a development extract)."""\n    e = arg or (os.environ if environment is None else environment).get("NFS_X360_ZZDATA0")\n    if e:\n        return Path(e)\n    if not x360:\n        return None\n    for p in (x360 / "NFS/ZZDATA0.BIN", x360.parent / "NFS/ZZDATA0.BIN"):\n        if p.exists():\n            return p\n    slices = sorted((x360.parent / "shaders").glob("zzdata0_*.bin")) if (x360.parent / "shaders").is_dir() else []\n    return slices[0] if slices else None\n'
+ORIGINAL_DISCOVERY_SHA = '99cec720656232b7c5251a2434fe333002146f7e38afab8366a4137f64fd490b'
 
 def chunk(tag, payload):
     return struct.pack("<II", tag, len(payload)) + payload
@@ -130,6 +153,10 @@ def make_iso(files, path):
 
 class AssetsTest(unittest.TestCase):
     def setUp(self):
+        # Synthetic importer fixtures do not carry retail shader containers.
+        shader_check = mock.patch.object(x360, "_validate_shaders")
+        shader_check.start()
+        self.addCleanup(shader_check.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="setup-assets-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -163,7 +190,8 @@ class AssetsTest(unittest.TestCase):
     def extraction_only(self):
         # T5 isolates both extraction layers from retail-specific converters/XEX.
         # T7 below exercises the real native decoder, texture parser and validator.
-        with mock.patch.object(x360, "_game_names", return_value=["GLOBAL/GAME_ONLY.BIN"]), \
+        with mock.patch.object(x360, "SHADER_WINDOW", (0, len(self.disc["NFS/ZZDATA0.BIN"]))), \
+                mock.patch.object(x360, "_game_names", return_value=["GLOBAL/GAME_ONLY.BIN"]), \
                 mock.patch.object(x360, "_convert"), mock.patch.object(x360, "_validate"):
             yield
 
@@ -175,6 +203,181 @@ class AssetsTest(unittest.TestCase):
         self.assertTrue(error.exception.fix)
         self.assertEqual(list(out.iterdir()), [], "failed transaction published partial output")
 
+    @contextlib.contextmanager
+    def optional_converters(self):
+        """Exercise real extraction/conversion dispatch; emulate script outputs only."""
+        calls = []
+        def run(argv, work, env):
+            script = Path(argv[3]).name
+            calls.append(script)
+            if script == "texture_compare.py":
+                Path(argv[6]).write_text("comparison")
+                return
+            output = Path(argv[5] if script == "x360_tex.py" else argv[6])
+            output.mkdir(parents=True, exist_ok=True)
+            name = "cuffs.dds" if script == "x360_cuffs.py" else "converted.bin"
+            content = {"hd_textures_mips_alpha": b"HD", "hd_textures_ui": b"UI", "nis_arrest": b"ARREST"}[output.name]
+            (output / name).write_bytes(b"CUFFS" if script == "x360_cuffs.py" else content)
+        with mock.patch.object(x360, "SHADER_WINDOW", (0, len(self.disc["NFS/ZZDATA0.BIN"]))), \
+             mock.patch.object(x360, "_game_names", return_value=["GLOBAL/GAME_ONLY.BIN"]), \
+             mock.patch.object(x360, "_run", side_effect=run), mock.patch.object(x360, "_validate"):
+            yield calls
+
+    def extra_manifest(self, root):
+        return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.rglob("*") if p.is_file() and p.name not in ("coverage.json", "validation.json")}
+
+    def test_optional_default_manifest(self):
+        with self.optional_converters() as calls:
+            x360.prepare(self.folder, self.base / "default", self.pc)
+        root = self.base / "default/prepared"
+        expected = {"files/" + name: ("asset " + name).encode() for name in self.files}
+        expected.update({"files/default.xex": self.disc["default.xex"], "files/NFS/ZDIR.BIN": self.disc["NFS/ZDIR.BIN"],
+                         "files/" + x360.SHADER_FILE: self.disc["NFS/ZZDATA0.BIN"], "Movies/CLIP.WMV": b"synthetic movie",
+                         "texture_compare.tsv": b"comparison"})
+        for folder, content in (("hd_textures_mips_alpha", b"HD"), ("hd_textures_ui", b"UI"), ("nis_arrest", b"ARREST")):
+            expected["assets/" + folder + "/converted.bin"] = content
+        expected["assets/hd_textures_mips_alpha/cuffs.dds"] = b"CUFFS"
+        self.assertEqual(self.extra_manifest(root), {n: hashlib.sha256(v).hexdigest() for n, v in expected.items()})
+        self.assertEqual(calls, ["texture_compare.py", "x360_tex.py", "x360_tex.py", "x360_nis_arrest.py", "x360_cuffs.py"])
+        with self.optional_converters():
+            x360.prepare(self.folder, self.base / "explicit-default", self.pc, extras=["arrest", "textures", "ui"])
+        self.assertEqual(self.extra_manifest(self.base / "explicit-default/prepared"), self.extra_manifest(root))
+
+    def test_optional_independent_manifests_and_retick(self):
+        names = ("arrest", "textures", "ui")
+        folders = dict(arrest="nis_arrest", textures="hd_textures_mips_alpha", ui="hd_textures_ui")
+        with self.optional_converters():
+            x360.prepare(self.folder, self.base / "reference", self.pc)
+        reference = self.extra_manifest(self.base / "reference/prepared")
+        for mask in range(8):
+            chosen = [n for i, n in enumerate(names) if mask & (1 << i)]
+            with self.subTest(chosen=chosen), self.optional_converters() as calls:
+                out = self.base / ("chosen-" + str(mask))
+                result = x360.prepare(self.folder, out, self.pc, extras=chosen)
+                expected = {n: h for n, h in reference.items()
+                            if not any(n.startswith("assets/" + folders[k] + "/") for k in names if k not in chosen)
+                            and not ("arrest" not in chosen and n.startswith("files/NIS/"))
+                            and not (not set(chosen) & {"textures", "ui"} and n == "texture_compare.tsv")}
+                self.assertEqual(self.extra_manifest(out / "prepared"), expected)
+                self.assertEqual(set(result.missing), set(names) - set(chosen))
+                self.assertEqual(calls.count("x360_tex.py"), int("textures" in chosen) + int("ui" in chosen))
+                self.assertEqual("x360_nis_arrest.py" in calls, "arrest" in chosen)
+                self.assertEqual("x360_cuffs.py" in calls, "textures" in chosen)
+                if not set(chosen) & {"arrest", "textures"}:
+                    coverage = json.loads((out / "prepared/coverage.json").read_text())
+                    self.assertFalse(any(n.startswith("NIS/") for n in coverage["files"]))
+        with self.optional_converters():
+            x360.prepare(self.folder, self.base / "reticked", self.pc, extras=list(names))
+        self.assertEqual(self.extra_manifest(self.base / "reticked/prepared"), reference)
+
+    def test_optional_validator_accepts_absent_outputs_and_rejects_selected_loss(self):
+        import x360_nis_arrest as arrest
+        for feature, folder in (("arrest", "nis_arrest"), ("textures", "hd_textures_mips_alpha"), ("ui", "hd_textures_ui")):
+            with self.subTest(feature=feature):
+                stage, work = self.validation_stage()
+                shutil.rmtree(stage / "assets" / folder)
+                chosen = [n for n in ("arrest", "textures", "ui") if n != feature]
+                with mock.patch.object(arrest, "convert_bundle", return_value=(b"converted mesh", {33}, 1)):
+                    x360._validate(stage, self.pc, work, {"required": []}, extras=chosen)
+                    with self.assertRaises((x360.X360Error, FileNotFoundError)):
+                        x360._validate(stage, self.pc, work, {"required": []})
+                shutil.rmtree(stage)
+
+    def test_retained_size_and_copy_range(self):
+        archive = self.folder / "NFS/ZZDATA0.BIN"
+        marker = bytes(range(256)) * (413696 // 256)
+        with archive.open("r+b") as f:
+            f.truncate(381569024)
+            f.seek(0x09BB7000)
+            f.write(marker)
+        calls = []
+        original_copy = x360.Source.copy
+        def copy(source, name, dest, offset=0, size=None):
+            calls.append((name, offset, size))
+            return original_copy(source, name, dest, offset, size)
+        with mock.patch.object(x360, "_game_names", return_value=["GLOBAL/GAME_ONLY.BIN"]), \
+                mock.patch.object(x360, "_convert"), mock.patch.object(x360, "_validate"), \
+                mock.patch.object(x360.Source, "copy", copy):
+            result = x360.prepare(self.folder, self.base / "retained", self.pc)
+        raw = result.roots["x360_root"]
+        self.assertFalse((raw / "NFS/ZZDATA0.BIN").exists())
+        self.assertEqual((raw / x360.SHADER_FILE).read_bytes(), marker)
+        self.assertIn(("NFS/ZZDATA0.BIN", 0x09BB7000, 413696), calls)
+        coverage = json.loads((raw.parent / "coverage.json").read_text())
+        self.assertEqual(coverage["sizes"][x360.SHADER_FILE], 413696)
+        self.assertEqual((raw / "default.xex").read_bytes(), self.disc["default.xex"])
+        self.assertEqual(381569024 - (raw / x360.SHADER_FILE).stat().st_size, 381155328)
+
+    def test_automatic_slice_discovery_and_precedence(self):
+        root = self.base / "installed/files"
+        retained = root / "NFS/zzdata0_09bb7000.bin"
+        retained.parent.mkdir(parents=True)
+        retained.write_bytes(b"slice")
+        self.assertEqual(tables.zzdata0_path(root, environment={}), retained)
+        override = self.base / "override.bin"
+        self.assertEqual(tables.zzdata0_path(root, str(override), {"NFS_X360_ZZDATA0": "env"}), override)
+        self.assertEqual(tables.zzdata0_path(root, environment={"NFS_X360_ZZDATA0": str(override)}), override)
+        full = root / "NFS/ZZDATA0.BIN"
+        full.write_bytes(b"full")
+        self.assertEqual(tables.zzdata0_path(root, environment={}), full)
+        full.unlink()
+        parent_full = root.parent / "NFS/ZZDATA0.BIN"
+        parent_full.parent.mkdir()
+        parent_full.write_bytes(b"parent full")
+        self.assertEqual(tables.zzdata0_path(root, environment={}), parent_full)
+        parent_full.unlink()
+        moved = self.base / "export.app/Contents/Resources/files"
+        moved.parent.mkdir(parents=True)
+        root.rename(moved)
+        self.assertEqual(tables.zzdata0_path(moved, environment={}), moved / retained.relative_to(root))
+        (moved / retained.relative_to(root)).unlink()
+        legacy = moved.parent / "shaders/zzdata0_9B00000.bin"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"development")
+        self.assertEqual(tables.zzdata0_path(moved, environment={}), legacy)
+        self.assertIsNone(tables.zzdata0_path(None, environment={}))
+
+    def test_shader_validation_rejects_missing_truncated_and_corrupt(self):
+        path = self.base / "zzdata0_09bb7000.bin"
+        for data in (None, b"short", bytes(413696)):
+            if data is not None:
+                path.write_bytes(data)
+            with self.assertRaises(x360.X360Error):
+                REAL_VALIDATE_SHADERS(path)
+
+    def test_shader_validation_failure_rolls_back(self):
+        archive = self.folder / "NFS/ZZDATA0.BIN"
+        # A same-length corrupt extent must fail before any converter or publication.
+        with archive.open("r+b") as f:
+            f.truncate(0x09C1C000)
+        out = self.base / "corrupt-output"
+        with mock.patch.object(x360, "_validate_shaders", REAL_VALIDATE_SHADERS), \
+                mock.patch.object(x360, "_convert") as converter:
+            with self.assertRaisesRegex(x360.X360Error, "shader"):
+                x360.prepare(self.folder, out, self.pc)
+            converter.assert_not_called()
+        self.assertEqual(list(out.iterdir()), [])
+
+    def test_preparation_shader_identity_accepts_one_supported_disc(self):
+        import x360_shader_lits as lits
+        import x360_shader_body as body
+        path = self.base / "zzdata0_09bb7000.bin"
+        path.write_bytes(bytes(413696))
+        usa, pal = lits.pins("USA"), lits.pins("PAL")
+        differing = sorted(name for name in usa if usa[name] != pal[name])
+        variants = ((usa, True), (pal, True),
+                    (dict(usa, **{differing[0]: pal[differing[0]]}), False),
+                    (dict(pal, **{differing[-1]: usa[differing[-1]]}), False))
+        for digests, accepted in variants:
+            found = {digest: [("00000000", {})] for digest in dict(digests, **body.EXTRA_PINS).values()}
+            with mock.patch.object(lits, "scan", return_value=found), mock.patch.object(lits, "text"):
+                if accepted:
+                    REAL_VALIDATE_SHADERS(path)
+                else:
+                    with self.assertRaises(x360.X360Error):
+                        REAL_VALIDATE_SHADERS(path)
+
     def test_t5_folder_equals_iso(self):
         with self.extraction_only():
             folder = x360.prepare(self.folder, self.base / "folder out", self.pc)
@@ -183,7 +386,7 @@ class AssetsTest(unittest.TestCase):
         self.assertEqual(folder.entries, len(self.files))
         self.assertEqual(hashes(folder.roots["x360_root"].parent), hashes(iso.roots["x360_root"].parent))
         self.assertEqual(iso.roots["x360_root"].joinpath("GLOBAL/GAME_ONLY.BIN").read_bytes(), "asset GLOBAL/GAME_ONLY.BIN".encode())
-        self.assertEqual(iso.roots["x360_root"].joinpath("NFS/ZZDATA0.BIN").read_bytes(), self.disc["NFS/ZZDATA0.BIN"])
+        self.assertEqual(iso.roots["x360_root"].joinpath(x360.SHADER_FILE).read_bytes(), self.disc["NFS/ZZDATA0.BIN"])
         self.assertEqual(hashes(self.folder), {k: hashlib.sha256(v).hexdigest() for k, v in self.disc.items()})
 
     def test_t5_missing_zdir_entry(self):
@@ -288,7 +491,7 @@ class AssetsTest(unittest.TestCase):
         stage = self.base / "validation"
         raw, assets, work = stage / "files", stage / "assets", stage / ".work"
         work.mkdir(parents=True)
-        for name in ("default.xex", "NFS/ZDIR.BIN", "NFS/ZZDATA0.BIN"):
+        for name in ("default.xex", "NFS/ZDIR.BIN", x360.SHADER_FILE):
             p = raw / name
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"synthetic input")
@@ -561,7 +764,22 @@ if __name__ == "__main__":
         at = sys.argv.index("--broken")
         control = sys.argv[at + 1]
         del sys.argv[at:at + 2]
-        if control == "inventory":
+        if control == "shader-validation":
+            REAL_VALIDATE_SHADERS = lambda path: None
+        elif control == "retention":
+            assert hashlib.sha256(ORIGINAL_EXTRACT_PREFIX.encode()).hexdigest() == ORIGINAL_EXTRACT_SHA
+            current = inspect.getsource(x360._extract)
+            start = current.index('    raw, movies =')
+            end = current.index('    pc_paths =')
+            restored = current[:start] + ORIGINAL_EXTRACT_PREFIX + current[end:]
+            # Original coverage had no retained-size map either.
+            restored = restored.replace('dict(retained_sizes, **{name: size for name, _, _, size in plan})',
+                                        '{name: size for name, _, _, size in plan}')
+            exec(restored, x360.__dict__)
+        elif control == "discovery":
+            assert hashlib.sha256(ORIGINAL_DISCOVERY.encode()).hexdigest() == ORIGINAL_DISCOVERY_SHA
+            exec(ORIGINAL_DISCOVERY, tables.__dict__)
+        elif control == "inventory":
             x360._texture_inventory = lambda *args: None
         elif control == "huff":
             huff.NativeHuff.__call__ = lambda self, data, offset=0: bytes(struct.unpack_from("<I", data, offset + 8)[0])

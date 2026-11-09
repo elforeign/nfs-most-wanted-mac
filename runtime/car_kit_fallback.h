@@ -1,4 +1,4 @@
-// Resolve absent kit models against the pack's own geometry, before streaming.
+// Resolve absent kit/style models against the pack's own geometry, before streaming.
 // Standard C only: the same resource policy is usable by every host.
 #ifndef NFS_CAR_KIT_FALLBACK_H
 #define NFS_CAR_KIT_FALLBACK_H
@@ -97,10 +97,13 @@ static int car_kit_fallback(FILE *f, const char *space, uint32_t *map, unsigned 
                     !memchr(name, 0, size) || hash != r[0] || car_kit_hash(name) != hash) goto done;
                 if (strncmp(name, stock_prefix, (size_t)prefix_size)) break;
                 const char *suffix = name + prefix_size;
-                // Preserve the entire slot/LOD suffix, including multiword slots.
-                for (unsigned wide = 0; wide < 2; ++wide) for (unsigned kit = 0; kit < 100; ++kit) {
-                    int length = snprintf(candidate, sizeof candidate, "%s_KIT%s%02u_%s", space,
-                                          wide ? "W" : "", kit, suffix);
+                // Random donor parts also request STYLE models. Preserve the
+                // entire slot/LOD suffix, including multiword slots; authored
+                // targets win over the pack's own stock model.
+                for (unsigned family = 0; family < 3; ++family) for (unsigned kit = 0; kit < 100; ++kit) {
+                    const char *kind = family == 2 ? "STYLE" : family ? "KITW" : "KIT";
+                    int length = snprintf(candidate, sizeof candidate, "%s_%s%02u_%s", space,
+                                          kind, kit, suffix);
                     if (length < 0 || (unsigned)length >= sizeof candidate) goto done;
                     uint32_t missing = car_kit_hash(candidate);
                     if (car_kit_present(rows, solids, missing)) continue;

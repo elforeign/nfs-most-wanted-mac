@@ -28,6 +28,10 @@
 
 
 """
+import sys as _inputs_sys
+from pathlib import Path as _InputsPath
+_inputs_sys.path.insert(0, str(_InputsPath(__file__).resolve().parents[1] / "tools"))
+from setup_kit.input_paths import input_path
 import argparse
 import hashlib
 import importlib.util
@@ -594,7 +598,7 @@ def private_proof():
     replay; generated wrappers isolate these primitives from unproved players
     and engine controllers. No claim of complete program execution is made.
     """
-    source = Path(os.environ.get('NFS_CARBON_PC', Path.home() / 'Downloads/NFSC'))
+    source = input_path('NFSC')
     roster = ROOT / 'tools_snapshot/private_cars.py'
     if not (source / 'GLOBAL/attributes.bin').is_file() or not roster.is_file():
         print('SKIP private source inputs absent; standalone CSIS proof completed')

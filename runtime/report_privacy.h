@@ -99,8 +99,11 @@ static NSString *ReportPrivateRules(NSString *text) {
     NSString *authorization = [NSString stringWithFormat:@"(?<![A-Za-z0-9_])(?:proxy[ _-]?)?authorization[\\\"']?\\s*[:=]\\s*(?:%@|[^\\r\\n<>}]+)", quoted];
     text = ReportPrivacyReplace(text, authorization, @"[authorization]"); // privacy:authorization
     text = ReportPrivacyReplace(text, @"\\b(?:Bearer|Basic)\\s+[A-Za-z0-9._~+/%\\\\=-]+", @"[authorization]"); // privacy:bearer
-    NSString *secret = [NSString stringWithFormat:@"(?<![A-Za-z0-9_])(?:x[ _-]api[ _-]key|api[ _-]?(?:key|token|secret)|(?:access|refresh|auth|session|client|github|gh)[ _-]?(?:token|secret)|aws[ _-](?:secret[ _-]access[ _-]key|session[ _-]token|access[ _-]key[ _-]id)|private[ _-]key|password|passwd|pwd|secret|token)[\\\"']?\\s*[:=]\\s*%@", value];
+    NSString *secret = [NSString stringWithFormat:@"(?<![A-Za-z0-9_])(?:x[ _-]api[ _-]key|api[ _-]?(?:key|token|secret)|(?:access|refresh|auth|session|client|github|gh)[ _-]?(?:token|secret)|aws[ _-](?:secret[ _-]access[ _-]key|session[ _-]token|access[ _-]key[ _-]id)|stream[ _-]key|private[ _-]key|password|passwd|pwd|secret|token)[\\\"']?\\s*[:=]\\s*%@", value];
     text = ReportPrivacyReplace(text, secret, @"[secret]"); // privacy:secret
+    // Ingest query credentials, including decoded/quoted JSON forms.
+    NSString *cid = [NSString stringWithFormat:@"(?<![A-Za-z0-9_])cid[\\\"']?\\s*[:=]\\s*%@", value];
+    text = ReportPrivacyReplace(text, cid, @"[stream key]"); // privacy:cid
     // Quoted paths can contain spaces; unquoted paths conservatively consume to a field/line delimiter.
     // Keep the established ~/suffix preview output: its known home has already been removed.
     NSString *root = @"(?:file:(?://|/)|/(?:Volumes|Users|home|(?:private/)?var/folders)/|[A-Za-z]:[\\\\/]+|\\\\{2,}[^\\\\/\\s\"'<>]+[\\\\/]+)";

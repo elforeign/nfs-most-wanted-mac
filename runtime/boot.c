@@ -34,6 +34,7 @@
 #include "settings.h"
 #include "server_loader.h"
 #include "x360audio.h"
+#include "car_audio.h"
 #include "x360copspeech.h"
 
 uint8_t *G;
@@ -227,6 +228,7 @@ void boot_write_call_counts(FILE *f) {
         if (host_fn_calls_n[i]) fprintf(f, "%12llu  %s\n", (unsigned long long)host_fn_calls_n[i], host_fn_names[i]);
 }
 void dispatch(Cpu *c, uint32_t t) {
+    if (car_audio_dispatch(c, t)) return;
     if (t == 0x006069E8u) host_lua_resume(c, t);   // Lua protected-error resume (audit 3 #2); dispatch is hot, so test inline
     if ((t >= SERVER_BASE && t < SERVER_RESERVED_END) || (t >= SERVER_THUNK_BASE && t < SERVER_THUNK_BASE + 4096)) {
         if (server_dispatch(c, t)) return;
@@ -601,6 +603,7 @@ __attribute__((weak)) int private_cars_backup_before_write(const char *destinati
 static int profile_write_denied(const char *path) {
     return !private_cars_save_allowed() && (file_is_save(path) || !strcmp(path, userdata_dir()));
 }
+__attribute__((weak)) int car_audio_open(const char *name) { (void)name; return -1; }
 static uint32_t file_open(const char *win, const char *host, uint32_t access, uint32_t share, uint32_t disp, uint32_t flags) {
     int k = 1, fd = -1, fresh = 0, fl = file_flags(access, disp);
     if ((fl != O_RDONLY) && profile_write_denied(host)) {
@@ -626,7 +629,8 @@ static uint32_t file_open(const char *win, const char *host, uint32_t access, ui
         path = strdup(host);
         if (!path) goto cleanup;
     }
-    fd = !s && fl == O_RDONLY ? x360audio_open(win, host) : -1;
+    fd = !s && fl == O_RDONLY ? car_audio_open(win) : -1;
+    if (fd < 0) fd = !s && fl == O_RDONLY ? x360audio_open(win, host) : -1;
     if (fd < 0) fd = open(s ? s->temp : host, s ? fl & ~(O_CREAT | O_EXCL) : fl, 0644);
     if (fd < 0) goto cleanup;
     struct stat st;
@@ -975,6 +979,7 @@ static void code_region_add(Cpu *c, uint32_t a, uint32_t n) {
     }
 }
 int code_region_of(uint32_t t) {
+    if (car_audio_code_region(t)) return 0x7fffffff;
     for (int i = 0; i < ncode_regions; ++i) if (t - code_regions[i].base < code_regions[i].size) return i;
     return -1;
 }
@@ -1083,6 +1088,7 @@ static int win32(Cpu *c, const char *fn) {
         printf("boot: ExitProcess(%u) after %u import calls\n", arg(c, 0), import_calls);
         void app_restart_game_exited(int successful);
         app_restart_game_exited(!strcmp(fn, "ExitProcess") && arg(c, 0) == 0);
+        diag_begin_exit();
         exit(0);
     }
     // ---- code pages: Latin-1 <-> UTF-16 identity mapping (enough for the game's ASCII strings) ----
@@ -1659,6 +1665,7 @@ static void *deadline_thread(void *p) {
         if (parent != 1 && getppid() != parent) { why = "BOOT_DEADLINE: parent process gone"; break; }
     }
     fprintf(stderr, "boot: %s, exiting\n", why);
+    diag_begin_exit();
     pthread_t h;
     pthread_create(&h, NULL, hard_exit_thread, NULL);
     exit(124);
@@ -1715,6 +1722,7 @@ int main(int argc, char **argv) {
     settings_language_setup(game_dir);     // settings_port.c: the language packs present; the Language row when > 1
     if (getenv("BOOT_DIAG")) { char p[1100]; snprintf(p, sizeof p, "%s/settings_rows.txt", getenv("BOOT_DIAG")); settings_dump(p); }
     report_init();                         // report.m: full logging (next launch), the hang watchdog
+    movies_check_install();                // ordinary log too: missing PC movies must not silently skip playback
     save_cleanup();                        // discard interrupted saves before any guest profile scan
     boot_trace = getenv("BOOT_TRACE") != NULL;
     deadline_start();
@@ -1772,5 +1780,6 @@ int main(int argc, char **argv) {
     printf("boot: image loaded, %u translated functions, entry %08X\n", guest_func_count, speed_entry);
     dispatch(c, speed_entry);
     printf("boot: entry returned eax=%08X after %u import calls\n", c->eax, import_calls);
+    diag_begin_exit();
     return 0;
 }

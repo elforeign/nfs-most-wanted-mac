@@ -8,6 +8,7 @@
 
 #include "host.h"
 #include "settings.h"
+#include "setting_bool.h"
 #include "roots.h"
 
 // X360 rows and the files they need (roots.h features). With a roots.txt that lacks them the row is hidden, locked and
@@ -98,14 +99,12 @@ static int parse(const Setting *s, const char *str) {
         int v = (int)(d + (d < 0 ? -0.5 : 0.5));
         return v < s->min ? s->min : v > s->max ? s->max : v;
     }
+    if (s->type == SET_TOGGLE && !s->choices && !s->values) return setting_bool_parse(str);
     int nc;
     labels(s, &nc);
     char buf[64];
     for (int i = 0; i < nc; ++i) { value_str(s, i, buf, sizeof buf); if (!strcasecmp(buf, str)) return i; }
-    if (s->type == SET_TOGGLE) {          // the usual spellings of a boolean switch
-        if (!strcmp(str, "1") || !strcasecmp(str, "on") || !strcasecmp(str, "true")) return 1;
-        if (!strcmp(str, "0") || !strcasecmp(str, "off") || !strcasecmp(str, "false")) return 0;
-    }
+    if (s->type == SET_TOGGLE) return setting_bool_parse(str);
     return -1;
 }
 static void look_row_edited(Setting *s);
@@ -216,6 +215,11 @@ int settings_set(Setting *s, int v) {
     // Selecting My picks still has to restore its saved values in that case.
     if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || v == settings_look_choice())) return 0;
     s->value = v;
+    if (s->live_env && s->env) {          // the renderer reads the switch as it runs; load() exports the same spelling
+        char buf[64];
+        value_str(s, v, buf, sizeof buf);
+        if (v == s->def || !buf[0]) unsetenv(s->env); else setenv(s->env, buf, 1);
+    }
     if (s->apply) s->apply(v);
     const char *key = pref_key(s);
     if (*key) {

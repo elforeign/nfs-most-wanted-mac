@@ -10,7 +10,7 @@
 //   report.txt     the summary, first: when, category, the user's note, why (user / crash / hang), build, game state,
 //                  display, render settings, audio output and device, controller, the last minute in numbers,
 //                  settings that differ from their defaults, and this file list
-//   screenshot.png the game frame when the menu opened (user reports; none for crash/hang reports)
+//   screenshot.png the game frame requested for this report (user reports; none for crash/hang reports)
 //   stats.txt      the per-second ring, oldest first, one line a second with a header
 //   events.txt     the notable-events ring, then the last 400 lines of the diagnostic event ring
 //   log.txt        the sanitized end (256 KB) of this run's stderr log; a notice if its privacy scan exceeds 1 MiB
@@ -36,7 +36,6 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <IOKit/ps/IOPowerSources.h>
 #include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -44,7 +43,7 @@
 #include "d3d9_internal.h"
 #include "settings.h"
 #include "report_privacy.h"
-#include "gpuclients.h"
+#include "slowlog.h"
 
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
 
@@ -70,7 +69,7 @@ static void session_note(const char *line, int audio);
 
 // ---------------- notable events ----------------
 #define NOTES 512
-#define NOTE_LEN 176
+#define NOTE_LEN 384
 static char notes[NOTES][NOTE_LEN];
 static volatile uint32_t notes_head;
 static uint64_t t_start;                 // report_init
@@ -92,7 +91,7 @@ static Sec secs[SECS];
 static uint64_t nsecs;
 // Cached on the game thread every few seconds, so a report from the hang watchdog or a crash handler needs no
 // Cocoa / GameController calls.
-static char sys_display[160] = "?", sys_edr[128] = "?", sys_presentation[256] = "?", sys_pad[128] = "none", sys_device[96] = "?";
+static char sys_display[160] = "?", sys_edr[256] = "?", sys_presentation[256] = "?", sys_pad[128] = "none", sys_device[96] = "?";
 static char sys_os[128] = "?", sys_model[128] = "?";
 
 static int cmp_f(const void *a, const void *b) { float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
@@ -114,7 +113,13 @@ static void device_name(AudioDeviceID dev, char *out, size_t n) {
 const char *report_audio_device(void) { return sys_device; }
 
 static float budget_ms = 25;
+static SlowlogSample slow_sample;
 static void refresh_power_thermal(void);
+static void format_display_output(char *out, size_t n, int wants, int fp16, const char *cs,
+                                  double current, double potential, double reference) {
+    snprintf(out, n, "EDR current=%.3f potential=%.3f reference=%.3f; output=%s wantsEDR=%d FP16=%d colorspace=%s; HDR transport=unknown",
+             current, potential, reference, wants && fp16 ? "HDR" : "SDR", wants, fp16, cs);
+}
 static void cache_system(void) {
     @autoreleasepool {
         NSScreen *s = layer && [layer.delegate isKindOfClass:NSView.class] ? ((NSView *)layer.delegate).window.screen : NSScreen.mainScreen;
@@ -130,16 +135,19 @@ static void cache_system(void) {
             snprintf(sys_display, sizeof sys_display, "%s", disp);
             if (!first) report_note("display: %s", disp);
         }
-        // Headroom describes what EDR content can use, not the display link's HDR
-        // signal mode. The game's BGRA8 sRGB layer still outputs SDR either way.
+        // Layer state describes content; EDR headroom does not identify HDR transport.
         char edr[sizeof sys_edr];
-        snprintf(edr, sizeof edr, "EDR unavailable; output=SDR sRGB; HDR transport=unknown");
-        if (s) {
-            if (@available(macOS 10.15, *))
-                snprintf(edr, sizeof edr, "EDR current=%.3f potential=%.3f reference=%.3f; output=SDR sRGB; HDR transport=unknown",
-                         s.maximumExtendedDynamicRangeColorComponentValue, s.maximumPotentialExtendedDynamicRangeColorComponentValue,
-                         s.maximumReferenceExtendedDynamicRangeColorComponentValue);
+        double current = NAN, potential = NAN, reference = NAN;
+        if (s) if (@available(macOS 10.15, *)) {
+            current = s.maximumExtendedDynamicRangeColorComponentValue;
+            potential = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+            reference = s.maximumReferenceExtendedDynamicRangeColorComponentValue;
         }
+        CFStringRef cs = layer.colorspace ? CGColorSpaceCopyName(layer.colorspace) : NULL;
+        format_display_output(edr, sizeof edr, layer.wantsExtendedDynamicRangeContent,
+                              layer.pixelFormat == MTLPixelFormatRGBA16Float, cs ? [(__bridge NSString *)cs UTF8String] : "unset",
+                              current, potential, reference);
+        if (cs) CFRelease(cs);
         if (strcmp(edr, sys_edr)) {
             int first = !strcmp(sys_edr, "?");
             snprintf(sys_edr, sizeof sys_edr, "%s", edr);
@@ -160,21 +168,14 @@ static void cache_system(void) {
         int hz = user32_display_hz(), sim = pacing_sim_hz();
         if (sim > 0 && sim < hz) hz = sim;
         budget_ms = 1500.0f / (float)(hz > 0 ? hz : 60);
-        refresh_power_thermal();
         snprintf(sys_pad, sizeof sys_pad, "none");
-        for (GCController *k in GCController.controllers)
-            if (k.extendedGamepad) {
-                snprintf(sys_pad, sizeof sys_pad, "%s (%s)%s", k.vendorName.UTF8String ?: "controller", k.productCategory.UTF8String ?: "?",
-                         getenv("BOOT_PAD") ? ", BOOT_PAD simulated" : "");
-                break;
-            }
+        user32_pad_report(sys_pad, sizeof sys_pad);
         if (!strcmp(sys_pad, "none") && getenv("BOOT_PAD")) snprintf(sys_pad, sizeof sys_pad, "BOOT_PAD simulated");
     }
 }
 
 // ---------------- the session log ----------------
 static char sys_power[40] = "?", sys_thermal[16] = "?";
-static int sys_thermal_n = -1, sys_lowpower = -1;   // perf.tsv thermal (0 nominal .. 3 critical) and low_power columns, refreshed with sys_thermal
 // budget_ms: 1.5x the frame interval (the display's, or the sim rate when that is lower), set by cache_system
 static void print_render(FILE *f) {
     fprintf(f, "back buffer %ux%u, MSAA %dx, post %s, shadows %u (map %d), car paint %s", dev.pp[0], dev.pp[1],
@@ -197,22 +198,16 @@ static int print_nondefault(FILE *f) {
 }
 static void refresh_power_thermal(void) {
     static const char *tn[] = {"nominal", "fair", "serious", "critical"};
-    @autoreleasepool {
-        NSInteger t = NSProcessInfo.processInfo.thermalState;
+    {
+        int t = slow_sample.thermal;
         const char *tv = t >= 0 && t < 4 ? tn[t] : "?";
-        sys_thermal_n = t >= 0 && t < 4 ? (int)t : -1;
-        sys_lowpower = NSProcessInfo.processInfo.lowPowerModeEnabled ? 1 : 0;
         if (strcmp(tv, sys_thermal)) {
             char old[16];
             snprintf(old, sizeof old, "%s", sys_thermal);
             snprintf(sys_thermal, sizeof sys_thermal, "%s", tv);
             if (strcmp(old, "?")) report_note("thermal: %s -> %s", old, tv);
         }
-        CFTypeRef info = IOPSCopyPowerSourcesInfo();
-        CFStringRef src = info ? IOPSGetProvidingPowerSourceType(info) : NULL;
-        char pv[40] = "?";
-        if (src) CFStringGetCString(src, pv, sizeof pv, kCFStringEncodingUTF8);
-        if (info) CFRelease(info);
+        const char *pv = slow_sample.power;
         if (strcmp(pv, sys_power)) {
             char old[40];
             snprintf(old, sizeof old, "%s", sys_power);
@@ -293,7 +288,7 @@ static void session_open(void) {
                         "rms_fl\trms_fr\trms_c\trms_lfe\trms_sl\trms_sr\tpeak_fl\tpeak_fr\tpeak_c\tpeak_lfe\tpeak_sl\tpeak_sr\tclip\tlimit_samples\t"
                         "dip_fl\tdip_fr\tdip_c\tdip_lfe\tdip_sl\tdip_sr\t"
                         "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\t"
-                        "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\n");
+                        "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\t" SLOWLOG_COLUMNS "\n");
     if (sess_f) {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
@@ -398,10 +393,11 @@ static void session_flush_hitches(uint64_t head, uint64_t gser) {
     if (skipped) fprintf(sess_f, "%9.2f s  (%llu more hitches not listed)\n", uptime(), (unsigned long long)skipped);
     if (written || skipped) fflush(sess_f);
 }
-static void session_exit(void) { session_summary(); }
+static void session_exit(void) { padlink_idle(1); session_summary(); }
 
 // diag.c diag_frame, every frame, always: once a second a stats line into the ring; stalls and audio changes as notes.
 void report_frame(uint64_t frame, uint32_t flow) {
+    if (diag_on) padlink_idle(0);
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
     static uint32_t prev_causes, last_flow = ~0u;
     static uint64_t def0, last_def;
@@ -447,6 +443,8 @@ void report_frame(uint64_t frame, uint32_t flow) {
     double now = host_ticks() / 1e9;
     if (now < next) return;
     next = now + 1;
+    slowlog_cached(&slow_sample);
+    refresh_power_thermal();
     if (now >= next_sys) { next_sys = now + 5; cache_system(); }
     Sec *s = &secs[nsecs % SECS];
     memset(s, 0, sizeof *s);
@@ -510,11 +508,10 @@ void report_frame(uint64_t frame, uint32_t flow) {
             } else fputs("\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t", perf_f);
             // what separates "the GPU got slower" causes: macOS thermal state (0 nominal .. 3 critical, -1 unknown), low power mode,
             // app frontmost, window hidden, native full screen, and the command buffers' queue-to-end ms (render_gpu_wall_ms)
-            fprintf(perf_f, "\t%d\t%d\t%d\t%d\t%d\t%.2f", sys_thermal_n, sys_lowpower, (int)NSApp.isActive, user32_window_occluded(),
+            fprintf(perf_f, "\t%d\t%d\t%d\t%d\t%d\t%.2f", slow_sample.thermal, slow_sample.low_power, (int)NSApp.isActive, user32_window_occluded(),
                     ps.native_fullscreen, render_gpu_wall_ms());
-            GPUClientsSample clients;
-            gpuclients_cached(&clients);
-            gpuclients_print(perf_f, &clients);
+            gpuclients_print(perf_f, &slow_sample.gpu);
+            slowlog_print(perf_f, &slow_sample, settings_get("graphics.postfx") == 1 ? "PC" : "X360");
             fputc('\n', perf_f);
             fflush(perf_f);
         }
@@ -557,45 +554,84 @@ void report_live(float *fps, float *p99, float *gpu) {
     *fps = s->fps; *p99 = s->p99; *gpu = s->gpu;
 }
 
-// ---------------- the screenshot: the frame when the menu opened ----------------
-static volatile int shot_wanted;
+// ---------------- the screenshot: one request per report save ----------------
+static int shot_wanted, shot_finished;
 static char shot_file[1100];
-static double shot_at;
+static uint64_t shot_generation;
 static pthread_mutex_t shot_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t shot_condition = PTHREAD_COND_INITIALIZER;
 static CFDataRef shot_data;
 // The PNG queue calls this after encoding, so retaining the image never reads a file under the guest lock.
 void report_shot_ready(const char *path) {
     pthread_mutex_lock(&shot_lock);
     int ours = shot_file[0] && !strcmp(path, shot_file);
     pthread_mutex_unlock(&shot_lock);
-    if (!ours) return;
+    // Each request has its own file, so an older encoder can never publish a newer request's image.
+    char prefix[1100];
+    snprintf(prefix, sizeof prefix, "%s/reports/.menu_frame-", userdata_dir());
+    int temporary = !strncmp(path, prefix, strlen(prefix));
+    if (!ours) { if (temporary) unlink(path); return; }
     @autoreleasepool {
         NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
         CFDataRef image = data.length ? CFRetain((__bridge CFDataRef)data) : NULL;
         pthread_mutex_lock(&shot_lock);
-        CFDataRef old = shot_data;
-        shot_data = image;
+        if (!strcmp(path, shot_file)) {
+            CFDataRef old = shot_data;
+            shot_data = image;
+            image = old;
+            shot_finished = 1;
+            pthread_cond_broadcast(&shot_condition);
+        }
         pthread_mutex_unlock(&shot_lock);
-        if (old) CFRelease(old);
+        if (image) CFRelease(image);
     }
+    if (temporary) unlink(path);
 }
 static const char *reports_dir(void) {
     static char dir[1100];
     if (!dir[0]) { snprintf(dir, sizeof dir, "%s/reports", userdata_dir()); mkdir(dir, 0755); }
     return dir;
 }
-void report_request_shot(void) { shot_wanted = 1; }
-// render_present.m: the next back buffer is saved as <userdata>/reports/.menu_frame.png (encoded off the game thread).
-int report_shot(char *path, size_t n) {
-    if (!shot_wanted || path[0]) return 0;
-    shot_wanted = 0;
-    const char *root = reports_dir();
+void report_request_shot(void) {
     pthread_mutex_lock(&shot_lock);
-    snprintf(shot_file, sizeof shot_file, "%s/.menu_frame.png", root);
-    snprintf(path, n, "%s", shot_file);
-    shot_at = host_ticks() / 1e9;
+    ++shot_generation;
+    shot_wanted = 1;
+    shot_finished = 0;
+    shot_file[0] = 0;
+    CFDataRef old = shot_data;
+    shot_data = NULL;
+    pthread_cond_broadcast(&shot_condition);
+    pthread_mutex_unlock(&shot_lock);
+    if (old) CFRelease(old);
+}
+// render_present.m: the next back buffer is encoded off the game thread to a request-specific file.
+int report_shot(char *path, size_t n) {
+    if (path[0]) return 0;
+    pthread_mutex_lock(&shot_lock);
+    if (!shot_wanted) { pthread_mutex_unlock(&shot_lock); return 0; }
+    int length = snprintf(shot_file, sizeof shot_file, "%s/.menu_frame-%llu.png", reports_dir(),
+                          (unsigned long long)shot_generation);
+    if (length < 0 || (size_t)length >= sizeof shot_file || (size_t)length >= n) {
+        pthread_mutex_unlock(&shot_lock); return 0;
+    }
+    shot_wanted = 0;
+    memcpy(path, shot_file, (size_t)length + 1);
     pthread_mutex_unlock(&shot_lock);
     return 1;
+}
+
+// Only the report writer waits. The guest, render and PNG queues must remain free to finish the capture.
+static CFDataRef report_wait_shot(uint64_t generation) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 2;
+    pthread_mutex_lock(&shot_lock);
+    while (generation && generation == shot_generation && !shot_finished) {
+        if (pthread_cond_timedwait(&shot_condition, &shot_lock, &deadline)) break;
+    }
+    CFDataRef image = generation && generation == shot_generation && shot_finished && shot_data ? CFRetain(shot_data) : NULL;
+    pthread_mutex_unlock(&shot_lock);
+    return image;
 }
 
 // ---------------- writing a report ----------------
@@ -636,6 +672,7 @@ typedef struct {
     size_t size[4];
     char root[1100], log[1024];
     CFDataRef shot;
+    uint64_t shot_generation;
     char *category, *attach;
     struct tm tm;
 } ReportSnapshot;
@@ -703,7 +740,10 @@ static ReportSnapshot *report_capture(const char *category, const char *note, co
     // Only copy paths here. File reads, image copying and redaction belong to the writer.
     fcntl(2, F_GETPATH, r->log);
     pthread_mutex_lock(&shot_lock);
-    if (!attach && shot_data && host_ticks() / 1e9 - shot_at < 600) r->shot = CFRetain(shot_data);
+    if (!attach) {
+        r->shot_generation = shot_generation;
+        if (shot_finished && shot_data) r->shot = CFRetain(shot_data);
+    }
     pthread_mutex_unlock(&shot_lock);
     // report.txt, the summary on top
     f = open_memstream(&r->text[3], &r->size[3]);
@@ -762,6 +802,7 @@ fail:
 
 // No guest lock needed. The potentially slow file, image and privacy work runs on the report queue for F10.
 static int report_store(ReportSnapshot *r, char *dir, size_t n) {
+    if (!r->attach && !r->shot) r->shot = report_wait_shot(r->shot_generation);
     char stamp[32], path[1500];
     strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &r->tm);
     mkdir(r->root, 0755);
@@ -796,9 +837,12 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
         FILE *f = fopen(path, "w");
         if (!f) { ok = 0; continue; }
         if (fwrite(r->text[i], 1, r->size[i], f) != r->size[i]) ok = 0;
-        if (i == 3)
+        if (i == 3) {
+            if (!r->attach && !have_shot)
+                fprintf(f, "\nscreenshot: omitted (this report's capture was unavailable or did not finish within 2 seconds)\n");
             fprintf(f, "\nfiles: report.txt%s, stats.txt, events.txt%s, settings.txt%s\n", have_shot ? ", screenshot.png" : "",
                     r->log[0] ? ", log.txt" : "", r->attach ? ", crash.txt" : "");
+        }
         if (fclose(f)) ok = 0;
     }
     ReportRedactBundle([NSString stringWithUTF8String:dir]);
@@ -837,6 +881,7 @@ void portmenu_status(const char *fmt, ...);
 // The main thread owns pending/UI state. Repeated presses keep one pending save, with no unbounded queue.
 void report_save_async(const char *category, const char *note) {
     if (report_pending) { portmenu_status("Saving report..."); return; }
+    report_request_shot();
     ReportSnapshot *r = report_capture(category, note, NULL, NULL);
     if (!r) { portmenu_status("Couldn't write the report"); return; }
     if (!report_queue) {
@@ -898,7 +943,10 @@ void report_init(void) {
     @autoreleasepool {
         snprintf(sys_os, sizeof sys_os, "%s", NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String ?: "?");
     }
-    if (!getenv("BOOT_DIAG") && settings_get("diag.full_logging") == 1) {
+    // A timing launch must stay diagnostics-off even when its scratch profile saved full logging.
+    const char *guarded_nodiag = getenv("RUN_GUARDED_NODIAG");
+    if (guarded_nodiag && !strcmp(guarded_nodiag, "1")) unsetenv("BOOT_DIAG");
+    else if (!getenv("BOOT_DIAG") && settings_get("diag.full_logging") == 1) {
         char dir[1200], stamp[32];
         time_t now = time(NULL);
         struct tm tm;
@@ -912,7 +960,7 @@ void report_init(void) {
         fprintf(stderr, "boot: full diagnostic logging (Diagnostics menu): %s\n", dir);
     }
     session_open();
-    gpuclients_start();
+    slowlog_start();
     atexit(session_exit);
     report_note("start: build %s", port_build_id());
     if (!getenv("BOOT_DIAG")) {

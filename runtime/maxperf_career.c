@@ -1,33 +1,12 @@
 // Career Max Performance uses the game's confirmation, locked-part selection and paid cart.
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
 #include "host.h"
-#include "settings.h"
-
-static int enabled = -1;
-static int maxperf_on(void) {
-    if (enabled < 0) {
-        const char *e = getenv("NFS_MAXPERF_CAREER");
-        enabled = !e || strcasecmp(e, "retail");
-    }
-    return enabled;
-}
-static void maxperf_apply(int v) { enabled = v == 0; }
-static const char *const choices[] = {"On", "Retail"};
-static const char *const values[] = {"on", "retail"};
-static Setting option = {.id = "gameplay.maxperf_career", .category = SET_GAMEPLAY, .order = 55,
-    .label = "Max Performance in career", .help = "Add the best unlocked performance parts to your cart. Checkout still charges. Retail hides this action in career.",
-    .type = SET_CHOICE, .choices = choices, .values = values, .nchoices = 2, .def = 0,
-    .env = "NFS_MAXPERF_CAREER", .apply = maxperf_apply};
-__attribute__((constructor)) static void maxperf_register(void) { settings_add(&option); }
 
 #define MAXPERF_PAD_Y 30.0f // console group: its stripe sits 23 below the group origin
 #define MAXPERF_PC_Y 53.0f  // keyboard group: its stripe is centred on the group origin
 
 static int career_shop(uint32_t self) {
     uint32_t db = M32(0x0091CF90u);
-    return maxperf_on() && M32(self + 0x150) == 0x802 &&
+    return M32(self + 0x150) == 0x802 &&
         ((db && (M8(db + 0x12C) & 1)) || M8(0x009B9E8Du));
 }
 
@@ -68,12 +47,15 @@ void maxperf_career_header(Cpu *c, uint32_t self) {
     *c = saved;
 }
 
+void underglow_menu_notify(uint32_t self, uint32_t msg);
 void f_007BB870_orig(Cpu *c);
 void f_007BB870(Cpu *c) {
     uint32_t self = c->ecx;
-    int open = arg(c, 0) == 0xC519BFC3u && career_shop(self);
+    uint32_t msg = arg(c, 0);
+    int open = msg == 0xC519BFC3u && career_shop(self);
     // Includes the category screen's notification; the retail career gate returns without a dialog.
     f_007BB870_orig(c);
+    underglow_menu_notify(self, msg);
     if (!open) return;
     Cpu saved = *c;
     uint32_t a[] = {M32(self + 0x10), 0x00890978u, 3, 0x70E01038u, 0x417B25E4u,

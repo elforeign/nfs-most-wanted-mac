@@ -1,11 +1,13 @@
 # Exact object inventory for the independent libraries; one row per member, including duplicates.
 # FFmpeg 7.1.1: pinned source and component selection in media/build_ffmpeg.sh.
+# Regenerated from the arm64/macOS 14.5 release build: 386 FFmpeg + 4 MIT members.
 # Archive symbol indexes are metadata and are not listed here.
 host/audio/build/libhostaudio.a	dsound_host.o
 host/audio/build/libmedia.a	media.o
 host/shaders/build/libsmtranslate.a	sm_msl.o
 host/shaders/build/libsmtranslate.a	sm_parse.o
 third_party/ffmpeg/lib/libavcodec.a	aac_ac3_parser.o
+third_party/ffmpeg/lib/libavcodec.a	aac_adtstoasc.o
 third_party/ffmpeg/lib/libavcodec.a	aactab.o
 third_party/ffmpeg/lib/libavcodec.a	ac3.o
 third_party/ffmpeg/lib/libavcodec.a	ac3_channel_layout_tab.o
@@ -13,8 +15,6 @@ third_party/ffmpeg/lib/libavcodec.a	ac3_parser.o
 third_party/ffmpeg/lib/libavcodec.a	ac3dec_data.o
 third_party/ffmpeg/lib/libavcodec.a	ac3dec_float.o
 third_party/ffmpeg/lib/libavcodec.a	ac3dsp.o
-third_party/ffmpeg/lib/libavcodec.a	ac3dsp_init_aarch64.o
-third_party/ffmpeg/lib/libavcodec.a	ac3dsp_neon.o
 third_party/ffmpeg/lib/libavcodec.a	ac3enc.o
 third_party/ffmpeg/lib/libavcodec.a	ac3enc_float.o
 third_party/ffmpeg/lib/libavcodec.a	ac3tab.o
@@ -56,12 +56,14 @@ third_party/ffmpeg/lib/libavcodec.a	fmtconvert_init.o
 third_party/ffmpeg/lib/libavcodec.a	fmtconvert_neon.o
 third_party/ffmpeg/lib/libavcodec.a	frame_thread_encoder.o
 third_party/ffmpeg/lib/libavcodec.a	get_buffer.o
+third_party/ffmpeg/lib/libavcodec.a	h264_mp4toannexb.o
 third_party/ffmpeg/lib/libavcodec.a	h264chroma.o
 third_party/ffmpeg/lib/libavcodec.a	h264chroma_init_aarch64.o
 third_party/ffmpeg/lib/libavcodec.a	h264cmc_neon.o
 third_party/ffmpeg/lib/libavcodec.a	h264qpel.o
 third_party/ffmpeg/lib/libavcodec.a	h264qpel_init_aarch64.o
 third_party/ffmpeg/lib/libavcodec.a	h264qpel_neon.o
+third_party/ffmpeg/lib/libavcodec.a	hevc_mp4toannexb.o
 third_party/ffmpeg/lib/libavcodec.a	hpeldsp.o
 third_party/ffmpeg/lib/libavcodec.a	hpeldsp_init_aarch64.o
 third_party/ffmpeg/lib/libavcodec.a	hpeldsp_neon.o
@@ -92,6 +94,7 @@ third_party/ffmpeg/lib/libavcodec.a	mlpdec.o
 third_party/ffmpeg/lib/libavcodec.a	mlpdsp.o
 third_party/ffmpeg/lib/libavcodec.a	mlpenc.o
 third_party/ffmpeg/lib/libavcodec.a	mpeg12framerate.o
+third_party/ffmpeg/lib/libavcodec.a	mpeg4audio.o
 third_party/ffmpeg/lib/libavcodec.a	mpeg4audio_sample_rates.o
 third_party/ffmpeg/lib/libavcodec.a	mpeg_er.o
 third_party/ffmpeg/lib/libavcodec.a	mpegaudio.o
@@ -162,6 +165,7 @@ third_party/ffmpeg/lib/libavcodec.a	vp56dsp.o
 third_party/ffmpeg/lib/libavcodec.a	vp6.o
 third_party/ffmpeg/lib/libavcodec.a	vp6dsp.o
 third_party/ffmpeg/lib/libavcodec.a	vpx_rac.o
+third_party/ffmpeg/lib/libavcodec.a	vvc_mp4toannexb.o
 third_party/ffmpeg/lib/libavcodec.a	wma.o
 third_party/ffmpeg/lib/libavcodec.a	wma_common.o
 third_party/ffmpeg/lib/libavcodec.a	wma_freqs.o
@@ -208,7 +212,9 @@ third_party/ffmpeg/lib/libavfilter.a	vf_transpose.o
 third_party/ffmpeg/lib/libavfilter.a	vf_vflip.o
 third_party/ffmpeg/lib/libavfilter.a	video.o
 third_party/ffmpeg/lib/libavformat.a	ac3dec.o
+third_party/ffmpeg/lib/libavformat.a	adtsenc.o
 third_party/ffmpeg/lib/libavformat.a	allformats.o
+third_party/ffmpeg/lib/libavformat.a	apetag.o
 third_party/ffmpeg/lib/libavformat.a	asf.o
 third_party/ffmpeg/lib/libavformat.a	asf_tags.o
 third_party/ffmpeg/lib/libavformat.a	asfcrypt.o
@@ -226,10 +232,13 @@ third_party/ffmpeg/lib/libavformat.a	file.o
 third_party/ffmpeg/lib/libavformat.a	format.o
 third_party/ffmpeg/lib/libavformat.a	id3v1.o
 third_party/ffmpeg/lib/libavformat.a	id3v2.o
+third_party/ffmpeg/lib/libavformat.a	id3v2enc.o
 third_party/ffmpeg/lib/libavformat.a	img2.o
 third_party/ffmpeg/lib/libavformat.a	img2enc.o
 third_party/ffmpeg/lib/libavformat.a	isom_tags.o
+third_party/ffmpeg/lib/libavformat.a	latmenc.o
 third_party/ffmpeg/lib/libavformat.a	metadata.o
+third_party/ffmpeg/lib/libavformat.a	mpegtsenc.o
 third_party/ffmpeg/lib/libavformat.a	mux.o
 third_party/ffmpeg/lib/libavformat.a	mux_utils.o
 third_party/ffmpeg/lib/libavformat.a	nullenc.o

@@ -69,7 +69,7 @@ exit /b %errorlevel%
 
 :link
 if not exist .metal-cache\windows\objects.rsp exit /b 1
-link.exe @.metal-cache\windows\objects.rsp /OUT:.metal-cache\windows\nfsmw-headless.exe /SUBSYSTEM:CONSOLE /MACHINE:X64 /STACK:67108864 kernel32.lib libcmt.lib libucrt.lib libvcruntime.lib oldnames.lib
+link.exe @.metal-cache\windows\objects.rsp /OUT:.metal-cache\windows\nfsmw-headless.exe /SUBSYSTEM:CONSOLE /MACHINE:X64 /STACK:67108864 kernel32.lib user32.lib winmm.lib libcpmt.lib libcmt.lib libucrt.lib libvcruntime.lib oldnames.lib
 exit /b %errorlevel%
 
 :smoke
@@ -86,6 +86,8 @@ exit /b 0
 
 :check-boot
 "%PY%" -I recomp\windows_boot_test.py --desktop
+if errorlevel 1 exit /b %errorlevel%
+"%PY%" -I recomp\windows_sync_test.py --desktop
 exit /b %errorlevel%
 
 :boot-prefix

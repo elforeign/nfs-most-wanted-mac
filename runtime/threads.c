@@ -724,7 +724,7 @@ int win32_threads(Cpu *c, const char *fn) {
         RET(1, 2);
     }
     if (!strcmp(fn, "ExitThread")) {
-        if (!self) { fprintf(stderr, "boot: main thread called ExitThread(%u)\n", arg(c, 0)); exit((int)arg(c, 0)); }
+        if (!self) { fprintf(stderr, "boot: main thread called ExitThread(%u)\n", arg(c, 0)); diag_begin_exit(); exit((int)arg(c, 0)); }
         thread_exit_now(self, arg(c, 0));
     }
     if (!strcmp(fn, "GetExitCodeThread")) {       // (h, code*)

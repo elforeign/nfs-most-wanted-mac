@@ -14,11 +14,24 @@ The MIT license in LICENSE covers this project's own code and documentation. It 
 THIRD-PARTY COMPONENTS
 
 FFmpeg 7.1.1 (https://ffmpeg.org) — LGPL version 2.1 or later. Setup includes the unmodified FFmpeg 7.1.1 source archive
-(SHA-256 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1) and builds it on your Mac with a reduced
-set of components and without --enable-gpl and without --enable-nonfree (see media/build_ffmpeg.sh). It is used for
+(SHA-256 733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1), together with compiled static libraries
+for arm64/macOS 14.5 and a reduced set of components, without --enable-gpl, --enable-nonfree or --enable-version3
+(see media/build_ffmpeg.sh). Setup verifies the compiled set's SHA-256 before use and builds from source if it is
+missing or damaged. The build script
+patches the extracted sources to guard the GPL arm64 AC-3 DSP files libavcodec/aarch64/ac3dsp_init_aarch64.c and
+libavcodec/aarch64/ac3dsp_neon.S behind CONFIG_GPL in the Makefile and the DSP initialization call. This build omits
+both files and uses the LGPL C AC-3 DSP fallback; the shipped source archive is unchanged. The build audits every
+installed FFmpeg archive member's compiled source header (media/check_ffmpeg_sources.py). FFmpeg is used for
 movie and audio decoding and for the Dolby Digital, Dolby Digital Plus and TrueHD output. It is linked statically into
-the app that Setup builds for you; because you build it yourself from the source above, you can rebuild or change it.
-The LGPL text is in the FFmpeg source archive (COPYING.LGPLv2.1).
+the app that Setup builds for you; the accompanying source and scripts let you rebuild or change the libraries and relink it.
+The LGPL text is included as media/licenses/LGPL-2.1.txt and in the FFmpeg source archive (COPYING.LGPLv2.1).
+The retained ISC and MIT notices, IJG terms and zlib notices are in media/licenses/FFmpeg-notices.txt.
+This software is based in part on the work of the Independent JPEG Group.
+The compiled host audio, media wrapper and shader translator libraries are this project's MIT code; LICENSE
+contains their copyright, permission and warranty text. Setup's Contents/Resources contains source.tar.gz,
+the unmodified archive under third_party/dl and the compiled set under prebuilt, including configure.txt.
+See media/PREBUILT.md for source locations and rebuild/relink instructions. The final app link stays on your Mac.
+You may modify these libraries and reverse engineer to debug those modifications as their licences permit.
 
 python-build-standalone (https://github.com/astral-sh/python-build-standalone) — a relocatable CPython 3.12 build,
 bundled in Setup to run the build tools. Licensed under the Python Software Foundation License; the build bundles

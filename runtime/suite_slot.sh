@@ -16,12 +16,27 @@ if [ -z "$suite_slot_dir" ]; then
     else suite_slot_dir=${TMPDIR:-/tmp}/nfsmw-suite-slots; fi
 fi
 
+# Shared for suites, exclusive for solo games; retained on fd 8 for the whole run.
+suite_slot_guard() { { mkdir -p "$suite_slot_dir" && : >>"$suite_slot_dir/solo"; } 2>/dev/null || return 2
+    exec 8>>"$suite_slot_dir/solo"; "${TOOLS_PY:-python3}" -I -c 'import fcntl,sys
+try: fcntl.flock(8, (fcntl.LOCK_SH if sys.argv[1]=="shared" else fcntl.LOCK_EX)|fcntl.LOCK_NB)
+except OSError as e: sys.exit(1 if e.errno in (11,35) else 2)' "$1" && return 0
+    rc=$?; exec 8>&-; return "$rc"
+}
+suite_slot_count() { "${TOOLS_PY:-python3}" -I -c 'import fcntl,pathlib,sys; n=0
+for p in pathlib.Path(sys.argv[1]).glob("slot[0-9]*"):
+    with p.open("r") as f:
+        try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: n+=1
+print(n)' "$suite_slot_dir"
+}
 suite_slot_acquire() {
     [ -z "${OFFLINE_SUITE_SLOT_HELD:-}" ] || return 0
     max=${OFFLINE_SUITE_SLOTS:-2}; said=0; waited=0; t0=$(date +%s)
     py=${TOOLS_PY:-python3}
     while :; do
         n=0
+        if suite_slot_guard shared; then :; else case $? in 1) n=$max ;; *) echo "offline_tests: cannot use suite guard (flock unavailable): running without a whole-suite slot" >&2; return 0 ;; esac; fi
         while [ "$n" -lt "$max" ]; do
             f=$suite_slot_dir/slot$n; n=$((n + 1))
             if ! { mkdir -p "$suite_slot_dir" && : >>"$f"; } 2>/dev/null; then
@@ -45,7 +60,7 @@ except OSError as e:
         done
         waited=1; now=$(date +%s)
         if [ $((now - said)) -ge 300 ]; then
-            echo "offline_tests: waiting for a whole-suite slot ($max in use; $((now - t0)) s so far)" >&2
+            echo "offline_tests: waiting for a whole-suite slot (slots or solo run busy; $((now - t0)) s so far)" >&2
             said=$now
         fi
         sleep 2

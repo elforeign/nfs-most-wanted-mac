@@ -1,14 +1,15 @@
 # Windows host and first D3D12 image
 
 `build_windows.py --host-layer` compiles the generated C, the generated
-`runtime/imports.c` metadata, and only `runtime/win/*.c`. It does not select any
+`runtime/imports.c` metadata, `runtime/win/*.c`, and the shared DirectSound mixer
+with `runtime/win/audio_output.cpp`. It does not select any
 Mac host implementation or change Mac build inputs. Without `--host-layer`, the
 job 1 generated-code-only build remains available. Pass the resulting objects
 directly to the linker: archive extraction of fallback-only hooks is unproved.
 
 Controller metadata on Mac is authored in `tools_snapshot/pad_metadata.py` and
 emitted by `controltype_gen.py` without game inputs. The current Windows host
-selects only `runtime/win/*.c`; it uses translated PC originals through forwarding
+uses translated PC originals through forwarding
 hooks for controller prompts and Control Types. It does not compile the Mac
 `padprompts.c` / `controltype.c` consumers or consume their three metadata includes.
 
@@ -68,6 +69,56 @@ and named/security-aware events. The Mac reference import handlers are in
 691, thread controls at 708, duplication at 737), `runtime/heap.c` (heap lifecycle
 at 498) and `runtime/boot.c` (VM imports at 1009, handle closure at 1288).
 
+`runtime/win/user32.c` and `dinput.c` register through the existing adapter
+seam; the prefix executable installs both after CRT/event registration. The
+first-import exit-10 smoke and prefix checkpoint remain enabled as before.
+The Windows-only implementation owns one registered guest class and one native
+window at a time, with generation-specific guest HWNDs, 32-bit WNDCLASSEX /
+CREATESTRUCT / MSG layouts and synchronous guest creation/destruction callbacks.
+Each callback runs on a copied CPU with a validated guest stack; incorrect
+stdcall cleanup or changed callee-saved registers fail immediately. Post/peek/get,
+message filters, translation, dispatch, quit, focus, capture, client/window rects
+and window positioning use the guest queue or explicit native adapters. GetMessage
+releases the GIL while waiting. Native paint is validated before guest delivery;
+native pointers and raw-input handles never enter guest messages. Icon/cursor
+imports currently return opaque tokens; BeginPaint supplies only a synthetic
+paint record, with no guest GDI drawing surface. Formatting, text conversion,
+desktop-window and thread-message imports remain unsupported.
+
+Keyboard state uses DIK scan codes, including extended keys. Focused relative raw
+mouse packets feed X/Y; legacy mouse moves provide deltas if raw registration
+fails. Legacy wheel/buttons remain independent of raw motion. Focus loss and
+native keyboard/mouse removal discard pending presses, publish releases and clear
+motion. Keyboard/mouse GetDeviceState overwrites the guest state with neutral
+input while inactive or disconnected and returns success for acquired objects;
+mouse deltas are consumed once. Per-device buffered cursors support peek/drain,
+16/20-byte event records, configured capacity and explicit overflow. The bounded
+slice supports 32 live COM objects, 256 queued messages/events, standard keyboard
+(256), mouse (16/20) and joystick (80/272) state layouts. Arbitrary data-format
+remapping and DirectInput event notifications remain unsupported.
+
+Two independent placeholder gamepads keep the Mac contract: X/Y, LT on Z, Rx/Ry,
+RT on Rz; triggers rest at centre, default range 0..65535, neutral POV -1 and no
+buttons. Device/axis range properties survive neutralization. No controller
+transport is selected: disconnected pads still return a complete neutral state
+with DI_OK, so callers overwrite old input. Controller follow-ons are XInput;
+GameInput/native DirectInput discovery and stable hotplug identities; Raw Input /
+HID USB and Bluetooth for DualSense, DualShock and Edge; wheels/pedals; and output
+transports for rumble, adaptive triggers, lightbar and player indicators, with
+focus/pause/quit release. Prompt/binding and feedback hooks remain separate work.
+
+`recomp/windows_input_test.py` runs Mac fake-window fixtures through production
+import and COM dispatch: the pinned original stops on all three representative
+window/message/DInput imports (0/3, exit 2), while registration handles 3/3.
+The main fixture has 244 assertions and 103 calls, including a GIL-releasing
+GetMessage producer, callback cleanup, creation rejection, quit preservation,
+buffer peek/overflow, mouse motion consumption, focus and disconnect release,
+standard formats, metadata and six-axis/two-pad ranges. Raw and legacy input
+fixtures both run. Missing focus release leaves a key at 128 and exits 1;
+fixed release reads 0 and exits 0. Wrong callback cleanup exits 2. Real SDK,
+Windows desktop, physical devices and game execution remain unverified. The
+desktop host link includes user32.lib; its missing-library control is rejected.
+
 All 300 generated import slots bind to headless thunks. By default, the executable
 logs and stops at the first import with exit **10**, before returning into guest
 code. Unsupported imports set guest eax=0 / last error=120 and stop with exit 2;
@@ -98,8 +149,8 @@ owners are in `windows_symbols.py`; no wildcard permits missing host code.
 The SDK-free pre-check also models `_dsign` (UCRT math.h inline lowering) and
 `puts` (hosted printf lowering). The real SDK desktop build is authoritative;
 the Mac build is a pre-check only. The current Mac freestanding audit compiles
-83/83 units with 59 generated / 54 combined external names; hosted O2 compiles
-83/83 with 58 / 55. Including the two modeled SDK names, both classify 56 desktop
+86/86 units with 59 generated / 80 combined external names; hosted O2 compiles
+86/86 with 58 / 81. Including the modeled SDK names, both classify 82 desktop
 names and report **0 unknown**. Compiler versions can change counts and object sizes.
 
 Both hosts use `hook_coverage.py`: 273 hooks from hooks.txt/generated prototypes

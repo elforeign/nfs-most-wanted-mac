@@ -75,6 +75,11 @@ def packaging(root):
     script.write_bytes((RUNTIME / 'bundle.sh').read_bytes())
     (runtime / 'docs').mkdir()
     (runtime / 'docs/guide.md').write_bytes((RUNTIME / 'docs/guide.md').read_bytes())
+    for name in ('NOTICE', 'LICENSE', 'media/PREBUILT.md', 'media/licenses/LGPL-2.1.txt',
+                 'media/licenses/FFmpeg-notices.txt'):
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((RUNTIME.parent / name).read_bytes())
     boot = runtime / 'boot'
     boot.write_text('#!/bin/sh\nexit 0\n')
     boot.chmod(0o755)

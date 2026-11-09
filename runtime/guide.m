@@ -13,21 +13,25 @@ static NSMutableArray<NSNumber *> *baselines;
 static double layout_width, content_height, viewport_height, offset;
 
 static NSString *resource(int testing) {
-    return [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:testing ? @"Testing.md" : @"Guide.md"];
+    return [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:
+            testing == 2 ? @"Licences.md" : testing ? @"Testing.md" : @"Guide.md"];
 }
 static void open_guide(int unused) { (void)unused; guide_open(0); }
 static void open_testing(int unused) { (void)unused; guide_open(1); }
+static void open_licences(int unused) { (void)unused; guide_open(2); }
 static const char *const shortcut_labels[] = {"Create / View + R3 (hold)", "Off"};
 static const char *const shortcut_values[] = {"view_r3", "off"};
 static Setting guide_row = {.id="help.guide", .category=SET_DIAGNOSTICS, .order=-20, .label="Guide",
     .help="Read the guide without leaving the game.", .type=SET_ACTION, .apply=open_guide};
 static Setting testing_row = {.id="help.testing", .category=SET_DIAGNOSTICS, .order=-10, .label="What to test",
     .help="Read the checklist included with this build.", .type=SET_ACTION, .apply=open_testing, .hidden=1};
+static Setting licences_row = {.id="help.licences", .category=SET_DIAGNOSTICS, .order=-5, .label="Licences",
+    .help="Library notices, licence texts and instructions for rebuilding.", .type=SET_ACTION, .apply=open_licences};
 static Setting shortcut_row = {.id="controls.guide_button", .category=SET_CONTROLS, .order=11,
     .label="Controller: open Guide", .help="Hold Create / View, then press R3 and hold both for 0.35 s. Short Create / View taps reach the game on release.",
     .type=SET_CHOICE, .choices=shortcut_labels, .values=shortcut_values, .nchoices=2, .def=1, .hidden=1, .env="NFS_GUIDE_BUTTON"};
 __attribute__((constructor)) static void register_guide(void) {
-    settings_add(&guide_row); settings_add(&testing_row); settings_add(&shortcut_row);
+    settings_add(&guide_row); settings_add(&testing_row); settings_add(&licences_row); settings_add(&shortcut_row);
 }
 void guide_refresh(void) { testing_row.hidden = ![NSFileManager.defaultManager fileExistsAtPath:resource(1) ?: @""]; }
 int guide_active(void) { return active; }
@@ -67,7 +71,7 @@ static NSAttributedString *format(NSString *source) {
     return result;
 }
 static void load_document(NSString *path, int testing) {
-    title=testing ? @"What to test" : @"Guide";
+    title=testing == 2 ? @"Licences" : testing ? @"What to test" : @"Guide";
     NSData *data=path ? [NSData dataWithContentsOfFile:path] : nil;
     NSString *source=data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
     if (!source) source=@"This document could not be read. Press Back to return to Help.";

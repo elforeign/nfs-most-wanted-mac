@@ -3,6 +3,20 @@ NFS Most Wanted Native - Setup
 This app builds the native Mac version of Need for Speed: Most Wanted (2005) on your Mac, from YOUR OWN copy of the PC game.
 It contains no game files. Everything happens on your Mac; nothing is uploaded.
 
+Optional later-game cars: appearance review accepted 10 PC and 9 Xbox 360
+conversions: 997GT3RS, BRERA, CCX, CORVETTEZ06, EUROPA, JAGUARXK, MR2,
+R32 and R8 on both platforms, plus 300C on PC. JAGUARXK is visible in race
+and showroom on both platforms.
+240SX remains unapproved on both platforms because its logo is a placeholder.
+997TT, CAMARON, G35, MAZDASPEED3 and MUSTANGSHLBYN on both, plus 300C on
+Xbox 360, failed conversion at review time. Later fixes need new render evidence.
+These reviewed conversions are not available for import in this package yet.
+Recognition alone does not approve a car.
+With an approved package, use Extras to import or manage your own files.
+Keep retained generations: if a career needs removed cars, restore its verified
+generation or reimport identical inputs with the same package, then restart.
+Do not delete the career or its dependency files to bypass a refusal.
+
 You need:
   - An Apple Silicon Mac (M1 or later) with macOS @MIN_MACOS@ or later.
   - Your own installed PC game folder: Need for Speed: Most Wanted, version 1.3, the folder with speed.exe.

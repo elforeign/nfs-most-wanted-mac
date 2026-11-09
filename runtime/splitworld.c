@@ -225,6 +225,7 @@ static void view_particles(Cpu *c, uint32_t view, uint32_t scratch) {
 }
 
 static void world_pass(Cpu *c, uint32_t view, const uint32_t r[4], uint32_t cull, uint32_t scratch, unsigned i) {
+    call_guest(c, 0x006E2F50u, 0, NULL);                             // drain the previous source before changing ownership
     shadow_source = view; shadow_cull = cull;
     uint32_t desc = M32(view + 0x60), rain = M32(view + 0x68);
     uint32_t a1 = M32(rain + 0x290);
@@ -293,6 +294,7 @@ static void world_pass(Cpu *c, uint32_t view, const uint32_t r[4], uint32_t cull
     split_post_view(c,view,r);
     fx_source = 0;
     check_stage(c,r,scratch,"post/lens",i);
+    call_guest(c, 0x006E2F50u, 0, NULL);                             // capture scope can already be closed; always drain receivers
     split_capture_end(c);                                          // flush receivers before switching ownership
     shadow_source = shadow_cull = 0;
 }

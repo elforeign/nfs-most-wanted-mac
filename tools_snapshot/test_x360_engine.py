@@ -111,7 +111,7 @@ def main():
 # repository); this list may only shrink. Every other address, and every PAL address that differs from the USA one, is
 # refused when moved by 4 bytes.
 UNCHECKED = {"X360E_MIRROR_WORLD", "X360E_RIPPLE_FPS", "X360E_STANDARD_BRIGHTNESS", "X360E_SHADOWMAP_BIAS",
-             "X360E_DROP_RADIUS", "X360E_DROP_LIFE", "X360E_SHADOW_FOCUS_RACE", "X360E_SHADOW_NEAR"}
+             "X360E_DROP_RADIUS", "X360E_DROP_LIFE", "X360E_SHADOW_FOCUS_RACE", "X360E_SHADOW_FOCUS_NEAR"}
 
 
 def pal_table_mutations():

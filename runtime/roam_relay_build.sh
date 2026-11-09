@@ -10,7 +10,18 @@ if [ "${1:-}" = --stage ]; then
     [ -z "$(ls -A "$stage")" ] || { echo 'stage must be empty' >&2; exit 2; }
     # Compiler dependency discovery follows transitive quoted headers, including newly added relay headers.
     # Relative paths keep this independent of checkout location and exclude system headers/assets.
-    deps=$($cc -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -MM roam_relay_main.c roam_core.c roam_auth.c roam_moderation.c roam_relay.c)
+    deps=$(
+        $cc \
+            -std=c11 \
+            -D_DEFAULT_SOURCE \
+            -D_DARWIN_C_SOURCE \
+            -MM \
+            roam_relay_main.c \
+            roam_core.c \
+            roam_auth.c \
+            roam_moderation.c \
+            roam_relay.c
+    )
     files=$(printf '%s\n' "$deps" | sed 's/^[^:]*://; s/\\$//' | tr '\n' ' ')
     for file in $files; do
         # Apple clang emits SDK metadata even with -MM; it is not a local header.
@@ -37,6 +48,19 @@ case $(uname -s) in
     *) echo 'supported platforms: macOS and Linux' >&2; exit 2 ;;
 esac
 # Fixed translation-unit list: never pull in the game, generated tables or game-facing frameworks.
-$cc -std=c11 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -O2 -Wall -Wextra -Werror \
-    roam_relay_main.c roam_core.c roam_auth.c roam_moderation.c roam_relay.c $libs -o "$1"
+$cc \
+    -std=c11 \
+    -D_DEFAULT_SOURCE \
+    -D_DARWIN_C_SOURCE \
+    -O2 \
+    -Wall \
+    -Wextra \
+    -Werror \
+    roam_relay_main.c \
+    roam_core.c \
+    roam_auth.c \
+    roam_moderation.c \
+    roam_relay.c \
+    $libs \
+    -o "$1"
 echo "relay build: $(uname -s)/$(uname -m); $($cc --version | head -1)"

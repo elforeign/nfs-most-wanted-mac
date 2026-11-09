@@ -2,9 +2,12 @@
 row (X360 half screen) and the "Xbox 360 sound" heading whose rows are all hidden. With X360 files, or with no
 roots.txt (the owner's layout), the list is unchanged. Compiles runtime/settings.c with a small driver (no game).
 On main 20c0254 the PC-only case listed both (fails); run with the project's Python -I.
+Shader/engine menu retention: 68/68 row states pass; pinned original gate fails 1/1 test.
 Retail checks: 6/6 pass; treating world files as grade availability fails the missing-attributes assertion (1 failure).
 """
 from pathlib import Path
+import hashlib
+import runpy
 import os
 import subprocess
 import tempfile
@@ -110,6 +113,65 @@ class MenuX360Traces(unittest.TestCase):
             text += f"x360_root={x}\n"
         (d / "roots.txt").write_text(text)
         return d / "roots.txt"
+
+    def test_retained_shader_and_engine_rows_remain_available(self):
+        """Original gate fails 1/1 test; retained gate passes, including missing inputs."""
+        # Independent registry expectations: shader-only, engine-only and both.
+        shader_only = "graphics.car_paint graphics.car_normals graphics.car_flake graphics.trees graphics.scenery_lights graphics.water graphics.grass graphics.parallax".split()
+        both = "graphics.building_glass graphics.rain_ripples graphics.x360_arrest graphics.postfx graphics.tone_curve graphics.speed_blur graphics.curve_glow graphics.raindrops".split()
+        engine_only = ["graphics.shadow_fit"]
+        names = shader_only + both + engine_only
+        d = Path(self.tmp.name) / "retained-menu"
+        (d / "gen").mkdir(parents=True)
+        for file, flag in (("x360_shader_lits.inc", "X360_SHADER_LITS"), ("x360_engine.inc", "X360_ENGINE_CONSTS")):
+            (d / "gen" / file).write_text("#define %s 1\n" % flag)
+        header = (ROOT / "runtime/roots.h").read_text()
+        if os.environ.get("NFS_TEST_LEGACY_SHADER_GATE") == "1":
+            original = runpy.run_path(str(ROOT / "runtime/roots_x360_test.py"))
+            fragment = original["ORIGINAL_PRESENCE"]
+            self.assertEqual(hashlib.sha256(fragment.encode()).hexdigest(), original["ORIGINAL_PRESENCE_SHA"])
+            start = header.index('        if (!shaders) return')
+            end = header.index('\n    }', start)
+            header = header[:start] + fragment + header[end:]
+        (d / "roots.h").write_text(header)
+        for file in ("settings.c", "bundle_roots.h"):
+            (d / file).write_bytes((ROOT / "runtime" / file).read_bytes())
+        code = DRIVER[:DRIVER.index("int main(void)")] + "int main(void) {\n"
+        for i, name in enumerate(names):
+            code += ('Setting row%d = {.id="%s", .type=SET_CHOICE, .choices=kXP, .values=kXPV, .nchoices=2}; '
+                     'settings_add(&row%d);\n' % (i, name, i))
+        code += 'settings_init();\n'
+        for i, name in enumerate(names):
+            code += 'printf("%s=%%d/%%d\\n", row%d.hidden, row%d.locked);\n' % (name, i, i)
+        code += 'return 0; }\n'
+        (d / "driver.c").write_text(code)
+        binary = d / "driver"
+        subprocess.run(["clang", "-DNFS_PUBLIC=1", "-w", "-I", d, "-I", ROOT / "runtime", "-I", ROOT / "recomp",
+                        d / "driver.c", d / "settings.c", "-o", binary], check=True)
+        manifest = self.manifest("retained_rows", True)
+        raw = manifest.parent / "x360"
+        assets = manifest.parent / "assets"
+        (assets / "nis_arrest").mkdir(parents=True)
+        manifest.write_text(manifest.read_text() + "assets_root=%s\n" % assets)
+        (raw / "NFS").mkdir()
+        slice_path, xex = raw / "NFS/zzdata0_09bb7000.bin", raw / "default.xex"
+        for shader_size, has_engine in ((413696, True), (None, True), (413695, True), (413696, False)):
+            if shader_size is None:
+                slice_path.unlink(missing_ok=True)
+            else:
+                slice_path.write_bytes(bytes(shader_size))
+            if has_engine:
+                xex.write_bytes(b"engine")
+            else:
+                xex.unlink(missing_ok=True)
+            env = dict(PATH=os.environ["PATH"], HOME=str(d / "home"), NFS_ROOTS=str(manifest))
+            output = subprocess.run([binary], env=env, capture_output=True, text=True, check=True).stdout
+            observed = dict(line.split("=") for line in output.splitlines())
+            self.assertEqual(set(observed), set(names))
+            for name in names:
+                available = ((name in engine_only or shader_size == 413696) and
+                             (name in shader_only or has_engine))
+                self.assertEqual(observed[name], "0/0" if available else "1/1", name)
 
     def test_pc_only_hides_road_reflection_and_empty_x360_heading(self):
         world, audio, env, *_ = self.run_with(self.manifest("pc", False))

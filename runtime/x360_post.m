@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <pthread.h>
 
 #include <math.h>
 
@@ -20,7 +21,6 @@
 // these no-op definitions (weak imports alone do not link their C snapshots).
 __attribute__((weak,noinline)) void render_float_scene_final(int preserve) { (void)preserve; }
 __attribute__((weak,noinline)) void render_float_scene_begin(void) {}
-__attribute__((weak,noinline)) void shadow_near_ab_post(float *adaptation,float *exposure) { (void)adaptation;(void)exposure; }
 __attribute__((weak,noinline)) void render_float_scene_post_target(uint32_t surface) { (void)surface; }
 #include "gen/x360_shader_lits.inc"   // X360_SHADER_LITS: 0 without the X360 shaders' constants (render_post.m fs_vt): PC chain
 #include "gen/x360_engine.inc"       // X360E_*: the X360 engine's post constants from the player's default.xex (0: PC chain)
@@ -123,13 +123,30 @@ static int look_ab(void) {
 }
 // this pass's settings: the held variant's when one is drawn, else the controls'
 static int look_var_is(const char *v) { return look_state == 2 && !strcmp(look_vars[look_var], v); }
+// Match soft smoke: no lock or environment lookup on the cached draw path.
+static int ssao_cached = -1;
+static pthread_mutex_t ssao_mu = PTHREAD_MUTEX_INITIALIZER;
+void x360_post_ssao_reload(void) {
+    pthread_mutex_lock(&ssao_mu);
+    __atomic_store_n(&ssao_cached, -1, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&ssao_mu);
+}
 int x360_post_ssao_enabled(void) {
     if (look_var_is("ssaooff")) return 0;
     if (look_var_is("ssaon")) return 1;
                                                                           
     // former choice's case-insensitive off/on switch for diagnostic A/Bs.
-    const char *e = getenv("NFS_SSAO");
-    return !e || strcasecmp(e, "off");
+    int on = __atomic_load_n(&ssao_cached, __ATOMIC_RELAXED);
+    if (on < 0) {
+        pthread_mutex_lock(&ssao_mu);
+        on = __atomic_load_n(&ssao_cached, __ATOMIC_RELAXED);
+        if (on < 0) {
+            const char *e = getenv("NFS_SSAO"); on = !e || strcasecmp(e, "off") != 0;
+            __atomic_store_n(&ssao_cached, on, __ATOMIC_RELAXED);
+        }
+        pthread_mutex_unlock(&ssao_mu);
+    }
+    return on;
 }
 int postfx_look_variant(const char *v) { return look_var_is(v); }   // lighting.c: `wlorig` / `wlneutral`
 static const char *var_num(const char *v, char key) {   // the digits after `key` in a variant ("b50c0"), or NULL
@@ -668,7 +685,6 @@ static void post_apply(Cpu *c, const X360PostView *view) {    // parameter build
     p.bloom_scale = X360E_BLOOM_SCALE * bloom_gain() * bloom_amount();    // g_fBloomScale 82908AB4, x View > Bloom
     p.bloom_mask_pc = old ? 0 : bloom_mask_pc();
     p.exposure = 2.0f * p.middle_gray / (adapted + X360E_EXPOSURE_EPS) * (1.0f + pulse);
-    if(diag_on && !view) { shadow_near_ab_post(&p.adapted_lum,&p.exposure);adapted=p.adapted_lum; }
     p.desaturation = look[4];
     { static int lb = -1, lc = -1, lt = -1; int bl = (int)(bloom_amount() * 100.0f + 0.5f), cl = (int)(colour_amount() * 100.0f + 0.5f), tc = tone_curve_x360();
       if (diag_on && look_state != 2 && (bl != lb || cl != lc || tc != lt)) {

@@ -1,10 +1,24 @@
 """Public Setup offline proofs; run with the project's Python -I.
 
+Optional X360 regressions: original implementation fails all 6 new import/backend
+tests (1 failure, 15 subtest errors); selected-output implementation passes 6/6.
+Default manifests compare every path and SHA-256; eight selections, re-ticking,
+repair/update persistence and selection-bound reuse are covered.
+
+Extras proof: eight safety checks pass. Omitting the Carbon input role accepts
+one unsafe work path; including it refuses all five writable roles. Original
+work/cache name sets refuse both extras directories; the extended sets accept
+both without deleting them. Standalone guards reject source/save overlaps,
+links/traversal and a planted log-parent link before writing to the source.
+Management guard: the original accepts four unsafe work paths; the fixed
+guard refuses all four, including manifest/preference roots with media offline.
+Per-volume checks preserve unknown sizes and refuse either full volume.
+
 Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
 two real child commands sharing one log entry independent of the caller TMPDIR.
 
-Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.4.0;
-changing it to 4.3.0 fails 1/1 against the independent 4.4.0 expectations.
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.5.0;
+changing it to 4.4.0 fails 1/1 against the independent 4.5.0 expectations.
 
 Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
 broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
@@ -27,8 +41,10 @@ T8 fixture verification: 1/1 passes; making the good translation broken exits 1
 with 1 failure. An unspecified future transform also passes with real compilation.
 Generate-only: good 1/1 emits sources with zero native commands; a forced-compile
 mutation is rejected 1/1 before invoking a native tool.
-T9 same content resumes; source/dependency/toolchain/player changes invalidate;
-corrupt/stale/missing outputs rebuild. Trusting existence breaks the oracle.
+T9 O2/debug identity passes 1/1; the old O1 identity fails 1/1.
+T9 same stage inputs resume; changed true inputs invalidate their consumers.
+Stale/missing working outputs restore from a verified retained copy; missing
+stamps or corrupt retained outputs rebuild. Trusting existence breaks the oracle.
 T10 permission/disk-full/signing/rename/Cancel failures preserve existing app,
 roots, profile and save hashes; a child/grandchild cancellation proof checks pids.
 Early replacement and an orphan child both fail the preservation oracle.
@@ -137,13 +153,19 @@ class Fixture(unittest.TestCase):
         self.home = Path(self.temp.name).resolve()
         self.env = mock.patch.dict(os.environ, {"NFSMW_SETUP_HOME": str(self.home)}, clear=False)
         self.env.start()
+        for key in [k for k in os.environ if k.startswith("NFS_")]:   # caller paths read as root overrides
+            del os.environ[key]
         self.source = self.home / "payload"
         for name in b.SOURCE_DIRS:
             (self.source / name).mkdir(parents=True)
         write(self.source / "setup.sh", "#!/bin/sh\n", True)
         write(self.source / "recomp/build_all.py", "# stubbed compiler driver\n")
+        write(self.source / "recomp/build_inputs.py", (ROOT / "recomp/build_inputs.py").read_text() +
+              "\n# The pipeline's generator packages are synthetic, like its tools.\ndef package_files(names):\n    return {}\n")
         write(self.source / "runtime/build.sh", "# stubbed linker driver\n")
-        write(self.source / "tools/gen_tables.py", "# stubbed tables driver\n")
+        # Keep real input/stamp/output discovery, without the fixture needing
+        # every converter source (the separate key proof covers that graph).
+        write(self.source / "tools/gen_tables.py", (ROOT / "tools/gen_tables.py").read_text() + "\nGENERATORS = []\n")
         write(self.source / "tools/setup_kit/export.py", (ROOT / "tools/setup_kit/export.py").read_bytes())
         write(self.source / "media/build_ffmpeg.sh", "# stubbed dependency driver\n")
         write(self.source / "third_party/dl/ffmpeg-7.1.1.tar.xz", 'test dependency (not a real archive)'.encode())
@@ -230,20 +252,29 @@ class FakeRunner:
                     ("media/build_ffmpeg.sh", "ffmpeg"), ("host/audio/build.sh", "audio"),
                     ("host/shaders/build.sh", "shaders"), ("runtime/build.sh", "runtime"),
                     ("runtime/bundle.sh", "bundle"), ("codesign", "sign")) if token in text), None)
-        if self.fail == name:
+        if name is not None and self.fail == name:
             raise b.SetupError(f"injected {name} failure")
-        if self.omit == name:
+        if name is not None and self.omit == name:
             if name == "recompile":
                 write(source / "recomp/out/report.txt", "compile errors: 1\n")
             return ""
         if name == "recompile":
             write(source / "recomp/out/speed.a", b"verified new archive")
             write(source / "recomp/out/speed_32.c", b"fixture C")
+            write(source / "recomp/out/funcs.h", b"fixture declarations")
+            write(source / "recomp/out/breaker_diag.inc", b"fixture diagnostics")
         elif name == "tables":
-            for table in ("attrib_x360", "x360audio_attrib", "attrib_light_data", "trees_params",
-                          "controltype_buttons", "auxlights_data", "glass_uv1"):
-                write(source / f"runtime/gen/{table}.inc", b"empty PC-only table")
+            inputs = b.importlib.util.spec_from_file_location("fixture_inputs", source / "recomp/build_inputs.py")
+            module = b.importlib.util.module_from_spec(inputs)
+            inputs.loader.exec_module(module)
+            generator = module.load_module(source / "tools/gen_tables.py")
+            for table in list(generator.STUBS) + generator.PUBTABLES + generator.PADTABLES:
+                write(source / f"runtime/gen/{table}", b"empty PC-only table")
+            pc = Path(argv[argv.index("--pc") + 1])
+            x360 = Path(argv[argv.index("--x360") + 1]) if "--x360" in argv else None
+            write(source / "runtime/gen/inputs.txt", generator.stamp_text(pc, x360, generator.zzdata0_path(x360)))
         elif name == "ffmpeg":
+            write(source / "third_party/ffmpeg/include/libavformat/avformat.h", b"dependency declarations")
             for lib in ("avformat", "avcodec", "avutil", "swresample", "swscale"):
                 write(source / f"third_party/ffmpeg/lib/lib{lib}.a", b"dependency library")
         elif name == "audio":
@@ -254,6 +285,8 @@ class FakeRunner:
             write(source / "host/shaders/build/libsmtranslate.a", b"shader library")
         elif name == "runtime":
             write(source / "runtime/boot", 'native runtime fixture'.encode(), True)
+            write(source / "runtime/gen/build-fixture.json", '{"runtime": "built"}')
+            write(source / "recomp/out/hook-coverage.json", '{"coverage": "checked"}')
         elif name == "bundle":
             assert argv[argv.index("--name") + 1] == b.PUBLIC_NAME and argv[argv.index("--exec-name") + 1] == "NFSMostWanted"
             app = Path(argv[2]) / "NFS Most Wanted Native.app"
@@ -564,6 +597,7 @@ class BuildFailureTests(Fixture):
             self.assertEqual(before, self.snapshot())
         runner = FakeRunner(self.log, self.child_env, self.paths.work)
         runner.omit = "recompile"
+        shutil.rmtree(self.paths.cache / "stages")
         # Any stale archive at the keyed source path is removed before retry.
         for source in self.paths.cache.glob("builds/*/source"):
             write(source / "recomp/out/speed.a", b"stale archive")
@@ -571,11 +605,59 @@ class BuildFailureTests(Fixture):
             self.build(runner)
         self.assertEqual(before, self.snapshot())
         runner.omit = "runtime"
+        shutil.rmtree(self.paths.cache / "stages")
         for source in self.paths.cache.glob("builds/*/source"):
             write(source / "runtime/boot", b"stale runtime", True)
         with self.assertRaisesRegex(b.SetupError, "without all required outputs"):
             self.build(runner)
         self.assertEqual(before, self.snapshot())
+
+
+class PrebuiltPipelineTests(Fixture):
+    # No prebuilt: 3/3 source stages. Damaged SHA: 3/3 source stages.
+    # Verified set: 0/3 source stages; runtime and final bundle still execute.
+    # Pin forwarding: 40abf6af fails 1/1; fixed 0 failures (3 pipeline tests PASS).
+    def library_commands(self, runner):
+        return [a for a in runner.commands if any(name in a for name in
+                ("media/build_ffmpeg.sh", "host/audio/build.sh", "host/shaders/build.sh"))]
+
+    def test_missing_prebuilt_uses_all_source_builds(self):
+        runner = FakeRunner(self.log, self.child_env, self.paths.work)
+        self.build(runner)
+        self.assertEqual(len(self.library_commands(runner)), 3)
+
+    def test_failed_sha_uses_all_source_builds(self):
+        folder = self.source / "prebuilt"
+        write(folder / "files/library.a", b"damaged")
+        write(folder / "configure.txt", b"fixture configure")
+        write(folder / "manifest.json", json.dumps(dict(schema=1, target="arm64-macos14.5", source=b.prebuilt.SHA,
+              recipe={}, configure=b.prebuilt.digest(folder / "configure.txt"), files={"library.a": "0" * 64})))
+        runner = FakeRunner(self.log, self.child_env, self.paths.work)
+        args = self.args()
+        args.prebuilt_manifest_sha256 = b.prebuilt.digest(folder / 'manifest.json')
+        with mock.patch.object(b.prebuilt, "check_notices"), mock.patch.object(b.prebuilt, "recipe", return_value={}), \
+                mock.patch.object(self, 'args', return_value=args):
+            self.build(runner)
+        self.assertEqual(len(self.library_commands(runner)), 3)
+
+    def test_verified_prebuilt_skips_only_the_library_compiles(self):
+        runner = FakeRunner(self.log, self.child_env, self.paths.work)
+        args = self.args()
+        args.prebuilt_manifest_sha256 = '1' * 64
+        def installed(root, source, log, *, expected_sha256=None):
+            self.assertEqual(expected_sha256, args.prebuilt_manifest_sha256)
+            write(source / "third_party/ffmpeg/include/libavformat/avformat.h", b"verified declarations")
+            for name in ("avformat", "avcodec", "swscale", "swresample", "avutil"):
+                write(source / f"third_party/ffmpeg/lib/lib{name}.a", b"verified compiled library")
+            write(source / "host/audio/build/libhostaudio.a", b"verified host audio")
+            write(source / "host/audio/build/libmedia.a", b"verified media")
+            write(source / "host/shaders/build/libsmtranslate.a", b"verified translator")
+            return True
+        with mock.patch.object(b.prebuilt, "install", side_effect=installed), mock.patch.object(self, 'args', return_value=args):
+            self.build(runner)
+        self.assertEqual(self.library_commands(runner), [])
+        self.assertTrue(any("runtime/build.sh" in a for a in runner.commands))
+        self.assertTrue(any("runtime/bundle.sh" in a for a in runner.commands))
 
 
 class CacheTests(Fixture):
@@ -594,17 +676,20 @@ class CacheTests(Fixture):
         os.utime(player_file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         third = FakeRunner(self.log, self.child_env, self.paths.work)
         self.build(third)
-        self.assertTrue(any("recomp/build_all.py" in c for c in third.commands))
+        self.assertFalse(any("recomp/build_all.py" in c for c in third.commands))
         write(self.source / "runtime/new.c", "changed source")
         fourth = FakeRunner(self.log, self.child_env, self.paths.work)
         self.build(fourth)
         self.assertTrue(any("runtime/build.sh" in c for c in fourth.commands))
-        for component in ("toolchain_version", "dependency_pin"):
+        for component in ("toolchain_version",):
             setattr(self, component, "fixture-v2")
             changed = FakeRunner(self.log, self.child_env, self.paths.work)
             self.build(changed)
             self.assertTrue(any("runtime/build.sh" in c for c in changed.commands), component)
         parts = [dict(source={"a": "1"}, dependencies={"pin": "1"}, toolchain={"clang": "1"}, pc_hash="1", x360_hash="1")]
+        with mock.patch.object(b, "identity", side_effect=lambda value: value):
+            policy = b.cache_key(**parts[0])
+        self.assertEqual(policy["cflags"], "recomp defaults; runtime -O2 -g")
         baseline = b.cache_key(**parts[0])
         keys = {baseline}
         for component in parts[0]:
@@ -618,22 +703,32 @@ class CacheTests(Fixture):
             self.assertNotEqual(baseline, baseline)  # broken: ignore changed input
 
     def test_T9_corrupt_missing_unstamped_and_existence_control(self):
-        cache = b.Cache(self.home / "stage-cache", self.events)
+        spec = importlib.util.spec_from_file_location("fixture_inputs", self.source / "recomp/build_inputs.py")
+        inputs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inputs)
+        cache = b.BuildStageCache(self.home / "stage-cache", self.events, inputs)
+        fingerprint = '1' * 64
         output = self.home / "output.a"
         calls = []
         def action():
             calls.append(1)
             write(output, b"fresh")
-        cache.run("stage", [output], action)
-        cache.run("stage", [output], action)
+        def run():
+            cache.run("stage", fingerprint, self.home, ["output.a"], action)
+        run()
+        run()
         self.assertEqual(len(calls), 1)
         write(output, b"stale")
-        cache.run("stage", [output], action)
+        run()
         output.unlink()
-        cache.run("stage", [output], action)
-        (cache.directory / "stage.json").unlink()
-        cache.run("stage", [output], action)
-        self.assertEqual(len(calls), 4)
+        run()
+        self.assertEqual(len(calls), 1, "working outputs restore without rebuilding")
+        entry = cache.directory / "stage" / fingerprint
+        (entry / "manifest.json").unlink()
+        run()
+        write(entry / "outputs/output.a", b"stale")
+        run()
+        self.assertEqual(len(calls), 3)
         write(output, b"stale")
         def existence_only():
             if not output.exists():
@@ -876,8 +971,10 @@ with (p/'child.log').open('wb') as log:
   with cancellation(): r.run(['/bin/sh','-c','exec 3>"$2"; printf ready >&3; sleep 30 & echo "$!" > "$1"; wait','owned-child',str(p/'grandchild.pid'),str(p/'descendants.pipe')])
  except Cancelled: sys.exit(130)
 """
-        proc = subprocess.Popen([sys.executable, "-I", "-c", code, str(ROOT / "tools"), str(self.home)],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        error_log = self.home / "cancellation-stderr.log"
+        with error_log.open("wb") as errors:
+            proc = subprocess.Popen([sys.executable, "-I", "-c", code, str(ROOT / "tools"), str(self.home)],
+                                    stdout=subprocess.DEVNULL, stderr=errors, start_new_session=True)
         try:
             deadline = time.monotonic() + 5
             while not pidfile.exists() and time.monotonic() < deadline:
@@ -885,7 +982,7 @@ with (p/'child.log').open('wb') as log:
             self.assertTrue(pidfile.exists())
             self.assertEqual(os.read(read_fd, 100), b"ready")
             proc.send_signal(signal.SIGTERM)
-            self.assertEqual(proc.wait(timeout=5), 130)
+            self.assertEqual(proc.wait(timeout=5), 130, error_log.read_text(errors="replace")[-2000:])
             # Both shell and grandchild hold the FIFO writer. EOF proves every
             # descendant closed it; no process-list access is needed in sandbox.
             def stopped():
@@ -1046,6 +1143,7 @@ class SaveMigrationTests(Fixture):
 
     def test_no_3x_profile_is_silent(self):
         shutil.rmtree(self.legacy)
+        write(self.pc / "MOVIES/ealogo_english_ntsc.vp6", b"synthetic movie")  # without movies Setup notes it (pc)
         self.build()
         self.assertFalse(self.new_saves.exists())
         self.assertFalse([e for e in self.events_seen() if e["ev"] == "warn"])
@@ -1145,7 +1243,7 @@ class PCZipTests(Fixture):
 
 
 def make_iso(path, files, label="FIXTURE", joliet=True):
-    """A minimal ISO 9660 image (with a Joliet volume, as the PC discs have) holding files at its root."""
+    """A minimal ISO 9660/Joliet image, including directories for loose disc files."""
     def record(extent, size, flags, name):
         n = 33 + len(name) + (len(name) + 1) % 2
         r = bytearray(n)
@@ -1164,9 +1262,19 @@ def make_iso(path, files, label="FIXTURE", joliet=True):
     for name, data in files.items():
         extents[name] = sector
         sector += max(1, -(-len(data) // 2048))
-    def directory(at, encode):
+    folders = sorted({str(p) for name in files for p in Path(name).parents if str(p) != "."})
+    primary = {name: sector + i for i, name in enumerate(folders)}
+    secondary = {name: sector + len(folders) + i for i, name in enumerate(folders)}
+    sector += 2 * len(folders)
+    def directory(at, encode, folder="", directories=None):
+        directories = directories or primary
         body = record(at, 2048, 2, b"\0") + record(at, 2048, 2, b"\1")
-        body += b"".join(record(extents[name], len(data), 0, encode(name)) for name, data in files.items())
+        for name, data in files.items():
+            if str(Path(name).parent) == (folder or "."):
+                body += record(extents[name], len(data), 0, encode(Path(name).name + ";1"))
+        for name, extent in directories.items():
+            if str(Path(name).parent) == (folder or "."):
+                body += record(extent, 2048, 2, encode(Path(name).name))
         assert len(body) <= 2048
         return body.ljust(2048, b"\0")
     def descriptor(kind, root_at, escape=b""):
@@ -1182,9 +1290,12 @@ def make_iso(path, files, label="FIXTURE", joliet=True):
         return bytes(d)
     terminator = bytes([255]) + b"CD001\x01" + bytes(2041)
     image = bytearray(16 * 2048) + descriptor(1, 19) + (descriptor(2, 20, b"%/E") if joliet else terminator) + terminator
-    image += directory(19, lambda n: n.upper().encode() + b";1") + directory(20, lambda n: (n + ";1").encode("utf-16-be"))
+    image += directory(19, lambda n: n.upper().encode()) + directory(20, lambda n: n.encode("utf-16-be"), directories=secondary)
     for name, data in files.items():
         image += bytes(data).ljust(max(1, -(-len(data) // 2048)) * 2048, b"\0")
+    for directories, encode in ((primary, lambda n: n.upper().encode()), (secondary, lambda n: n.encode("utf-16-be"))):
+        for name, extent in directories.items():
+            image += directory(extent, encode, name, directories)
     path.write_bytes(image)
     return path
 
@@ -1236,6 +1347,7 @@ class PCDiscTests(Fixture):
     def setUp(self):
         super().setUp()
         import zipfile
+        write(self.pc / "MOVIES/ealogo_english_ntsc.vp6", b"synthetic movie")
         self.discs = self.home / "My discs"
         self.discs.mkdir()
         self.old_exe = bytearray(self.data)
@@ -1284,7 +1396,7 @@ class PCDiscTests(Fixture):
                 self.assertEqual((root / p.relative_to(self.pc)).read_bytes(), p.read_bytes(), relative)
         for name, data in self.patched.items():
             self.assertEqual((root / name.replace("\\", "/")).read_bytes(), data)
-        self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(["speed.exe", "server.dll", *b.PC_DIRS]))
+        self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(["speed.exe", "server.dll", "MOVIES", *b.PC_DIRS]))
         self.assertFalse(any("\\" in p.name for p in root.rglob("*")))
         self.assertEqual(self.inputs(), before)
         # The --check and --build routes with the disc images, and an install from them.
@@ -1672,6 +1784,8 @@ class ProtocolTests(Fixture):
         runtime = self.home / "bundle payload/runtime"
         write(runtime / "bundle.sh", (ROOT / "runtime/bundle.sh").read_bytes())
         write(runtime / "docs/guide.md", (ROOT / "runtime/docs/guide.md").read_bytes())
+        for name in b.prebuilt.LEGAL:
+            write(runtime.parent / name, (ROOT / name).read_bytes())
         write(runtime / "boot", b"runtime fixture", True)
         tools = self.home / "bundle tools"
         # Real shell + real plist parser; stub only compiler/icon/signing tools.
@@ -1712,8 +1826,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], "4.4.0")
-        self.assertEqual(public["CFBundleVersion"], "4.4.0")
+        self.assertEqual(public["CFBundleShortVersionString"], "4.5.0")
+        self.assertEqual(public["CFBundleVersion"], "4.5.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -1737,9 +1851,10 @@ printf icon > "$1"
 
     def test_protocol_file_matches_golden_shapes(self):
         schema = json.loads((ROOT / "tools/setup_kit/protocol.json").read_text())
-        self.assertEqual(schema["$defs"]["stage"]["enum"], [s for s, _ in b.STAGES] + ["stage"])
+        self.assertEqual(schema["$defs"]["stage"]["enum"], [s for s, _ in b.STAGES] + ["stage", "cars"])
         names = {shape["properties"]["ev"]["const"] for shape in schema["oneOf"]}
-        self.assertEqual(names, {"stage", "progress", "warn", "error", "features", "done", "ready"})
+        self.assertEqual(names, {"stage", "progress", "warn", "error", "features", "done", "ready",
+                                 "cars-recognition", "cars-plan", "cars-progress", "cars-result"})
         self.assertTrue(all(s["additionalProperties"] is False for s in schema["oneOf"]))
 
     def test_media_pin_missing_and_wrong_even_with_extracted_tree(self):
@@ -2495,6 +2610,14 @@ class ReviewTests(Fixture):
         with self.assertRaisesRegex(b.SetupError, "changed while Setup was converting"):
             run(False)
 
+    # Review 11-06: the extras page writes car-selection.json into the unmarked default work folder before the first
+    # PC check marks it; the check then refused the folder. PASS with the name listed; without it: "already holds other files".
+    def test_default_work_folder_accepts_the_car_selection(self):
+        default = self.paths.default_work
+        write(default / "car-selection.json", "[]")
+        b.claim(default, True, b.SETUP_WORK_NAMES, "work", self.paths.state)
+        self.assertTrue((default / "car-selection.json").is_file())
+
     # NEW MEDIUM: an unmarked default work folder with Setup's own pc_src.tmp was refused before journal recovery.
     def test_R8_recovery_runs_before_the_work_folder_is_judged(self):
         default = self.paths.default_work
@@ -2633,6 +2756,222 @@ class ReviewTests(Fixture):
         third = Path((self.paths.data / "roots.txt").read_text().split("=", 1)[1].strip()).relative_to(installs).parts[0]
         install()
         self.assertEqual(sorted(p.name for p in installs.iterdir() if p.name[0] != "."), sorted([third, gens[-1]]))
+
+
+class ExtrasSafetyTests(unittest.TestCase):
+    """Protected-path controls: original has no Carbon role or volume-plan API."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='extras-safety-', dir=ROOT / '.metal-cache')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.source = self.root / 'payload'
+        self.pc = self.root / 'mw'
+        self.carbon = self.root / 'carbon'
+        self.carbon.mkdir()
+        (self.carbon / 'arbitrary.EXE').write_bytes(b'synthetic executable')
+        self.dest = self.root / 'apps'
+        self.paths = b.Paths(self.root / 'work', env={'HOME': str(self.root), 'NFSMW_SETUP_HOME': str(self.root / 'setup')})
+
+    def test_required_build_protects_optional_carbon_inputs(self):
+        b.check_locations(self.paths, self.pc, None, self.dest, self.source, carbon=self.carbon / 'arbitrary.EXE')
+        for attr in ('work', 'cache', 'data', 'logs', 'state'):
+            original = getattr(self.paths, attr)
+            setattr(self.paths, attr, self.carbon / 'must-not-write')
+            try:
+                with self.assertRaises(b.SetupError, msg=attr):
+                    b.check_locations(self.paths, self.pc, None, self.dest, self.source, carbon=self.carbon / 'arbitrary.EXE')
+            finally:
+                setattr(self.paths, attr, original)
+        self.assertEqual(sorted(p.name for p in self.carbon.iterdir()), ['arbitrary.EXE'])
+        # Deliberately omit the Carbon role: the same unsafe choice is accepted.
+        self.paths.work = self.carbon / 'must-not-write'
+        b.check_locations(self.paths, self.pc, None, self.dest, self.source)
+
+    def test_standalone_refuses_work_cache_catalog_and_save_overlaps_before_writes(self):
+        with mock.patch.object(b, 'ROOT', self.source):
+            b.car_locations(self.paths, [self.carbon, self.pc])
+            for attr, target in (('work', self.carbon / 'work'), ('cache', self.carbon),
+                                 ('data', self.carbon), ('work', self.paths.legacy / 'scratch'),
+                                 ('work', self.paths.data / b.SAVE_DIR / 'scratch'),
+                                 ('work', self.source / 'work'), ('work', self.paths.cache / 'cars/work')):
+                original = getattr(self.paths, attr)
+                setattr(self.paths, attr, target)
+                try:
+                    with self.assertRaises(b.SetupError, msg=(attr, target)):
+                        b.car_locations(self.paths, [self.carbon, self.pc])
+                finally:
+                    setattr(self.paths, attr, original)
+        self.assertFalse(self.paths.work.exists())
+        self.assertFalse(self.paths.data.exists())
+
+    def test_standalone_rejects_symlink_and_traversal_inputs(self):
+        link = self.root / 'alias'
+        link.symlink_to(self.carbon, target_is_directory=True)
+        for path in (link, link / 'arbitrary.EXE', self.carbon / '../carbon', self.carbon / 'arbitrary.EXE/../x'):
+            with self.assertRaises((b.car_api().ImportError, OSError, b.car_catalog.CatalogError)):
+                b.carbon_input(path)
+
+    def test_standalone_cli_protects_paths_before_opening_log(self):
+        base = self.root / 'setup-home'
+        for options in ({'NFSMW_SETUP_DATA': str(self.carbon)},
+                        {'NFSMW_SETUP_CACHE': str(self.carbon)},
+                        {'NFSMW_SETUP_CACHE': str(self.root / 'alias')},
+                        {'NFSMW_SETUP_DATA': str(base / 'legacy')}):
+            alias = self.root / 'alias'
+            if not alias.exists():
+                alias.symlink_to(self.carbon, target_is_directory=True)
+            output = io.StringIO()
+            env = dict(os.environ, NFSMW_SETUP_HOME=str(base), **options)
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(b, 'ROOT', self.source), redirect_stdout(output):
+                rc = b.main(['--cars-check', '--carbon', str(self.carbon / 'arbitrary.EXE'), '--events'])
+            self.assertNotEqual(rc, 0, output.getvalue())
+            self.assertFalse((base / 'state/car-work').exists())
+            self.assertEqual(sorted(p.name for p in self.carbon.iterdir()), ['arbitrary.EXE'])
+
+    def test_optional_work_and_cache_bootstrap_preserve_required_claims(self):
+        work = self.paths.default_work
+        (work / 'extras').mkdir(parents=True)
+        (self.paths.cache / 'cars').mkdir(parents=True)
+        for folder, names, label in ((work, b.SETUP_WORK_NAMES, 'work'),
+                                     (self.paths.cache, b.SETUP_CACHE_NAMES, 'cache')):
+            with self.assertRaises(b.SetupError):
+                b.claim(folder, True, names - {'extras', 'cars'}, label, self.paths.state)
+            b.claim(folder, True, names, label, self.paths.state)
+            self.assertTrue(ins.owned(folder, self.paths.state))
+        self.assertTrue((work / 'extras').is_dir())
+        self.assertTrue((self.paths.cache / 'cars').is_dir())
+
+    def test_management_protects_installed_asset_paths_without_requiring_media(self):
+        self.paths.data.mkdir(parents=True)
+        assets = self.root / 'unplugged-assets'
+        (self.paths.data / 'roots.txt').write_text('pc_root=' + str(self.pc) + '\nassets_root=' + str(assets) + '\n')
+        (self.paths.data / 'app.txt').write_text('game_dir=' + str(self.carbon) + '\n')
+        with mock.patch.object(b, 'ROOT', self.source):
+            b.car_locations(self.paths, [])
+            for target in (self.pc / 'logs', assets / 'logs', self.carbon / 'logs', self.paths.data / 'temporary'):
+                original = self.paths.work
+                self.paths.work = target
+                try:
+                    with self.assertRaises(b.SetupError, msg=target):
+                        b.car_locations(self.paths, [])
+                finally:
+                    self.paths.work = original
+        self.assertFalse(self.pc.exists())
+        self.assertFalse(assets.exists())
+        self.assertEqual(sorted(p.name for p in self.carbon.iterdir()), ['arbitrary.EXE'])
+
+    def test_log_parent_swap_does_not_write_into_source(self):
+        base = self.root / 'setup-home'
+        original = b.car_locations
+        def swap(paths, inputs):
+            original(paths, inputs)
+            paths.work.parent.mkdir(parents=True)
+            paths.work.symlink_to(self.carbon, target_is_directory=True)
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {'NFSMW_SETUP_HOME': str(base)}), \
+                mock.patch.object(b, 'ROOT', self.source), mock.patch.object(b, 'car_locations', swap), redirect_stdout(output):
+            rc = b.main(['--cars-check', '--carbon', str(self.carbon), '--events'])
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(sorted(p.name for p in self.carbon.iterdir()), ['arbitrary.EXE'])
+
+    def test_ft_volume_plans_keep_unknown_sizes_and_refuse_each_full_volume(self):
+        unknown = dict(volumes=[dict(required_bytes=None, available_bytes=0)])
+        b.check_space(self.paths, car_plan=unknown)
+        self.assertIsNone(unknown['volumes'][0]['required_bytes'])
+        for index in range(2):
+            volumes = [dict(required_bytes=100, available_bytes=1000), dict(required_bytes=100, available_bytes=1000)]
+            volumes[index]['available_bytes'] = 99
+            with self.assertRaises(b.SetupError):
+                b.check_space(self.paths, car_plan={'volumes': volumes})
+        b.check_space(self.paths, car_plan={'volumes': [dict(required_bytes=100, available_bytes=100)]})
+
+
+class X360ExtrasTests(Fixture):
+    def xbox_run(self, chosen=None, *, check=False, stage=False):
+        from setup_kit import x360_extras
+        xbox = self.home / "own Xbox.iso"
+        if not xbox.exists():
+            write(xbox, b"synthetic Xbox disc")
+        args = self.args(check=check)
+        args.x360 = str(xbox)
+        args.x360_extras = chosen
+        if stage:
+            args.build = False
+            args.stage_only = True
+            args.stage = str(self.home / "prepared-update")
+            args.dest = str(self.dest / (b.PUBLIC_NAME + ".app"))
+        def prepare(source, out, pc, events, env, record=None, extras=None):
+            selection = x360_extras.selection(extras)
+            write(out / "files/shared.bin", b"shared")
+            (out / "assets").mkdir(exist_ok=True)
+            for feature in selection:
+                write(out / "assets" / x360_extras.FOLDERS[feature] / "asset", feature.encode())
+            if record is not None:
+                record.update(features=True, missing=[n for n in x360_extras.ALL if n not in selection])
+            return dict(x360_root=out / "files", assets_root=out / "assets")
+        with self.pipeline_stubs(), mock.patch.object(b, "prepare_x360", side_effect=prepare):
+            return b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
+
+    def installed_extras(self):
+        roots = dict(line.split("=", 1) for line in (self.paths.data / "roots.txt").read_text().splitlines())
+        return {p.parent.name: p.read_bytes() for p in Path(roots["assets_root"]).rglob("asset")}
+
+    def test_x360_choices_repair_update_and_retick(self):
+        # A full check must never be reused for a build with one extra unticked.
+        self.xbox_run(check=True)
+        self.xbox_run("textures,ui")
+        expected = {"hd_textures_mips_alpha": b"textures", "hd_textures_ui": b"ui"}
+        self.assertEqual(self.installed_extras(), expected)
+        self.assertEqual(b.staging.load_choices(self.paths.state)["x360_extras"], ["textures", "ui"])
+        self.xbox_run()  # repair without an explicit choice
+        self.assertEqual(self.installed_extras(), expected)
+        ready = self.xbox_run(stage=True)  # prepared update also preserves the selection
+        descriptor = json.loads(ready.read_text())
+        self.assertEqual(descriptor["provenance"]["x360_extras"], ["textures", "ui"])
+        self.assertFalse(any(p.name == "nis_arrest" for p in ready.parent.rglob("*")))
+        self.xbox_run("arrest,textures,ui")
+        self.assertEqual(self.installed_extras(), dict(expected, nis_arrest=b"arrest"))
+        self.xbox_run()  # reticking is remembered too
+        self.assertEqual(self.installed_extras(), dict(expected, nis_arrest=b"arrest"))
+        for chosen, absent in (("arrest,ui", "hd_textures_mips_alpha"), ("arrest,textures", "hd_textures_ui"), ("", None)):
+            with self.subTest(chosen=chosen):
+                self.xbox_run(chosen)
+                if absent:
+                    self.assertNotIn(absent, self.installed_extras())
+                    self.assertEqual(len(self.installed_extras()), 2)
+                else:
+                    self.assertEqual(self.installed_extras(), {})
+                before = self.installed_extras()
+                self.xbox_run()
+                self.assertEqual(self.installed_extras(), before)
+
+    def test_x360_selection_cache_keys_and_validation(self):
+        from setup_kit import x360_extras
+        key_args = ({}, {}, {}, "pc", "xbox")
+        self.assertEqual(b.cache_key(*key_args), b.cache_key(*key_args, extras=list(x360_extras.ALL)))
+        self.assertEqual(len({b.cache_key(*key_args, extras=[n for i, n in enumerate(x360_extras.ALL) if mask & (1 << i)])
+                              for mask in range(8)}), 8)
+        self.assertEqual(len({b.preparation_key("xbox", "pc", {}, {}, extras=[n for i, n in enumerate(x360_extras.ALL) if mask & (1 << i)])
+                              for mask in range(8)}), 8)
+        for invalid in ("unknown", "arrest,arrest", True, ["ui", 1]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                x360_extras.selection(invalid)
+        b.staging.save_choices(self.paths.state, self.pc, None, self.dest, extra_choices=[])
+        self.assertEqual(b.staging.load_choices(self.paths.state)["x360_extras"], [])
+        saved = json.loads((self.paths.state / "source-choices.json").read_text())
+        for invalid in (False, "arrest", ["unknown"], ["ui", "ui"]):
+            write(self.paths.state / "source-choices.json", json.dumps(dict(saved, x360_extras=invalid)))
+            with self.assertRaises(ins.InstallError):
+                b.staging.load_choices(self.paths.state)
+
+    def test_x360_omitted_space_is_not_reserved(self):
+        from setup_kit import x360_extras
+        base = sum(p.stat().st_size for p in self.pc.rglob("*") if p.is_file()) + 4 * 1024**3
+        with mock.patch.object(b.shutil, "disk_usage", return_value=types.SimpleNamespace(free=base)):
+            b.check_space(self.paths, self.pc, self.dest, x360_bytes=x360_extras.required_bytes([]))
+            for feature in x360_extras.ALL:
+                with self.subTest(feature=feature), self.assertRaises(b.SetupError):
+                    b.check_space(self.paths, self.pc, self.dest, x360_bytes=x360_extras.required_bytes([feature]))
 
 
 @contextmanager

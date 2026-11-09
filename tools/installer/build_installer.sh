@@ -142,6 +142,15 @@ for s in data["sources"]:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     shutil.copy(base(s), dest)
 PY
+    # Build from exactly the reviewed source payload and unchanged pinned tarball.
+    # No development outputs or game inputs enter the independent library set.
+    mkdir -p "$OUT/public/third_party/dl"
+    cp "$APP/Contents/Resources/third_party/dl/ffmpeg-7.1.1.tar.xz" "$OUT/public/third_party/dl/"
+    "$PYTHON" -I "$OUT/public/tools/setup_kit/prebuilt.py" build "$OUT/public" "$APP/Contents/Resources/prebuilt"
+    "$PYTHON" -I "$OUT/public/tools/setup_kit/prebuilt.py" check "$OUT/public" "$APP/Contents/Resources/prebuilt"
+    # Sign the manifest's expected digest separately from the optional payload.
+    # Setup passes this resource directly to the backend, including cache reuse.
+    shasum -a 256 "$APP/Contents/Resources/prebuilt/manifest.json" | awk '{print $1}' > "$APP/Contents/Resources/prebuilt-manifest.sha256"
 else
     echo "Note: --dev build without the pinned Python and FFmpeg; do not release it." >&2
 fi

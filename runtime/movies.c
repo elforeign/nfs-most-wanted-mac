@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "../host/audio/dsound_host.h"
@@ -131,6 +132,107 @@ static void mlog(const char *fmt, ...) {
 }
 
 // ---------------- names ----------------
+// BEGIN movie install check: compiled with the actual startup hook by the offline Setup test.
+void movies_check_install(void) {
+    char path[4096];
+    DIR *root = opendir(game_dir);
+    struct dirent *e;
+    int found = 0, playable = 0;
+    while (root && (e = readdir(root))) {
+        if (strcasecmp(e->d_name, "MOVIES")) continue;
+        found = snprintf(path, sizeof path, "%s/%s", game_dir, e->d_name) < (int)sizeof path;
+        break;
+    }
+    if (root) closedir(root);
+    DIR *movies = found ? opendir(path) : NULL;
+    while (movies && (e = readdir(movies))) {
+        size_t n = strlen(e->d_name);
+        if (n < 4 || strcasecmp(e->d_name + n - 4, ".vp6")) continue;
+        struct stat st;
+        if (!fstatat(dirfd(movies), e->d_name, &st, 0) && S_ISREG(st.st_mode) && st.st_size > 0) {
+            playable = 1;
+            break;
+        }
+    }
+    if (!playable)
+        fprintf(stderr, "movies: PC MOVIES folder is %s; .vp6 movies unavailable. Restore the PC movie files with Setup.\n",
+                movies ? "empty (no usable .vp6 files)" : "missing or unreadable");
+    if (movies) closedir(movies);
+}
+// END movie install check
+// BEGIN movie variants: compiled by the offline movie test.
+// CalculateMovieFilename (00516130) names a movie MOVIES\<name>_<language>_<ntsc|pal>.vp6. The region is NTSC only for
+// English US: every other language of LanguageConversionTable (008FB578) makes BuildRegion::IsPal (0064A110) true. An
+// installed game has the files of the edition it came from (a US install: *_english_ntsc.vp6), so a language whose
+// region differs from the install's (English US on a European install, a European language on a US one) missed every
+// movie, and FEngMovieStarter::Callback (00559680) skipped them all without a word. movie_variant picks, from the
+// installed folder `dir`, the same movie in another region or language: score 1 same language, other region;
+// 2 English, same region; 3 English, other region; 4 another language, same region; 5 any. 0: not installed at all.
+static int movie_split(const char *file, size_t *name, const char **lang, size_t *nlang, const char **region, size_t *nregion) {
+    size_t n = strlen(file);
+    if (n < 5 || strcasecmp(file + n - 4, ".vp6")) return 0;
+    n -= 4;
+    const char *r = NULL, *l = NULL;
+    for (size_t i = n; i-- > 0;) if (file[i] == '_') { if (!r) r = file + i + 1; else { l = file + i + 1; break; } }
+    if (!r || !l || l - file < 2) return 0;
+    *region = r; *nregion = (size_t)(file + n - r);
+    *lang = l; *nlang = (size_t)(r - 1 - l);
+    *name = (size_t)(l - 1 - file);
+    return *nregion && *nlang;
+}
+static int same_token(const char *a, size_t na, const char *b, size_t nb) { return na == nb && !strncasecmp(a, b, na); }
+static int movie_variant(const char *dir, const char *want, char *out, size_t cap) {
+    size_t name, nlang, nregion, ename, elang, eregion;
+    const char *lang, *region, *el, *er;
+    if (!movie_split(want, &name, &lang, &nlang, &region, &nregion)) return 0;
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    int best = 0;
+    while (d && (e = readdir(d))) {
+        if (!movie_split(e->d_name, &ename, &el, &elang, &er, &eregion) || !same_token(e->d_name, ename, want, name)) continue;
+        int same_lang = same_token(el, elang, lang, nlang), english = same_token(el, elang, "english", 7);
+        int same_region = same_token(er, eregion, region, nregion);
+        int score = same_lang ? (same_region ? 0 : 1) : english ? (same_region ? 2 : 3) : same_region ? 4 : 5;
+        if (!score || (best && score >= best)) continue;   // score 0 is the name asked for, which bFileExists did not find
+        struct stat st;
+        if (fstatat(dirfd(d), e->d_name, &st, 0) || !S_ISREG(st.st_mode) || !st.st_size) continue;
+        if (snprintf(out, cap, "%s", e->d_name) >= (int)cap) continue;
+        best = score;
+    }
+    if (d) closedir(d);
+    return best;
+}
+// The installed MOVIES folder (any case) under `root`; 0 when there is none.
+static int movies_pc_dir(const char *root, char *path, size_t cap) {
+    DIR *d = root ? opendir(root) : NULL;
+    struct dirent *e;
+    int found = 0;
+    while (d && !found && (e = readdir(d)))
+        found = !strcasecmp(e->d_name, "MOVIES") && snprintf(path, cap, "%s/%s", root, e->d_name) < (int)cap;
+    if (d) closedir(d);
+    return found;
+}
+// The movie the game asked for at guest `addr` ("MOVIES\<name>_<language>_<region>.vp6", FEngMovieStarter::Callback's
+// 64-byte buffer, which it then hands to MoviePlayer) was not found: name the installed variant there instead and
+// return 1. English in the asked region is left to the game's own second lookup. A movie with no file at all is
+// logged at the game's last (English) lookup, so a report shows which movies are missing.
+static int movie_substitute(char *guest, size_t room) {
+    char dir[4096], file[256];
+    const char *want = guest + 7;
+    int score = movies_pc_dir(game_dir, dir, sizeof dir) ? movie_variant(dir, want, file, sizeof file) : 0;
+    if (score == 2) return 0;
+    if (!score || 7 + strlen(file) >= room) {
+        size_t n, nl, nr;
+        const char *l, *r;
+        if (!score && movie_split(want, &n, &l, &nl, &r, &nr) && same_token(l, nl, "english", 7))
+            fprintf(stderr, "movies: %s is not installed in any language or region; the game skips it\n", guest);
+        return 0;
+    }
+    fprintf(stderr, "movies: %s is not installed; playing MOVIES\\%s\n", guest, file);
+    memcpy(guest + 7, file, strlen(file) + 1);
+    return 1;
+}
+// END movie variants
 static int dir_exists(const char *p) { DIR *d = opendir(p); if (d) closedir(d); return d != NULL; }
 static const char *x360_dir(void) {
     static char dir[1024];
@@ -562,14 +664,16 @@ int movies_playing(void) { return playing_player != 0; }
 float movies_picture_aspect(void) { return mv.active && mv.th ? (float)mv.tw / (float)mv.th : 0; }   // what the movie texture holds   // for scripted input (BOOT_KEYS skipmovies)
 // bFileExists (cdecl, const char *): FEngMovieStarter::Callback (00559680) checks MOVIES\<name>_<language>_ntsc.vp6
 // before it plays and otherwise ends the movie at once. A movie the X360 folder has counts as there, so a movie with
-// no PC VP6 (eahd_bumper, the X360's EA HD bumper, bootflow.c) plays its WMV through Play below.
+// no PC VP6 (eahd_bumper, the X360's EA HD bumper, bootflow.c) plays its WMV through Play below. A VP6 installed
+// only in another region or language stands in next (movie_substitute; the name is changed where the game keeps it).
 void f_0065F7A0(Cpu *c) {
-    const char *p = gptr(arg(c, 0));
+    char *p = (char *)gptr(arg(c, 0));
     f_0065F7A0_orig(c);
     size_t n = p ? strlen(p) : 0;
-    if (c->eax || n < 12 || strncasecmp(p, "MOVIES\\", 7) || strcasecmp(p + n - 4, ".vp6") || M32(SKIP_MOVIES)) return;
+    if (c->eax || n < 12 || n >= 64 || strncasecmp(p, "MOVIES\\", 7) || strcasecmp(p + n - 4, ".vp6") || M32(SKIP_MOVIES)) return;
     char path[1024], why[1200];
     if (find_wmv(p, path, sizeof path, why, sizeof why)) { c->eax = 1; mlog("%s: no VP6, the X360 WMV stands in", p); }
+    else if (movie_substitute(p, 64)) { c->eax = 1; mlog("%s: installed VP6 of another region or language", p); }
 }
 void f_00542A40(Cpu *c) {                                  // MoviePlayer::Play (thiscall)
     uint32_t self = c->ecx;
