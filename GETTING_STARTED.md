@@ -68,8 +68,8 @@ these features are simply absent. Setup only reads your copy; it never provides 
   The same key closes it. Up/Down and Left/Right change things; Esc closes it.
 - Rows marked with a restart symbol take effect after **Restart game** (Display & performance).
 - **Help > Guide** explains the settings, look presets and controls.
-- **Controls > Triggers:** the new PlayStation selector offers Shift (default) or Pedals for R2 gas and L2 brake/reverse.
-- **Online (beta):** free roam is Off until you Host or Join. Hosting needs incoming UDP and may need router setup; some networks cannot host. Read the [Guide](runtime/docs/guide.md#online-beta) before trying it.
+- **PlayStation pedals:** bind Accelerate to R2 and Brake to L2 in the game's Options > Controls.
+- **Online free roam:** not available in 4.5; it moves to a shared server with room codes in a later update.
 - **Display & performance > Online:** *Check for updates* asks GitHub when you press it. *Update now* prepares an available update for the next launch. *Discord status* is off by default.
 
 ## Where things are

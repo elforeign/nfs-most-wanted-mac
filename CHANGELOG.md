@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.5.0
+
+- **Your own later-game cars:** point Setup at your own Need for Speed Carbon PC or Xbox 360 game files and tick the cars you want from the approved list (default unticked; a missing source is skipped by name). Added cars have their own engine sound by default.
+- **Stock BMW M3 GTR:** buyable in the career car lot ($75,000) and selectable in Quick Race.
+- **Underglow:** Customize > Visual has a Light row and each colour name shows its colour. It works on every car you can own. The light on the road is Off by default; Road pool Measured or Stronger is your choice.
+- **Adaptive triggers:** Options > Controls > Adaptive triggers On / Off (default On); Off keeps plain rumble.
+- **Smoother play:** shaders and known pipeline states are prepared at load instead of mid-frame (free-roam stutter 370 ms to 32 ms in our test), and the car-draw path is cheaper (+11 fps at 4K in our test). Tyre smoke renders at half resolution by default (4K smoke pass 4.9 to 1.4 ms). The Xbox 360 far-shadow fade is the default.
+- **Look defaults:** Particles Physical, Glow behind signs On, Clear headlamp glass and Traffic detail On.
+- **Sound:** a short reverb crossfade at environment changes is On by default (F10 > Audio turns it off).
+- **Replay buffer:** F10 can keep the last 30 seconds in memory and save them as a clip on a key or controller chord (Off by default).
+- **Live streaming:** F10 > Display > Live streaming sends the game picture and sound to YouTube. Your stream key stays in memory only, is masked, and is never written to disk or reports; **Forget stream key** clears it.
+- **Setup:** choose to skip the Xbox 360 arrest scenes, HD textures and menu art (all ticked by default), and a smaller Xbox 360 shader footprint (about 380 MB less installed). Setup installs prebuilt libraries instead of compiling them on your Mac: about 76 s instead of 99 s on a quiet Mac, with the source build as the fallback. The source and licences ship beside them.
+- **Movies:** they play even when only another edition's movie files are installed.
+- **Fixed:** quitting no longer waits on a replay buffer nobody saved (the 5 s freeze on quit is gone); the hitch during police pursuits is gone; each report attaches only its own screenshot, and a full input queue drops input instead of ending the game.
+
 ## 4.4.0
 
 - **Video clips with sound:** F10 > Display > Video clip records the game picture and its sound (stereo AAC; HEVC or H.264; 1080p, 1440p or 4K; works with HDR on) to Movies/NFSMW.
@@ -35,6 +50,25 @@
 - Fixed Stereo and PCM audio dropouts on outputs with a large device buffer (some TVs).
 - With Xbox 360 files, cops in the busted scene keep their arms.
 - Problem reports keep your own words and clock times; join codes stay masked.
+
+## 4.2.0
+
+- **HDR output** (optional, Off by default): F10 > Picture > HDR output > On, then Restart game. On a screen with HDR it uses brighter highlights; otherwise it stays SDR. **HDR status** shows what the game is using.
+- **Setup: choosing the game folder:** pick the game folder, `speed.exe` itself, or a `.zip` of the folder. Before, Choose could stay greyed out once you were inside the game folder.
+- **Xbox and other controllers:** controllers that are not PlayStation pads now start with the Xbox layout (RT gas, LT brake). A layout you already picked is kept; PlayStation controllers keep the PS2 layout.
+- **DualSense / DualShock triggers:** shifting with R2 / L2 (the PS2 layout) now happens at half travel instead of the first touch. If you mapped gas or brake to R2 / L2, they respond to how far you press them.
+- Split-screen and LAN (beta) are unchanged from 4.1.0.
+
+## 4.1.0
+
+- **Contact shadows:** soft shading where cars and objects meet the ground.
+- **Soft smoke:** smoke and dust fade gently where they meet the road, walls and cars instead of cutting off in a hard line.
+- **Sharper car reflections:** finer detail in the paint's reflections, using about 120 MB more memory; F10 > Cars & cutscenes > Car reflections > Standard switches back (after Restart game).
+- **No freeze at the start of the first race:** shaders are prepared while the game loads.
+- **Better problem reports:** when the game slows down, the diagnostic log records whether another app was using the graphics chip or the chip was running slower.
+- **On-screen keyboard for controller players:** when the game asks for a name, a keyboard appears: Cross types, Circle deletes, Square accepts, Triangle cancels (A / B / X / Y on Xbox controllers).
+- A small car-paint shading fix (matches the Xbox 360 version).
+- **In development, for testing:** two-player split-screen (one Mac, two controllers) and LAN play (F10 > Gameplay > LAN play (beta)). Tested so far on one Mac.
 
 ## 4.0.1 — Setup fix
 

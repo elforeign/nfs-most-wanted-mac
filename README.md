@@ -55,8 +55,8 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
   music, police, nis (cutscenes), vinyls, textures and movies. Without that copy the PC game alone is used and these
   are absent.
 - **Guide and look presets:** F10 > Help > Guide explains the settings; Picture offers Port, PC retail, Xbox 360 retail and My picks.
-- **PlayStation trigger pedals:** the new Controls > Triggers selector offers Shift or Pedals; DualSense resistance follows the trigger bindings.
-- **Online free roam beta:** Off until you Host or Join. Hosting needs incoming UDP and may need router setup; some networks cannot host. See the [Guide](runtime/docs/guide.md#online-beta) for controls and limits.
+- **PlayStation trigger pedals:** bind Accelerate to R2 and Brake to L2 in the game's Options > Controls; DualSense resistance follows the bindings.
+- **Online free roam:** not available in 4.5; it moves to a shared server with room codes in a later update.
 - **Updates:** Check for updates runs when you press it; Update now prepares an available update for the next launch. Keep Setup’s remembered sources available. Discord status is off by default.
 - The original Most Wanted car catalog.
 
