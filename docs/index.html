@@ -140,7 +140,7 @@ ul.plain { margin: 0; padding: 0 0 0 1.1em; display: grid; gap: 0.5rem; }
 ul.plain li::marker { color: var(--amber); }
 .links { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 1.5rem; }
 
-/* New in 4.4 and the garage list */
+/* Release highlights and the garage list */
 .cols { display: grid; gap: 1.25rem 3rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
 .cols div p { margin: 0; color: var(--muted); }
 .tinted { background: var(--night-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -160,7 +160,7 @@ footer p { max-width: 62rem; }
 <header class="hero">
   <div class="hero-shot">
     <img src="img/hero-m3gtr-vs-razor.jpg" width="1600" height="1004" alt="The BMW M3 GTR beside Razor's Mustang, running on a Mac">
-    <div class="stamp">In game on a Mac &middot; 4.3.0</div>
+    <div class="stamp">In game on a Mac</div>
   </div>
   <div class="wrap">
     <div class="hero-copy">
@@ -170,7 +170,7 @@ footer p { max-width: 62rem; }
       <p class="lede">The real PC game, rebuilt for Apple Silicon by static recompilation. The game's own x86 code is translated to C and compiled for your Mac, with a Metal renderer, native audio and native controller support.</p>
       <p class="lede">For people who own the PC game. Bring your copy. Setup handles the rest.</p>
       <div class="buttons">
-        <a class="btn go" href="https://github.com/elforeign/nfs-most-wanted-mac/releases/latest">Download Setup (4.4.0)</a>
+        <a class="btn go" href="https://github.com/elforeign/nfs-most-wanted-mac/releases/latest">Download Setup (4.6.0)</a>
         <a class="btn" href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/GETTING_STARTED.md">Read the setup guide</a>
         <a class="btn" href="https://discord.gg/d6HfMwdM9v">Join the Discord</a>
       </div>
@@ -180,7 +180,7 @@ footer p { max-width: 62rem; }
 
 <div class="band" aria-hidden="true">
   <div class="wrap">
-    <span>Apple Silicon (M1 or later)</span><span>macOS 14.5+</span><span>Built on your Mac</span><span>Free, MIT licence</span><span>v4.4.0</span>
+    <span>Apple Silicon (M1 or later)</span><span>macOS 14.5+</span><span>Built on your Mac</span><span>Free, MIT licence</span><span>v4.6.0</span>
   </div>
 </div>
 
@@ -201,7 +201,7 @@ footer p { max-width: 62rem; }
       <div class="lightbar" aria-hidden="true"></div>
       <div class="sheet-head">
         <h2>Rap sheet: NFS Most Wanted Native</h2>
-        <span class="stamp">File 4.4.0 &middot; Rockport PD</span>
+        <span class="stamp">File 4.6.0 &middot; Rockport PD</span>
       </div>
       <div class="sheet-body">
         <ul class="charges">
@@ -218,15 +218,15 @@ footer p { max-width: 62rem; }
           <dt>Renderer</dt><dd>Metal, widescreen, HDR Auto</dd>
           <dt>Emulator</dt><dd>None</dd>
           <dt>Files given out</dt><dd>None. You bring your own.</dd>
-          <dt>Look</dt><dd>PC, or PC + Xbox 360 with your own 360 copy</dd>
+          <dt>Look</dt><dd>Console looks from your PC files, or Xbox 360 with your own 360 copy</dd>
           <dt>Controllers</dt><dd>DualSense, DualShock 4, Xbox and other pads macOS supports</dd>
           <dt>Licence</dt><dd>MIT (the game is not relicensed)</dd>
-          <dt>Prior offences</dt><dd><span style="font-family:var(--mono);font-size:0.85em">4.4.0 &middot; 4.3.0 &middot; 4.2.0 &middot; 4.1.0 &middot; 4.0.1 &middot; 4.0.0</span></dd>
-          <dt>Heat</dt><dd><div class="heat" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>6 releases in 7 days (27 Oct to 2 Nov 2026)</dd>
+          <dt>Prior offences</dt><dd><span style="font-family:var(--mono);font-size:0.85em">4.6.0 &middot; 4.5.0 &middot; 4.4.0 &middot; 4.3.0 &middot; 4.2.0 &middot; 4.1.0 &middot; 4.0.1 &middot; 4.0.0</span></dd>
+          <dt>Heat</dt><dd><div class="heat" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>8 releases (27 Oct to 14 Nov 2026)</dd>
         </dl>
       </div>
       <div class="open">
-        <p><strong>Still open:</strong> online free roam is off in 4.4. It comes back with a shared server in a later update. The app is not notarized by Apple, so macOS asks you once to Open Anyway.</p>
+        <p><strong>Still open:</strong> online free roam is unavailable in 4.6.0. The app is not notarized by Apple, so macOS asks you once to Open Anyway.</p>
       </div>
     </div>
   </div>
@@ -276,16 +276,23 @@ footer p { max-width: 62rem; }
 
 <section id="new">
   <div class="wrap">
-    <h2>New in 4.4.</h2>
+    <h2>New in 4.6.0.</h2>
     <div class="cols">
-      <div><h3>Video clips with sound</h3><p>F10 &gt; Display &gt; Video clip saves the picture and sound to Movies/NFSMW. HEVC or H.264, at 1080p, 1440p or 4K. Works with HDR on.</p></div>
-      <div><h3>Physical car materials</h3><p>Tinted glass and chrome from measured real-world values, Off by default. Physical particles give smoke and dust soft edges and scene lighting.</p></div>
-      <div><h3>Build from your PC discs</h3><p>Setup takes the discs as <code>.iso</code> images with the official 1.3 update, and installs and updates the game without Windows.</p></div>
-      <div><h3>PAL Xbox 360 disc</h3><p>The European retail Xbox 360 copy now works for the Xbox 360 features, as well as the USA one.</p></div>
-      <div><h3>Full screen: Auto</h3><p>Native full screen on the Mac's own screen, Borderless on other displays.</p></div>
-      <div><h3>Junkman and cash</h3><p>Junkman parts after the career, Unlimited by default. Add cash for a started career.</p></div>
+      <div><h3>Console looks. Your PC files.</h3><p>Post-processing, car paint, tyre and badge detail, metallic flake, building-window glass, lens rain drops, sea and road reflection size are On without console files. Bring your Xbox 360 copy and its versions are used.</p></div>
+      <div><h3>Clear coat and tyre tread</h3><p>A glossy lacquer layer on the paint, and tread grooves made from your PC files. Both On by default. With your Xbox 360 files, the console's tread is used.</p></div>
+      <div><h3>Rain stays outside</h3><p>Roofs and bridges keep the rain out, following your world detail setting. Cars in cast shadows keep their sky light.</p></div>
+      <div><h3>Underglow, on the road</h3><p>The shop preview lifts the car, the light reaches its sides, and the road pool follows the road surface.</p></div>
+      <div><h3>More for the garage</h3><p>Setup can import six more approved cars. Added-car imports work again.</p></div>
+      <div><h3>Smoother under cover</h3><p>The rain-under-roofs and hood-view slowdowns are gone. Post-processing costs less with the same picture.</p></div>
     </div>
-    <p style="margin-top:1.5rem">Also: an all-in-one app export in Setup, and problem reports you can post as a GitHub issue after you check the text. <a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/CHANGELOG.md">Full changelog</a>.</p>
+    <h3 style="margin-top:2rem">Added in 4.5.0</h3>
+    <div class="cols">
+      <div><h3>Your own later-game cars</h3><p>Point Setup at your own Need for Speed Carbon PC or Xbox 360 files and tick cars from the approved list. Each added car has its own engine sound. The stock BMW M3 GTR is in the career car lot for $75,000 and in Quick Race.</p></div>
+      <div><h3>Keep the last 30 seconds</h3><p>F10's replay buffer can save a clip on a key or controller chord. Off by default. Live streaming sends the game picture and sound to YouTube.</p></div>
+      <div><h3>Ready before the race</h3><p>Shaders and known pipeline states prepare at load. Tyre smoke uses half resolution by default. Adaptive triggers have their own On / Off setting in Options &gt; Controls.</p></div>
+      <div><h3>Less work for Setup</h3><p>Prebuilt libraries shorten the build, with source and licences beside them and a source-build fallback. Choose which Xbox 360 extras to install.</p></div>
+    </div>
+    <p style="margin-top:1.5rem"><a href="https://github.com/elforeign/nfs-most-wanted-mac/blob/main/CHANGELOG.md">Full changelog</a>.</p>
   </div>
 </section>
 
