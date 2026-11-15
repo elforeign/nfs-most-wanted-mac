@@ -176,7 +176,7 @@ static int glass_boost_on(void) {
 // family whose console map is not loaded (no console files); a loaded console map is used exactly as by X360.
 static int carnm = -1;                    // 0 pc, 1 x360, 2 port
 static int carnm_on(void) {
-    if (carnm < 0) { const char *e = getenv("NFS_CAR_NORMALMAPS"); carnm = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "port") ? 2 : 1; }
+    if (carnm < 0) { const char *e = getenv("NFS_CAR_NORMALMAPS"); carnm = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "x360") ? 1 : 2; }
     return carnm;
 }
 void materials_set_car_normals(int mode) { carnm = mode; if (diag_on) diag_event("materials: car normal maps live now %s", carnm == 2 ? "port" : carnm ? "x360" : "pc"); }

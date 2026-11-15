@@ -313,7 +313,7 @@ static void carnm_apply(int v) { materials_set_car_normals(v); }
 static const char *const kCarnm[] = {"PC", "X360", "Port"}, *const kCarnmV[] = {"pc", "x360", "port"};
 static Setting s_carnm = {.id = "graphics.car_normals", .category = SET_CARS, .order = 30, .label = "Tyre and badge detail",
     .help = "X360 adds the console's bump detail to tyre sidewalls, tread and badges (needs the X360 car paint on); PC keeps them flat. Port also adds tread grooves generated from the PC files where the console files are missing.",
-    .type = SET_CHOICE, .choices = kCarnm, .values = kCarnmV, .nchoices = 3, .def = 1, .env = "NFS_CAR_NORMALMAPS", .apply = carnm_apply};
+    .type = SET_CHOICE, .choices = kCarnm, .values = kCarnmV, .nchoices = 3, .def = 2, .env = "NFS_CAR_NORMALMAPS", .apply = carnm_apply};
 static const char *const kFlake[] = {"PC", "X360", "Generated"};
 static const char *const kFlakeV[] = {"pc", "x360", "generated"};
 static void flake_apply(int v) { materials_set_car_flake(v); }

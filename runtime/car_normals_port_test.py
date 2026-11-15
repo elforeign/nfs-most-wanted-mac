@@ -10,6 +10,8 @@ generator and upload, from the PC files alone (exit 3 without them).
   GPU, production car paint shader with the normal-map path on, BGRA8 512x256: changed pixels port map vs flat map
     (NFS_TEST_CARNM_FLAT=1) TREAD 51,860 / TREADR 28,216 / DOORLINE 48,192; the flat-vs-flat control 0.
 Old route 0/4 families pass, new 4/4.
+  Default: with NFS_CAR_NORMALMAPS unset the selector routes exactly as port, with and without console maps (owner's
+    On); the old x360 default fails it.
 """
 import os
 from pathlib import Path
@@ -138,9 +140,10 @@ def route(d, material):
     run(['clang', '-x', 'objective-c', '-fobjc-arc', '-I', RT, '-I', ROOT / 'recomp', '-I', ROOT / 'recomp/out',
          d / 'route.c', RT / 'car_normals_port.m', '-framework', 'Metal', '-framework', 'Foundation', '-o', d / 'route'])
     out = {}
-    for value in ('pc', 'x360', 'port'):
+    for value in ('pc', 'x360', 'port', None):
         for console in (0, 1):
-            env = dict(os.environ, NFS_CAR_NORMALMAPS=value)
+            env = dict(os.environ, NFS_CAR_NORMALMAPS=value or '')
+            if value is None: del env['NFS_CAR_NORMALMAPS']   # the shipped default
             rows = run([d / 'route'] + (['console'] if console else []), env=env).stdout.split('\n')
             out[value, console] = {r.split()[0]: (int(r.split()[1]), int(r.split()[2])) for r in rows if r}
     return out
@@ -267,6 +270,9 @@ def main():
         print('route: port maps bound by today\'s x360 route %d/4; console sentinels kept %d/4; pc off %d/8' % (today, console, pc_off))
         assert all(new.values()), 'new: %d/4 families pass' % sum(new.values())
         assert today == 0 and console == 4 and pc_off == 8
+        default_port = all(routes[None, c] == routes['port', c] for c in (0, 1))
+        print('default (variable unset) routes as port: %s' % default_port)
+        assert default_port, 'the shipped default does not route as port'
         print('old route 0/4 families bind a port map; new %d/4 pass' % sum(new.values()))
         # Recipe deletion: each removed recipe fails its own family's check and only that one.
         for fam in FAMILIES:

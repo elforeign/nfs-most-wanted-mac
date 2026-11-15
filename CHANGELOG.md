@@ -6,7 +6,7 @@
 - **Clear coat:** a glossy lacquer layer on car paint, On by default (F10 > Cars > Clear coat).
 - **Rain cover:** rain stays out from under roofs and bridges, On by default; it follows your world detail setting.
 - **Tunnel shadows:** the default is now Keep + sky light, so a car in a cast shadow keeps its sky light.
-- **Tyre tread detail:** F10 > Cars > Tyre and badge detail has a new Port choice with tread grooves generated from the PC files; Off by default.
+- **Tyre tread detail:** tread grooves generated from the PC files, On by default (F10 > Cars > Tyre and badge detail: Port); with your Xbox 360 files the console's tread is used.
 - **Underglow:** the shop preview lifts the car, the light reaches the car's sides, and the light on the road follows the road surface.
 - **Added cars:** six more approved cars can be imported by Setup.
 - **Fixed:** rain under roofs no longer costs about 25 fps; the hood-view slowdown is gone; post-processing is cheaper (0.24 ms less GPU time a frame) with an identical picture and the brightness read-back never waits; a controller input no longer hides the pointer repeatedly; Setup imports your added cars again; the live-stream key leaves no readable copies after Stop, Forget or quit.

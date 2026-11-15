@@ -106,11 +106,12 @@ ARR = {"kX360PcV": ["x360", "pc"], "kPcX360V": ["pc", "x360"], "kArrestV": ["pc"
 ARR["kFlakeV"] = ["pc", "x360", "generated"]
 ARR["kBglassV"] = ["pc", "x360", "port"]
 ARR["kCarnmV"] = ["pc", "x360", "port"]
-WANT = {i: "x360" for i in """graphics.postfx graphics.car_paint graphics.car_glass graphics.car_normals graphics.car_flake
+WANT = {i: "x360" for i in """graphics.postfx graphics.car_paint graphics.car_glass graphics.car_flake
     graphics.x360_arrest graphics.grass graphics.trees graphics.water graphics.building_glass graphics.scenery_lights graphics.parallax
     graphics.lighting_data graphics.road_reflection graphics.rain_ripples graphics.raindrops graphics.speed_blur
     graphics.shadow_fit audio.x360_copspeech audio.x360_nisaudio audio.x360_reverb""".split()}
 WANT.update({"graphics.particles": "physical",   # was retail; inline .values array
+             "graphics.car_normals": "port",   # was x360; generated tread where console maps are missing
              "graphics.tone_curve": "pc", "audio.x360_mix": "on", "audio.x360_music": "on", "audio.engine_sound": "realistic"})
 rows = {}
 for f in glob.glob("runtime/*.c") + glob.glob("runtime/*.m"):
