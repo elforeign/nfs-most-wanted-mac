@@ -84,6 +84,7 @@ int underglow_ui_step(const char *step, uint64_t elapsed, const char *pkg, const
             uint32_t career=1; c.ecx=db;
             call_guest(&c,0x0050E4C0u,1,&career);
             uint32_t a[]={1,fixture_row}; call_guest(&c,0x00589D60u,2,a);
+            underglow_light_fixture_owner(profile,fixture_row);
             fixture_shop_started=1;
         }
         if (pkg && !strcmp(pkg,"CustomizeMain.fng") && (M32(db+0x12C)&1) &&

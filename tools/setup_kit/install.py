@@ -168,37 +168,37 @@ OWNER_BUNDLE_ID = "local.nfsmw-port"
 RUNNING_APP = re.compile(r"NFSMW\.app/Contents/MacOS/|NFS Most Wanted Native(?: 3\.x(?: \(\d+\))?)?\.app/Contents/MacOS/")
 
 
-def public_app_path(dest):
-    """The only app Setup may replace or rename: 'NFS Most Wanted Native.app' directly inside dest."""
-    target = Path(dest) / APP_BUNDLE
-    if target.name != APP_BUNDLE or target.parent != Path(dest):
-        raise InstallError("Refusing to touch an app other than " + APP_BUNDLE + ".")
+def public_app_path(dest, bundle=APP_BUNDLE):
+    """The only app Setup may replace or rename: 'NFS Most Wanted Native.app' (or the product's bundle) directly inside dest."""
+    target = Path(dest) / bundle
+    if target.name != bundle or target.parent != Path(dest):
+        raise InstallError("Refusing to touch an app other than " + bundle + ".")
     return target
 
 
-def is_current_app(app):
+def is_current_app(app, bundle_id=PUBLIC_BUNDLE_ID):
     """True for an installed 4.x public app (safe to replace). Anything else, 3.x or unknown, is kept."""
     try:
         with (Path(app) / "Contents/Info.plist").open("rb") as f:
             info = plistlib.load(f)
         major = int(str(info["CFBundleShortVersionString"]).split(".")[0])
-        return info["CFBundleIdentifier"] == PUBLIC_BUNDLE_ID and major >= 4
+        return info["CFBundleIdentifier"] == bundle_id and major >= 4
     except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
         return False
 
 
-def legacy_name(dest):
+def legacy_name(dest, name=APP_NAME):
     """First free 'NFS Most Wanted Native 3.x.app', then ' (2)', ' (3)'..."""
     dest = Path(dest)
-    path = dest / f"{APP_NAME} 3.x.app"
+    path = dest / f"{name} 3.x.app"
     n = 2
     while exists(path):
-        path = dest / f"{APP_NAME} 3.x ({n}).app"
+        path = dest / f"{name} 3.x ({n}).app"
         n += 1
     return path
 
 
-def assert_not_running(processes=None):
+def assert_not_running(processes=None, pattern=RUNNING_APP):
     if processes is None:
         try:
             result = subprocess.run(["/bin/ps", "-axo", "pid=,comm="], capture_output=True, text=True, check=True)
@@ -207,7 +207,7 @@ def assert_not_running(processes=None):
                                "Allow process inspection, quit the game and run Setup again.") from e
         processes = result.stdout
     for line in processes.splitlines():
-        if RUNNING_APP.search(line):
+        if pattern.search(line):
             raise InstallError("NFS Most Wanted is running.", "Quit every copy of the game before installing.")
 
 
@@ -258,8 +258,9 @@ def _plan(data_home, record):
     token, dest = record["token"], Path(record["dest"])
     if not re.fullmatch(r"[0-9a-f]{32}", token):
         raise InstallError("The install journal is damaged.", "Remove " + str(journal_path(data_home)) + " and run Setup again.")
-    target = dest / APP_BUNDLE
-    names = [(target, dest / f".{APP_BUNDLE}.new-{token}", dest / f".{APP_BUNDLE}.backup-{token}")]
+    bundle = record.get("bundle", APP_BUNDLE)  # another product's journal names its app; Most Wanted's names none
+    target = dest / bundle
+    names = [(target, dest / f".{bundle}.new-{token}", dest / f".{bundle}.backup-{token}")]
     for name in ("roots.txt", "app.txt"):
         path = data_home / name
         names.append((path, path.with_name(f".{name}.new-{token}"), path.with_name(f".{name}.backup-{token}")))
@@ -341,7 +342,8 @@ def _finish(data_home, record, log=None, allow_rollback=True):
     target, _, app_backup = names[0]
     app_ok = False
     try:
-        app_ok = _placed(target, ids.get(str(target), [None, None])[1]) and is_current_app(target) and \
+        app_ok = _placed(target, ids.get(str(target), [None, None])[1]) and \
+            is_current_app(target, record.get("bundle_id", PUBLIC_BUNDLE_ID)) and \
             not target.is_symlink() and app_complete(target)
     except OSError:
         pass
@@ -381,7 +383,8 @@ def _finish(data_home, record, log=None, allow_rollback=True):
     if record.get("keep_legacy") and old_id is not None and ident(app_backup) == old_id:
         for _ in range(1000):
             try:
-                rename_new(app_backup, legacy_name(target.parent))
+                name = target.name[:-len(".app")]
+                rename_new(app_backup, legacy_name(target.parent) if name == APP_NAME else legacy_name(target.parent, name))
                 break
             except FileExistsError:
                 continue  # taken between the check and the rename: try the next number
@@ -728,16 +731,17 @@ def recover_interrupted(data_home, log=None, held=None):
 
 
 def transactional_install(app, staged_data, roots, data_home, dest, verify, running=assert_not_running, on_commit=None,
-                          after_commit=None, move_data=False, log=None):
+                          after_commit=None, move_data=False, log=None, product=None):
     """Return installed app. verify(path) must reject an invalid/unsigned app.
 
     roots values point into staged_data and are relocated to a new permanent
     generation. Nothing at an existing manifest path is modified in place.
+    product: another game's {"bundle", "bundle_id"} (None: Most Wanted); it is kept in the journal for recovery.
     """
     app, staged_data, data_home, dest = map(Path, (app, staged_data, data_home, dest))
     token = uuid.uuid4().hex
-    target = public_app_path(dest)
-    record = dict(token=token, dest=str(dest), state="preparing", keep_legacy=False, ids={})
+    target = public_app_path(dest, product["bundle"]) if product else public_app_path(dest)
+    record = dict(token=token, dest=str(dest), state="preparing", keep_legacy=False, ids={}, **(product or {}))
     names, generation, generation_tmp = _plan(data_home, record)
     candidate = names[0][1]
     committed = False
@@ -797,7 +801,7 @@ def transactional_install(app, staged_data, roots, data_home, dest, verify, runn
                 raise InstallError("The destination app is a symbolic link.", "Choose a different install destination.")
             # A 4.x app is replaced (backup kept). Anything else there (3.x) is kept for good under a visible
             # 3.x name, given only after the commit; until then it waits under this run's unique backup name.
-            record["keep_legacy"] = exists(target) and not is_current_app(target)
+            record["keep_legacy"] = exists(target) and not is_current_app(target, record.get("bundle_id", PUBLIC_BUNDLE_ID))
             record["ids"] = {str(path): [ident(path), ident(new)] for path, new, backup in names}
             # The generations the current roots.txt uses: kept by the prune after commit (one step of rollback).
             # None (uncertain: unreadable, or a root that only seems to be in installs) means nothing is pruned.

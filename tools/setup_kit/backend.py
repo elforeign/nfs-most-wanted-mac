@@ -60,8 +60,8 @@ import unicodedata
 import uuid
 import zipfile
 
-from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, digest_tree, mark_owned, owned, real_dir,
-                      recover_interrupted, remove, transactional_install, write_synced)
+from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, assert_not_running, digest_tree, mark_owned,
+                      owned, real_dir, recover_interrupted, remove, transactional_install, write_synced)
 from . import pc_disc, rtpatch, prebuilt
 from . import car_sources, car_catalog
 from . import stage as staging
@@ -73,7 +73,13 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.5.0"
+PUBLIC_VERSION = "4.6.0"
+# Carbon's app, every name in one place. Working names until the release names are decided.
+CARBON_PRODUCT = dict(name="NFS Carbon Native", exec="NFSCarbon", bundle_id="io.github.nfs-carbon-native-mac", data="Carbon")
+CARBON_EXE_SHA256 = "baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3"  # NFSC.exe (car_sources.json pin)
+CARBON_RUNNING = re.compile(re.escape(CARBON_PRODUCT["name"]) + r"\.app/Contents/MacOS/")
+CARBON_X360_BYTES = 40_000_000  # the two Xbox archives (38.4 MB), kept whole
+CARBON_EXTS = {".inc"}  # Carbon's translated-code includes: copied only into a Carbon build's source
 LLVM_FLAGS = ["-mllvm", "-capture-tracking-max-uses-to-explore=100000"]
 STAGES = [
     ("preflight", "Checking developer tools"), ("pc", "Checking the installed PC game"),
@@ -324,7 +330,8 @@ class Events:
 
     def stage(self, name):
         self.current = name
-        self.emit("stage", id=name, title="Preparing the update" if name == "stage" else dict(STAGES)[name])
+        self.emit("stage", id=name, title="Preparing the update" if name == "stage" else
+                  "Translating Carbon" if name == "carbon" else dict(STAGES)[name])
 
     def progress(self, done=1, total=1):
         self.emit("progress", id=self.current, done=done, total=total)
@@ -531,6 +538,23 @@ def validate_pc(root, source_root=ROOT):
         if not case_child(root, name).is_dir():
             raise SetupError(f"The PC folder has no {name} directory.", "Install the complete PC game, then select its folder.")
     return exe, exe_fingerprint(exe.read_bytes(), exe, source_root)
+
+
+def validate_carbon(root):
+    """The Carbon game folder: NFSC.exe of the supported PC release beside its TRACKS, or SetupError."""
+    fix = "Choose the installed Need for Speed Carbon (PC) folder containing NFSC.exe and TRACKS."
+    if not root.is_dir():
+        raise SetupError("The Carbon game folder was not found.", fix)
+    try:
+        exe = case_child(root, "NFSC.exe")
+        tracks = case_child(root, "TRACKS")
+    except SetupError:
+        raise SetupError("The Carbon folder has no NFSC.exe or no TRACKS folder.", fix) from None
+    if not tracks.is_dir():
+        raise SetupError("The Carbon folder has no TRACKS directory.", fix)
+    if not exe.is_file() or sha_file(exe) != CARBON_EXE_SHA256:
+        raise SetupError("NFSC.exe is not the supported PC release of Need for Speed Carbon.", fix)
+    return exe
 
 
 def movie_note(root):
@@ -820,7 +844,7 @@ SOURCE_EXTS = {".py", ".c", ".h", ".cpp", ".m", ".mm", ".sh", ".metal", ".tsv", 
 IGNORED = {"out", "build", "gen", "__pycache__", ".venv", ".git", "testdata", "testdata_synth"}
 
 
-def source_inventory(root):
+def source_inventory(root, extra_exts=()):
     result = {}
     for name in SOURCE_DIRS:
         directory = root / name
@@ -830,7 +854,7 @@ def source_inventory(root):
             dirs[:] = sorted(d for d in dirs if d not in IGNORED and not d.startswith("."))
             for name in sorted(files):
                 p = Path(base) / name
-                if p.suffix in SOURCE_EXTS and not p.name.endswith(".log"):
+                if (p.suffix in SOURCE_EXTS or p.suffix in extra_exts) and not p.name.endswith(".log"):
                     if p.is_symlink():
                         raise SetupError(f"Setup source contains a symbolic link: {p}", "Download Setup again.")
                     result[str(p.relative_to(root))] = sha_file(p)
@@ -852,9 +876,10 @@ def dependency_identity(root, toolchain):
             "packages": toolchain["packages"]}
 
 
-def cache_key(source, dependencies, toolchain, pc_hash, x360_hash, extras=None):
+def cache_key(source, dependencies, toolchain, pc_hash, x360_hash, extras=None, game="mw"):
     return identity(dict(schema=1, source=source, dependencies=dependencies, toolchain=toolchain,
-                         player=dict(pc=pc_hash, x360=x360_hash, **x360_extras.identity(extras)), public=True, cflags="recomp defaults; runtime -O2 -g"))
+                         player=dict(pc=pc_hash, x360=x360_hash, **x360_extras.identity(extras), **({} if game == "mw" else {"game": game})),
+                         public=True, cflags="recomp defaults; runtime -O2 -g"))
 
 
 class BuildStageCache:
@@ -985,16 +1010,17 @@ def module_environment(env):
         os.environ.update(original)
 
 
-def prepare_x360(source, out, pc, events, env, record=None, extras=None):
+def prepare_x360(source, out, pc, events, env, record=None, extras=None, game="mw"):
     if source is None:
         events.emit("features", x360=False, missing=X360_MISSING)
         return {}
     if not source.is_dir() and not (source.is_file() and source.suffix.lower() == ".iso"):
         raise SetupError("Choose an Xbox 360 game folder or ISO.", "Choose your own complete Xbox 360 copy, or continue without Xbox 360 features.")
+    module_name = "setup_kit.carbon_x360" if game == "carbon" else "setup_kit.x360"
     try:
-        module = importlib.import_module("setup_kit.x360")
+        module = importlib.import_module(module_name)
     except ModuleNotFoundError as e:
-        if e.name != "setup_kit.x360":
+        if e.name != module_name:
             raise SetupError("The Xbox 360 importer is incomplete.", "Download Setup again.") from e
         events.emit("warn", id="x360", msg="Xbox 360 support is unavailable in this Setup build; continuing with PC features.")
         events.emit("features", x360=False, missing=X360_MISSING)
@@ -1012,7 +1038,8 @@ def prepare_x360(source, out, pc, events, env, record=None, extras=None):
             events.log.write(("x360: " + str(args or kwargs) + "\n").encode())
     try:
         with module_environment(env):
-            result = module.prepare(source, out, pc, progress, **({} if x360_extras.selection(extras) == x360_extras.ALL else {"extras": extras}))
+            result = (module.prepare(source, out, progress) if game == "carbon" else
+                      module.prepare(source, out, pc, progress, **({} if x360_extras.selection(extras) == x360_extras.ALL else {"extras": extras})))
     except Exception as e:
         if isinstance(e, Cancelled):
             raise
@@ -1045,13 +1072,14 @@ def x360_stat(source):
     return {"": stat(source)}
 
 
-def x360_identity(source, pc_hash, inventory, content, toolchain, extras=None):
+def x360_identity(source, pc_hash, inventory, content, toolchain, extras=None, game="mw"):
     """What a converted X360 copy depends on: the player's copy (its content digest, the one --build computes for
     its cache key, plus every file's path, size, modification time and inode), the PC game's content and this
     Setup's source and toolchain."""
     files = x360_stat(source)
     return identity(dict(schema=3, x360=str(source), files=files, content=content, pc=pc_hash,
-                         source=identity(inventory), toolchain=toolchain, **x360_extras.identity(extras)))
+                         source=identity(inventory), toolchain=toolchain, **x360_extras.identity(extras),
+                         **({} if game == "mw" else {"game": game})))
 
 
 def record_check_x360(work, key, roots, record):
@@ -1132,12 +1160,12 @@ def clean_work(paths, events, key=None):
             shutil.rmtree(child, ignore_errors=True)
 
 
-def verify_app(app, runner, version=PUBLIC_VERSION):
+def verify_app(app, runner, version=PUBLIC_VERSION, bundle_id=PUBLIC_ID, executable_name=PUBLIC_EXEC):
     try:
         with (app / "Contents/Info.plist").open("rb") as f:
             info = plistlib.load(f)
         executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
-        if (info["CFBundleIdentifier"] != PUBLIC_ID or info["CFBundleExecutable"] != PUBLIC_EXEC or info["CFBundleShortVersionString"] != version or
+        if (info["CFBundleIdentifier"] != bundle_id or info["CFBundleExecutable"] != executable_name or info["CFBundleShortVersionString"] != version or
                 not executable.is_file() or not executable.stat().st_size or not os.access(executable, os.X_OK)):
             raise ValueError("app identity or executable")
     except (OSError, ValueError, KeyError, plistlib.InvalidFileException) as e:
@@ -1192,7 +1220,7 @@ def overlaps(a, b):
     return within(a, b) or within(b, a)
 
 
-def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None):
+def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None, data_home=None):
     """Refuse any location choice that could make Setup write into, or delete, something it must only read.
 
     work and cache are recursively removed and populated (stage, pc_src extraction, build copies): they may not
@@ -1203,9 +1231,10 @@ def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None):
     own names directly in it are written). All comparisons are by filesystem identity (within()). extras are further
     inputs (a disc image's 1.3 update and speed.exe).
     """
-    inputs = [pc] + ([x360] if x360 else []) + list(extras) + ([carbon_input(carbon)] if carbon else [])
+    inputs = ([pc] if pc else []) + ([x360] if x360 else []) + list(extras) + ([carbon_input(carbon)] if carbon else [])
     apps = [dest / "NFSMW.app", dest / f"{PUBLIC_NAME}.app"]
-    profiles = [paths.data, paths.legacy]
+    data_paths = [paths.data] + ([data_home] if data_home is not None else [])
+    profiles = data_paths + [paths.legacy]
     protected = inputs + [source] + apps + profiles
     def refuse(msg, a):
         raise SetupError(msg.format(a), "Choose separate work, cache, game, save and destination folders.")
@@ -1215,16 +1244,17 @@ def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None):
                 refuse("Setup work/cache overlaps a protected folder: {}", disposable)
     if overlaps(paths.work, paths.cache):
         refuse("Setup work and cache folders overlap: {}", paths.work)
-    for writable in (paths.data, paths.logs, paths.state):
+    for writable in data_paths + [paths.logs, paths.state]:
         for keep in inputs + [source] + apps + [paths.legacy]:
             if within(writable, keep):
                 refuse("Setup data/logs would write into a protected folder: {}", writable)
-    if overlaps(paths.data, paths.legacy):
-        refuse("The 4.0 data folder overlaps the 3.x profile: {}", paths.data)
+    for data in data_paths:
+        if overlaps(data, paths.legacy):
+            refuse("The 4.0 data folder overlaps the 3.x profile: {}", data)
     for keep in inputs + profiles + [source, paths.work, paths.cache]:
         if within(dest, keep):
             refuse("The destination is inside a folder Setup must not write to: {}", dest)
-    if pc.is_file() and within(dest, pc.parent) and within(pc.parent, dest):
+    if pc and pc.is_file() and within(dest, pc.parent) and within(pc.parent, dest):
         # Not beside the player's .zip either; a subfolder of the zip's folder (zip in ~, app in ~/Applications) is fine.
         refuse("The destination is the folder holding the game .zip: {}", dest)
     # The installer normally unpacks source below paths.state. That is allowed;
@@ -1363,9 +1393,15 @@ def migrate_3x_saves(paths, events):
 
 def build(args, paths, events, runner, source_root=ROOT):
     stage_only = getattr(args, "stage_only", False)
-    pc, selected_pc, dest = clean_path(args.pc), clean_path(args.pc), clean_path(args.dest)
+    # Carbon (--game carbon) reads only the Carbon folder: the shared stages without Most Wanted (no PC copy, no
+    # speed.exe translation, the tables made without a game folder, the libraries), then it translates NFSC.exe and
+    # installs its own app and profile (<data>/Carbon, where the Carbon program looks).
+    carbon = clean_path(args.carbon) if getattr(args, "game", "mw") == "carbon" else None
+    pc = selected_pc = None if carbon else clean_path(args.pc)
+    dest = clean_path(args.dest)
+    data_home = paths.data / CARBON_PRODUCT["data"] if carbon else paths.data
     # Normal Setup receives a destination directory; headless staging receives the app path.
-    destination = dest if stage_only else dest / f"{PUBLIC_NAME}.app"
+    destination = dest if stage_only else dest / f"{CARBON_PRODUCT['name'] if carbon else PUBLIC_NAME}.app"
     if stage_only:
         dest = destination.parent
     x360 = clean_path(args.x360) if args.x360 else None
@@ -1380,12 +1416,13 @@ def build(args, paths, events, runner, source_root=ROOT):
         chosen = x360_extras.selection(chosen)
     except ValueError as error:
         raise SetupError(str(error)) from error
-    options = {} if chosen == x360_extras.ALL else {"extras": chosen}
+    # Carbon's Xbox artwork has no optional parts; its game name joins every key and call that Most Wanted also makes.
+    options = {"game": "carbon"} if carbon else {} if chosen == x360_extras.ALL else {"extras": chosen}
     pc_update = clean_path(args.pc_update) if getattr(args, "pc_update", None) else None
     pc_exe = clean_path(args.pc_exe) if getattr(args, "pc_exe", None) else None
     pc_discs = [clean_path(p) for p in getattr(args, "pc_disc", None) or []]
-    extras = pc_extras(pc, pc_update, pc_exe, pc_discs)
-    check_locations(paths, pc, x360, dest, source_root, extras)
+    extras = [carbon] if carbon else pc_extras(pc, pc_update, pc_exe, pc_discs)
+    check_locations(paths, pc, x360, dest, source_root, extras, data_home=data_home)
     if stage_only:
         check_stage_locations(args.stage, paths, pc, x360, destination, source_root, extras)
         if x360 and not x360.exists():
@@ -1398,7 +1435,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         # A previous install that lost power or was killed mid-way: restore the previous app/roots/preferences (or
         # finish a committed one) before anything else (even before the work folder is judged: recovery needs only
         # the profile and destination), so a failure later in this run still leaves a whole install.
-        outcome = recover_interrupted(paths.data, log=setup_log)
+        outcome = recover_interrupted(data_home, log=setup_log)
         if outcome:
             events.emit("warn", id="preflight", msg="Setup found an interrupted install and " +
                         ("restored your previous version." if outcome == "restored" else "finished it."))
@@ -1410,16 +1447,20 @@ def build(args, paths, events, runner, source_root=ROOT):
     dependencies = dependency_identity(source_root, toolchain) if not args.check else None
     events.progress()
     events.stage("pc")
-    if is_pc_zip(pc):  # a .zip of the game folder: only read
+    if carbon:
+        validate_carbon(carbon)
+        pc_hash, carbon_hash = None, digest_tree(carbon)
+    elif is_pc_zip(pc):  # a .zip of the game folder: only read
         pc = extract_pc_zip(pc, paths.work, events)
     elif pc_disc.is_disc(pc):  # PC disc images, the 1.3 update and speed.exe: only read, installed into work
         pc = extract_pc_disc(pc, pc_update, pc_exe, paths.work, events, source_root, pc_discs)
-    exe, fingerprint = validate_pc(pc, source_root)
-    note = movie_note(pc)
-    if note:  # the game runs without them, but must not lose its movies without a word
-        setup_log(note)
-        events.emit("warn", id="pc", msg=note)
-    pc_hash = digest_tree(pc)
+    if not carbon:
+        exe, fingerprint = validate_pc(pc, source_root)
+        note = movie_note(pc)
+        if note:  # the game runs without them, but must not lose its movies without a word
+            setup_log(note)
+            events.emit("warn", id="pc", msg=note)
+        pc_hash = digest_tree(pc)
     events.progress()
     events.stage("x360")
     stage = paths.work / "stage"
@@ -1434,7 +1475,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         record = {}
         before = x360_stat(x360)
         content = x360_content_digest(x360)
-        inventory = source_inventory(source_root)
+        inventory = source_inventory(source_root, CARBON_EXTS if carbon else ())
         prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(content, pc_hash, inventory, toolchain, **options))
         roots = restore_prepared_x360(prepared_cache, check_out, events, record) if owned(paths.cache, paths.state) else None
         if roots is None:
@@ -1445,7 +1486,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         return None
     x360_before = x360_stat(x360) if x360 else None
     x360_hash = x360_content_digest(x360) if x360 else None
-    inventory = source_inventory(source_root)
+    inventory = source_inventory(source_root, CARBON_EXTS if carbon else ())
     key = cache_key(inventory, dependencies, toolchain, pc_hash, x360_hash, **options)
     cache_home = paths.cache / "builds" / key
     claim(paths.cache, paths.cache == paths.default_cache, SETUP_CACHE_NAMES, "cache", paths.state)
@@ -1453,12 +1494,12 @@ def build(args, paths, events, runner, source_root=ROOT):
         # Publishers hold this same lock: every pending copy is now abandoned.
         # Reclaim it before disk-space checks, including builds with cache hits.
         PreparedCache.clean_pending(paths.cache / "x360")
-        space = dict(x360_bytes=x360_extras.required_bytes(chosen) if x360 else 0,
-                     x360_shared_bytes=146_000_000 if x360 and "textures" in chosen and "arrest" not in chosen else 0)
+        space = dict(x360_bytes=(CARBON_X360_BYTES if carbon else x360_extras.required_bytes(chosen)) if x360 else 0,
+                     x360_shared_bytes=146_000_000 if x360 and not carbon and "textures" in chosen and "arrest" not in chosen else 0)
         if stage_only:
             check_space(paths, pc, clean_path(args.stage), stage_only=True, **space)
         else:
-            check_space(paths, pc, dest, **space)
+            check_space(paths, carbon or pc, dest, **space)
         source = cache_home / "source"
         source.parent.mkdir(parents=True, exist_ok=True)
         copy_source(source_root, source, inventory)
@@ -1471,40 +1512,51 @@ def build(args, paths, events, runner, source_root=ROOT):
                 del sys.modules[name]
         remove(stage)
         staged_data = stage / "data"
-        pc_copy = staged_data / "pc"
-        pc_copy.parent.mkdir(parents=True)
-        shutil.copytree(pc, pc_copy)
-        if digest_tree(pc_copy) != pc_hash:
-            raise SetupError("The PC game changed while it was being copied.", "Close other installers or file-copy operations and try again.")
-        # Windows names are case insensitive; gen_tables.py uses these spellings.
-        for canonical in ("speed.exe", "GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND"):
-            actual = case_child(pc_copy, canonical)
-            if actual.name != canonical:
-                temporary = actual.with_name(".setup-case-" + uuid.uuid4().hex)
-                actual.rename(temporary)
-                temporary.rename(pc_copy / canonical)
-        roots = {"pc_root": pc_copy}
+        pc_copy = None if carbon else staged_data / "pc"
+        staged_data.mkdir(parents=True)
+        if pc_copy:
+            shutil.copytree(pc, pc_copy)
+            if digest_tree(pc_copy) != pc_hash:
+                raise SetupError("The PC game changed while it was being copied.", "Close other installers or file-copy operations and try again.")
+            # Windows names are case insensitive; gen_tables.py uses these spellings.
+            for canonical in ("speed.exe", "GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND"):
+                actual = case_child(pc_copy, canonical)
+                if actual.name != canonical:
+                    temporary = actual.with_name(".setup-case-" + uuid.uuid4().hex)
+                    actual.rename(temporary)
+                    temporary.rename(pc_copy / canonical)
+        else:
+            carbon_data = stage / "carbon-data"
+            shutil.copytree(carbon, carbon_data / "pc")
+            if digest_tree(carbon_data / "pc") != carbon_hash:
+                raise SetupError("The Carbon game changed while it was being copied.", "Close other installers or file-copy operations and try again.")
+        roots = {"pc_root": pc_copy} if pc_copy else {}
         record = {}
+        # Carbon's Xbox artwork goes inside its own data folder, so it is installed and removed with it.
+        x360_target = carbon_data / "x360" if carbon else staged_data / "x360"
         prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(x360_hash, pc_hash, inventory, toolchain, **options))
-        reused = restore_prepared_x360(prepared_cache, staged_data / "x360", events, record) if x360 else None
+        reused = restore_prepared_x360(prepared_cache, x360_target, events, record) if x360 else None
         cached_preparation = reused is not None
         if x360 and reused is None:
             reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash, toolchain, **options),
-                                      staged_data / "x360", events, record)
-        roots.update(reused if reused is not None else prepare_x360(x360, staged_data / "x360", pc_copy, events, runner.env, record, **options))
-        if stage_only and x360 and not (set(roots) - {"pc_root"}):
+                                      x360_target, events, record)
+        prepared = reused if reused is not None else prepare_x360(x360, x360_target, pc_copy, events, runner.env, record, **options)
+        if not carbon:  # Carbon's build stages must not see the artwork root: their cache keys would change with it
+            roots.update(prepared)
+        if stage_only and x360 and not prepared:
             raise SetupError("X360_PREPARATION_MISSING: The selected Xbox 360 source produced no extras.",
                              "Use a complete Setup build with Xbox 360 support and reconnect your source.")
         if x360 and (x360_stat(x360) != x360_before or x360_content_digest(x360) != x360_hash):
             # The cache key names the bytes digested before the conversion: those must be the bytes converted.
             raise SetupError("Your Xbox 360 copy changed while Setup was converting it.", "Leave it unchanged and run Setup again.")
-        if x360 and not cached_preparation and set(roots) - {"pc_root"}:
-            saved = prepared_cache.publish(staged_data / "x360", {k: v for k, v in roots.items() if k != "pc_root"}, record)
+        if x360 and not cached_preparation and prepared:
+            saved = prepared_cache.publish(x360_target, prepared, record)
             if saved:
                 events.emit("warn", id="x360", msg=f"Verified preparation saved in {prepared_cache.directory}. "
                             "To clear it, quit Setup and delete that cache folder.")
         manifest = stage / "roots.txt"
-        write_roots(manifest, roots)
+        if not carbon:  # Carbon writes its own (carbon-roots.txt)
+            write_roots(manifest, roots)
         events.progress()
         spec = importlib.util.spec_from_file_location("_setup_build_inputs", source / "recomp/build_inputs.py")
         build_inputs = importlib.util.module_from_spec(spec)
@@ -1527,7 +1579,7 @@ def build(args, paths, events, runner, source_root=ROOT):
             # argument roles and values, including flags, determine the build.
             # The executable's bytes/version remain in build_compiler; its
             # installation path is a role just like source and asset paths.
-            roles = {str(py): "$PYTHON", str(pc_copy): "$PC", str(source): "$SOURCE"}
+            roles = {str(py): "$PYTHON", **({str(pc_copy): "$PC"} if pc_copy else {}), str(source): "$SOURCE"}
             if "x360_root" in roots:
                 roles[str(roots["x360_root"])] = "$X360"
             arguments = []
@@ -1538,16 +1590,20 @@ def build(args, paths, events, runner, source_root=ROOT):
                 compiler=build_compiler, env=runner.env, arguments=arguments)
             cache.run(name, fingerprint, source, relative, command(argv))
         events.stage("recompile")
-        cached("recompile", ["recomp/out", "recomp/out/speed.a", "recomp/out/funcs.h", "recomp/out/breaker_diag.inc",
-                             "recomp/out/speed_32.c"], [py, "-I", "recomp/build_all.py", "--exe", pc_copy / "speed.exe"])
-        if not (source / "recomp/out/speed.a").is_file():
-            raise SetupError("Recompilation produced no speed.a; stale archives are not accepted.")
+        if not carbon:  # Carbon links no Most Wanted code: NFSC.exe is translated in its own stage
+            cached("recompile", ["recomp/out", "recomp/out/speed.a", "recomp/out/funcs.h", "recomp/out/breaker_diag.inc",
+                                 "recomp/out/speed_32.c"], [py, "-I", "recomp/build_all.py", "--exe", pc_copy / "speed.exe"])
+            if not (source / "recomp/out/speed.a").is_file():
+                raise SetupError("Recompilation produced no speed.a; stale archives are not accepted.")
         events.progress()
         events.stage("tables")
-        table_generator = build_inputs.load_module(source / "tools/gen_tables.py")
-        table_names = list(table_generator.STUBS) + table_generator.PUBTABLES + table_generator.PADTABLES
-        cached("tables", ["runtime/gen/" + name for name in table_names] + ["runtime/gen/inputs.txt"], [py, "-I", "tools/gen_tables.py", "--pc", pc_copy] +
-               (["--x360", roots["x360_root"]] if "x360_root" in roots else ["--no-x360"]))
+        if carbon:  # the Carbon program includes only tables made without a game folder (seconds: uncached)
+            runner.run([py, "-I", "tools/gen_tables.py", "--no-pc"], cwd=source)
+        else:
+            table_generator = build_inputs.load_module(source / "tools/gen_tables.py")
+            table_names = list(table_generator.STUBS) + table_generator.PUBTABLES + table_generator.PADTABLES
+            cached("tables", ["runtime/gen/" + name for name in table_names] + ["runtime/gen/inputs.txt"], [py, "-I", "tools/gen_tables.py", "--pc", pc_copy] +
+                   (["--x360", roots["x360_root"]] if "x360_root" in roots else ["--no-x360"]))
         events.progress()
         events.stage("audio")
         # FFmpeg is built here (media.cpp needs its headers) but reported as itself: an FFmpeg failure is an "ffmpeg"
@@ -1575,6 +1631,10 @@ def build(args, paths, events, runner, source_root=ROOT):
                 raise SetupError(f"FFmpeg library {library} is missing.")
         events.progress()
         events.stage("runtime")
+        if carbon:
+            events.progress()
+            return build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, events, runner, key, setup_log,
+                                x360_root=prepared.get("x360_root"))
         cached("runtime", ["runtime/boot"], ["sh", "runtime/build.sh"])
         # Coverage is validation against the current host source, not an input
         # to translated code. Recheck it even when both native artifacts resume.
@@ -1617,6 +1677,49 @@ def build(args, paths, events, runner, source_root=ROOT):
         clean_work(paths, events, key)
         events.progress()
         return installed
+
+
+def build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, events, runner, key, setup_log, x360_root=None):
+    """Carbon's stages, after the tables and libraries: translate NFSC.exe, the hook archive, the runtime link, then its own app, signed, verified and installed."""
+    py = Path(sys.executable).absolute()
+    jobs = str(os.cpu_count() or 4)
+    started = time.monotonic()
+    events.stage("carbon")
+    for argv in ([py, "-I", "recomp/build_private.py", "--exe", carbon_data / "pc" / "NFSC.exe", "--out",
+                  "recomp/out/carbon-base", "--prefix", "NFSC", "--jobs", jobs],
+                 [py, "-I", "recomp/private_world.py", "--base", "recomp/out/carbon-base", "--out", "recomp/out/carbon"],
+                 [py, "-I", "recomp/build_private_runtime.py", "--out", "recomp/out/carbon", "--archive",
+                  "recomp/out/carbon/NFSC.a", "--binary", "boot_carbon", "--tables", "runtime/gen", "--jobs", jobs]):
+        runner.run(argv, cwd=source)
+    if not (source / "recomp/out/carbon/boot_carbon").is_file():
+        raise SetupError("The Carbon build produced no program.")
+    setup_log(f"carbon stages: {time.monotonic() - started:.0f} s")
+    events.progress()
+    events.stage("assets")
+    roots = {"pc_root": carbon_data / "pc"}
+    if x360_root is not None:
+        roots["x360_root"] = Path(x360_root)
+    write_roots(stage / "carbon-roots.txt", roots)
+    digest_tree(carbon_data)  # Refuse escaping symlinks or partial/unreadable outputs.
+    events.progress()
+    events.stage("bundle")
+    product = CARBON_PRODUCT
+    runner.run(["sh", "runtime/bundle.sh", stage, "--boot", source / "recomp/out/carbon/boot_carbon", "--game", "carbon",
+                "--name", product["name"], "--exec-name", product["exec"], "--bundle-id", product["bundle_id"],
+                "--version", PUBLIC_VERSION, "--build-version", PUBLIC_VERSION, "--source-id", identity(inventory)], cwd=source)
+    app = stage / f"{product['name']}.app"
+    def verify(path):
+        verify_app(path, runner, bundle_id=product["bundle_id"], executable_name=product["exec"])
+    verify(app)
+    events.progress()
+    events.stage("install")
+    installed = transactional_install(app, carbon_data, roots, data_home, dest, verify, log=setup_log,
+                                      running=lambda: assert_not_running(pattern=CARBON_RUNNING),
+                                      on_commit=lambda path: setattr(events, "installed", path), move_data=True,
+                                      product=dict(bundle=app.name, bundle_id=product["bundle_id"]))
+    clean_work(paths, events, key)
+    events.progress()
+    return installed
 
 
 def check_stage_locations(target, paths, pc, x360, destination, source, extras=()):
@@ -1939,7 +2042,9 @@ def main(argv=None):
         mode.add_argument('--cars-' + name, action='store_true', help='standalone extras ' + name)
     mode.add_argument('--cars-remove', nargs='+', type=int, help='deselect permanent slots; retain packs')
     mode.add_argument('--cars-restore', help='restore a verified retained generation')
-    ap.add_argument('--carbon', help='Carbon folder, any executable, or X360 ISO')
+    ap.add_argument('--carbon', help='Carbon folder, any executable, or X360 ISO (with --game carbon: the Carbon PC folder)')
+    ap.add_argument('--game', choices=('mw', 'carbon'), default='mw',
+                    help='carbon: --check or --build Carbon from --carbon alone, with an optional --x360 (no --pc, no Most Wanted copy)')
     ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')
     ap.add_argument('--cars-mw-pc', help='MW donor folder before first installation; otherwise use installed roots')
     ap.add_argument('--cars-measure', action='store_true', help='measure conversion without activating it')
@@ -1967,7 +2072,11 @@ def main(argv=None):
     try:
         if car_mode:
             return cars_command(args)
-        if any((args.carbon, args.cars_spec, args.cars_mw_pc, args.cars_measure, args.cars_repair)):
+        if args.game == "carbon" and not ((args.build or args.check) and args.carbon) or args.game == "carbon" and (
+                args.pc or args.pc_disc or args.pc_update or args.pc_exe):
+            raise SetupError("--game carbon requires --build and --carbon (or --check and --carbon), and reads only the Carbon folder "
+                             "and, optionally, --x360 (your Carbon Xbox 360 copy), without --pc or disc images.")
+        if any((args.carbon if args.game == "mw" else None, args.cars_spec, args.cars_mw_pc, args.cars_measure, args.cars_repair)):
             raise SetupError("Extras options require a --cars-* operation.")
         if args.export_all_in_one:
             if not args.app or not args.dest or args.pc or args.x360 or args.stage:
@@ -2007,8 +2116,8 @@ def main(argv=None):
                 raise SetupError("--stage-only requires --stage.")
             stage_path = clean_path(args.stage)
             args.work = args.work or str(stage_path.parent / ("." + stage_path.name + "-work"))
-        elif not (args.pc and args.dest and args.work) or args.stage:
-            raise SetupError("--check and --build require --pc, --dest and --work; --stage requires --stage-only.")
+        elif not ((args.pc or args.game == "carbon") and args.dest and args.work) or args.stage:
+            raise SetupError("--check and --build require --pc (Carbon: --carbon), --dest and --work; --stage requires --stage-only.")
         paths = Paths(args.work)
         if args.stage_only:
             choices = None if args.pc and args.x360 and args.dest else staging.load_choices(paths.state, required=not args.pc)
@@ -2029,12 +2138,15 @@ def main(argv=None):
             check_stage_locations(args.stage, paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
                                   clean_path(args.dest), ROOT, extras)
         # Validate before creating anything at a user-selected path.
-        check_locations(paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
-                        clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT, extras)
+        check_locations(paths, clean_path(args.pc) if args.pc else None, clean_path(args.x360) if args.x360 else None,
+                        clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT, extras,
+                        carbon=clean_path(args.carbon) if args.carbon else None,
+                        data_home=paths.data / CARBON_PRODUCT["data"] if args.game == "carbon" else None)
         # Setup's own work folder (new, empty or marked), before anything is written into it.
         recovered = []
         if args.build:  # an interrupted install is resolved before the work folder is judged (build() finds nothing left)
-            outcome = recover_interrupted(paths.data, log=recovered.append)
+            outcome = recover_interrupted(paths.data / CARBON_PRODUCT["data"] if args.game == "carbon" else paths.data,
+                                          log=recovered.append)
             if outcome:
                 recovered.append("outcome " + outcome)
         claim(paths.work, paths.work == paths.default_work, SETUP_WORK_NAMES, "work", paths.state)

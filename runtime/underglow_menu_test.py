@@ -1,10 +1,12 @@
 """Native underglow colour and Light rows through production CustomizeSub hooks.
-Menu 82/82 plus pool startup/preferences/overrides 7/7; pinned original Setup
-52/82 (30 failures), removed hooks 60, cancel-keeps-preview 5, unowned-entry 1.
+Menu 100/100 plus pool startup/preferences/overrides 7/7; pinned original Setup
+55/96 (45 failures on the 100 now), removed hooks 72, cancel-keeps-preview 6, unowned-entry 1.
+Pulse Back-keeps-preview fails 2; Accept-without-save fails 5.
+Row count 10 -> 11: the global Pulse row follows Road pool.
 Pool Back-keeps-preview fails 2; Accept-without-save fails 4.
 Changed default checks on ORIGINAL On core: 15/19 (4 failures); fixed real
 menu/core/store save-load 19/19 and fresh-process restart 2/2. Colour alone
-stays Off; native Light On persists. Omitted light-bit storage fails 4/19.
+switches Light On (it stayed Off before; that old behaviour fails 3); native Light On persists. Omitted light-bit storage fails 4/19.
 """
 from pathlib import Path
 import subprocess
@@ -13,13 +15,14 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PRE = r'''
 #include "host.h"
+#include "underglow_ui.h"
 #include <stdlib.h>
 #include <stdarg.h>
 uint8_t *G;
 int diag_on = 0;
-static char pool_pref[16];static unsigned pref_writes;
-const char *app_pref(const char *key){return !strcmp(key,"cars.underglow_pool") ? pool_pref : NULL;}
-void app_pref_set(const char *key,const char *value){if(strcmp(key,"cars.underglow_pool"))abort();strcpy(pool_pref,value);++pref_writes;}
+static char pool_pref[16],pulse_pref[16];static unsigned pref_writes;
+const char *app_pref(const char *key){return !strcmp(key,"cars.underglow_pool") ? pool_pref : !strcmp(key,"cars.underglow_pulse") ? pulse_pref : NULL;}
+void app_pref_set(const char *key,const char *value){if(!strcmp(key,"cars.underglow_pool"))strcpy(pool_pref,value);else if(!strcmp(key,"cars.underglow_pulse"))strcpy(pulse_pref,value);else abort();++pref_writes;}
 void underglow_menu_option_added(uint32_t opt);
 uint32_t galloc(uint32_t n) { static uint32_t top = 0xA00000; uint32_t r = top; top += (n + 15) & ~15u; return r; }
 uint32_t gstr(const char *s) { static uint32_t top = 0xE00000; uint32_t r = top; strcpy((char *)G + r, s); top += 64; return r; }
@@ -56,6 +59,9 @@ static Cpu cpu(uint32_t self, uint32_t id) {
     return c;
 }
 int main(int argc,char **argv) {
+    if(argc==4 && !strcmp(argv[1],"pulse")) {
+        strcpy(pulse_pref,argv[2]);return underglow_pulse()!=(unsigned)atoi(argv[3]);
+    }
     if(argc==3) {
         strcpy(pool_pref,argv[1]);
         unsigned expected=(unsigned)atoi(argv[2]);
@@ -82,27 +88,36 @@ int main(int argc,char **argv) {
     /* colour page */
     reset(); M32(self + 0x150) = 0x308; preset_of[82] = 2;
     Cpu c = cpu(self, 0); f_007BFBD0(&c);
-    CHECK(adds == 10); CHECK(M32(self + 0x1B0) == 0x55470A00u);
+    CHECK(adds == 11); CHECK(M32(self + 0x1B0) == 0x55470A00u);
     for (unsigned i = 0; i < 8; ++i) { CHECK(added_ids[i] == 0x901 + i); CHECK(added_labels[i] == 0x55470A01u + i); }
     for (unsigned i = 0; i < 8; ++i) CHECK(strcmp((char *)G + underglow_menu_text(0x55470A01u + i),
         (const char *[]){"Off","Red","Green","Yellow","Blue","Magenta","Cyan","White"}[i]) == 0);
     for (unsigned i = 0; i < 8; ++i) CHECK(M32(options[i] + 0x50) == ((0x308u << 16) | 0x803u) && M32(options[i] + 0x4C) == M32(0x905EA8u));
     CHECK(strcmp((char *)G + underglow_menu_text(0x55470A00u), "Underglow") == 0);
-    CHECK(underglow_menu_text(0x1234u) == 0 && underglow_menu_text(0x55470A10u) == 0);
+    CHECK(underglow_menu_text(0x1234u) == 0 && underglow_menu_text(0x55470A12u) == 0);
     CHECK(added_ids[8]==0x309 && added_labels[8]==0x55470A09u);
     CHECK(M32(options[8]+0x4C)==M32(0x905EACu) && (M32(options[8]+0x50)&65535)==0x309);
     CHECK(!light_of[82]);
     /* hover Yellow (preset 3), accept: kept */
     M32(self + 0x38) = options[3]; underglow_menu_notify(self, 0x5A928018u);
     CHECK(preset_of[82] == 3);
+    CHECK(light_of[82] == 1);   /* choosing a colour switches the light on */
     underglow_menu_notify(self, 0x0C407210u); underglow_menu_notify(self, 0xE1FDE1D1u);
-    CHECK(preset_of[82] == 3);
+    CHECK(preset_of[82] == 3 && light_of[82] == 1);
+    /* Off (preset 0) alone does not switch it on; a colour then Back restores the light as it was */
+    light_of[82] = 0; adds = 0; Cpu c1 = cpu(self, 0); f_007BFBD0(&c1);
+    M32(self + 0x38) = options[0]; underglow_menu_notify(self, 0x5A928018u);
+    CHECK(preset_of[82] == 0 && !light_of[82]);
+    M32(self + 0x38) = options[5]; underglow_menu_notify(self, 0x5A928018u);
+    CHECK(light_of[82] == 1);
+    underglow_menu_notify(self, 0xE1FDE1D1u);
+    CHECK(preset_of[82] == 3 && !light_of[82]);
     /* reopen (saved 3), hover Cyan (6), leave without accept: back to Yellow */
     adds = 0; Cpu c2 = cpu(self, 0); f_007BFBD0(&c2);
     M32(self + 0x38) = options[6]; underglow_menu_notify(self, 0x5A928018u);
     CHECK(preset_of[82] == 6);
     underglow_menu_notify(self, 0xE1FDE1D1u);
-    CHECK(preset_of[82] == 3);
+    CHECK(preset_of[82] == 3 && !light_of[82]);
     /* hover, then the page is replaced by another screen: restored */
     adds = 0; Cpu c3 = cpu(self, 0); f_007BFBD0(&c3);
     M32(self + 0x38) = options[1]; underglow_menu_notify(self, 0x5A928018u);
@@ -159,6 +174,37 @@ int main(int argc,char **argv) {
     M32(self+0x38)=options[0]; underglow_menu_notify(self,0x0C407210u);
     underglow_menu_notify(self,0xE1FDE1D1u);
     CHECK(underglow_pool_strength()==0 && pref_writes==2 && !strcmp(pool_pref,"measured"));
+    /* Pulse follows the same preview/cancel/accept preference lifecycle. */
+    CHECK(!underglow_pulse());
+    adds=0; M32(self+0x150)=0x308; f_007BFBD0(&lc);
+    CHECK(added_ids[10]==0x30B && added_labels[10]==0x55470A10u);
+    CHECK(!strcmp((char *)G+underglow_menu_text(added_labels[10]),"Pulse: Off"));
+    underglow_menu_notify(self,0xE1FDE1D1u);
+    adds=0; M32(self+0x150)=0x30B; f_007BFBD0(&lc);
+    CHECK(adds==2 && M32(self+0x154)==0x308);
+    CHECK(!strcmp((char *)G+underglow_menu_text(added_labels[0]),"Off"));
+    CHECK(!strcmp((char *)G+underglow_menu_text(added_labels[1]),"On"));
+    unsigned writes=pref_writes;
+    M32(self+0x38)=options[1]; underglow_menu_notify(self,0x5A928018u);
+    CHECK(underglow_pulse()==1 && pref_writes==writes);
+    underglow_menu_notify(self,0xE1FDE1D1u);
+    CHECK(!underglow_pulse() && pref_writes==writes);
+    adds=0; f_007BFBD0(&lc); M32(self+0x38)=options[1];
+    underglow_menu_notify(self,0x0C407210u); underglow_menu_notify(self,0xE1FDE1D1u);
+    CHECK(underglow_pulse()==1 && pref_writes==writes+1 && !strcmp(pulse_pref,"on"));
+    pulse_loaded=0; CHECK(underglow_pulse()==1);
+    adds=0; M32(self+0x150)=0x308; f_007BFBD0(&lc);
+    CHECK(!strcmp((char *)G+underglow_menu_text(added_labels[10]),"Pulse: On"));
+    underglow_menu_notify(self,0xE1FDE1D1u);
+    adds=0; M32(self+0x150)=0x30B; f_007BFBD0(&lc);
+    M32(self+0x38)=options[0]; underglow_menu_notify(self,0x5A928018u);
+    M32(self+0x150)=0x802; underglow_menu_notify(self,0);
+    CHECK(underglow_pulse()==1 && pref_writes==writes+1);
+    adds=0; M32(self+0x150)=0x30B; f_007BFBD0(&lc);
+    M32(self+0x38)=options[0]; underglow_menu_notify(self,0x0C407210u);
+    underglow_menu_notify(self,0xE1FDE1D1u);
+    pulse_loaded=0; CHECK(!underglow_pulse() && !strcmp(pulse_pref,"off"));
+    CHECK(light_of[82]==1 && preset_of[82]==3);
     /* not owned: no page content, nothing stored */
     reset(); owned_car = 0; M32(self + 0x150) = 0x308;
     Cpu c4 = cpu(self, 0); f_007BFBD0(&c4);
@@ -186,6 +232,9 @@ def run(tmp, name, body, want):
             if override is not None: env['NFS_UNDERGLOW_STRENGTH']=override
             subprocess.run([str(tmp/name),pref,str(expected)],env=env,check=True)
         print('pool startup/preference/override: 7/7')
+        for pref,expected in [('',0),('off',0),('on',1),('broken',0)]:
+            subprocess.run([str(tmp/name),'pulse',pref,str(expected)],check=True)
+        print('pulse fresh-process startup/preference: 4/4')
 
 INTEGRATION = r"""
 static const char *data_dir;
@@ -217,7 +266,7 @@ int main(int argc,char **argv) {
         CHECK(underglow_light_set(p,83,0));
         /* Drive the actual menu, then the same save lifecycle the colour uses. */
         M32(self+0x150)=0x308; Cpu c={0};c.ecx=self;c.esp=0x1000;f_007BFBD0(&c);
-        CHECK(adds==10 && added_ids[8]==0x309 && added_labels[8]==0x55470A09u);
+        CHECK(adds==11 && added_ids[8]==0x309 && added_labels[8]==0x55470A09u);
         M32(self+0x38)=options[8];underglow_menu_notify(self,0xE1FDE1D1u);
         adds=0;M32(self+0x150)=0x309;f_007BFBD0(&c);
         M32(self+0x38)=options[1];underglow_menu_notify(self,0x0C407210u);underglow_menu_notify(self,0xE1FDE1D1u);
@@ -278,9 +327,12 @@ def main():
         'good': (src, True),
         # retail Visual / Setup unchanged: the hooks only call the original
         'hooks-removed': (src.replace('    if (id != 0x307u || M32(self + 0x150) != 0x803u || !owned()) return;', '    return;')
-                             .replace('    if ((mode != UG_MODE && mode != UG_LIGHT_MODE && mode != UG_POOL_MODE) || !owned()) return;', '    return;'), False),
+                             .replace('    if ((mode != UG_MODE && mode != UG_LIGHT_MODE && mode != UG_POOL_MODE && mode != UG_PULSE_MODE) || !owned()) return;', '    return;'), False),
+        'pulse-back-keeps-preview': (src.replace('if(st.mode==UG_PULSE_MODE) pulse_preview(st.pulse);','if(0) pulse_preview(st.pulse);'), False),
+        'pulse-accept-not-saved': (src.replace('if(st.mode==UG_PULSE_MODE) pulse_save();','if(0) pulse_save();'), False),
         'pool-back-keeps-preview': (src.replace('if(st.mode==UG_POOL_MODE) pool_preview(st.pool);','if(0) pool_preview(st.pool);'), False),
         'pool-accept-not-saved': (src.replace('if(st.mode==UG_POOL_MODE) pool_save();','if(0) pool_save();'), False),
+        'colour-leaves-light': (src.replace('            if (i) underglow_light_set(st.profile,st.handle,1);   /* a chosen colour lights; Back restores both */\n', ''), False),
         'cancel-keeps-preview': (src.replace('        underglow_set(st.profile, st.handle, st.saved);\n', ''), False),
         'unowned-gets-entry': (src.replace('!= 0x803u || !owned()) return;', '!= 0x803u) return;'), False),
     }

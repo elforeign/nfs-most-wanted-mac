@@ -1998,7 +1998,7 @@ def main(selection_only=False):
             build=subprocess.run(['clang','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',
                                   '-I'+str(tmp),'-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                                   *(['-DNFS_PUBLIC=1'] if variant=='public' else []),
-                                  str(tmp/'test.c'),str(ROOT/'runtime/car_physics.c'),str(ROOT/'runtime/traffic_pilot.c'),
+                                  str(tmp/'test.c'),str(ROOT/'runtime/car_grip.c'),str(ROOT/'runtime/car_physics.c'),str(ROOT/'runtime/traffic_pilot.c'),
                                   '-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3500:]
             cases=[(0,1,0,6)] if variant=='public' else [(0,1,0,0)]

@@ -8,6 +8,8 @@ stale 18/250, ownership 4/248, mapping 3/246, opening press 14/248,
 held input 1/248, device switch 2/248, Note rollback 1/248,
 hold repeat 1/255, clear all 1/255.
 Physical-device tracker: 6/0 checks/failures; broken connection tracking 6/2.
+Pointer hide proof: fixed 1/2/3 calls after pad/mouse/key batches of 1,000 inputs;
+SHA-256-pinned original: 1,000 calls for 1,000 pad inputs.
 R3 review proof: original press-to-clear 350 checks/25 failures; release-to-clear 350/0.
 """
 from pathlib import Path
@@ -22,6 +24,10 @@ R = ROOT / 'runtime'
 # Authentic reviewed press-to-clear fragment; only this action changes in the baseline.
 R3_PRESS_BASELINE = '            if (edge & 512) osk_queue(s->generation, OSK_CLEAR, 0);          // R3: the whole field\n'
 assert hashlib.sha256(R3_PRESS_BASELINE.encode()).hexdigest() == 'abb773d64d8162ee143319b2084ad9908924e2339189f94996e196a215ed2371'
+
+# Original input handler: repeat pad input unconditionally hides the system pointer.
+POINTER_BASELINE = 'void prompts_input(int pad) {              // user32.m: a key or mouse button (0), a controller button or stick (1)\n    static float moved;\n    if (pad < 0) { moved += 1; if (moved < 16) return; pad = 0; }   // mouse movement: about 16 points of it\n    moved = 0;\n    physical_input = pad;\n    if (pad == 1) user32_hide_pointer();   // F21: hidden until the mouse moves (a key press or click also hands the prompts back)\n    if (!pad) pad_lost = 0;                // keys or the mouse: the player has moved on from the lost controller\n    if (pad_active == pad) return;\n    pad_active = pad;\n    if (mode() == 2) fprintf(stderr, "boot: button prompts: %s\\n", pad ? "console" : "keyboard");\n    if (diag_on) diag_event("prompts: input from the %s", pad ? "controller" : "keyboard/mouse");\n}\n'
+assert hashlib.sha256(POINTER_BASELINE.encode()).hexdigest() == '6f9af994e348051cdcf2edc1bba427a186081c320135d9657a12f94c3efc4bb6'
 
 PRE = r'''
 #include "funcs.h"
@@ -220,13 +226,13 @@ def main():
     # Execute the physical-device tracker itself, including connection-only changes.
     prompts = (R / 'padprompts.c').read_text()
     tracker = '\n'.join(re.search(r'void ' + name + r'\([^\n]*\) \{.*?\n\}', prompts, re.S).group()
-                        for name in ('prompts_input', 'prompts_pad_seen'))
+                        for name in ('prompts_pointer_visible', 'prompts_input', 'prompts_mouse_moved', 'prompts_pad_seen'))
     tracker_pre = r'''
     #include <stdio.h>
-    static int physical_input, pad_active=-1, pad_lost, failures;
+    static int physical_input, pointer_hidden, pad_active=-1, pad_lost, failures, hide_calls;
     static int diag_on;
     static int mode(void) { return 2; }
-    static void user32_hide_pointer(void) {}
+    static void user32_hide_pointer(void) { ++hide_calls; }
     static void diag_event(const char *s,...) { (void)s; }
     #define CHECK(x) do { if(!(x)) ++failures; } while(0)
     '''
@@ -249,6 +255,60 @@ def main():
             p = subprocess.run([str(exe)], capture_output=True, text=True)
             print(('broken tracker: ' if broken else '') + p.stdout.strip())
             assert p.returncode == int(broken), p.stderr
+    # Pointer visibility is independent of the 16-point prompt selection threshold.
+    pointer_main = r'''
+    int main(void) {
+      for(int i=0;i<1000;++i) prompts_input(1);
+      int pad_calls=hide_calls; CHECK(pad_calls==1);
+      prompts_mouse_moved(1); CHECK(pad_active==1 && physical_input==1);
+      for(int i=0;i<1000;++i) prompts_input(1);
+      int mouse_calls=hide_calls; CHECK(mouse_calls==2);
+      prompts_input(0);
+      for(int i=0;i<1000;++i) prompts_input(1);
+      int key_calls=hide_calls; CHECK(key_calls==3);
+      printf("pointer hide: pad=%d mouse=%d key=%d, %d failures\n",
+             pad_calls,mouse_calls,key_calls,failures);
+      // A click uses the same keyboard/mouse notification as a key press.
+      prompts_input(0); prompts_input(1); CHECK(hide_calls==4);
+      prompts_mouse_moved(0); prompts_input(1); CHECK(hide_calls==4);
+      prompts_mouse_moved(0.25f); prompts_input(1); CHECK(hide_calls==5);
+      prompts_input(-1); prompts_input(1); CHECK(hide_calls==6);
+      // Focus loss/return and the menu arrow invalidate without changing prompts.
+      for(int event=0;event<3;++event) {
+        prompts_pointer_visible(); CHECK(pad_active==1 && physical_input==1);
+        for(int i=0;i<1000;++i) prompts_input(1);
+        CHECK(hide_calls==7+event);
+      }
+      printf("pointer invalidation: %d failures\n",failures);
+      return failures?1:0;
+    }
+    '''
+    with tempfile.TemporaryDirectory(prefix='osk-pointer-') as d:
+        original = re.search(r'void prompts_input\([^\n]*\) \{.*?\n\}', tracker, re.S).group() + '\n'
+        for broken in (False, True):
+            src = Path(d) / 'pointer.c'; exe = Path(d) / 'pointer'
+            body = tracker.replace(original, POINTER_BASELINE) if broken else tracker
+            assert not broken or body != tracker
+            src.write_text(tracker_pre + body + pointer_main)
+            subprocess.run(['clang', '-std=c11', '-fsanitize=address,undefined', str(src), '-o', str(exe)],
+                           check=True, capture_output=True)
+            result = subprocess.run([str(exe)], capture_output=True, text=True)
+            print(('original pointer: ' if broken else '') + result.stdout.strip())
+            assert result.returncode == int(broken), result.stderr
+            assert ('pad=1000 mouse=2000 key=3000' if broken else 'pad=1 mouse=2 key=3') in result.stdout
+
+    # Actual Cocoa hooks must invalidate even input consumed by a menu/editor.
+    user32 = (R / 'user32.m').read_text()
+    for hook in ('windowDidBecomeKey:', 'windowDidResignKey:', 'void user32_menu_cursor('):
+        body = user32.split(hook, 1)[1].split('{', 1)[1]
+        body = re.sub(r'//[^\n]*', '', body)
+        assert body.lstrip().startswith('prompts_pointer_visible();'), hook
+    invalidation = user32.split('// Even input consumed by an editor/menu', 1)[1].split('if(stream_key_route_event(e))', 1)[0]
+    for event in ('MouseMoved', 'LeftMouseDragged', 'RightMouseDragged', 'OtherMouseDragged',
+                  'KeyDown', 'LeftMouseDown', 'RightMouseDown', 'OtherMouseDown'):
+        assert 'NSEventType' + event in invalidation, event
+    assert 'prompts_pointer_visible();' in invalidation
+    assert 'if (headless > 0) return;' in user32.split('void user32_hide_pointer(void) {', 1)[1].split('\n}', 1)[0]
     bodies = '\n'.join(translated(n, c, o) for n, c, o in [
         ('0057F1D0', 21, True), ('00586580', 21, True), ('00572FF0', 21, False),
         ('0056C820', 20, False), ('0056C7C0', 20, False), ('0056C7F0', 20, False),

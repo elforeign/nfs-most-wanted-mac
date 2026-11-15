@@ -51,6 +51,9 @@ uint32_t gmalloc(uint32_t n) {
 static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) {
     (void)c; (void)art; (void)name; return fake_texture(hash, 0);
 }
+static uint32_t make_xb_glyph(Cpu *c, const char *xb, const char *name, uint32_t hash) {
+    (void)c; (void)xb; (void)name; return fake_texture(hash, 1);
+}
 uint32_t x360_texture_load(Cpu *c, const char *file, uint32_t hash, uint32_t as_hash) {
     (void)c; (void)file; (void)hash;
     return available_xbox ? fake_texture(as_hash, 1) : 0;
@@ -87,6 +90,7 @@ POST = r'''
 int main(int argc, char **argv) {
     unsigned occupied = argc > 1 ? (unsigned)atoi(argv[1]) : 26;
     available_xbox = argc < 3 || atoi(argv[2]);
+    setenv("NFS_XBOX_PROMPT_ART", "off", 1);
     G = calloc(1, 16*1024*1024); assert(G);
     M32(OTHER_TEX_N) = occupied;
     for (unsigned i = 0; i < occupied; ++i) {

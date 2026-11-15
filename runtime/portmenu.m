@@ -1,3 +1,4 @@
+#include "game_select.h"
 // portmenu.m - the port's settings menu: F10 (Fn-F10 on Mac keyboards), the controller's touchpad click.
 //
 // What it shows: the settings registry (settings.h) by category, Picture / World / Cars & cutscenes / Mirror / Display &
@@ -38,20 +39,35 @@
 #include "guide.h"
 #include "replay_input.h"
 #include "cliprec.h"
+#if NFS_GAME == NFS_GAME_MW
 #include "report_github.h"
+#else
+#include "game_menu_report.inc"
+#endif
 #include "onscreen_keyboard.h"
 void osk_pass(Cpu *c);
 
+#if NFS_GAME == NFS_GAME_MW
 #define GAMEFLOW_STATE 0x00925E90u       // 3 front end, 6 racing
 #define SND_CTL_STATES 0x00911FE8u       // g_ActiveCtlStates (SetSoundControlState 004B9080)
+#endif
 const char *port_build_id(void);
 void report_note(const char *fmt, ...);
 void user32_menu_opening(void);          // user32.m: release held keys and buttons to the game
 void user32_menu_cursor(void);           // user32.m: the system cursor over the game while the menu is open
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_menu_policy.inc"
+#include "game_menu_shortcut.inc"
+#include "game_menu_text.inc"
+#endif
 
 // ---------------- state (game thread) ----------------
+#if NFS_GAME == NFS_GAME_MW
 static int is_open, tab, sel = -1, top, editing, dragging = -1, hover = -1, hover_tab = -1, dirty = 1;
+#else
+#include "game_menu_state.inc"
+#endif
 static int device;                       // help line: 0 keyboard, 1 mouse, 2 controller
 static char status[256];
 static double status_until, next_refresh;
@@ -84,6 +100,10 @@ void portmenu_open_folder(const char *path) {
 static int rows(int cat, Setting **out, int cap) {
     if (cat == SET_DIAGNOSTICS) guide_refresh();
     return settings_rows(cat, out, cap);
+}
+static int tab_has_rows(int cat) {
+    Setting *r[128];
+    return rows(cat, r, 128) > 0;
 }
 static int selectable(const Setting *s) { return s->type != SET_HEADING && s->type != SET_INFO; }
 static int value_of(const Setting *s) { return s->get ? s->get() : s->value; }
@@ -122,7 +142,15 @@ static void log_tab(void) {          // BOOT_DIAG: the tab and its rows ((-) not
     diag_event("menu: tab %s:%s", settings_category_names[tab], ids);
 }
 static void set_tab(int t) {
-    tab = (t + SET_NCATEGORIES) % SET_NCATEGORIES;
+    int direction = t < tab ? -1 : 1;
+    t = (t % SET_NCATEGORIES + SET_NCATEGORIES) % SET_NCATEGORIES;
+    int checked = 0;
+    while (!tab_has_rows(t) && checked < SET_NCATEGORIES) {
+        t = (t + direction + SET_NCATEGORIES) % SET_NCATEGORIES;
+        ++checked;
+    }
+    if (checked == SET_NCATEGORIES) return;
+    tab = t;
     sel = -1; top = 0; editing = 0; hover = -1;
     clamp_sel();
     dirty = 1;
@@ -190,6 +218,10 @@ static void set_open(int o) {
             return event;
         }];
         user32_menu_opening();           // keys and buttons held now are released to the game first
+        if (!tab_has_rows(tab)) {
+            for (int t = 0; t < SET_NCATEGORIES; ++t)
+                if (tab_has_rows(t)) { tab = t; break; }
+        }
         clamp_sel();
     }
     if (!o) stream_key_close();
@@ -202,11 +234,16 @@ static void set_open(int o) {
     report_note("menu %s", o ? "opened" : "closed");
     fprintf(stderr, "boot: settings menu %s\n", o ? "opened" : "closed");
     if (diag_on && o) log_tab();
+#if NFS_GAME == NFS_GAME_MW
     if (diag_on) diag_event("menu: %s (tab %s, game-flow %u)", o ? "open" : "closed", settings_category_names[tab], M32(GAMEFLOW_STATE));
+#else
+#include "game_menu_event.inc"
+#endif
 }
 void portmenu_toggle(void) { set_open(!is_open); }
 
 // ---------------- pause (pacing.c, every main-loop pass) ----------------
+#if NFS_GAME == NFS_GAME_MW
 int portmenu_hold(void) { return is_open && M32(GAMEFLOW_STATE) == 6; }
 void portmenu_pass(Cpu *c) {
     osk_pass(c);
@@ -223,10 +260,14 @@ void portmenu_pass(Cpu *c) {
     if (diag_on) diag_event("menu: game sound %s (control states %08X)", want ? "paused" : "resumed", M32(SND_CTL_STATES));
 }
 
+#else
+#include "game_menu_hold.inc"
+#endif
 // ---------------- keyboard ----------------
 // user32.m key_event, every key (scripted ones too): 1 = the menu took it.
 // Match the game's driving/menu decision in user32's pad mapping. Any input
 // capture belongs to Controls, including keyboard capture before it is bound.
+#if NFS_GAME == NFS_GAME_MW
 static int replay_game_blocked(void) {
     if(is_open || M32(GAMEFLOW_STATE)!=6) return 1;
     uint32_t sim=M32(0x009885E0u), io=M32(0x00920DE8u);
@@ -240,6 +281,9 @@ static int replay_game_blocked(void) {
             }
     return 0;
 }
+#else
+#include "game_menu_replay.inc"
+#endif
 static ReplayInput replayInput;
 void replay_controls_cancel(void) { replay_input_cancel(&replayInput); }
 void replay_controls_disconnect(void) { replay_input_disconnect(&replayInput); }
@@ -379,7 +423,7 @@ int portmenu_mouse(int kind, double vx, double vy, double dy) {
     if (kind == 0 || kind == 3) {
         if (kind == 0 && device != 1) { device = 1; dirty = 1; }
         int h = row >= 0 && selectable(r[row]) ? row : -1, ht = -1;
-        for (int t = 0; t < SET_NCATEGORIES; ++t) if (y >= TAB_Y - 6 && y < TAB_Y + 30 && x >= tab_x[t] && x < tab_x[t + 1]) ht = t;
+        for (int t = 0; t < SET_NCATEGORIES; ++t) if (tab_has_rows(t) && y >= TAB_Y - 6 && y < TAB_Y + 30 && x >= tab_x[t] && x < tab_x[t + 1]) ht = t;
         if (h != hover || ht != hover_tab) { hover = h; hover_tab = ht; dirty = 1; }
         if (kind == 3 && dragging >= 0 && dragging < n) {
             Setting *s = r[dragging];
@@ -401,7 +445,7 @@ int portmenu_mouse(int kind, double vx, double vy, double dy) {
     // kind 1: a click
     if (x < 0 || y < 0 || x > PW || y > PH) { set_open(0); return 1; }
     for (int t = 0; t < SET_NCATEGORIES; ++t)
-        if (y >= TAB_Y - 6 && y < TAB_Y + 30 && x >= tab_x[t] && x < tab_x[t + 1]) { set_tab(t); return 1; }
+        if (tab_has_rows(t) && y >= TAB_Y - 6 && y < TAB_Y + 30 && x >= tab_x[t] && x < tab_x[t + 1]) { set_tab(t); return 1; }
     if (row < 0 || !selectable(r[row])) return 1;
     sel = row; editing = 0; dirty = 1;
     Setting *s = r[row];
@@ -631,17 +675,22 @@ static int render(void) {
     // title
     text(ctx, "Settings", 28, 20, fnt(1, 22), c_text, 0);
     char b[512];
+#if NFS_GAME == NFS_GAME_MW
     snprintf(b, sizeof b, "NFSMW Mac port  ·  %s", port_build_id());
+#else
+#include "game_menu_title.inc"
+#endif
     text(ctx, b, PW - 28, 27, fnt(0, 12), c_faint, 1);
     // tabs
     double x = 28;
     const char *prev = device == 2 ? (user32_pad_layout_xbox() ? "LB" : "L1") : "Q", *next = device == 2 ? (user32_pad_layout_xbox() ? "RB" : "R1") : "E";
     x += text(ctx, prev, x, TAB_Y + 5, fnt(0, 12), c_faint, 0) + 12;
     for (int t = 0; t < SET_NCATEGORIES; ++t) {
+        tab_x[t] = x;
+        if (!tab_has_rows(t)) { tab_x[t + 1] = x; continue; }
         CTFontRef tf = fnt(t == tab ? 1 : 0, 14);
         CTLineRef line = (__bridge CTLineRef)cached_layout(settings_category_names[t], tf, c_text, 0);
         double w = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-        tab_x[t] = x;
         if (t == tab) fill(ctx, x, TAB_Y - 4, w + 16, 30, 15, c_accent);
         else if (t == hover_tab) fill(ctx, x, TAB_Y - 4, w + 16, 30, 15, c_hover);
         text(ctx, settings_category_names[t], x + 8, TAB_Y + 1, tf, t == tab ? c_tab : c_text, 0);
@@ -988,6 +1037,7 @@ void portmenu_frame(void) {
                                keyboard_layer.frame.origin.x, keyboard_layer.frame.origin.y,
                                keyboard_layer.frame.size.width, keyboard_layer.frame.size.height);
     }
+#if NFS_GAME == NFS_GAME_MW
     if (is_open && diag_on && last_ctx && getenv("BOOT_DIAG_SHOTS") && diag_frame_wanted(dev.frames, "BOOT_DIAG_SHOTS")) {
         char path[1024];
         snprintf(path, sizeof path, "%s/menu_%05llu.png", diag_dir, (unsigned long long)dev.frames);
@@ -996,4 +1046,7 @@ void portmenu_frame(void) {
         diag_event("menu: capture %s (panel %zux%zu in a %.0fx%.0f pt view, tab %s, row %d)", path, last_w, last_h, v.width, v.height,
                    settings_category_names[tab], sel);
     }
+#else
+#include "game_menu_capture.inc"
+#endif
 }

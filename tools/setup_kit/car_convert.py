@@ -952,6 +952,7 @@ def check_output_path(out, protected):
 
 
 def write_outputs(out, files, protected):
+    """Publish complete files; a None value removes an obsolete optional file."""
     check_output_path(out, protected)
     # Pin every ancestor. O_NOFOLLOW on just the leaf permits a swapped parent
     # symlink to redirect publication after the protected-tree check.
@@ -970,6 +971,8 @@ def write_outputs(out, files, protected):
             directory = child
         for name, data in files.items():
             require(Path(name).name == name, 'output filename must be a basename')
+            if data is None:
+                continue
             temporary = '.carbon-car-' + secrets.token_hex(12) + '.tmp'
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=directory)
@@ -980,6 +983,12 @@ def write_outputs(out, files, protected):
                 os.fsync(stream.fileno())
         for temporary, name in staged:
             os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        for name, data in files.items():
+            if data is None:
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
     finally:
         for temporary, _ in staged:
             try:
@@ -1793,7 +1802,7 @@ def _lighting_rows(data, size):
 
 def _converter_policy(platform, lighting, tracked, mac_audio=False):
     """Hash executable policy dependencies separately from local asset inputs."""
-    from . import car_lighting, car_paint, car_physics, car_sources, x360, xdvdfs
+    from . import car_grip, car_lighting, car_paint, car_physics, car_sources, x360, xdvdfs
     require(lighting is None or isinstance(lighting, Mapping), 'lighting options must be a mapping')
     options = dict(lighting or {})
     require(set(options) <= {'amplitudes', 'lamps', 'gains'}, 'unknown lighting policy option')
@@ -1804,7 +1813,7 @@ def _converter_policy(platform, lighting, tracked, mac_audio=False):
         gains.validate()
         settings['gains'] = vars(gains)
     modules = [Path(__file__), Path(huff.__file__), Path(car_texture_namespace.__file__), Path(car_lighting.__file__),
-               Path(car_paint.__file__), Path(car_physics.__file__),
+               Path(car_paint.__file__), Path(car_physics.__file__), Path(car_grip.__file__),
                Path(car_sources.__file__), Path(x360.__file__), Path(xdvdfs.__file__)]
     if mac_audio:
         from . import car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank
@@ -1826,9 +1835,9 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
                      attributes, mw_donor_dir, mw_root, out_dir, tracked, platform,
                      source_inputs, source_check, code, policy, lighting,
                      shared_textures=None, source_aliases=None, runtime_bindings=(),
-                     runtime_materials=(), audio_pack=None):
+                     runtime_materials=(), audio_pack=None, grip=None):
     """One assembly, resource, sidecar and audited writer path for both platforms."""
-    from . import car_lighting, car_paint, car_physics
+    from . import car_grip, car_lighting, car_paint, car_physics
     mw, mw_tex = (tracked.read(mw_donor_dir / n) for n in ('GEOMETRY.BIN', 'TEXTURES.BIN'))
     refs = validate_geometry(mw, input_pack=True)
     validate_textures(mw_tex, 5)
@@ -1889,6 +1898,7 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     physics = car_physics.metadata(attributes, car, donor)
     if physics is not None:
         files['PHYSICS.BIN'] = physics
+    files['GRIP.BIN'] = car_grip.optional_metadata(attributes, car, donor) if platform == 'pc' else grip
     files['PAINT.BIN'], paint = car_paint.metadata(shared_raw,
         lambda: unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC')), car, donor, attributes)
     collision = collision_sidecar(shared_raw, car, donor)
@@ -1914,7 +1924,7 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
         converter_policy=policy, approved=False, default_paint=paint,
         solids=stats['solids'], assemblies=stats['assemblies'], textures=nt,
         inputs=inputs, source_inputs=normalized_source, dependencies=dependencies,
-        outputs={n: hashlib.sha256(data).hexdigest() for n, data in files.items()},
+        outputs={n: hashlib.sha256(data).hexdigest() for n, data in files.items() if data is not None},
         lighting=dict(rows=sorted(rows), dynamic=selected.dynamic, unsupported=selected.unsupported),
         material_policy='MW roles and MW-derived lamp rows; classified neutral vertex illumination')
 
@@ -2015,7 +2025,8 @@ def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None):
             tracked=tracked, platform='x360', source_inputs=lambda: copy.deepcopy(bundle.inputs),
             source_check=check_source, code=code, policy=policy, lighting=options,
             shared_textures=bundle.shared_textures, source_aliases=bundle.texture_aliases,
-            runtime_bindings=bundle.runtime_bindings, runtime_materials=bundle.runtime_materials)
+            runtime_bindings=bundle.runtime_bindings, runtime_materials=bundle.runtime_materials,
+            grip=ci.grip_metadata(bundle._reader.read('GLOBAL/ATTRIBUTES.BIN'), car, donor))
     except ConversionError:
         raise
     except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, UnicodeError, np.linalg.LinAlgError) as exc:

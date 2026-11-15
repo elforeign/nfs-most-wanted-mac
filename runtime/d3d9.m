@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // d3d9.m - Direct3D 9 on Metal.
 //
 // COM objects live in guest memory: [vtable][host index]. Vtables are arrays of host-function addresses
@@ -327,7 +328,10 @@ static int vol_GetLevelDesc(Cpu *c) {  // D3DVOLUME_DESC: Format, Type, Usage, P
 static int b_Lock(Cpu *c) {            // (this, offset, size, ppData, flags)
     Obj *b = THIS;
     b->buffer_lock_write = !(arg(c, 4) & 0x10); // D3DLOCK_READONLY
-    if (b->buffer_lock_write) { ++b->buffer_generation; render_panes_changed(b); }
+    // A writable Lock also marks the buffer for re-upload: D3D9 uploads a managed buffer's changes when it is next
+    // used, and some writers never Unlock (a CPU morph blend that writes a part's vertices between two Locks).
+    // (2: dirty from a Lock alone; Unlock makes it 1. BOOT_DIAG counts the uploads only a Lock asked for.)
+    if (b->buffer_lock_write) { ++b->buffer_generation; b->dirty = 2; render_panes_changed(b); }
     M32(arg(c, 3)) = b->mem[0] + arg(c, 1);
     RET(D3D_OK, 5);
 }
@@ -389,7 +393,14 @@ static int q_GetData(Cpu *c) {         // (this, data*, size, flags)
 }
 
 // ---------------- IDirect3D9 ----------------
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_widescreen.inc"
+#endif
 static void fill_mode(uint32_t p, uint32_t w, uint32_t h, uint32_t fmt) { M32(p) = w; M32(p + 4) = h; M32(p + 8) = 60; M32(p + 12) = fmt; }
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_mode_provider.inc"
+#endif
+#if NFS_GAME == NFS_GAME_MW
 static const uint32_t modes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {1280, 960}, {1280, 1024}, {1360, 768},
                                     {1600, 900}, {1600, 1200}, {1920, 1080}, {1920, 1200}, {2560, 1440}};
 // The adapter's modes: the common ones above plus widescreen.c's six slots (which follow the display), so the game
@@ -407,6 +418,9 @@ static uint32_t nmodes(void) {
     }
     return nmodes_;
 }
+#else
+#include "game_display_modes.inc"
+#endif
 #define NMODES nmodes()
 static void mode_at(uint32_t i, uint32_t *w, uint32_t *h) { *w = adapter_modes[i][0]; *h = adapter_modes[i][1]; }
 static int fmt_is_display(uint32_t f) { return f == 22 || f == 23 || f == 21; }
@@ -565,6 +579,7 @@ static void default_states(void) {
 int widescreen_native_slot(void);        // widescreen.c
 // F10 > Picture > Anti-aliasing (aa_setting.c): the same variable the Video options edit, applied as its Accept does.
 int aa_game_levels(void) { return (int)render_msaa_levels(NULL); }
+#if NFS_GAME == NFS_GAME_MW
 int aa_game_get(void) { return (int)M32(FSAA_LEVEL); }
 void aa_game_apply(int level) {
     void boot_reg_set_dword(const char *name, uint32_t v);
@@ -588,14 +603,23 @@ void first_run_settings(Cpu *c, const char *where) {     // also from widescreen
     fprintf(stderr, "boot: first run, %s: detection picked g_FSAALevel %u g_RacingResolution %u, using %u %u, g_ShadowDetail %u (defaults: 4x MSAA, shadows 2, native resolution; BOOT_REG wins)\n", where, aa, res,
             M32(FSAA_LEVEL), M32(RES_INDEX), M32(SHADOW_DETAIL));
 }
+#else
+#include "game_display_aa.inc"
+void first_run_settings(Cpu *c, const char *where) { }
+#endif
 void f_006C1990_orig(Cpu *c);
+#if NFS_GAME == NFS_GAME_MW
 void f_006C1990(Cpu *c) {                      // the video settings' hardware detection (default settings)
     f_006C1990_orig(c);
     first_run_settings(c, "video defaults");
 }
+#endif
 
 static int d_CreateDevice(Cpu *c) {            // (this, adapter, type, hFocusWindow, behavior, pp*, ppDevice)
     envcube_configure();
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (diag_on) { extern void diag_flush(void); diag_event("PRIVATE REACHED IDirect3D9::CreateDevice"); diag_flush(); }
+#endif
     uint32_t pp = arg(c, 5);
     memcpy(dev.pp, G + pp, sizeof dev.pp);
     dev.hwnd = dev.pp[7] ? dev.pp[7] : arg(c, 3);
@@ -615,13 +639,20 @@ static int d_CreateDevice(Cpu *c) {            // (this, adapter, type, hFocusWi
     // own wider gamut, oversaturated).
     if (layer) { layer.device = mtl; layer.pixelFormat = MTLPixelFormatBGRA8Unorm; layer.framebufferOnly = YES; layer.colorspace = srgb_colorspace(); }
     fprintf(stderr, "boot: D3D9 CreateDevice(hwnd %08X, behavior %X) on %s%s; antialiasing: level %u, menu maximum %u, MultiSample %u/%u\n", dev.hwnd, dev.behavior,
+#if NFS_GAME == NFS_GAME_MW
             mtl.name.UTF8String, layer ? "" : " (no window layer)", M32(0x00901808), M32(0x00901890), dev.pp[4], dev.pp[5]);
+#else
+            mtl.name.UTF8String, layer ? "" : " (no window layer)", game_diag_aa_requested(), game_diag_aa_active(), dev.pp[4], dev.pp[5]);
+#endif
     default_states();
     setup_swapchain();
     render_init();
     memcpy(G + pp, dev.pp, sizeof dev.pp);           // the runtime fills in 0 sizes and formats
     for (int i = 0; i < 512; ++i) for (int k = 0; k < 16; ++k) dev.transform[i][k] = (k % 5 == 0) ? 1.0f : 0.0f;
     M32(arg(c, 6)) = dev.self->guest;
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (diag_on) { extern void diag_flush(void); diag_event("PRIVATE RETURN IDirect3D9::CreateDevice success"); diag_flush(); }
+#endif
     RET(D3D_OK, 7);
 }
 
@@ -657,6 +688,7 @@ uint32_t view_hash(void) {                     // diag: FNV of the current D3DTS
     for (int i = 0; i < 64; ++i) h = (h ^ p[i]) * 16777619u;
     return h;
 }
+#if NFS_GAME == NFS_GAME_MW
 static void present(void) {
     envcube_frame();
     ++dev.frames;
@@ -773,6 +805,15 @@ static int v_Present(Cpu *c) {
     gil_yield(c);
     RET(D3D_OK, 5);
 }
+#else
+static void present(void)
+#include "game_menu_present.inc"
+
+static void autodrive_players(Cpu *c, int mode) { }
+static int v_Present(Cpu *c)
+#include "game_picture_present.inc"
+
+#endif
 static int v_GetBackBuffer(Cpu *c) {           // (this, iSwap, i, type, pp)
     M32(arg(c, 4)) = dev.backbuffer;
     obj_addref(obj(dev.backbuffer));
@@ -808,7 +849,11 @@ static int v_GetGammaRamp(Cpu *c) {
 static Obj *make_texture(int kind, uint32_t vt, uint32_t w, uint32_t h, uint32_t d, uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool) {
     Obj *t = new_obj(kind, vt);
     uint32_t maxl = 1;
+#if NFS_GAME == NFS_GAME_MW
     for (uint32_t m = w > h ? w : h; m > 1; m >>= 1) ++maxl;
+#else
+    for (uint32_t m = d > w && d > h ? d : w > h ? w : h; m > 1; m >>= 1) ++maxl;
+#endif
     if (levels == 0 || levels > maxl) levels = (usage & 0x400) ? 1 : maxl;   // AUTOGENMIPMAP exposes one level
     if (levels > 16) levels = 16;
     t->w = w; t->h = h; t->d = d ? d : 1; t->levels = levels; t->usage = usage; t->fmt = fmt; t->pool = pool;
@@ -1214,6 +1259,9 @@ uint32_t d3d9_device_guest(void) { return dev.self ? dev.self->guest : 0; }
 
 int win32_d3d9(Cpu *c, const char *fn) {
     if (!strcmp(fn, "Direct3DCreate9")) {        // (SDKVersion)
+#if NFS_GAME == NFS_GAME_PRIVATE
+        if (diag_on) { extern void diag_flush(void); diag_event("PRIVATE REACHED Direct3DCreate9"); diag_flush(); }
+#endif
         d3d9_init();
         if (boot_trace) fprintf(stderr, "      Direct3DCreate9(SDK %u)\n", arg(c, 0));
         Obj *d = nobjs ? objs[0] : new_obj(K_D3D, vt_d3d);
@@ -1221,3 +1269,7 @@ int win32_d3d9(Cpu *c, const char *fn) {
     }
     return 0;
 }
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+#include "game_d3dx.inc"
+#endif

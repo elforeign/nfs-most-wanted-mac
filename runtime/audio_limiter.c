@@ -1,3 +1,4 @@
+#include "game_select.h"
 // Snd's final float -> int16 conversion, BEFORE DirectSound. Float planes use 16-bit sample units.
 // 008233BC calls 00823104 for <=256 frames; 0082333F..00823395 calls all six master converters in order,
 // then 00825C0B interleaves their int16 outputs. Capture the six planes after their filter chains, limit
@@ -47,6 +48,7 @@ static void nan_check(unsigned ch, uint32_t obj, float sample, uint32_t i) {
 // post-chain mix stays below 1e-6 RMS for over 1 s in game (game-flow 6) while the pre-chain mix is not silent, or
 // when the whole chain is silent in game for over 1 s (then the voices/banks are the suspects: see x360abk lines).
 static struct { double pre[6], post[6], out[6]; uint64_t n[6], nonfinite_pre[6]; uint64_t since; int silent_logged; uint64_t quiet_since; } md;
+#if NFS_GAME == NFS_GAME_MW
 static void mixdiag_tick(uint32_t obj0) {
     uint64_t now = host_ticks();
     if (!md.since) md.since = now;
@@ -77,7 +79,9 @@ static void mixdiag_tick(uint32_t obj0) {
     memset(md.n, 0, sizeof md.n); memset(md.nonfinite_pre, 0, sizeof md.nonfinite_pre);
     md.since = now;
 }
+#endif
 
+#if NFS_GAME == NFS_GAME_MW
 void f_00825957(Cpu *c) {
     enum { MASTER = 0x009C2478, STRIDE = 0x70, MAX_FRAMES = 256 };
     static _Thread_local struct {
@@ -162,3 +166,4 @@ void f_00825957(Cpu *c) {
     c->eax = frames;
     c->esp += 4; // cdecl; all six results are consumed only after the caller's conversion loop
 }
+#endif

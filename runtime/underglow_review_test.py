@@ -1,4 +1,5 @@
-"""Five review regressions, with SHA-256-pinned 2cc2b719 function fragments.
+"""Emitter expectations 4/8 -> 0/0: optical strips no longer submit quads.
+Five review regressions, with SHA-256-pinned 2cc2b719 function fragments.
 1: 120 unchanged frames rebuild 120 -> 0; part/car changes each rebuild 1 -> 1
    (131 checks: original fails 2, fixed passes all).
 2: 81,920 pool pixels compute duties 81,922 -> 1, turn 40,961 -> 0
@@ -63,11 +64,11 @@ int main(int argc,char **argv) {
         MF32(self+0xa4)+=.01f;before=mount_rebuilds;
         underglow_light_begin(&c,&capture);CHECK(capture.valid);CHECK(mount_rebuilds==before+1);
     } else if(!strcmp(argv[1],"duties")) {
-        f_0074E160(&c);CHECK(strips==4 && pools==1);
+        f_0074E160(&c);CHECK(strips==0 && pools==1);
         unsigned first=duty_calls;
         MF32(0x52000)=MF32(0x52014)=cosf(.25f);MF32(0x52004)=sinf(.25f);MF32(0x52010)=-sinf(.25f);
         ++dev.frames;++frame_now;
-        f_0074E160(&c);CHECK(strips==8 && pools==2);
+        f_0074E160(&c);CHECK(strips==0 && pools==2);
         printf("preset duty computations: initial=%u turn=%u total=%u pixels=81920\n",first,duty_calls-first,duty_calls);
         CHECK(first==1);CHECK(duty_calls==1);
     } else {
@@ -172,6 +173,7 @@ def light_checks(tmp, fixture_data):
     source = (ROOT / 'runtime/underglow_light.m').read_text()
     wrapper = (ROOT / 'runtime/diag.c').read_text()
     wrapper = wrapper[wrapper.index('\nunsigned diag_car1[4];')+1:wrapper.index('void f_007387E0_orig')]
+    wrapper = wrapper.replace('materials_car_diagnostics', 'f_0074E160')
     harness = light.HARNESS[:light.HARNESS.index('int main(int argc,char **argv)')]
     harness = harness.replace('void diag_event(const char *fmt,...){}', 'void review_diag(const char *fmt,...);\nvoid diag_event(const char *fmt,...){review_diag(fmt);}')
     setup = light.HARNESS.split(' G=calloc(1,16*1024*1024);', 1)[1].split(' f_0074E160(&c);CHECK(original_calls==1);', 1)[0]

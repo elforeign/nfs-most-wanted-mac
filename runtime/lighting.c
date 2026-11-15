@@ -54,11 +54,12 @@ static int wl_mode(void) {
     return mode;
 }
 
-static const char *const kTunnel[] = {"Original", "Keep"}, *const kTunnelV[] = {"pc", "keep"};
+static const char *const kTunnel[] = {"Original", "Keep", "Keep + sky light"}, *const kTunnelV[] = {"pc", "keep", "sky"};
 static Setting s_tunnel = {.id = "graphics.tunnel_shadows", .category = SET_WORLD, .order = 30, .label = "Tunnel shadows",
-    .help = "Original fades sun shadows out inside tunnels, while Keep retains the mapped shadows there (roof coverage still matters).",
-    .type = SET_CHOICE, .choices = kTunnel, .values = kTunnelV, .nchoices = 2,
-    .def = 1, .env = "NFS_TUNNEL_SHADOWS"};
+    .help = "Original fades sun shadows out inside tunnels, while Keep retains the mapped shadows there (roof coverage still matters). "
+            "Keep + sky light also lets a car in a cast shadow lose only the sun, keeping its two fill lights.",
+    .type = SET_CHOICE, .choices = kTunnel, .values = kTunnelV, .nchoices = 3,
+    .def = 2, .env = "NFS_TUNNEL_SHADOWS"};
 __attribute__((constructor)) static void lighting_register(void) {
     settings_add(&s_tunnel);
 }
@@ -68,7 +69,15 @@ __attribute__((constructor)) static void lighting_register(void) {
 // d3dx_effect.c intercepts that named parameter, so both uploads use 1-strength
 // under Keep, omitting tunnelBlend (00982BA8). No caster/fit changes.
 float lighting_inv_shadow_strength(float original) {
-    return s_tunnel.value == 1 ? 1.0f - rf(0x008FAE68u) : original;
+    return s_tunnel.value >= 1 ? 1.0f - rf(0x008FAE68u) : original;
+}
+// Keep + sky light: the car paint PS (materials.m) scales only the sun (rig light 0) by the shadow factor. Both
+// games scale all three rig lights (PC t1 PS, X360 09bb919c); a cast shadow blocks the sun, not the sky the fill lights stand for.
+int lighting_car_sky_fill(void) {
+    int postfx_look_variant(const char *v);   // x360_post.m: BOOT_DIAG_LOOK_AB held variants
+    if (postfx_look_variant("skyoff")) return 0;
+    if (postfx_look_variant("skyon")) return 1;
+    return s_tunnel.value == 2;
 }
 void lighting_set_world(int neutral) {   // the F10 menu (live: read at every setter call)
     mode = neutral != 0;
@@ -94,7 +103,7 @@ static void ambient_rgb(uint32_t tod, float out[3]) {
     if (!in_game) reported = 0;
     if (diag_on && in_game && !reported) {
         diag_event("lighting_options: tunnel_shadows=%s shade_desat=2/3 neutral=%d tod=%08X time=%.3f ambient %.6f %.6f %.6f -> %.6f %.6f %.6f",
-                   s_tunnel.value ? "keep" : "pc", active, tod, rf(tod + 8),
+                   kTunnelV[s_tunnel.value], active, tod, rf(tod + 8),
                    before[0], before[1], before[2], out[0], out[1], out[2]);
         reported = 1;
     }

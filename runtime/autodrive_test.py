@@ -9,6 +9,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT=Path(__file__).resolve().parents[1]
 PRE=r'''
 #include "host.h"
@@ -49,7 +53,7 @@ int main(void){
 }
 '''
 def main():
-    src=(ROOT/'runtime/d3d9.m').read_text()
+    src=mw_source(ROOT/'runtime/d3d9.m')
     body=re.search(r'static void autodrive_players\(Cpu \*c, int mode\) \{.*?\n\}',src,re.S)[0]
     mutants={
         'P2-omitted':('mode == 2 && split_view_rect(0x009196C0u, NULL) ? 2 : 1','1'),

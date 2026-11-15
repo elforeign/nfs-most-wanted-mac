@@ -2,7 +2,8 @@
 //
 // A small Mac app in front of the setup backend (tools/setup.py). The player chooses an installed PC game folder (or
 // its .zip, or the PC disc images with the 1.3 update) and, optionally, their own Xbox 360 copy; the backend builds the
-// native app on this Mac. The app carries no game files:
+// native app on this Mac. A bundle whose Info.plist sets SetupProduct=carbon installs Carbon instead: its PC folder and,
+// optionally, its own Xbox 360 copy, without Most Wanted's extras. The app carries no game files:
 // it ships this project's reviewed source (Resources/source.tar.gz), a relocatable Python (Resources/python) and the
 // FFmpeg source tarball (Resources/third_party/dl), and talks to the backend only through its command line and its
 // JSON-line events (the setup contract).
@@ -14,6 +15,7 @@
 //   Setup --install-cancel-test STAGE GRACE MARKER   cancels a fake backend in STAGE whose TERM handler takes 2*GRACE s
 //                                                    to "restore" (writes MARKER); reports exit status and the marker
 //   Setup --quit-policy-test       what quitting does when idle, while checking and while building, as JSON
+//   Setup --carbon-product-test    the Carbon product's backend commands, app name and page order beside Most Wanted's
 
 import AppKit
 import SwiftUI
@@ -34,6 +36,7 @@ let stageTable: [(id: String, title: String)] = [
     ("shaders", "Building the graphics code"),
     ("ffmpeg", "Building the video decoder"),
     ("runtime", "Linking the game runtime"),
+    ("carbon", "Translating Carbon"),
     ("assets", "Preparing game data"),
     ("bundle", "Building and signing the app"),
     ("install", "Installing the app"),
@@ -476,11 +479,30 @@ struct X360Extras {
     }
 }
 
-func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL,
+/// The game this Setup installs: the bundle's SetupProduct key (absent: Most Wanted).
+enum SetupProduct: String {
+    case mw, carbon
+    static var bundled: SetupProduct {
+        SetupProduct(rawValue: Bundle.main.object(forInfoDictionaryKey: "SetupProduct") as? String ?? "mw") ?? .mw
+    }
+    var title: String { self == .mw ? "NFS Most Wanted Native" : "NFS Carbon Native" }
+}
+
+// carbon: the Carbon product (a plain flag: tests compile this function on its own).
+func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, carbon: Bool = false,
                       pcUpdate: URL? = nil, pcExe: URL? = nil, pcDiscs: [URL] = [], x360Extras: X360Extras? = nil) -> [String] {
     if mode == .exportApp {
         return ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
                 "--export-all-in-one", "--app", pc.path, "--dest", dest.path, "--work", work.path, "--events"]
+    }
+    if carbon {
+        // Carbon reads only its PC folder and, optionally, its own Xbox 360 copy (the artwork has no parts to choose).
+        var a = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
+                 mode == .check ? "--check" : "--build", "--game", "carbon", "--carbon", pc.path]
+        if let x = x360 { a += ["--x360", x.path] }
+        a += ["--dest", dest.path, "--work", work.path, "--events"]
+        if let digest = bundledPrebuiltDigest() { a += ["--prebuilt-manifest-sha256", digest] }
+        return a
     }
     var a = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
              mode == .check ? "--check" : "--build", "--pc", pc.path]
@@ -495,7 +517,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL,
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "7deace4b65e40706c1907e625228ffd4d516c4b8046474a53b5e4fa093442107"
+let carSelectionsSHA256 = "43d1ae014a1ac94bf862c07930a2c9f291bf63244b77d246bf92890b272a5c87"
 
 struct CarChoice: Identifiable {
     let platform: String
@@ -507,7 +529,10 @@ struct CarChoice: Identifiable {
         let names = ["300C": "Chrysler 300C", "997GT3RS": "Porsche 911 GT3 RS",
                      "BRERA": "Alfa Romeo Brera", "CCX": "Koenigsegg CCX",
                      "CORVETTEZ06": "Chevrolet Corvette Z06", "EUROPA": "Lotus Europa S",
-                     "JAGUARXK": "Jaguar XK", "MR2": "Toyota MR2", "R32": "Volkswagen Golf R32", "R8": "Audi R8"]
+                     "JAGUARXK": "Jaguar XK", "MR2": "Toyota MR2", "R32": "Volkswagen Golf R32", "R8": "Audi R8",
+                     "240SX": "Nissan 240SX", "997TT": "Porsche 911 Turbo",
+                     "CAMARON": "Chevrolet Camaro Concept", "G35": "Infiniti G35",
+                     "MAZDASPEED3": "Mazdaspeed3", "MUSTANGSHLBYN": "Shelby GT500"]
         return names[folder] ?? folder
     }
     var carHash: String {
@@ -695,6 +720,8 @@ enum PCKind: Int { case folder, disc }
 
 final class Setup: ObservableObject {
     static let shared = Setup()
+    let product: SetupProduct
+    var carbonProduct: Bool { product == .carbon }
 
     @Published var showReadMe = false
     @Published var page: Page = .welcome
@@ -736,15 +763,18 @@ final class Setup: ObservableObject {
     private var stderrTail: [String] = []
     private var lastLog = ""
 
-    init() {
+    init(product: SetupProduct = .bundled) {
+        self.product = product
         let apps = URL(fileURLWithPath: "/Applications")
         dest = FileManager.default.isWritableFile(atPath: apps.path) ? apps
             : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
     }
 
-    var installedApp: URL { dest.appendingPathComponent("NFS Most Wanted Native.app") }
+    var installedApp: URL { dest.appendingPathComponent(product.title + ".app") }
     var freeGB: Double? { freeSpaceGB(at: dest) }
-    var requiredGB: Double { x360Extras.requiredGB(hasX360: x360 != nil) }
+    var requiredGB: Double { carbonProduct ? requiredFreeGB : x360Extras.requiredGB(hasX360: x360 != nil) }
+    /// After the Xbox 360 page: Most Wanted's extras page; Carbon has none (its car import is Most Wanted's).
+    var afterX360: Page { carbonProduct ? .review : .extras }
     var enoughSpace: Bool { (freeGB ?? requiredGB) >= requiredGB }
 
     func pickFolder(message: String, files: Bool = false, types: [UTType] = [], folders: Bool = true) -> URL? {
@@ -767,6 +797,13 @@ final class Setup: ObservableObject {
     }
 
     func choosePC() {
+        if carbonProduct {
+            guard let url = pickFolder(message: "Choose the Need for Speed Carbon folder (the one with NFSC.exe and TRACKS), or NFSC.exe itself.",
+                                       files: true, types: [.folder, .exe]) else { return }
+            pc = pcRoot(url); features = nil; x360 = nil; x360Status = ""
+            runCheck(forX360: false)
+            return
+        }
         // The game folder, or a .zip of it (Setup unpacks a copy; the .zip is only read).
         guard var url = pickFolder(message: "Choose the Need for Speed: Most Wanted folder (the one with speed.exe), speed.exe itself, or a .zip of that folder.",
                                    // .folder too: with allowedContentTypes set, the panel greys out "Choose" for any
@@ -831,6 +868,14 @@ final class Setup: ObservableObject {
         carbon = url
         state.recognition = nil
         runCars(.carsCheck)
+    }
+
+    /// Carbon's console copy: its artwork has nothing to choose, so it is checked (and prepared) at once.
+    func chooseCarbonX360() {
+        guard let url = pickFolder(message: "Choose your Need for Speed Carbon Xbox 360 copy: its folder, or the .iso file.", files: true) else { return }
+        x360 = url
+        features = nil
+        runCheck(forX360: true)
     }
 
     func loadCarChoices() {
@@ -910,6 +955,13 @@ final class Setup: ObservableObject {
         }
     }
 
+    func installArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL) -> [String] {
+        let disc = pcKind == .disc
+        return backendArguments(mode: mode, pc: pc, x360: x360, dest: dest, work: work, carbon: carbonProduct,
+                                pcUpdate: disc ? pcUpdate : nil, pcExe: disc ? pcExe : nil,
+                                pcDiscs: disc ? pcDiscs.keys.sorted().compactMap { pcDiscs[$0] } : [], x360Extras: x360Extras)
+    }
+
     // One backend run, check or build; all state changes happen on the main queue.
     private func launch(mode: RunMode, pc: URL, x360: URL?, destination: URL? = nil,
                         arguments: [String]? = nil,
@@ -927,10 +979,7 @@ final class Setup: ObservableObject {
             try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
             let env = childEnvironment(inherited: ProcessInfo.processInfo.environment, python: python,
                                        roots: work.appendingPathComponent("roots.txt").path)
-            let disc = pcKind == .disc
-            let c = try ChildProcess(exe: python, args: arguments ?? backendArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work,
-                                                                       pcUpdate: disc ? pcUpdate : nil, pcExe: disc ? pcExe : nil,
-                                                                       pcDiscs: disc ? pcDiscs.keys.sorted().compactMap { pcDiscs[$0] } : [], x360Extras: x360Extras),
+            let c = try ChildProcess(exe: python, args: arguments ?? installArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work),
                                      env: env, cwd: sourceDir().path)
             child = c
             c.run(onOut: { [weak self] data in
@@ -981,9 +1030,9 @@ final class Setup: ObservableObject {
             if let f = st.features { self.features = f }
             switch outcome {
             case .success:
-                if forX360 { self.x360Status = "Your Xbox 360 copy can be used." }
+                if forX360 { self.x360Status = self.carbonProduct ? "Your Carbon Xbox 360 copy can be used." : "Your Xbox 360 copy can be used." }
                 else {
-                    self.pcStatus = self.pcKind == .disc ? "Your disc images can be used."
+                    self.pcStatus = self.carbonProduct ? "Your Carbon game folder can be used." : self.pcKind == .disc ? "Your disc images can be used."
                         : pc.pathExtension.lowercased() == "zip" ? "Your game .zip can be used." : "Your game folder can be used."
                     // Notes on the game itself, e.g. no MOVIES folder (backend movie_note).
                     for note in st.warnings where note.hasPrefix("pc: ") { self.pcStatus += "\n" + note.dropFirst(4) }
@@ -1005,7 +1054,7 @@ final class Setup: ObservableObject {
         exporting = false
         page = .build; running = true; outcome = nil; started = Date()
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
-                                                         reason: "Building NFS Most Wanted Native")
+                                                         reason: "Building " + product.title)
         launch(mode: .build, pc: pc, x360: x360) { [weak self] outcome, _ in
             guard let self else { return }
             if let a = self.activity { ProcessInfo.processInfo.endActivity(a) }
@@ -1115,7 +1164,7 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text("NFS Most Wanted Native Setup").font(.title).bold()
+                Text(s.product.title + " Setup").font(.title).bold()
                 Spacer()
                 Button("Read Me") { s.showReadMe = true }
             }
@@ -1145,7 +1194,8 @@ struct ContentView: View {
 
     var welcome: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Builds the native Mac version of Need for Speed: Most Wanted (2005) on this Mac, from your own copy of the PC game. "
+            Text("Builds the native Mac version of " + (s.carbonProduct ? "Need for Speed Carbon (2006)" : "Need for Speed: Most Wanted (2005)")
+                 + " on this Mac, from your own copy of the PC game. "
                  + "It contains no game files, everything happens on this Mac, and your game folder is never changed.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             GroupBox(label: Text("Apple's developer tools").bold()) {
@@ -1158,15 +1208,43 @@ struct ContentView: View {
                 }.padding(4)
             }
             nav(back: nil, next: .pc, nextEnabled: s.tools)
-            Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
-            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
-            Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
-                .font(.caption).foregroundStyle(.secondary)
+            if !s.carbonProduct {  // Most Wanted's car extras and its all-in-one export
+                Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
+                Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+                Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
     var pcPage: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if s.carbonProduct { carbonPCBox } else { mwPCBox }
+            nav(back: .welcome, next: .x360, nextEnabled: s.pcOK)
+        }
+    }
+
+    var pcStatusLabel: some View {
+        Label(s.pcStatus, systemImage: s.pcOK ? "checkmark.circle.fill" : (s.checking ? "hourglass" : "exclamationmark.triangle.fill"))
+            .foregroundStyle(s.pcOK ? .green : (s.checking ? .secondary : .orange))
+            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+    }
+
+    var carbonPCBox: some View {
+        GroupBox(label: Text("Your Carbon PC game").bold()) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(s.pc?.path ?? "The installed folder with NFSC.exe and TRACKS.")
+                        .lineLimit(2).truncationMode(.middle).foregroundStyle(s.pc == nil ? .secondary : .primary)
+                    Spacer()
+                    Button("Choose…") { s.choosePC() }.disabled(s.checking)
+                }
+                if !s.pcStatus.isEmpty { pcStatusLabel }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+        }
+    }
+
+    var mwPCBox: some View {
             GroupBox(label: Text("Your PC game").bold()) {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("", selection: Binding(get: { s.pcKind }, set: { s.chooseKind($0) })) {
@@ -1190,15 +1268,9 @@ struct ContentView: View {
                         choice("1.3 update", s.pcUpdate, "nfsmwpatch1.3.exe") { s.chooseUpdate() }
                         choice("speed.exe", s.pcExe, "A speed.exe with the version 1.3 code") { s.chooseExe() }
                     }
-                    if !s.pcStatus.isEmpty {
-                        Label(s.pcStatus, systemImage: s.pcOK ? "checkmark.circle.fill" : (s.checking ? "hourglass" : "exclamationmark.triangle.fill"))
-                            .foregroundStyle(s.pcOK ? .green : (s.checking ? .secondary : .orange))
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    }
+                    if !s.pcStatus.isEmpty { pcStatusLabel }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
-            nav(back: .welcome, next: .x360, nextEnabled: s.pcOK)
-        }
     }
 
     func choice(_ title: String, _ url: URL?, _ placeholder: String, _ action: @escaping () -> Void) -> some View {
@@ -1212,25 +1284,27 @@ struct ContentView: View {
 
     var x360Page: some View {
         VStack(alignment: .leading, spacing: 12) {
-            GroupBox(label: Text("Your Xbox 360 copy (optional)").bold()) {
+            GroupBox(label: Text(s.carbonProduct ? "Your Carbon Xbox 360 copy (optional)" : "Your Xbox 360 copy (optional)").bold()) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("If you own the Xbox 360 version, choose its folder or .iso to add its extra features. Skip this to build with the PC game only.")
+                    Text(s.carbonProduct
+                         ? "If you own Need for Speed Carbon for Xbox 360, choose its folder or .iso: Setup takes its button art and its two controller diagrams, shown while you play with an Xbox controller. Skip this and Carbon draws its own Xbox buttons."
+                         : "If you own the Xbox 360 version, choose its folder or .iso to add its extra features. Skip this to build with the PC game only.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Text(s.x360?.path ?? "None chosen").lineLimit(2).truncationMode(.middle)
                             .foregroundStyle(s.x360 == nil ? .secondary : .primary)
                         Spacer()
                         if s.x360 != nil { Button("Remove") { s.x360 = nil; s.x360Status = ""; s.runCheck(forX360: false) }.disabled(s.checking) }
-                        Button("Choose…") { s.chooseX360() }.disabled(s.checking)
+                        Button("Choose…") { if s.carbonProduct { s.chooseCarbonX360() } else { s.chooseX360() } }.disabled(s.checking)
                     }
                     if !s.x360Status.isEmpty {
                         Label(s.x360Status, systemImage: s.checking ? "hourglass" : (s.x360 != nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"))
                             .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     }
-                    featureList
+                    if !s.carbonProduct { featureList }  // Most Wanted's Xbox 360 features
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
-            nav(back: .pc, next: .extras, nextEnabled: true)
+            nav(back: .pc, next: s.afterX360, nextEnabled: true)
         }
     }
 
@@ -1358,15 +1432,19 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             GroupBox(label: Text("Review").bold()) {
                 VStack(alignment: .leading, spacing: 6) {
-                    row(s.pcKind == .disc ? "PC discs" : "PC game", s.pc?.path ?? "")
+                    row(s.carbonProduct ? "Carbon PC" : s.pcKind == .disc ? "PC discs" : "PC game", s.pc?.path ?? "")
                     if s.pcKind == .disc {
                         ForEach(s.pcDiscs.keys.sorted(), id: \.self) { n in row("Disc \(n)", s.pcDiscs[n]?.path ?? "") }
                         if let u = s.pcUpdate { row("1.3 update", u.path) }
                         if let e = s.pcExe { row("speed.exe", e.path) }
                     }
-                    row("Xbox 360 copy", s.x360?.path ?? "None (PC game only)")
-                    row("Xbox 360 extras", s.x360 == nil ? "PC assets" : s.x360Extras.summary)
-                    row("Other-game extras", s.extras.skipped ? "Skipped" : s.extras.message)
+                    if s.carbonProduct {
+                        row("Carbon Xbox 360", s.x360?.path ?? "None (Carbon draws its own Xbox buttons)")
+                    } else {
+                        row("Xbox 360 copy", s.x360?.path ?? "None (PC game only)")
+                        row("Xbox 360 extras", s.x360 == nil ? "PC assets" : s.x360Extras.summary)
+                        row("Other-game extras", s.extras.skipped ? "Skipped" : s.extras.message)
+                    }
                     HStack {
                         row("Install in", s.dest.path)
                         Button("Change…") { s.chooseDest() }
@@ -1377,14 +1455,15 @@ struct ContentView: View {
                         .foregroundStyle(s.enoughSpace ? .green : .orange)
                     if s.enoughSpace == false { Text("Free some space or choose another place.").font(.caption) }
                     if FileManager.default.fileExists(atPath: s.installedApp.path) {
-                        Text("NFS Most Wanted Native is already there. A 3.x copy is kept as \"NFS Most Wanted Native 3.x\"; a 4.0 copy is replaced only after the new one is complete.")
+                        Text(s.carbonProduct ? "NFS Carbon Native is already there. It is replaced only after the new one is complete."
+                             : "NFS Most Wanted Native is already there. A 3.x copy is kept as \"NFS Most Wanted Native 3.x\"; a 4.0 copy is replaced only after the new one is complete.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Text("Keep the Mac plugged in; it stays awake while this runs.").font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
             HStack {
-                Button("Back") { s.page = .extras }
+                Button("Back") { s.page = s.carbonProduct ? .x360 : .extras }
                 Spacer()
                 Button("Build") { s.build() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(!s.enoughSpace || s.running)
             }
@@ -1483,8 +1562,10 @@ struct ContentView: View {
                 Button("Show Log") { s.showLog() }
                 Spacer()
             }
-            Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
-            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+            if !s.carbonProduct {
+                Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
+                Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+            }
         }
     }
 }
@@ -1638,6 +1719,24 @@ struct Entry {
             let command = backendArguments(mode: .build, pc: URL(fileURLWithPath: "/pc"), x360: URL(fileURLWithPath: "/x360"),
                                            dest: URL(fileURLWithPath: "/dest"), work: URL(fileURLWithPath: "/work"), x360Extras: chosen)
             print(jsonString(["names": chosen.names, "bytes": chosen.bytes, "requiredGB": chosen.requiredGB(hasX360: true), "arguments": command]))
+            exit(0)
+        }
+        if args.count > 1, args[1] == "--carbon-product-test" {
+            // What the Carbon product's Setup runs and shows, beside Most Wanted's unchanged command.
+            let carbon = Setup(product: .carbon), mw = Setup(product: .mw)
+            let pc = URL(fileURLWithPath: "/carbon"), x360 = URL(fileURLWithPath: "/x360")
+            let dest = URL(fileURLWithPath: "/dest"), work = URL(fileURLWithPath: "/work")
+            carbon.dest = dest; mw.dest = dest; mw.x360Extras = X360Extras()
+            mw.pcKind = .disc; mw.pcUpdate = URL(fileURLWithPath: "/patch"); mw.pcDiscs = [2: URL(fileURLWithPath: "/disc2")]
+            print(jsonString([
+                "bundled": SetupProduct.bundled.rawValue,
+                "check": carbon.installArguments(mode: .check, pc: pc, x360: nil, dest: dest, work: work),
+                "checkX360": carbon.installArguments(mode: .check, pc: pc, x360: x360, dest: dest, work: work),
+                "build": carbon.installArguments(mode: .build, pc: pc, x360: x360, dest: dest, work: work),
+                "mwBuild": mw.installArguments(mode: .build, pc: URL(fileURLWithPath: "/pc"), x360: x360, dest: dest, work: work),
+                "app": carbon.installedApp.path, "mwApp": mw.installedApp.path,
+                "afterX360": carbon.afterX360.rawValue, "mwAfterX360": mw.afterX360.rawValue,
+                "requiredGB": carbon.requiredGB]))
             exit(0)
         }
         if args.count > 1, args[1] == "--extras-flow-test" {

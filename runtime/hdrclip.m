@@ -1,3 +1,4 @@
+#include "game_select.h"
 // Step 2 plan: attribute raw exports first; route a separate scene attachment by
 // phase, promote only screen copies, sanitize world exports, then prove transport
 // with the renderer's copy path and a deliberately UNORM copy. Off stays verbatim.
@@ -32,6 +33,7 @@ static NSString *hc_msl(void) { return @
 "inline void hc_add(device atomic_uint *b,uint s,thread uint *n){if(s>=306u)return;for(uint k=0;k<8;k++)if(n[k])atomic_fetch_add_explicit(b+s*8+k,n[k],memory_order_relaxed);}\n"
 "inline void hc_count(float4 v,device atomic_uint *b,uint s){if(s>=306u)return;uint n[8];hc_values(v,n);hc_add(b,s,n);}\n"; }
 int hdrclip_test(int mutant);
+#if NFS_GAME == NFS_GAME_MW
 void hdrclip_init(void) {
     const char *fs=getenv("NFS_FLOAT_SCENE"),*hdr=getenv("NFS_HDR_OUTPUT"),*pads=getenv("NFS_PADS");
     // Shared split atlases require per-view phase routing (design step 7).
@@ -51,6 +53,9 @@ void hdrclip_init(void) {
     if(hdrclip_on) { hc_buffer=[mtl newBufferWithLength:HC_COUNTERS*8*sizeof(uint32_t) options:MTLResourceStorageModeShared]; memset(hc_buffer.contents,0,hc_buffer.length); }
     if(hdrclip_on){hc_pairs=[mtl newBufferWithLength:8*sizeof(uint32_t) options:MTLResourceStorageModeShared];memset(hc_pairs.contents,0,hc_pairs.length);}
 }
+#else
+#include "game_hdrclip_init.inc"
+#endif
 // Preserve offsets while ignoring comments in signatures, braces and return searches.
 static NSString *hc_code(NSString *s) {
     NSRegularExpression *comments=[NSRegularExpression regularExpressionWithPattern:@"/\\*.*?\\*/|//[^\\n]*" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
@@ -139,10 +144,14 @@ NSString *hdrclip_world_source(NSString *source,uint64_t key,int material,unsign
     }
     return hc_transform(source,family,1);
 }
+#if NFS_GAME == NFS_GAME_MW
 static unsigned hc_select(unsigned stage) {
     if(!hc_frame && M32(0x00925E90u)==6 && MF32(0x009885D8u)>=15.0f)hc_frame=frame_serial;
     return !hc_finished && hc_frame==frame_serial ? stage:HC_STAGES;
 }
+#else
+#include "game_hdrclip_select.inc"
+#endif
 void hdrclip_bind(id<MTLRenderCommandEncoder> e,unsigned stage) {
     unsigned s=hc_select(stage);
     [e setFragmentBuffer:hc_buffer offset:0 atIndex:25];[e setFragmentBytes:&s length:sizeof s atIndex:26];
@@ -205,6 +214,7 @@ static void hdrclip_pair(id<MTLTexture> src,id<MTLTexture> dst,unsigned stage) {
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=scratch;rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionDontCare;
     id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];[e setRenderPipelineState:psos[variant]];[e setFragmentTexture:src atIndex:0];[e setFragmentTexture:dst atIndex:1];[e setFragmentBuffer:hc_pairs offset:0 atIndex:0];[e setFragmentBytes:&stage length:4 atIndex:1];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
 }
+#if NFS_GAME == NFS_GAME_MW
 void hdrclip_finish(void) {
     if(hc_select(HC_FINAL)>=HC_STAGES)return;
     hc_finished=1;id<MTLBuffer> b=hc_buffer,pairs=hc_pairs;uint64_t frame=hc_frame;float sim=MF32(0x009885D8u);
@@ -238,6 +248,9 @@ void hdrclip_finish(void) {
         fclose(f);
     }];
 }
+#else
+#include "game_hdrclip_finish.inc"
+#endif
 
 // Shared native check, also runnable in an authorized game_run. No game assets.
 // 1025 samples [0,8] at 1/128: 896 over-white exports, 128 below-white,

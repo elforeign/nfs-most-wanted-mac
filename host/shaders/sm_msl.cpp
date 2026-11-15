@@ -18,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <regex>
 #include <string>
 
 #include "shadow_edge_msl.h"
@@ -1098,4 +1099,74 @@ extern "C" void sm_result_free(SmResult *r) {
 
 extern "C" char *sm_shadow_edge_patch(const char *source,const uint32_t *tokens,size_t n,const SmResult *pc) {
     return source && pc ? sm::shadow_edge_patch(source,tokens,n,*pc) : nullptr;
+}
+
+// Adapt the final material source for the single-sample object replay. The
+// original material still evaluates its discard/alpha path, but writes no colour.
+extern "C" char *sm_temporal_variant(const char *source, int stage) {
+    if (!source || (stage != SM_VERTEX && stage != SM_PIXEL)) return nullptr;
+    std::string s(source);
+    if (s.find("SmTemporalAux") != std::string::npos) return nullptr;
+    const std::regex entry(stage == SM_VERTEX ?
+        R"(\bvertex\s+(\w+)\s+sm_main\s*\()" : R"(\bfragment\s+(\w+)\s+sm_main\s*\()");
+    std::smatch m;
+    if (!std::regex_search(s,m,entry)) return nullptr;
+    std::string result_type=m[1];size_t start=m.position(),args=start+m.length();
+    size_t body=s.find('{',args);if(body==std::string::npos)return nullptr;
+    size_t close=s.rfind(')',body);if(close==std::string::npos)return nullptr;
+    size_t end=body+1;unsigned depth=1;
+    for(;end<s.size() && depth;++end){if(s[end]=='{')++depth;if(s[end]=='}')--depth;}
+    if(depth)return nullptr;
+    std::string signature=s.substr(args,close-args),code=s.substr(body+1,end-body-2);
+    std::string input_type,input;
+    if(stage==SM_PIXEL){
+        if(!std::regex_search(signature,m,std::regex(R"((\w+)\s+(\w+)\s*\[\[stage_in\]\])")))return nullptr;
+        input_type=m[1];input=m[2];
+    }
+    std::string rewritten;const std::regex returns(R"(\breturn\s+([^;]+);)");
+    auto begin=std::sregex_iterator(code.begin(),code.end(),returns);
+    if(begin==std::sregex_iterator())return nullptr;
+    size_t copied=0;
+    for(auto it=begin;it!=std::sregex_iterator();++it){
+        const auto &r=*it;rewritten+=code.substr(copied,r.position()-copied);std::string value=r[1];
+        if(stage==SM_VERTEX){
+            if(!std::regex_match(value,std::regex(R"(\w+)")))return nullptr;
+            rewritten+="{ float4 tc="+value+".pos;tc.xy-=sm_temporal_aux.raster.xy*tc.w;\n";
+            rewritten+=value+".tm_current=tc;"+value+".tm_previous=sm_temporal_aux.clip_to_previous*tc;\n";
+            rewritten+="return "+value+";}";
+        }else{
+            rewritten+="{ return SmTemporalOutput{half2(sm_temporal_motion("+input+".tm_current,"+input+".tm_previous,"+
+                input+".pos,sm_temporal_aux,sm_temporal_resolved)),half(1)};}";
+        }
+        copied=r.position()+r.length();
+    }
+    rewritten+=code.substr(copied);
+    signature+=stage==SM_VERTEX?",constant SmTemporalAux &sm_temporal_aux [[buffer(21)]]":
+        ",constant SmTemporalAux &sm_temporal_aux [[buffer(7)]],\n"
+        "depth2d<float,access::read> sm_temporal_resolved [[texture(31)]]";
+    std::string prefix=s.substr(0,start);
+    auto fields=[&](const std::string &name,const std::string &text){
+        std::smatch hit;if(!std::regex_search(prefix,hit,std::regex("\\bstruct\\s+"+name+"\\s*\\{")))return false;
+        prefix.insert(hit.position()+hit.length(),text);return true;
+    };
+    if(!fields(stage==SM_VERTEX?result_type:input_type,
+        "\nfloat4 tm_current [[user(tm_current)]];float4 tm_previous [[user(tm_previous)]];\n"))return nullptr;
+    prefix+=R"MSL(
+struct SmTemporalOutput { half2 motion [[color(0)]]; half coverage [[color(1)]]; };
+struct SmTemporalAux { float4x4 clip_to_previous,clip_to_previous_view;float4 raster,viewport;float2 sample_positions[4];float valid,reactive,pad0,pad1; };
+inline float2 sm_temporal_motion(float4 c,float4 p,float4 position,constant SmTemporalAux &a,
+    depth2d<float,access::read> resolved) {
+    uint2 pixel=uint2(position.xy);float d=resolved.read(pixel);
+    if(!isfinite(d) || abs(position.z-d)>0.0000002f)discard_fragment();
+    float2 location=position.xy;
+    float2 ndc=(location-a.viewport.zw)/a.viewport.xy*float2(2,-2)+float2(-1,1)-a.raster.xy;
+    float4 residual=float4(ndc,c.z/c.w,1)*c.w-c;p+=a.clip_to_previous*residual;c+=residual;
+    if(a.valid<.5f || c.w<=0 || p.w<=0 || !all(isfinite(c)) || !all(isfinite(p)))return float2(0);
+    float2 motion=(p.xy/p.w-c.xy/c.w)*float2(.5f,-.5f);
+    return all(isfinite(motion))?motion:float2(0);
+}
+)MSL";
+    std::string out=prefix+(stage==SM_VERTEX?"vertex ":"fragment ")+(stage==SM_VERTEX?result_type:"SmTemporalOutput")+
+        " sm_main("+signature+"){"+rewritten+"}"+s.substr(end);
+    char *p=(char *)malloc(out.size()+1);if(p)memcpy(p,out.c_str(),out.size()+1);return p;
 }

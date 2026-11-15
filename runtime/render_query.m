@@ -1,3 +1,4 @@
+#include "game_select.h"
 // render_query.m - occlusion queries on Metal visibility results (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 
@@ -29,6 +30,7 @@ void query_segment(void) {
 // full-size shot at the end of each: once on the open road (race frame 1500, out of tunnels for 2 s) and 20 frames
 // after entering each of the first 4 tunnels/underpasses (AmIinATunnel of the main view, 0x982BA4, set by 006D6820).
 static int q_fake;
+#if NFS_GAME == NFS_GAME_MW
 static void query_test_ab(void) {
     static int mode = -1, tunnels, open_done, out_frames;
     static uint64_t race_frame0, ab_start, tunnel_frames;
@@ -55,6 +57,9 @@ static void query_test_ab(void) {
     q_fake = f < ab_start + 12;
     if (f >= ab_start + 23) ab_start = 0;
 }
+#else
+static void query_test_ab(void) { }
+#endif
 // Issue (D3DISSUE_END 1, D3DISSUE_BEGIN 2) of an occlusion query.
 void render_query_issue(Obj *q, uint32_t flags) {
     if (!mtl) return;

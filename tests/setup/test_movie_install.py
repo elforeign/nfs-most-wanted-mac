@@ -335,6 +335,10 @@ class MovieDiscTests(Fixture):
 class StartupMovieTests(unittest.TestCase):
     def test_normal_startup_reports_missing_and_empty_movies(self):
         boot = (ROOT / "runtime/boot.c").read_text()
+        selected = subprocess.run(["unifdef", "-DNFS_GAME=1", "-DNFS_GAME_MW=1",
+                                   "-DNFS_GAME_PRIVATE=2"], input=boot, capture_output=True, text=True)
+        self.assertIn(selected.returncode, (0, 1), selected.stderr)
+        boot = selected.stdout
         current = boot[boot.index("int main(int argc, char **argv) {"):]
         current = current[:current.index("    char path[4096];")]
         movies = (ROOT / "runtime/movies.c").read_text()
@@ -351,6 +355,7 @@ const char *game_dir;
 int boot_trace;
 static const char *app_start(int argc, char **argv) { (void)argc; return argv[1]; }
 static void settings_init(void) {}
+void car_grip_init(void) {}
 static void private_cars_boot(void) {}
 static void settings_language_setup(const char *p) { (void)p; }
 static void settings_dump(const char *p) { (void)p; }

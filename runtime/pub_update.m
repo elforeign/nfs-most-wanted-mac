@@ -9,6 +9,12 @@
 #include <signal.h>
 #include <unistd.h>
 #include "pub_update_core.h"
+#include "game_select.h"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#define PU_SETUP_NAME @"NFS Carbon Native Setup.app"
+#else
+#define PU_SETUP_NAME @"NFS Most Wanted Native Setup.app"
+#endif
 #include "pub_update_rehearsal.h"
 #include "pub_update_write.h"
 #include "bundle_roots.h"
@@ -199,7 +205,7 @@ int main(int argc, const char **argv) {
             [NSString stringWithUTF8String:argv[4]], [NSString stringWithUTF8String:argv[5]]];
         BOOL ok = Run([job stringByAppendingPathComponent:@"pub_update_helper"], delivery, log);
         NSDictionary *receipt = PURead([job stringByAppendingPathComponent:@"progress.json"]);
-        NSString *setup = [job stringByAppendingPathComponent:@"mount/NFS Most Wanted Native Setup.app"];
+        NSString *setup = [job stringByAppendingPathComponent:[@"mount" stringByAppendingPathComponent:PU_SETUP_NAME]];
         NSString *prepareScript = PrepareScript;
 #ifdef PUB_UPDATE_REHEARSAL
         prepareScript = PURPrepareScript(prepareScript);
@@ -241,7 +247,11 @@ int main(int argc, const char **argv) {
 #include "settings.h"
 extern const char *userdata_dir(void);
 #ifndef PUB_RELEASES_REPO
+#if NFS_GAME == NFS_GAME_PRIVATE
+#define PUB_RELEASES_REPO "elforeign/nfs-carbon-mac"
+#else
 #define PUB_RELEASES_REPO "elforeign/nfs-most-wanted-mac"
+#endif
 #endif
 static NSString *pu_job, *pu_asset, *pu_checksum;
 static unsigned long long pu_size;
@@ -335,7 +345,11 @@ static int mac_fetch(void) {
             pu_done(body != nil, body.UTF8String);
             pu_asset = pu_checksum = nil; pu_size = 0;
             if (pu_state == PU_NEWER && [release isKindOfClass:NSDictionary.class]) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+                NSString *expected = [NSString stringWithFormat:@"NFS-Carbon-Native-Setup-v%s.dmg", pu_latest];
+#else
                 NSString *expected = [NSString stringWithFormat:@"NFS-Most-Wanted-Native-Setup-v%s.dmg", pu_latest];
+#endif
                 id assets = release[@"assets"];
                 if ([assets isKindOfClass:NSArray.class]) for (id asset in assets) {
                     if (![asset isKindOfClass:NSDictionary.class]) continue;

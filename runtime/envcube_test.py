@@ -6,6 +6,8 @@ Every texel is checked. Pattern comparisons measure all face/mip differences.
 BGRA8 comparisons: good max 0; missing opcode with poison max 252, exit 1.
 Default: unset sharp 1024/11; old PC-default mutant 256/1 exits 1.
 Native default: unset 1; default-off mutant 0 exits 1.
+Private host: 0 guest writes, unchanged creation descriptors; removing the real
+edge guard writes 1024 over the sentinel (1 write, exit 1).
 """
 import os
 from pathlib import Path
@@ -15,6 +17,40 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 gpu_enabled = os.environ.get('CODEX_GPU_CHECK') == '1' or os.environ.get('NFS_GPU_SANDBOX') == '1'
 with tempfile.TemporaryDirectory(prefix='envcube-test-') as scratch:
+    # Execute the actual included private host path with a guest-code sentinel.
+    original = (root / 'runtime/envcube.m').read_text()
+    private_source = Path(scratch) / 'private_envcube.m'
+    harness = Path(scratch) / 'private_check.m'
+    harness.write_text(r'''
+#include "private_envcube.m"
+uint8_t *G; int diag_on;
+int main(void) {
+    G=calloc(1,0x00900000); if(!G)return 2;
+    M32(0x008F8FF4u)=0x13579BDFu;
+    setenv("NFS_CAR_REFLECTION","sharp",1);envcube_live_reconfigure();
+    unsigned writes=M32(0x008F8FF4u)!=0x13579BDFu;
+    int fail=writes || envcube_creation_levels(1024,1,1,21)!=1 ||
+        envcube_creation_edge(1024,0,21,1,0x006BD529u)!=1024;
+    printf("private envcube writes=%u descriptors=%s\n",writes,fail?"FAIL":"unchanged");
+    free(G);return fail;
+}
+''')
+    anchor = '#if NFS_GAME == NFS_GAME_MW\n    // Re-entrant'
+    assert original.count(anchor) == 1
+    for broken in (False, True):
+        private_source.write_text(original.replace(anchor, '#if 1\n    // Re-entrant', 1) if broken else original)
+        private_exe = Path(scratch) / 'private_check'
+        command = ['clang', '-O1', '-w', '-fobjc-arc', '-DNFS_GAME=2',
+                   '-I', str(root / 'runtime'), '-I', str(root / 'recomp'),
+                   str(harness), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(private_exe)]
+        # Only the mutant's guarded diagnostic needs this inert sink.
+        sink = Path(scratch) / 'sink.c'; sink.write_text('void diag_event(const char *fmt,...) {(void)fmt;}\n')
+        result = subprocess.run(command + [str(sink)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr[-2000:]
+        result = subprocess.run([str(private_exe)], capture_output=True, text=True)
+        assert result.returncode == int(broken), result.stdout + result.stderr
+        assert f'writes={int(broken)}' in result.stdout
+        print(('broken: ' if broken else 'good: ') + result.stdout.strip(), flush=True)
     exe = Path(scratch) / 'envcube'
     def compile_test(source, output, recorder=root / 'runtime/render_thread.m'):
         subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',

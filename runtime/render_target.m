@@ -1,6 +1,19 @@
 // render_target.m - render targets: MSAA textures and resolves, pass attachments (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 
+id<MTLTexture> render_temporal_motion(TemporalViewId view,id<MTLTexture> depth) {
+    if (!temporal_state_requested || !temporal_draw_target || view>=TEMPORAL_MIRROR ||
+        temporal_draw_target->frame!=frame_serial) return nil;
+    const TemporalViewState *state=temporal_view_state(view);
+    if (!state || state->current.frame!=frame_serial ||
+        state->current.key.source!=(uint64_t)(__bridge void *)temporal_draw_target->source ||
+        state->current.key.depth!=(uint64_t)(__bridge void *)temporal_draw_target->depth) return nil;
+    end_pass();ensure_cmd();
+    id<MTLTexture> motion=temporal_render_resolve(mtl,cmd,temporal_draw_target,depth,view);
+    if (motion) temporal_pose_commit(view,state->current.serial);
+    return motion;
+}
+
 // ---------------- MSAA ----------------
 // The game's Antialiasing option (g_FSAALevel, D3DMULTISAMPLE_NONMASKABLE with the level as quality) makes the back
 // buffer and the auto depth buffer multisampled (presentation parameters), plus one window-sized multisampled render

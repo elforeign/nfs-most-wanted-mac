@@ -24,7 +24,11 @@ spec.loader.exec_module(world)
 
 def translated(file, name):
     src = (ROOT/'recomp/out'/file).read_text()
-    return re.search(r'void f_'+name+r'(?:_orig)?\(Cpu \*restrict c\) \{.*?\n\}', src, re.S)[0]
+    body = re.search(r'void f_'+name+r'(?:_orig)?\(Cpu \*restrict c\) \{.*?\n\}', src, re.S)[0]
+    # A host hook (roof-cover rain, day/night sun) gives the translated stock
+    # body an _orig suffix. This fixture compares that stock body, unhooked.
+    body = body.replace('f_'+name+'_orig(', 'f_'+name+'(')
+    return body
 
 
 DECL = r'''
@@ -116,7 +120,7 @@ static int fx_route(Cpu*c,uint32_t fn,int n,const uint32_t*a){
  case 0x6C00D0: run_guest(c,f_006C00D0,n,a);return 1;
  case 0x6C0130: run_guest(c,f_006C0130,n,a);return 1;
  case 0x758100:{unsigned i=fx_source==0x9196C0;CHECK(c->ecx==M32(fx_source+0x68));++rain_calls[i];run_guest(c,f_00758100,n,a);return 1;}
- case 0x503D00:{unsigned i=a[0]==0x9196C0;++emitter_calls[i];CHECK(a[0]==fx_source);run_guest(c,f_00503D00_orig,n,a);return 1;}
+ case 0x503D00:{unsigned i=a[0]==0x9196C0;++emitter_calls[i];CHECK(a[0]==fx_source);run_guest(c,f_00503D00,n,a);return 1;}
  case 0x507770: run_guest(c,f_00507770,n,a);return 1;
  case 0x6D04E0:{unsigned i=a[0]==0x9196C0;++sun_calls[i];sun_seen[i]=c->ecx;
    CHECK(c->ecx!=0x93E018);CHECK(!i||sun_seen[0]!=sun_seen[1]);

@@ -1,5 +1,8 @@
 """Public Setup offline proofs; run with the project's Python -I.
 
+Carbon Xbox artwork (CarbonBuildTests, 6 new tests, 15/15 pass): dropping x360_root from the install fails 2,
+refusing --x360 for Carbon fails 1.
+
 Optional X360 regressions: original implementation fails all 6 new import/backend
 tests (1 failure, 15 subtest errors); selected-output implementation passes 6/6.
 Default manifests compare every path and SHA-256; eight selections, re-ticking,
@@ -17,8 +20,8 @@ Per-volume checks preserve unknown sizes and refuse either full volume.
 Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
 two real child commands sharing one log entry independent of the caller TMPDIR.
 
-Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.5.0;
-changing it to 4.4.0 fails 1/1 against the independent 4.5.0 expectations.
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.6.0;
+changing it to 4.5.0 fails 1/1 against the independent 4.6.0 expectations.
 
 Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
 broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
@@ -506,7 +509,9 @@ class PCTests(Fixture):
 class BuildFailureTests(Fixture):
     def compile_fixture(self, text, broken=False, generate_only=False):
         tree = ast.parse(text)
-        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        # main parses arguments; build_image holds the shared pipeline (lib removal, compile, archive, report).
+        pipeline = [next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+                    for name in ("main", "build_image")]
         out = self.home / ("broken-compile" if broken else "compile")
         out.mkdir(exist_ok=True)
         write(out / "speed.a", b"stale archive")
@@ -516,7 +521,8 @@ class BuildFailureTests(Fixture):
                 self.pe = types.SimpleNamespace(fingerprint="fixture")
             def translate(self, *args):
                 return ("this deliberately will not compile !!!" if broken else "void f_00000001(Cpu *c) {}"), None
-        fp = types.SimpleNamespace(SUPPORTED={"fixture": "0"}, NAMES=["fixture"], WHOLE_FILE_SHA256="0")
+        # Identity emission is covered by exe_fingerprint_test; isolate the compiler/error handling here.
+        fp = types.SimpleNamespace(table_constants=lambda data, **kw: "")
         ns = dict(argparse=__import__("argparse"), os=os, sys=sys, Path=Path, collections=collections,
                   concurrent=concurrent, subprocess=subprocess, OUT=str(out), HERE=str(out), CHUNK=800,
                   build_inputs=types.SimpleNamespace(recomp_key=lambda **kw: 'fixture',
@@ -526,14 +532,15 @@ class BuildFailureTests(Fixture):
                   load_hooks=lambda: {},
                   breaker_diagnostic_bodies=lambda bodies: "",
                   recomp=types.SimpleNamespace(Recompiler=RC, CFLAGS=["-O0"], exe_fingerprint=fp,
+                                               PE=lambda: types.SimpleNamespace(data=b"fixture", sha256="0", fingerprint="fixture"),
                                                EXE=str(out / "speed.exe")))
         # Keep translation transforms isolated as main grows; compilation and
         # archive/error handling below still run for real.
         functions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
         functions.update(alias.asname or alias.name for n in tree.body if isinstance(n, ast.ImportFrom)
                          for alias in n.names)
-        referenced = {n.id for n in ast.walk(main) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-        for name in (functions & referenced) - ns.keys() - {"main"}:
+        referenced = {n.id for fn in pipeline for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        for name in (functions & referenced) - ns.keys() - {"main", "build_image"}:
             ns[name] = lambda *args, **kwargs: args[-1]
         server = types.ModuleType("server_module")
         server.build = mock.Mock()
@@ -541,7 +548,7 @@ class BuildFailureTests(Fixture):
                 mock.patch.object(sys, "argv", ["test", "--jobs", "1"] +
                                   (["--generate-only"] if generate_only else [])), \
                 mock.patch("sys.stdout", new=io.StringIO()):
-            exec(compile(ast.Module(body=[main], type_ignores=[]), "build_all.py", "exec"), ns)
+            exec(compile(ast.Module(body=pipeline, type_ignores=[]), "build_all.py", "exec"), ns)
             try:
                 ns["main"]()
                 status = 0
@@ -562,7 +569,7 @@ class BuildFailureTests(Fixture):
         self.assertIn("compile errors: 1", (out / "report.txt").read_text())
         # Restore the two old failure semantics without depending on git/HEAD;
         # this proof must also run from a release source archive after commits.
-        old = text.replace('    if not args.generate_only and os.path.exists(lib):\n        os.remove(lib)\n', '', 1)
+        old = text.replace('    if not generate_only and os.path.exists(lib):\n        os.remove(lib)\n', '', 1)
         old = old.replace('    if errors:\n        raise SystemExit(1)\n', '', 1)
         self.assertNotEqual(old, text)
         status, out = self.compile_fixture(old, broken=True)
@@ -580,7 +587,7 @@ class BuildFailureTests(Fixture):
             self.assertTrue((out / 'table.c').is_file())
             self.assertTrue((out / 'speed_00.c').is_file())
             self.assertEqual((out / 'speed.a').read_bytes(), b'stale archive')
-            mutant = text.replace('    if not args.generate_only:\n        with concurrent.',
+            mutant = text.replace('    if not generate_only:\n        with concurrent.',
                                   '    if True:\n        with concurrent.', 1)
             self.assertNotEqual(mutant, text)
             with self.assertRaisesRegex(AssertionError, 'native tool during generation'):
@@ -1826,8 +1833,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], "4.5.0")
-        self.assertEqual(public["CFBundleVersion"], "4.5.0")
+        self.assertEqual(public["CFBundleShortVersionString"], "4.6.0")
+        self.assertEqual(public["CFBundleVersion"], "4.6.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -1851,7 +1858,9 @@ printf icon > "$1"
 
     def test_protocol_file_matches_golden_shapes(self):
         schema = json.loads((ROOT / "tools/setup_kit/protocol.json").read_text())
-        self.assertEqual(schema["$defs"]["stage"]["enum"], [s for s, _ in b.STAGES] + ["stage", "cars"])
+        order = [s for s, _ in b.STAGES]   # Carbon's stage follows runtime (--game carbon only)
+        self.assertEqual(schema["$defs"]["stage"]["enum"], order[:order.index("runtime") + 1] + ["carbon"] +
+                         order[order.index("runtime") + 1:] + ["stage", "cars"])
         names = {shape["properties"]["ev"]["const"] for shape in schema["oneOf"]}
         self.assertEqual(names, {"stage", "progress", "warn", "error", "features", "done", "ready",
                                  "cars-recognition", "cars-plan", "cars-progress", "cars-result"})
@@ -2761,6 +2770,7 @@ class ReviewTests(Fixture):
 class ExtrasSafetyTests(unittest.TestCase):
     """Protected-path controls: original has no Carbon role or volume-plan API."""
     def setUp(self):
+        (ROOT / '.metal-cache').mkdir(exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(prefix='extras-safety-', dir=ROOT / '.metal-cache')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -2977,6 +2987,255 @@ class X360ExtrasTests(Fixture):
 @contextmanager
 def contextlib_nullcontext(value=None):
     yield value
+
+
+class CarbonRunner(FakeRunner):
+    """The Carbon stages' four commands, its tables and its bundle; Most Wanted's commands as FakeRunner."""
+    def run(self, argv, cwd=None, capture=False):
+        text = " ".join(map(str, argv))
+        if "gen_tables.py" in text and "--no-pc" in text:
+            self.commands.append(list(map(str, argv)))
+            spec = b.importlib.util.spec_from_file_location("fixture_tables", Path(cwd) / "tools/gen_tables.py")
+            generator = b.importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(generator)
+            for table in generator.NOPC_TABLES:
+                write(Path(cwd) / f"runtime/gen/{table}", b"table made without a game folder")
+            return ""
+        if "runtime/bundle.sh" in text:
+            argv = list(map(str, argv))
+            self.commands.append(argv)
+            name, exe = argv[argv.index("--name") + 1], argv[argv.index("--exec-name") + 1]
+            app = Path(argv[2]) / f"{name}.app"
+            write(app / f"Contents/MacOS/{exe}", b"signed Carbon fixture", True)
+            write(app / "Contents/Info.plist", plistlib.dumps(dict(CFBundleExecutable=exe,
+                  CFBundleIdentifier=argv[argv.index("--bundle-id") + 1], CFBundleShortVersionString=b.PUBLIC_VERSION)))
+            return ""
+        if "build_private_runtime.py" in text:
+            self.commands.append(list(map(str, argv)))
+            write(Path(cwd) / "recomp/out/carbon/boot_carbon", b"Carbon program fixture", True)
+            return ""
+        return super().run(argv, cwd, capture)
+
+
+class CarbonBuildTests(Fixture):
+    """--game carbon: the shared stages without Most Wanted, then Carbon's, its own app and profile <data>/Carbon.
+
+    Proof: 3/3 pass; the same tests on main ef8b58ae's backend/install fail 3/3 (no --game option: main() exits 2
+    through argparse; build() makes and installs NFS Most Wanted Native.app from the Most Wanted program).
+    Carbon only (no Most Wanted folder): commands reading the Most Wanted copy 1 -> 0; on main 86d96004's backend
+    test_carbon_build_without_most_wanted_folder fails (main() refuses: "--check and --build require --pc").
+    Most Wanted's golden stream, bundle arguments and install tests in this file are unchanged and pass."""
+    def setUp(self):
+        super().setUp()
+        self.carbon = self.home / "Carbon game"
+        write(self.carbon / "NFSC.exe", b"MZ Carbon fixture executable")
+        write(self.carbon / "TRACKS/fixture.bin", b"Carbon track")
+        self.pin = mock.patch.object(b, "CARBON_EXE_SHA256", b.sha_file(self.carbon / "NFSC.exe"), create=True)
+        self.pin.start()
+
+    def tearDown(self):
+        self.pin.stop()
+        super().tearDown()
+
+    def carbon_build(self):
+        runner = CarbonRunner(self.log, self.child_env, self.paths.work)
+        args = types.SimpleNamespace(pc=None, dest=str(self.dest), x360=None, build=True, check=False,
+                                     game="carbon", carbon=str(self.carbon))
+        with self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"):
+            return b.build(args, self.paths, self.events, runner, self.source), runner
+
+    def test_derived_carbon_profile_refused_before_recovery(self):
+        self.paths.data.mkdir(parents=True)
+        profile = self.paths.data / "Carbon"
+        for target in (self.carbon, self.source, self.paths.legacy,   # the inputs and Setup's own folders (no Most Wanted folder)
+                       self.paths.work, self.paths.cache):
+            with self.subTest(target=target.name):
+                profile.symlink_to(target, target_is_directory=True)
+                try:
+                    with mock.patch.object(b, "recover_interrupted",
+                                           side_effect=AssertionError("unsafe profile reached recovery")) as recovery:
+                        with self.assertRaises(b.SetupError):
+                            self.carbon_build()
+                        recovery.assert_not_called()
+                finally:
+                    profile.unlink()
+
+    def test_initial_carbon_profile_refused_before_recovery(self):
+        self.paths.data.mkdir(parents=True)
+        (self.paths.data / "Carbon").symlink_to(self.carbon, target_is_directory=True)
+        with mock.patch.object(b, "recover_interrupted",
+                               side_effect=AssertionError("unsafe profile reached recovery")) as recovery, \
+             mock.patch.object(b, "build") as build, redirect_stdout(self.stream):
+            rc = b.main(["--build", "--game", "carbon", "--carbon", str(self.carbon), "--dest", str(self.dest),
+                         "--work", str(self.home / "new-work"), "--events"])
+        self.assertEqual(rc, 1)
+        recovery.assert_not_called()
+        build.assert_not_called()
+        self.assertFalse((self.home / "new-work").exists())
+        self.assertFalse(self.paths.logs.exists())
+
+    def test_initial_carbon_input_protected_before_writes(self):
+        # Both a Carbon build and MW's optional executable pick protect the input folder.
+        for game, picked in (("carbon", self.carbon), ("mw", self.carbon / "NFSC.exe")):
+            with self.subTest(game=game), \
+                 mock.patch.dict(os.environ, {"NFSMW_SETUP_LOGS": str(self.carbon / "setup-logs")}), \
+                 mock.patch.object(b, "build", side_effect=b.SetupError("later rejection")), \
+                 redirect_stdout(self.stream):
+                rc = b.main(["--build", "--game", game, "--carbon", str(picked)] + (["--pc", str(self.pc)] if game == "mw" else []) +
+                            ["--dest", str(self.dest), "--work", str(self.home / "new-work"), "--events"])
+                self.assertEqual(rc, 1)
+                self.assertFalse((self.carbon / "setup-logs").exists())
+                self.assertFalse((self.home / "new-work").exists())
+
+    def test_carbon_tracks_must_be_directory(self):
+        shutil.rmtree(self.carbon / "TRACKS")
+        write(self.carbon / "TRACKS", b"not a directory")
+        with self.assertRaisesRegex(b.SetupError, "TRACKS"):
+            b.validate_carbon(self.carbon)
+
+    def test_carbon_build_installs_its_own_app_and_profile(self):
+        installed, runner = self.carbon_build()
+        app = self.dest / "NFS Carbon Native.app"
+        self.assertEqual(Path(installed), app)
+        self.assertTrue((app / "Contents/MacOS/NFSCarbon").is_file())
+        self.assertFalse((self.dest / "NFS Most Wanted Native.app").exists())
+        roots = dict(line.split("=", 1) for line in (self.paths.data / "Carbon/roots.txt").read_text().splitlines())
+        self.assertTrue((Path(roots["pc_root"]) / "NFSC.exe").is_file())
+        self.assertFalse((self.paths.data / "roots.txt").exists())   # Most Wanted's profile untouched
+        stages = [json.loads(l)["id"] for l in self.stream.getvalue().splitlines() if json.loads(l)["ev"] == "stage"]
+        order = [s for s, _ in b.STAGES]
+        self.assertEqual(stages, order[:order.index("runtime") + 1] + ["carbon"] + order[order.index("runtime") + 1:])
+        text = [" ".join(c) for c in runner.commands]
+        for tool in ("recomp/build_private.py", "recomp/private_world.py", "recomp/build_private_runtime.py"):
+            self.assertEqual(sum(tool in c for c in text), 1, tool)
+        self.assertFalse(any("runtime/build.sh" in c for c in text))
+        self.assertFalse(any("region.py" in c or "--proof" in c for c in text))
+        # No command reads Most Wanted: once its TRACKS (world proof) and speed.exe (the runtime link's host ranges).
+        self.assertEqual(sum("NFS_SPEED_EXE" in c or str(self.pc) in c for c in text), 0)
+        self.assertFalse(any("recomp/build_all.py" in c for c in text))
+        self.assertEqual([c for c in text if "gen_tables.py" in c], [c for c in text if "gen_tables.py --no-pc" in c])
+        bundle = next(c for c in runner.commands if "runtime/bundle.sh" in " ".join(c))
+        self.assertEqual(bundle[bundle.index("--game") + 1], "carbon")
+        self.assertTrue(bundle[bundle.index("--boot") + 1].endswith("recomp/out/carbon/boot_carbon"))
+
+    def test_carbon_build_without_most_wanted_folder(self):
+        shutil.rmtree(self.pc)
+        real = b.build
+        with mock.patch.object(b, "build", lambda args, paths, events, runner, source_root=None:
+                               real(args, paths, events, CarbonRunner(self.log, self.child_env, paths.work), self.source)), \
+             self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"), redirect_stdout(self.stream):
+            rc = b.main(["--build", "--game", "carbon", "--carbon", str(self.carbon), "--dest", str(self.dest),
+                         "--work", str(self.paths.work), "--events"])
+        self.assertEqual(rc, 0, self.stream.getvalue()[-2000:])
+        self.assertTrue((self.dest / "NFS Carbon Native.app/Contents/MacOS/NFSCarbon").is_file())
+        self.assertFalse(self.pc.exists())
+
+    def test_carbon_refuses_a_most_wanted_folder(self):
+        with mock.patch("sys.stdout", self.stream), mock.patch.object(b, "build") as build:
+            rc = b.main(["--build", "--game", "carbon", "--carbon", str(self.carbon), "--pc", str(self.pc),
+                         "--dest", str(self.dest), "--work", str(self.paths.work), "--events"])
+        self.assertEqual(rc, 1)
+        build.assert_not_called()
+        self.assertIn("reads only the Carbon folder", json.loads(self.stream.getvalue())["msg"])
+
+    def test_folder_without_nfsc_exe_refused_nothing_installed(self):
+        (self.carbon / "NFSC.exe").unlink()
+        with self.assertRaises(b.SetupError) as raised:
+            self.carbon_build()
+        self.assertIn("NFSC.exe", str(raised.exception))
+        self.assertFalse((self.dest / "NFS Carbon Native.app").exists())
+        self.assertFalse((self.paths.data / "Carbon/roots.txt").exists())
+
+    def carbon_x360(self, title=0x454107EC):
+        """A synthetic Carbon Xbox 360 folder, its converter copied into the fixture's Setup source."""
+        tests = str(Path(__file__).resolve().parent)
+        if tests not in sys.path:
+            sys.path.insert(0, tests)
+        import test_carbon_x360 as art
+        self.assets = {art.GLOBALB: art.glyph_archive(), art.DYNTEX: art.diagram_archive()}
+        for name in ("car_sources", "x360", "xdvdfs", "huff", "x360_extras"):
+            write(self.source / f"tools/setup_kit/{name}.py", (ROOT / f"tools/setup_kit/{name}.py").read_bytes())
+        # The build reloads the converter from its source copy: that copy carries the synthetic archives' fingerprints.
+        text = (ROOT / "tools/setup_kit/carbon_x360.py").read_text()
+        table = re.search(r"^FILES = \{.*?^\}\n", text, re.S | re.M).group(0)
+        write(self.source / "tools/setup_kit/carbon_x360.py", text.replace(table, "FILES = " + repr(art.fingerprints(self.assets)) + "\n"))
+        # --check runs the converter that is already imported.
+        import setup_kit.carbon_x360 as imported
+        patch = mock.patch.object(imported, "FILES", art.fingerprints(self.assets))
+        patch.start()
+        self.addCleanup(patch.stop)
+        physical = art.helpers.archive_files(art.helpers.fake_xex(title), self.assets)
+        folder = self.home / "Carbon Xbox 360"
+        art.helpers.write_files(folder, physical)
+        return folder
+
+    def carbon_command(self, x360=None, check=False):
+        runner = CarbonRunner(self.log, self.child_env, self.paths.work)
+        args = types.SimpleNamespace(pc=None, dest=str(self.dest), x360=str(x360) if x360 else None, build=not check,
+                                     check=check, game="carbon", carbon=str(self.carbon))
+        with self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"):
+            return b.build(args, self.paths, self.events, runner, self.source), runner
+
+    def installed_roots(self):
+        return dict(line.split("=", 1) for line in (self.paths.data / "Carbon/roots.txt").read_text().splitlines())
+
+    def test_carbon_artwork_installs_inside_carbon_data(self):
+        installed, runner = self.carbon_command(self.carbon_x360())
+        roots = self.installed_roots()
+        self.assertEqual(sorted(roots), ["pc_root", "x360_root"])
+        pc, art = Path(roots["pc_root"]), Path(roots["x360_root"])
+        self.assertTrue(art.is_relative_to(pc.parent))   # beside the Carbon copy, in the same generation
+        for name, data in self.assets.items():
+            self.assertEqual((art / name).read_bytes(), data)
+        self.assertEqual(sorted(p.relative_to(art).as_posix() for p in art.rglob("*") if p.is_file()), sorted(self.assets))
+        self.assertFalse((self.paths.data / "roots.txt").exists())   # Most Wanted's profile untouched
+        # No build command may take the artwork as an input.
+        self.assertFalse([c for c in map(" ".join, runner.commands) if str(art) in c or "x360" in c])
+
+    def test_carbon_without_a_console_copy_keeps_only_its_own_root(self):
+        self.carbon_command()
+        self.assertEqual(sorted(self.installed_roots()), ["pc_root"])
+
+    def test_carbon_refuses_another_title_and_installs_nothing(self):
+        source = self.carbon_x360(title=0x45410876)
+        with self.assertRaisesRegex(b.SetupError, "not Need for Speed Carbon"):
+            self.carbon_command(source)
+        self.assertFalse((self.dest / "NFS Carbon Native.app").exists())
+        self.assertFalse((self.paths.data / "Carbon/roots.txt").exists())
+
+    def test_carbon_check_then_build_reuses_the_checked_artwork(self):
+        source = self.carbon_x360()
+        self.assertIsNone(self.carbon_command(source, check=True)[0])
+        self.assertTrue((self.paths.work / (b.CHECK_X360 + ".json")).is_file())
+        self.carbon_command(source)
+        self.assertIn("Reusing the Xbox 360 files converted by the check", self.stream.getvalue())
+        self.assertEqual(sorted(self.installed_roots()), ["pc_root", "x360_root"])
+
+    def test_carbon_artwork_is_cached_per_game(self):
+        source = self.carbon_x360()
+        self.carbon_command(source)
+        self.assertIn("Verified preparation saved", self.stream.getvalue())
+        self.stream.truncate(0)
+        self.stream.seek(0)
+        self.carbon_command(source, check=True)   # the same copy: restored, not prepared again
+        self.assertIn("persistent cache", self.stream.getvalue())
+        mw = b.preparation_key("x", None, {}, {}, game="mw")
+        self.assertNotEqual(b.preparation_key("x", None, {}, {}, game="carbon"), mw)
+        self.assertEqual(mw, b.preparation_key("x", None, {}, {}))   # Most Wanted's keys are unchanged
+
+    def test_command_line_accepts_the_console_copy_for_carbon(self):
+        with mock.patch.object(b, "build", side_effect=b.SetupError("reached build")), redirect_stdout(self.stream):
+            rc = b.main(["--check", "--game", "carbon", "--carbon", str(self.carbon), "--x360", str(self.home / "x"),
+                         "--dest", str(self.dest), "--work", str(self.home / "new-work"), "--events"])
+        self.assertEqual(rc, 1)
+        self.assertIn("reached build", self.stream.getvalue())
+
+    def test_command_line_requires_the_carbon_folder(self):
+        with mock.patch("sys.stdout", self.stream):
+            rc = b.main(["--build", "--game", "carbon", "--pc", str(self.pc), "--dest", str(self.dest),
+                         "--work", str(self.paths.work), "--events"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--game carbon requires --build and --carbon", json.loads(self.stream.getvalue())["msg"])
 
 
 if __name__ == "__main__":

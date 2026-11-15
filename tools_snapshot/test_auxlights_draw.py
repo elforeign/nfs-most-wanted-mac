@@ -66,6 +66,9 @@ static unsigned char *G=storage;
 #define M32(a) (*(uint32_t *)(G+(uint32_t)(a)))
 #define CUR_VIEW 0x00982A20u
 typedef struct { uint32_t eax,ecx,edi,esp; } Cpu;
+#include "temporal_state_fixture.h"
+static void temporal_materials_pose_append(uint32_t slot) { (void)slot; abort(); }
+static void temporal_materials_model_render(Cpu *c) { (void)c; abort(); }
 static int diag_on;
 static int split_fixture;
 static int split_view_rect(uint32_t v,uint32_t *r) { (void)r; return split_fixture && v==0x9196C0; }

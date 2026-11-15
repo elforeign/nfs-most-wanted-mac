@@ -44,6 +44,8 @@
 #include "settings.h"
 #include "report_privacy.h"
 #include "slowlog.h"
+#include "slowclock.h"
+#include "slowlog_lumab.h"
 
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
 
@@ -288,7 +290,8 @@ static void session_open(void) {
                         "rms_fl\trms_fr\trms_c\trms_lfe\trms_sl\trms_sr\tpeak_fl\tpeak_fr\tpeak_c\tpeak_lfe\tpeak_sl\tpeak_sr\tclip\tlimit_samples\t"
                         "dip_fl\tdip_fr\tdip_c\tdip_lfe\tdip_sl\tdip_sr\t"
                         "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\t"
-                        "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\t" SLOWLOG_COLUMNS "\n");
+                        "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\t" SLOWLOG_COLUMNS
+                        "\tcpu_game_ms\tproc_cpu_ms\tproc_pcore_pct\tproc_ghz\tproc_faults\tsys_cpu_pct\tmem_pressure\tclock_low\n");   // slowclock.c
     if (sess_f) {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
@@ -512,6 +515,10 @@ void report_frame(uint64_t frame, uint32_t flow) {
                     ps.native_fullscreen, render_gpu_wall_ms());
             gpuclients_print(perf_f, &slow_sample.gpu);
             slowlog_print(perf_f, &slow_sample, settings_get("graphics.postfx") == 1 ? "PC" : "X360");
+            static uint64_t clock_serial;                     // slowclock.c: CPU evidence, and the frame ring at a clock drop
+            int clock_fresh = slow_sample.serial && slow_sample.serial != clock_serial;
+            clock_serial = slow_sample.serial;
+            slowclock_second(perf_f, slow_sample.enabled, frame, slow_sample.gpu.states, clock_fresh, report_session_dir(), s->t, report_note);
             fputc('\n', perf_f);
             fflush(perf_f);
         }
@@ -522,6 +529,9 @@ void report_frame(uint64_t frame, uint32_t flow) {
         session_flush_hitches(head, g);
         if (s->t >= next_sum) { next_sum = s->t + 60; session_summary(); }
     }
+    slowlog_lumab_tick(frame, flow, n ? draws / n : 0, s->gpu,
+                      (int)NSApp.isActive, user32_window_occluded(),
+                      settings_get("graphics.postfx") != 1, &slow_sample, report_session_dir());
     ++nsecs;
     // the audio output and the default device: a note when either changes, and for new underruns
     static char last_mode[96] = "";

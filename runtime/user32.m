@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // user32.m - USER32 (and the few GDI32 calls) on Cocoa.
 //
 // One NSWindow per game window, with a CAMetalLayer-backed content view that the D3D9 layer renders into.
@@ -23,6 +24,7 @@
 
 int app_native_fullscreen(void);
 int app_fullscreen_is_auto(void);
+int app_background_run(void);
 int app_request_fullscreen_space(NSWindow *window, int full);
 void render_presentation_changed(void);
 void report_note(const char *fmt, ...);
@@ -56,6 +58,7 @@ static int headless = -1;
 static int screen_w = 1920, screen_h = 1080, screen_top_inset;   // points; the inset is the camera housing's
 static double screen_scale = 1;
 static uint32_t focus_hwnd, capture_hwnd;
+void prompts_pointer_visible(void);       // padprompts.c: the next pad input must hide the pointer again
 static int cursor_count;
 static uint8_t key_down[256], key_toggled[256], key_scan[256];
 static int pad0_down;   // physical D-pad Down on pad 0 as of the last read (online free roam's ghost toggle; the game still sees it)
@@ -182,6 +185,7 @@ static int cursor_hidden;               // ShowCursor count < 0: no system curso
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; user32_request_close(); return NO; }  // cleanup before WM_CLOSE
 - (void)windowDidBecomeKey:(NSNotification *)n {
+    prompts_pointer_visible();
     (void)n;
     feedback_poll_pause();
     feedback_suppress(FEEDBACK_FOCUS, 0);
@@ -194,6 +198,7 @@ static int cursor_hidden;               // ShowCursor count < 0: no system curso
 // n is nil for BOOT_KEYS unfocus:/hide: steps, which always pause. A real focus loss pauses the game in NFSMW.app;
 // runtime/boot keeps running in the background for scripted runs (NFS_PAUSE_INACTIVE=0|1 overrides).
 - (void)windowDidResignKey:(NSNotification *)n {
+    prompts_pointer_visible();
     void replay_controls_cancel(void); replay_controls_cancel();
     if (diag_on) diag_event("window lost focus");
     feedback_suppress(FEEDBACK_FOCUS, 1);
@@ -305,6 +310,9 @@ void prompts_input(int pad);              // padprompts.c: which input was used 
 #include "onscreen_keyboard.h"
 void prompts_mouse_moved(float points);
 void prompts_pad_seen(int connected);
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "carbon_feedback_input.inc"
+#endif
 // portmenu.m: the F10 settings menu takes F10 always, and every key, character, mouse event and pad read while open.
 int portmenu_key(uint8_t vk, int down, int repeat);
 int portmenu_char(uint32_t ch);
@@ -352,6 +360,12 @@ static void pump(int wait) {
                                               dequeue:YES];
             if (!e) break;
             wait = 0;
+            // Even input consumed by an editor/menu can make the system pointer visible.
+            if (e.type == NSEventTypeMouseMoved || e.type == NSEventTypeLeftMouseDragged ||
+                e.type == NSEventTypeRightMouseDragged || e.type == NSEventTypeOtherMouseDragged ||
+                e.type == NSEventTypeKeyDown || e.type == NSEventTypeLeftMouseDown ||
+                e.type == NSEventTypeRightMouseDown || e.type == NSEventTypeOtherMouseDown)
+                prompts_pointer_visible();
             if(stream_key_route_event(e)) {
                 if(e.type==NSEventTypeKeyUp) {
                     KeyMap released=e.keyCode<128?mac_keys[e.keyCode]:(KeyMap){0,0};
@@ -375,6 +389,11 @@ static void pump(int wait) {
                     break;                                            // Cmd-Q etc.
                 }
                 key_event(hwnd, k.vk, k.scan, e.type == NSEventTypeKeyDown, e.isARepeat);
+                // BOOT_KEYLOG=1: a played session becomes a BOOT_KEYS script (same line shape as "scripted key", with the key
+                // code). Off by default: the events log is sent in reports and must not record what a player types.
+                static int keylog = -1;
+                if (keylog < 0) keylog = getenv("BOOT_KEYLOG") != NULL && getenv("BOOT_KEYLOG")[0] == '1';
+                if (keylog && diag_on && !e.isARepeat) diag_event("real key vk=%02X %s", k.vk, e.type == NSEventTypeKeyDown ? "down" : "up");
                 if (e.type == NSEventTypeKeyDown) {
                     NSString *s = e.characters;
                     for (NSUInteger i = 0; i < s.length; ++i) {
@@ -570,7 +589,7 @@ static void ns_show(Win *w, int show) {
     if (!w->ns) return;
     if (show) {
         if (ns_fullscreen(w) && !app_native_fullscreen()) NSApp.presentationOptions = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
-        if (getenv("BOOT_BACKGROUND")) { [w->ns orderBack:nil]; [w->ns makeFirstResponder:w->view]; }   // test runs: behind, never key (app.m)
+        if (app_background_run()) { [w->ns orderBack:nil]; [w->ns makeFirstResponder:w->view]; }   // test runs: behind, never key (app.m)
         else { [w->ns makeKeyAndOrderFront:nil]; [w->ns makeFirstResponder:w->view]; [NSApp activateIgnoringOtherApps:YES]; }
         if (app_native_fullscreen()) ns_apply_mode(w);
         if (!w->native_transition) ns_mode_changed(w);
@@ -619,6 +638,7 @@ void user32_hide_pointer(void) {
     else dispatch_async(dispatch_get_main_queue(), ^{ [NSCursor setHiddenUntilMouseMoves:YES]; });
 }
 void user32_menu_cursor(void) {        // the system arrow over the game while the menu is open
+    prompts_pointer_visible();
     Win *w = game_window();
     if (w && w->ns && w->view) [w->ns invalidateCursorRectsForView:w->view];
 }
@@ -687,11 +707,83 @@ static char script_axis[32];               // BOOT_KEYS padaxis:NAME=V (lx ly rx
 // (focus loss for N seconds, below), race:N (N ticks after the race state, game-flow 6, began), cmdopt:K (Cmd-Option-K through the menu bar, e.g. cmdopt:p cycles the performance
 // overlay). A tick is 1/60 s of real time, so scripts behave the same at any frame rate
 // (they were written in frames at 60 fps).
+#if NFS_GAME == NFS_GAME_MW
+// A stationary paint close-up on the scratch career's owned car. The retail
+// SelectCarCameraMover (004769e0) keeps its current orientation in state 2.
+static int flake_fixture_pose(const float *v);
+static int flake_fixture(const char *action) {
+    uint32_t db = M32(0x0091CF90u), profile = db ? M32(db + 0x10) : 0;
+    uint32_t row = M32(0x0091D3D4u);
+    if (!diag_on || !profile || memcmp(G + profile, "TEST\0", 5) || !row ||
+        !(M32(row + 12) & 2) || G[row + 16] >= 76) return 0;
+    static uint32_t stack, name;
+    if (!stack) { stack = galloc(65536); name = gstr("GarageMain.fng"); }
+    Cpu c = {0}; c.esp = stack + 65520;
+    uint32_t screen = call_guest(&c, 0x00591E90u, 1, &name);
+    if (!screen) return 0;
+    if (!strcmp(action, "paint")) {
+        // CustomizeSub::SetupVisual / CustomizeCategoryScreen select this
+        // retail page with paint mode 301 and parent visual category 803.
+        uint32_t args[] = {gstr("Paint.fng"), 0x08030301u, 0, 0};
+        c.ecx = M32(0x0091CADCu);
+        call_guest(&c, 0x00525940u, 4, args);
+        return 1;
+    }
+    if (!strcmp(action, "metal") || !strcmp(action, "gloss")) {
+        uint32_t paint_name = gstr("Paint.fng");
+        uint32_t paint = call_guest(&c, 0x00591E90u, 1, &paint_name);
+        if (!paint || M32(paint + 0x148) != 0x301 || M32(0x009B9EC4u) != row) return 0;
+        // Retail filters: GLOSS / METAL / PEARL. Install the selected real
+        // slot-4c part into this TEST car, rather than forcing MetallicScale.
+        unsigned filter = !strcmp(action, "metal") ? 1 : 0;
+        for (int i = 0; i < 3 && M32(paint + 0x1BC) != filter; ++i) {
+            uint32_t direction = 1; c.ecx = paint;
+            call_guest(&c, 0x007BDC60u, 1, &direction);
+        }
+        if (M32(paint + 0x1BC) != filter) return 0;
+        c.ecx = paint;
+        uint32_t selected = call_guest(&c, 0x007C2B00u, 0, NULL);
+        if (!selected || M32(selected + 0x10) != 0x4C || !M32(selected + 0xC)) return 0;
+        uint32_t args[] = {0x4C, M32(selected + 0xC)};
+        c.ecx = 0x009B9EC0u;
+        call_guest(&c, 0x007AF1D0u, 2, args);
+        diag_event("flake fixture: installed %s row=%08X handle=%u slot=%u part=%08X filter=%u",
+            action, row, M32(row), args[0], args[1], filter);
+        return 1;
+    }
+    // View the roof from just off vertical; retain a non-degenerate up vector.
+    const float roof[6] = {175, 0, 2, 0, 0, 1.4f};
+    return flake_fixture_pose(roof);
+}
+// The showroom mover's held pose (CreateCameraMatrix 0046b7e0): +0x90 rotates about X (180 above, 90 level),
+// +0x94 about Z, +0x98 the radius from the scene origin (not from the look-at target), +0xB0 the target.
+static int flake_fixture_pose(const float *v) {
+    uint32_t db = M32(0x0091CF90u), profile = db ? M32(db + 0x10) : 0;
+    static uint32_t stack, name;
+    if (!stack) { stack = galloc(65536); name = gstr("GarageMain.fng"); }
+    Cpu c = {0}; c.esp = stack + 65520;
+    uint32_t screen = diag_on && profile && !memcmp(G + profile, "TEST\0", 5) ? call_guest(&c, 0x00591E90u, 1, &name) : 0;
+    uint32_t mover = screen ? M32(screen + 0x4C) : 0;
+    if (!mover || M32(mover + 0xC) != 9) return 0;
+    diag_event("showroom pose: camera before %.3f/%.3f/%.3f target %.3f/%.3f/%.3f, now %.3f/%.3f/%.3f target %.3f/%.3f/%.3f",
+        MF32(mover+0x90), MF32(mover+0x94), MF32(mover+0x98), MF32(mover+0xB0), MF32(mover+0xB4), MF32(mover+0xB8),
+        v[0], v[1], v[2], v[3], v[4], v[5]);
+    M32(mover + 0x80) = 2;
+    MF32(mover + 0x90) = v[0]; MF32(mover + 0x94) = v[1]; MF32(mover + 0x98) = v[2];
+    MF32(mover + 0x9C) = 0; MF32(mover + 0xA0) = 60;
+    MF32(mover + 0xB0) = v[3]; MF32(mover + 0xB4) = v[4]; MF32(mover + 0xB8) = v[5];
+    MF32(mover + 0x120) = MF32(mover + 0x124) = MF32(mover + 0x128) = 0;
+    uint32_t camera = M32(mover + 0x1C);
+    if (camera) MF32(camera + 0xBC) = .02f;
+    return 1;
+}
+#endif
 // Strict scripted menu runs must stop input at a package timeout.
 static int script_pkg_result(const char *ctl,const char *want,uint64_t elapsed,int strict) {
     if(ctl && !strncasecmp(ctl,want,strlen(want)))return 1;
     return elapsed>=1800 ? (strict ? -1 : 1) : 0;
 }
+#if NFS_GAME == NFS_GAME_MW
 static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     static int step = 0, sequence_failed;
     if(sequence_failed)return;
@@ -727,7 +819,20 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     // find step `step`
     const char *p = spec;
     for (int k = 0; k < step && p; ++k) { p = strchr(p, ','); if (p) ++p; }
-    if (!p || !*p) return;
+    if (!p || !*p) {
+        // Strict runs end with their script (a menu left open sits in view until the guard); a race or autodrive run ends by itself.
+        static uint64_t ended_at;
+        const char *st = getenv("BOOT_KEYS_STRICT");
+        if (st && !strcmp(st, "1") && !getenv("BOOT_AUTODRIVE") && !getenv("BOOT_RACE")) {
+            if (!ended_at) ended_at = frame;
+            if (frame - ended_at >= 120) {
+                fprintf(stderr, "scripted keys: script ended, closing (strict)\n");
+                if (diag_on) diag_event("scripted keys: script ended, closing (strict)");
+                [NSApp performSelector:@selector(terminate:) withObject:nil];   // the menu's quit path (WM_CLOSE)
+            }
+        }
+        return;
+    }
     char tok[128];
     int n = 0;
     while (p[n] && p[n] != ',' && n < 127) { tok[n] = p[n]; ++n; }
@@ -760,15 +865,25 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         }
         if (diag_on) diag_event("script: %s", tok);
         ++step; step_start = 0;
-    } else if (!strncmp(tok, "carnm:", 6)) {   // test only: NFS_CAR_NORMALMAPS live (x360|pc), for same-view A/B shots in the front end
-        void materials_set_car_normals(int x360);
-        materials_set_car_normals(!strcmp(tok + 6, "x360"));
+    } else if (!strncmp(tok, "carnm:", 6)) {   // test only: NFS_CAR_NORMALMAPS live (x360|pc|port|portflat: port with flat maps, the control), for same-view A/B shots
+        void materials_set_car_normals(int mode), car_normals_port_set_flat(int on);
+        const char *m = tok + 6;
+        car_normals_port_set_flat(!strcmp(m, "portflat"));
+        materials_set_car_normals(!strncmp(m, "port", 4) ? 2 : !strcmp(m, "x360"));
         ++step; step_start = 0;
-    } else if (!strncmp(tok, "flake:", 6)) {   // test only: R30 flake live: x360 | pc | tint0..2 | force0 | force1 | forceoff (same-view A/B and pixel counts in the front end)
-        void materials_set_car_flake(int x360), materials_flake_test(int tint, int force);
+    } else if (!strncmp(tok, "carview:", 8)) {   // test only: a stationary showroom pose RX/RZ/R/TX/TY/TZ (flake_fixture's close-up mover)
+        float v[6];
+        if (sscanf(tok + 8, "%f/%f/%f/%f/%f/%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6 || !flake_fixture_pose(v)) { sequence_failed = 1; return; }
+        ++step; step_start = 0;
+    } else if (!strncmp(tok, "flake:", 6)) {   // test only: R30 flake live: x360 | pc | generated | tint0..2 | force0 | force1 | forceoff (same-view A/B and pixel counts in the front end)
+        void materials_set_car_flake(int mode), materials_flake_test(int tint, int force);
         extern int materials_flake_tint, materials_flake_force;
         const char *w = tok + 6;
-        if (!strcmp(w, "x360") || !strcmp(w, "pc")) materials_set_car_flake(!strcmp(w, "x360"));
+        if (!strcmp(w, "close") || !strcmp(w, "paint") || !strcmp(w, "metal") || !strcmp(w, "gloss")) {
+            if (!flake_fixture(w)) { sequence_failed = 1; return; }
+        }
+        else if (!strcmp(w, "generated")) materials_set_car_flake(2);
+        else if (!strcmp(w, "x360") || !strcmp(w, "pc")) materials_set_car_flake(!strcmp(w, "x360"));
         else if (!strncmp(w, "tint", 4)) materials_flake_test(atoi(w + 4), materials_flake_force);
         else materials_flake_test(materials_flake_tint, !strcmp(w, "force0") ? 0 : !strcmp(w, "force1") ? 1 : -1);
         ++step; step_start = 0;
@@ -787,6 +902,15 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         if (diag_on) live_fake_go();
         if (diag_on) diag_event("script: livego");
         ++step; step_start = 0;
+    } else if (!strcmp(tok, "livestop") || !strcmp(tok, "livequit")) {
+        const char *fake=getenv("NFS_TEST_LIVE_FAKE");
+        if(diag_on && fake && atoi(fake)>0 && atoi(fake)<=65535) {
+            void stream_key_stop(int);
+            diag_event("script: %s",tok); // quit can exit before returning
+            if(!strcmp(tok,"livestop")) stream_key_stop(0);
+            else [NSApp terminate:nil];
+        }
+        ++step; step_start=0;
     } else if (!strcmp(tok, "replayarm") || !strcmp(tok, "replaysave")) {
         void replay_arm_action(int), replay_save_action(int);
         if(!strcmp(tok,"replayarm")) replay_arm_action(0); else replay_save_action(0);
@@ -914,6 +1038,7 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
             sequence_failed=1;
             fprintf(stderr,"script: package timeout want=%s actual=%s; input stopped\n",want,ctl?ctl:"none");
             if(diag_on)diag_event("script: package timeout want=%s actual=%s; input stopped",want,ctl?ctl:"none");
+            [NSApp performSelector:@selector(terminate:) withObject:nil];   // strict only (script_pkg_result): a timed-out package ends the run
             return;
         }
         if (result>0) {
@@ -944,6 +1069,9 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         ++step; step_start = 0;
     }
 }
+#else
+#include "game_script.inc"
+#endif
 
 // One RETURN for BOOT_AUTODRIVE's result popups (d3d9.m); released 4 frames later by user32_script.
 static uint64_t autoret_release;
@@ -988,9 +1116,29 @@ static void display_poll(void) {
 }
 
 void user32_script(uint64_t frame, uint64_t draws) {
+#if NFS_GAME == NFS_GAME_MW
     display_poll();
+#else
+
+#endif
     static int held_frames;
     if (autoret_release && ++held_frames >= 4) { press("RETURN", 0, frame); autoret_release = held_frames = 0; }
+    // BOOT_KEYFILE=path: a driver outside the game that reads the screen writes one key name into the file; the key
+    // is pressed here, held 80 ms and the file removed, so a route follows what is on screen instead of a clock.
+    {
+        static const char *kf; static int kf_init; static char kf_held[16]; static uint64_t kf_down;
+        if (!kf_init) { kf = getenv("BOOT_KEYFILE"); kf_init = 1; }
+        if (kf && kf_held[0]) {
+            if (host_ticks() - kf_down >= 80000000ull) { press(kf_held, 0, frame); kf_held[0] = 0; }
+        } else if (kf && frame % 8 == 0) {
+            FILE *f = fopen(kf, "r");
+            if (f) {
+                char name[16] = "";
+                if (fscanf(f, "%15s", name) == 1) { press(name, 1, frame); strlcpy(kf_held, name, sizeof kf_held); kf_down = host_ticks(); }
+                fclose(f); remove(kf);
+            }
+        }
+    }
     const char *spec = getenv("BOOT_KEYS");
     if (spec && !strncmp(spec, "seq:", 4)) { script_seq(spec + 4, frame, draws); return; }
     for (const char *p = spec; p && *p;) {
@@ -1410,23 +1558,32 @@ static void pad_menu_keys(uint32_t keys) {  // menus: FE BUTTON4 / BUTTON0 / STA
 }
 // The FE package that has control (cFEng::FindPackageWithControl 00516A90: cFEng::mInstance -> FEngine, its package
 // list at +0xE4, +8 next, +0x20 has control, +0xC name), or NULL.
+#if NFS_GAME == NFS_GAME_MW
 static const char *fe_package_in_control(void) {
     uint32_t fe = M32(0x0091CADCu) ? M32(M32(0x0091CADCu)) : 0;
     if (!fe || fe == 0xFFFFFF28u) return NULL;
     for (uint32_t p = M32(fe + 0xE4); p; p = M32(p + 8)) if (M32(p + 0x20)) return gptr(M32(p + 0xC));
     return NULL;
 }
+#else
+#include "carbon_pad_state.inc"
+#endif
 // Options > Controls re-mapping: the game is waiting for the input to bind (the input object at IOModule
 // (GetIOModule 00634370 = 0x920DE0) +8: FUN_00628C00, called at 0052AFED when a field is picked, sets its +0x183C and
 // the device +0x1840 (1 keyboard, 3 controller); FUN_00634900 clears +0x183C when an input was captured). What the
 // controller sends then is what the binding records, and the bindings are used while driving, so the controller gets
 // the driving mapping while the game listens.
+#if NFS_GAME == NFS_GAME_MW
 static int pad_remap_listening(void) {
     uint32_t io = M32(0x00920DE8u);
     return io && M8(io + 0x183C) && M32(io + 0x1840) == 3;
 }
+#else
+#include "carbon_pad_remap.inc"
+#endif
 // The game's action bindings (GameAction 0091F418: 76 entries of 0x34 bytes: an id, then keyboard primary/secondary
 // and controller primary/secondary, 12 bytes each {type, ?, index}). BOOT_DIAG logs the controller ones on change.
+#if NFS_GAME == NFS_GAME_MW
 static void pad_diag_bindings(void) {
     static uint32_t last;
     uint32_t h = 2166136261u;
@@ -1443,8 +1600,12 @@ static void pad_diag_bindings(void) {
     }
     diag_event("%s", line);
 }
+#else
+static void pad_diag_bindings(void) {  }
+#endif
 static const char *pad_mode = "menus", *pad_ctl;   // the last mapping decision, for the diag pad: lines
 int controltype_passthrough(int idx);
+#if NFS_GAME == NFS_GAME_MW
 static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
     uint32_t sim = M32(SIM_INSTANCE);
     // Driving: racing (game-flow 6), the sim not paused, and no menu package in control (the race results come up
@@ -1503,6 +1664,9 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
         st->buttons = (phys & 0x3FFu) | bit(phys, P_L3) << 11;
     // Keep physical pressures for Z/Rz, including while capturing a binding.
 }
+#else
+#include "game_pad.inc"
+#endif
 
 // The pad's identity: its kind and the name the game sees (DIDEVICEINSTANCE, the Controls screen's page title, and the
 // profile's binding set: padbind.c). Set by pad_read; a disconnected pad keeps the last one.
@@ -1538,6 +1702,9 @@ static void pad_native(PadState *st, uint32_t phys) {
     static uint32_t last = ~0u;
     if (diag_on && st->buttons != last) { last = st->buttons; diag_event("pad: native buttons %04X", st->buttons); }
 }
+#if NFS_GAME != NFS_GAME_MW
+#include "carbon_pad_delivery.inc"
+#endif
 // The F10 menu is open: the game reads a connected pad at rest (the layout's held menu keys are released too).
 static void pad_neutral(int idx, PadState *st) {
     memset(st, 0, sizeof *st);
@@ -1760,10 +1927,14 @@ int pad_read_n(int idx, PadState *st) {
         static const char *an[6] = {"lx", "ly", "rx", "ry", "lt", "rt"};
         float axv = axis[0] ? (float)atof(strchr(axis, '=') ? strchr(axis, '=') + 1 : "0") : 0;
         for (int k = 0; k < 4; ++k) if (axis[0] && !strncmp(axis, an[k], 2)) *ax[k] = axv;   // sticks: seen by the layout
+#if NFS_GAME != NFS_GAME_MW
+#include "carbon_pad_script.inc"
+#else
         if (kind_native(pad_kinds[idx])) pad_native(st, st->buttons);
         else pad_apply_layout(idx, st, st->buttons);   // buttons= is the physical P_* mask, mapped like a real pad
         st->buttons |= idx ? script_raw2 : script_raw;
         for (int k = 0; k < 6; ++k) if (axis[0] && !strncmp(axis, an[k], 2)) *ax[k] = axv;
+#endif
         static uint32_t last_sims[2] = {~0u, ~0u};
         uint32_t *last_sim = &last_sims[idx];
         if (diag_on && st->buttons != *last_sim) {
@@ -1831,6 +2002,9 @@ int pad_read_n(int idx, PadState *st) {
         uint32_t inject = 0, hide = idx == 0 ? portmenu_pad(phys, up, down, left, right, st->lx, st->ly, home.pressed, touch.pressed, touch != nil, &inject) : (portmenu_is_open() ? ~0u : 0);
         if (hide == ~0u || osk_visible()) { pad_neutral(idx, st); return 1; }
         phys = (phys & ~hide) | inject;
+#if NFS_GAME != NFS_GAME_MW
+#include "carbon_pad_poll.inc"
+#else
         if (kind_native(kind)) {           // PS, the touchpad click, the Edge's back paddles, when not the menu's shortcut
             GCControllerButtonInput *lp = nil, *rp = nil;
             if (kind == PAD_KIND_EDGE) if (@available(macOS 13.0, *)) {
@@ -1846,6 +2020,7 @@ int pad_read_n(int idx, PadState *st) {
             static const int pov[3][3] = {{22500, 27000, 31500}, {18000, -1, 0}, {13500, 9000, 4500}};   // [x+1][y+1]
             st->pov = pov[x + 1][y + 1];
         }
+#endif
         if (diag_on) {                   // each change of buttons/D-pad, or of a stick/trigger by 0.25
             static PadState lasts[2];
             PadState last = lasts[idx];

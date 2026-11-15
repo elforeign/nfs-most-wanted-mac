@@ -70,6 +70,7 @@ HARNESS = r'''
 #include <stdlib.h>
 #include <stdio.h>
 #include "car85.c"
+#include "temporal_state_fixture.h"
 #ifndef CAR85_VERIFIED_CATALOG
 const PrivateCar *private_cars_traffic_get(void) { return NULL; }
 size_t private_cars_count(void) { return 0; }
@@ -432,7 +433,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
             assert variant == "good" or old or modified != actual, variant
             (tmp / "car85.c").write_text(modified)
             binary = tmp / variant
-            command = ["clang",str(ROOT/"runtime/car_physics.c"), "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
+            command = ["clang",str(ROOT/"runtime/car_grip.c"),str(ROOT/"runtime/car_physics.c"), "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
                        "-I", str(ROOT / "recomp"), "-I", str(ROOT / "recomp/out"), str(tmp / "test.c"),
                        "-framework", "CoreGraphics", "-framework", "CoreText", "-framework", "CoreFoundation", "-o", str(binary)]
             build = subprocess.run(command, text=True, capture_output=True)

@@ -2,6 +2,8 @@
 # Builds NFSMW.app from runtime/boot (run build.sh first):  runtime/bundle.sh [output dir, default runtime/]
 # Public identity: --name NAME --exec-name EXE --bundle-id ID --version VERSION [--build-version VERSION] [--source-id HASH].
 # With --name (or NFSMW_BUNDLE_NAME) the bundle directory is "NAME.app"; the executable is EXE (default NFSMW).
+# Program and game: --boot FILE (default boot) is the executable to bundle; --game mw|carbon (default mw) picks the
+# guide, copyright line and network text (Carbon's program is recomp/out/carbon/boot_carbon).
 # Environment equivalents: NFSMW_BUNDLE_NAME, NFSMW_BUNDLE_EXEC, NFSMW_BUNDLE_ID, NFSMW_BUNDLE_VERSION,
 # NFSMW_BUNDLE_BUILD_VERSION, NFSMW_SOURCE_ID. Omitting them keeps the owner defaults.
 # The app asks for the game folder on first launch (Option at launch asks again), logs to ~/Library/Logs/NFSMW-port,
@@ -16,6 +18,8 @@ BUNDLE_ID=${NFSMW_BUNDLE_ID:-local.nfsmw-port}
 VERSION=${NFSMW_BUNDLE_VERSION:-}
 BUILD_VERSION=${NFSMW_BUNDLE_BUILD_VERSION:-}
 SOURCE_ID=${NFSMW_SOURCE_ID:-}
+BOOT=boot
+GAME=mw
 while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || { echo "bundle.sh: missing option value" >&2; exit 2; }
     case "$1" in
@@ -25,6 +29,8 @@ while [ $# -gt 0 ]; do
         --version) VERSION=$2 ;;
         --build-version) BUILD_VERSION=$2 ;;
         --source-id) SOURCE_ID=$2 ;;
+        --boot) BOOT=$2 ;;
+        --game) GAME=$2 ;;
         *) echo "bundle.sh: unknown option $1" >&2; exit 2 ;;
     esac
     shift 2
@@ -37,21 +43,30 @@ case "$NAME" in ''|.*|*/*) echo "bundle.sh: invalid app name" >&2; exit 2 ;; esa
 case "$EXEC_NAME" in ''|.*|*[!A-Za-z0-9._-]*) echo "bundle.sh: invalid executable name" >&2; exit 2 ;; esac
 case "$BUNDLE_ID" in ''|*[!A-Za-z0-9.-]*) echo "bundle.sh: invalid bundle identifier" >&2; exit 2 ;; esac
 case "$VERSION" in *[!0-9.]*|.*|*.|*..*) echo "bundle.sh: version must contain numeric dot components" >&2; exit 2 ;; esac
+case "$GAME" in
+    mw) GUIDE=docs/guide.md
+        GAME_TITLE="Need for Speed Most Wanted (PC, v1.3)"
+        NET_TEXT="Online free roam finds your router to host a session." ;;
+    carbon) GUIDE=docs/guide_carbon.md
+        GAME_TITLE="Need for Speed Carbon (PC)"
+        NET_TEXT="Network play finds your router to host a session." ;;
+    *) echo "bundle.sh: unknown game $GAME (mw or carbon)" >&2; exit 2 ;;
+esac
 APP="$OUT/$NAME.app"
-[ -x boot ] || { echo "bundle.sh: runtime/boot missing, run runtime/build.sh first" >&2; exit 1; }
-[ -f docs/guide.md ] || { echo "bundle.sh: runtime/docs/guide.md missing" >&2; exit 1; }
+[ -x "$BOOT" ] || { echo "bundle.sh: $BOOT missing, run runtime/build.sh first" >&2; exit 1; }
+[ -f "$GUIDE" ] || { echo "bundle.sh: runtime/$GUIDE missing" >&2; exit 1; }
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 0)
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 if [ -n "$VERSION" ] && [ -z "$BUILD_VERSION" ]; then BUILD_VERSION=$VERSION; fi
 VERSION=${VERSION:-0.$BUILD}
 BUILD_VERSION=${BUILD_VERSION:-$BUILD ($COMMIT)}
 SOURCE_ID=${SOURCE_ID:-$COMMIT}
-MINOS=$(otool -l boot | awk '/LC_BUILD_VERSION/ { f = 1 } f && $1 == "minos" { print $2; exit }')
+MINOS=$(otool -l "$BOOT" | awk '/LC_BUILD_VERSION/ { f = 1 } f && $1 == "minos" { print $2; exit }')
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp boot "$APP/Contents/MacOS/$EXEC_NAME"
-cp docs/guide.md "$APP/Contents/Resources/Guide.md"
+cp "$BOOT" "$APP/Contents/MacOS/$EXEC_NAME"
+cp "$GUIDE" "$APP/Contents/Resources/Guide.md"
 # Keep the complete texts readable from Help > Licences, including source and
 # relinking instructions. A public bundle must never silently omit them.
 for legal in ../NOTICE ../LICENSE ../media/PREBUILT.md ../media/licenses/LGPL-2.1.txt ../media/licenses/FFmpeg-notices.txt; do
@@ -76,11 +91,14 @@ fi
 # Icon: drawn by app_icon.m (a generic speedometer), every iconset size from the 1024 px master.
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Standalone update tools need the same product selector as the game binary.
+set --
+[ "$GAME" = mw ] || set -- -DNFS_GAME=2
 # Build the delivery helper separately. Test URL overrides are compiled out of this binary.
-clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-deprecated-declarations -mmacosx-version-min="$MINOS" pub_update_helper.m -framework Foundation -o "$TMP/pub_update_helper"
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-deprecated-declarations -mmacosx-version-min="$MINOS" "$@" pub_update_helper.m -framework Foundation -o "$TMP/pub_update_helper"
 cp "$TMP/pub_update_helper" "$APP/Contents/MacOS/pub_update_helper"
 codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_helper"
-clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-unused-function -Wno-deprecated-declarations -DPUB_UPDATE_WORKER=1 -mmacosx-version-min="$MINOS" pub_update.m -framework Cocoa -o "$TMP/pub_update_worker"
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-unused-function -Wno-deprecated-declarations "$@" -DPUB_UPDATE_WORKER=1 -mmacosx-version-min="$MINOS" pub_update.m -framework Cocoa -o "$TMP/pub_update_worker"
 cp "$TMP/pub_update_worker" "$APP/Contents/MacOS/pub_update_worker"
 codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_worker"
 clang -fobjc-arc -w app_icon.m -framework Cocoa -framework ImageIO -framework UniformTypeIdentifiers -o "$TMP/app_icon"
@@ -108,12 +126,12 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleShortVersionString</key>      <string>$VERSION</string>
     <key>CFBundleVersion</key>                 <string>$BUILD_VERSION</string>
     <key>NFSMWSourceIdentity</key>             <string>$SOURCE_ID</string>
-    <key>NSHumanReadableCopyright</key>        <string>Native Apple Silicon runtime for the PC game. Needs your own copy of Need for Speed Most Wanted (PC, v1.3).</string>
+    <key>NSHumanReadableCopyright</key>        <string>Native Apple Silicon runtime for the PC game. Needs your own copy of $GAME_TITLE.</string>
     <key>LSMinimumSystemVersion</key>          <string>$MINOS</string>
     <key>LSArchitecturePriority</key>          <array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key>       <string>public.app-category.racing-games</string>
     <key>LSSupportsGameMode</key>              <true/>
-    <key>NSLocalNetworkUsageDescription</key>     <string>Online free roam finds your router to host a session.</string>
+    <key>NSLocalNetworkUsageDescription</key>     <string>$NET_TEXT</string>
     <key>NSHighResolutionCapable</key>         <true/>
     <key>NSPrincipalClass</key>                <string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key>  <false/>

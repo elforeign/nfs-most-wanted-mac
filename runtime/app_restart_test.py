@@ -175,7 +175,9 @@ def plist_check(source, root):
     (app / 'Contents').mkdir(parents=True)
     block = source[source.index('cat > "$APP/Contents/Info.plist"'):source.index('\nplutil -lint')]
     env = dict(os.environ, APP=str(app), BUNDLE_ID='test.restart', NAME='Test Game', EXEC_NAME='NFSMW',
-               VERSION='1.0', BUILD_VERSION='1', SOURCE_ID='fixture', MINOS='14.0')
+               VERSION='1.0', BUILD_VERSION='1', SOURCE_ID='fixture', MINOS='14.0',
+               GAME_TITLE='Need for Speed Most Wanted (PC, v1.3)',
+               NET_TEXT='Online free roam finds your router to host a session.')
     subprocess.run(['/bin/sh', '-c', block], env=env, check=True, capture_output=True)
     with (app / 'Contents/Info.plist').open('rb') as f:
         info = plistlib.load(f)

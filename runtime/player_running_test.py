@@ -11,6 +11,11 @@
 
 
 
+
+
+
+
+
 """
 import os
 import shutil
@@ -48,6 +53,14 @@ def reported(d, script_text):
     sp.write_text(script_text)
     env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX)
     return subprocess.run(['sh', str(sp)], capture_output=True, text=True, env=env).returncode == 0
+
+
+def run_script(d, script_text):
+    sp = Path(d) / 'port/runtime/player_running.sh'
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(script_text)
+    env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX)
+    return subprocess.run(['sh', str(sp)], capture_output=True, text=True, env=env)
 
 
 def stop(pid):
@@ -91,6 +104,22 @@ def cases(script_text):
             time.sleep(0.3)
             if reported(d, script_text):
                 bad.append('stopped game')
+            # marker folder of the player's own launcher
+            mk = Path(d) / 'runs/player'
+            mk.mkdir()
+            p = spawn('/bin/sleep 60', False); pids.append(p); time.sleep(0.3)
+            (mk / str(p)).write_text('')
+            r = run_script(d, script_text)
+            if r.returncode != 0 or r.stdout.strip() != f'{p} marker':
+                bad.append('marker live')
+            stop(p); os.waitpid(p, 0)
+            if reported(d, script_text):
+                bad.append('marker dead')
+            (mk / str(p)).unlink()
+            (mk / 'abc').write_text('')
+            (mk / f'{os.getpid()}x').write_text('')
+            if reported(d, script_text):
+                bad.append('marker name')
         finally:
             for p in pids:
                 stop(p)
@@ -108,7 +137,7 @@ PPID_LINE = '        path=$(ps -p "$p" -o comm= 2>/dev/null) || continue\n'
 assert PPID_LINE in SCRIPT
 launchd = SCRIPT.replace(PPID_LINE, '        [ "$(ps -p "$p" -o ppid= 2>/dev/null | tr -d " ")" = 1 ] || continue\n' + PPID_LINE)
 lbad = cases(launchd)
-print(f'player_running good script: {7 - len(good)}/7 cases' + (f' FAILED {good}' if good else ''))
+print(f'player_running good script: {10 - len(good)}/10 cases' + (f' FAILED {good}' if good else ''))
 print(f'player_running old-pattern copy: {len(obad)} failed cases {obad}')
 print(f'player_running launchd-parent copy: {len(lbad)} failed cases {lbad}')
 print(f'player_running filter-removed copy: {len(fbad)} failed cases {fbad}')

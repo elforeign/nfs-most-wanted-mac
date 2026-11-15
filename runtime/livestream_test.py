@@ -1,5 +1,28 @@
 #!/usr/bin/env python3
 """Real NSURLSession to HTTPS on 127.0.0.1 only, without a game or external URL.
+Abort controls under four yes processes: 14/20 trials failed before, all in
+finish-concurrent (segment/playlist/five/retry: 0/20 each); 0/40 after in all
+five cases, with their graceful counterparts also 0/40. Held-response socket
+handshake spans Stop's return. Restoring graceful finish in the abort control
+is rejected: deadline is not an immediate Stop (1/1 deliberately wrong run).
+Whole-process key scan baseline/acceptance: 0/0 matches; skipped poster erase:
+1 match in port.poster, DefaultMallocZone allocation size 1280. Scans raw and
+percent-encoded UTF-8/UTF-16 across readable VM, with one scanner allocation
+excluded. This snapshot does not prove swap/crash-dump/AppKit cleanup.
+Early global snapshot control: final ACKs=0 in saved stats vs fixed 1; bytes 752/0.
+Graceful completion: reviewed abort cancelled=1/finals=0; fixed held segment,
+playlist and five queued segments cancelled=failed=0, exactly one final ACK.
+Combined Stop timeout 5.669 s; final retry 2 retries/1 ACK; key residue 0/512 bytes.
+Join-deadline reset: 6.673 s FAIL vs 5.669 s PASS; pair reset: 1.244 s FAIL vs 0.233 s PASS.
+False ACK on stalled final is rejected (finals=0, finalized=1); healthy finalized=1/finals=1.
+Shared drain: five queued items, fixed deadline/cancelled=1/finals=0;
+disabled common timer posts five and a final (cancelled=0/finals=1), FAIL.
+Concurrent global Stop original/fixed: second premature return 1/0 in both
+plain and poster-queue reentry cases (FAIL/PASS); first premature 0/0,
+held key scans 1/1, final residue 0/0. Fixed stoppers finish within 2 s of
+queue release, including Stop reentry from the poster queue.
+Hardening original/fixed: 5/5 owned-buffer scans find 1/0 sentinel matches each;
+external Stop returns before cancellation 1/0 times (eventual residue 0/0).
 Livefix original/fixed: 7 segments/0 playlists vs 7/7 over two starts;
 unique names 6/7, playlist/window/session assertions 7/0 failures. Original
 202/500/401, playlist deadline and detached Stop checks fail; fixed all pass.
@@ -38,6 +61,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import importlib.util
+
+FINAL_ABORT_FRAGMENTS = {'    void stop(StreamError reason': '    void stop(StreamError reason,int code=0,const char *detail=nullptr) {\n        {\n            std::lock_guard<std::mutex> guard(lock);\n            if(counters.running) {\n                counters.running=false; counters.error=reason; counters.httpCode=code; counters.reason=detail;\n                if(reason!=StreamError::stopped) {\n                    if(detail && code) report_note("live: error kind=%s code=%d reason=%s",errorKind(reason),code,detail);\n                    else if(detail) report_note("live: error kind=%s reason=%s",errorKind(reason),detail);\n                    else report_note("live: error kind=%s code=%d",errorKind(reason),code);\n                }\n                for(auto &s:pending) subtract(s);\n                pending.clear();\n            }\n        }\n        auto self=shared_from_this();\n        // Serialize with request construction, but never dispatch_sync onto self.\n        if(dispatch_get_specific(this)==this) cancel();\n        else dispatch_sync(work, ^{ self->cancel(); });\n    }', '    void cancel()': '    void cancel() {\n        if(timer) { dispatch_source_cancel(timer); timer=nullptr; }\n        if(task) {\n            if(!taskCancelled) {\n                taskCancelled=true;\n                { std::lock_guard<std::mutex> guard(lock); ++counters.cancelled; }\n                [task cancel];\n            }\n        } else {\n            std::lock_guard<std::mutex> guard(lock);\n            if(sending) { ++counters.failed; subtract(sending); sending.reset(); }\n        }\n        [session invalidateAndCancel]; session=nil;\n        erase(keyBytes,sizeof keyBytes); keySize=0;\n        playlistBody=nil; window.clear();\n        logStop();\n    }', 'void Poster::stop()': 'void Poster::stop() { state->stop(StreamError::stopped); }'}
+FINAL_ABORT_DIGESTS = {'    void stop(StreamError reason': 'da2e7a81edbf4d49f769f72ecfd1d04ba1489f9d96b4ee89a3afa2a1958d25fd', '    void cancel()': 'd70c7e9215d2f2aa8153b7eeada5849fc6b18b1d4e400eb1ac849bab2baba782', 'void Poster::stop()': 'f521e83cea09b6ca8624404611378f4c9222012d77698465f49272b734ed1e9e'}
+
+# Original global Stop detached the poster before its synchronous erasure.
+BASE_STOP_STREAM = 'void stopStream() {\n    std::shared_ptr<Poster> old;\n    { std::lock_guard<std::mutex> guard(streamLock); old=std::move(currentStream);\n      if(old) lastStream=old->stats(); }\n    if(old) old->stop();\n}'
+BASE_STOP_STREAM_SHA256 = 'd909bfba87d09069289705f6ec0960fd65b42e2b204871681ce13f83b3f79735'
 
 # Original admission/data callbacks, pinned to the reviewed revision.
 BASE_POST = 'bool Poster::post(OwnedSegment segment) {\n    auto s=state;\n    bool admitted=false;\n    {\n        std::lock_guard<std::mutex> guard(s->lock);\n        if(!s->counters.running) return false;\n        int64_t duration=segment && segment->start90k>=0 && segment->end90k>segment->start90k ? segment->end90k-segment->start90k : 0;\n        if(segment && !segment->bytes.empty() && duration>0 &&\n            segment->bytes.size()<=maxBytes-s->counters.bytes && duration<=maxTicks-s->counters.ticks) {\n            s->pending.push_back(std::move(segment));\n            s->counters.bytes+=s->pending.back()->bytes.size(); s->counters.ticks+=duration;\n            s->counters.peakBytes=std::max(s->counters.peakBytes,s->counters.bytes);\n            s->counters.peakTicks=std::max(s->counters.peakTicks,s->counters.ticks);\n            ++s->counters.accepted; admitted=true;\n        } else { s->counters.running=false; s->counters.error=StreamError::overload; }\n    }\n    if(admitted) dispatch_async(s->work, ^{ s->pump(); });\n    else s->stop(StreamError::overload);\n    return admitted;\n}\n'
@@ -52,10 +83,10 @@ LIVEFIX_ORIGINAL_SHA256 = {'    void stop(StreamError reason)': 'f1e0bf47713e22b
 def original_ingest(source):
     for name, text in LIVEFIX_ORIGINAL.items():
         assert hashlib.sha256(text.encode()).hexdigest() == LIVEFIX_ORIGINAL_SHA256[name]
-    for name in ('stop', 'cancel', 'pump', 'complete', 'send', 'makePlaylist'):
+    for name in ('stop', 'cancel', 'pump', 'complete', 'send', 'makePlaylist', 'endPlaylist'):
         begin = source.index('    void '+name+'(')
         end = source.index('\n    }', begin)+len('\n    }')
-        old = next((v for k,v in LIVEFIX_ORIGINAL.items() if k.startswith('    void '+name+'(')), '')
+        old = next((v for k,v in LIVEFIX_ORIGINAL.items() if k.startswith('    void '+name+'(')), '    void endPlaylist() {}' if name=='endPlaylist' else '')
         source = source[:begin]+old+source[end:]
     for kind in ('response','redirect','data'):
         signature=LIVEFIX_ORIGINAL[kind].split('{',1)[0]
@@ -70,8 +101,40 @@ def original_ingest(source):
     assert source.count(fail) == 1
     source = source.replace(fail, 'void Poster::fail(StreamError reason,int,const char *) { state->stop(reason); }')
     source=source.replace('        inFlight.reset(); // the delegate holds this state for the completion call\n','')
+    source=source.replace('key=nil;', 'erase(keyBytes,sizeof keyBytes); keySize=0;')
+    source=source.replace('value:key]', 'value:[[NSString alloc] initWithBytes:keyBytes length:keySize encoding:NSUTF8StringEncoding]]')
+    source=source.replace('void Poster::finish() { state->finish(); }','void Poster::finish() { stop(); }')
     return source.replace('static const char *errorKind', '__attribute__((unused)) static const char *errorKind')
 
+
+# Key lifetime baseline: only the key-owning functions/members from the reviewed code.
+KEY_ORIGINAL = {'stop': '    void stop(StreamError reason,int code=0) {\n        {\n            std::lock_guard<std::mutex> guard(lock);\n            if(!counters.running) return;\n            counters.running=false; counters.error=reason; counters.httpCode=code;\n            if(reason!=StreamError::stopped) {\n                report_note("live: error kind=%s code=%d",errorKind(reason),code);\n            }\n            for(auto &s:pending) subtract(s);\n            pending.clear();\n        }\n        auto self=shared_from_this();\n        dispatch_async(work, ^{ self->cancel(); });\n    }', 'cancel': '    void cancel() {\n        if(timer) { dispatch_source_cancel(timer); timer=nullptr; }\n        if(task) {\n            { std::lock_guard<std::mutex> guard(lock); ++counters.cancelled; }\n            [task cancel];\n        } else {\n            std::lock_guard<std::mutex> guard(lock);\n            if(sending) { subtract(sending); sending.reset(); }\n        }\n        [session invalidateAndCancel]; session=nil;\n        key=nil; playlistBody=nil; window.clear();\n        logStop();\n    }', 'send': '    void send() {\n        { std::lock_guard<std::mutex> guard(lock); if(!counters.running) return; }\n        @autoreleasepool {\n            if(!session) {\n                auto delegate=[NFSSegmentSession new]; delegate->state=shared_from_this();\n                auto configuration=[NSURLSessionConfiguration ephemeralSessionConfiguration];\n                configuration.URLCache=nil; configuration.HTTPCookieStorage=nil;\n                configuration.URLCredentialStorage=nil; configuration.HTTPShouldSetCookies=NO;\n                configuration.requestCachePolicy=NSURLRequestReloadIgnoringLocalCacheData;\n                configuration.HTTPMaximumConnectionsPerHost=1;\n                configuration.HTTPShouldUsePipelining=NO;\n                configuration.timeoutIntervalForRequest=deadline+1;\n                configuration.timeoutIntervalForResource=deadline+1;\n#ifdef LIVESTREAM_TESTING\n                configuration.connectionProxyDictionary=@{};\n#endif\n                auto callbacks=[NSOperationQueue new]; callbacks.maxConcurrentOperationCount=1;\n                callbacks.underlyingQueue=work;\n                session=[NSURLSession sessionWithConfiguration:configuration delegate:delegate delegateQueue:callbacks];\n            }\n            NSURLComponents *url=[base copy];\n            url.queryItems=@[[NSURLQueryItem queryItemWithName:@"cid" value:key],\n                [NSURLQueryItem queryItemWithName:@"copy" value:@"0"],\n                [NSURLQueryItem queryItemWithName:@"file" value:playlist?@"live.m3u8":sendingName]];\n            url.percentEncodedQuery=[url.percentEncodedQuery stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];\n            auto request=[NSMutableURLRequest requestWithURL:url.URL];\n            request.HTTPMethod=@"POST"; request.timeoutInterval=deadline+1;\n            [request setValue:@"NFS / Mac / 1.0" forHTTPHeaderField:@"User-Agent"];\n            [request setValue:playlist?@"application/vnd.apple.mpegurl":@"video/MP2T" forHTTPHeaderField:@"Content-Type"];\n            if(playlist) request.HTTPBody=playlistBody;\n            else {\n                // Foundation shares the immutable payload, including cancellation.\n                auto body=sending;\n                request.HTTPBody=[[NSData alloc] initWithBytesNoCopy:(void*)body->bytes.data()\n                    length:body->bytes.size() deallocator:^(void *,NSUInteger) { (void)body; }];\n            }\n            responseBytes=0; responseCode=0;\n            task=[session dataTaskWithRequest:request];\n            inFlight=shared_from_this();\n            [task resume];\n        }\n    }', 'create': 'std::shared_ptr<Poster> Poster::create(const std::string& key\n#ifdef LIVESTREAM_TESTING\n    , const StreamTestOptions& options\n#endif\n) {\n    if(key.empty()) return {};\n    if(key.size()>512) return {};\n    @autoreleasepool {\n        NSString *text=[[NSString alloc] initWithBytes:key.data() length:key.size() encoding:NSUTF8StringEncoding];\n        if(!text || !text.length || [text rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location!=NSNotFound) return {};\n        NSString *address=@"https://a.upload.youtube.com/http_upload_hls";\n#ifdef LIVESTREAM_TESTING\n        if(!options.baseURL.empty()) address=[NSString stringWithUTF8String:options.baseURL.c_str()];\n#endif\n        auto base=[NSURLComponents componentsWithString:address];\n        bool production=[base.host isEqualToString:@"a.upload.youtube.com"] && (!base.port || base.port.integerValue==443);\n        bool allowed=production;\n#ifdef LIVESTREAM_TESTING\n        allowed=allowed || ([base.host isEqualToString:@"127.0.0.1"] && base.port.integerValue>0 && base.port.integerValue<=65535);\n        if(options.deadlineSeconds<=0 || options.deadlineSeconds>Poster::deadlineSeconds) return {};\n#endif\n        if(![base.scheme isEqualToString:@"https"] || !allowed || base.user || base.password || base.query || base.fragment ||\n            ![base.path isEqualToString:@"/http_upload_hls"] || !base.URL) return {};\n        auto state=std::make_shared<StreamState>(text,base);\n#ifdef LIVESTREAM_TESTING\n        state->deadline=options.deadlineSeconds;\n        if(!production && !options.anchorDER.empty()) state->anchor=[NSData dataWithBytes:options.anchorDER.data() length:options.anchorDER.size()];\n#endif\n        report_note("live: Go live");\n        return std::shared_ptr<Poster>(new Poster(std::move(state)));\n    }\n}', 'constructor': '    StreamState(NSString *k,NSURLComponents *b):prefix(NSUUID.UUID.UUIDString),key(k),base(b),\n        work(dispatch_queue_create("live.https",DISPATCH_QUEUE_SERIAL)) { counters.running=true; }'}
+KEY_ORIGINAL_SHA256 = {'stop': '707fd602de1237822d96c6b229d67a4b8dddf8c045b33a4ea887e6dface99770', 'cancel': '7f36835b4917172b9387530adbce3c4ca71cebdde2911af66220cf1fa56236b5', 'send': '01de40f5ed0c430abdee23bf35133b3d02e12c0d169f0fc89be888ee99d4e820', 'create': '19278d8c17eeef5e5e2e240d92083deb312cc27899274c8f0e2507aaf578860c', 'constructor': 'a1578e01819481e8ab9bf52bf1fd395612a818eac5d9569289f99b039b9ed934'}
+
+def function(text,signature):
+    begin=text.index(signature); brace=text.index('{',begin); depth=1; end=brace+1
+    while depth:
+        depth+=(text[end]=='{')-(text[end]=='}'); end+=1
+    return text[begin:end]
+
+
+def original_key_lifetime(source):
+    for name,text in KEY_ORIGINAL.items():
+        assert hashlib.sha256(text.encode()).hexdigest()==KEY_ORIGINAL_SHA256[name]
+    for name,signature in [('stop','    void stop('),('cancel','    void cancel('),('send','    void send('),
+                           ('create','std::shared_ptr<Poster> Poster::create(')]:
+        source=source.replace(function(source,signature),KEY_ORIGINAL[name])
+    begin=source.index('    StreamState('); end=source.index('\n    void subtract(',begin)
+    source=source[:begin]+KEY_ORIGINAL['constructor']+source[end:]
+    source=source.replace('    unsigned char keyBytes[512]={0};\n    size_t keySize=0;\n    bool taskCancelled=false;',
+                          '    NSString *key;')
+    # The pinned stop() predates named failure reasons; the reason detail is irrelevant to key lifetime.
+    before='{ state->stop(reason,code,detail); }'
+    assert source.count(before)==1
+    source=source.replace(before,'{ (void)detail; state->stop(reason,code); }')
+    source=source.replace('void Poster::finish() { state->finish(); }','void Poster::finish() { stop(); }')
+    return source.replace('static void erase(', '__attribute__((unused)) static void erase(').replace(
+                          'static bool validKey(', '__attribute__((unused)) static bool validKey(')
 
 RT = Path(__file__).resolve().parent
 ROOT = RT.parent
@@ -79,7 +142,7 @@ CACHE = ROOT / '.metal-cache/livestream'
 
 
 class Fixture:
-    def __init__(self, cert, private, key, mode):
+    def __init__(self, cert, private, key, mode, abort_control=False):
         self.key, self.mode = key, mode
         self.received, self.escaped, self.invalid = [], 0, 0
         self.accepted = 0
@@ -90,6 +153,13 @@ class Fixture:
         self.awaiting_playlist = False
         self.playlist_sequences, self.durations = [], []
         self.stop = threading.Event()
+        self.directory = Path(cert).parent
+        self.finals = 0
+        self.last_playlist = None
+        # Abort controls keep the selected response in flight through Stop's
+        # return. The child receives the hold notification before Stop, and
+        # releases it afterwards; scheduling cannot turn this into an ACK.
+        self.abort_channel, self.abort_child = socket.socketpair() if abort_control else (None, None)
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -107,6 +177,7 @@ class Fixture:
                 body = self.rfile.read(length)
                 name = query.get('file', [''])[0]
                 playlist = name.endswith('.m3u8')
+                final = playlist and body.endswith(b'#EXT-X-ENDLIST\n')
                 kind = 'playlist' if playlist else 'segment'
                 attempt = fixture.attempts.get(name, 0)
                 fixture.attempts[name] = attempt + 1
@@ -119,6 +190,9 @@ class Fixture:
                 if fixture.mode in ('retry-segment', 'retry-playlist') and playlist == (fixture.mode == 'retry-playlist') and attempt < 2:
                     code = 500
                 if fixture.mode == 'redirect': code = 307
+                if fixture.mode == 'finish-retry' and final:
+                    code = 500 if fixture.finals < 2 else 200
+                    fixture.finals += 1
                 valid = (parts.path == '/http_upload_hls' and
                          set(query) == {'cid', 'copy', 'file'} and
                          query['cid'] == [fixture.key] and query['copy'] == ['0'] and
@@ -126,6 +200,10 @@ class Fixture:
                 if playlist:
                     valid = valid and self.headers.get('Content-Type') == 'application/vnd.apple.mpegurl'
                     parsed = fixture.parse_playlist(body)
+                    if final:
+                        parsed = parsed and body == fixture.last_playlist+b'#EXT-X-ENDLIST\n'
+                    elif code in (200,202):
+                        fixture.last_playlist = body
                     fixture.playlists.append(bool(valid and parsed))
                     valid = valid and parsed
                     if code in (200, 202): fixture.awaiting_playlist = False
@@ -151,6 +229,22 @@ class Fixture:
                     fixture.received.append(bool(valid))
                 fixture.events.append((kind, name, code, time.monotonic()))
                 fixture.invalid += not valid
+                hold = ((fixture.mode in ('finish-segment','finish-five','finish-concurrent','finish-retry','finish-total-stall','finish-joined-stall','finish-early-stall','finish-queue-stall','finish-drain-stall') and not playlist and len(fixture.received)==1)
+                        or (fixture.mode=='finish-playlist' and playlist and not final and len(fixture.playlists)==1))
+                if hold:
+                    if fixture.abort_channel is not None:
+                        fixture.abort_channel.sendall(b'H')
+                        if fixture.abort_channel.recv(1) != b'R': return
+                    else:
+                        (fixture.directory/'finish-held').write_text('held')
+                        until=time.monotonic()+10
+                        while not fixture.stop.is_set() and time.monotonic()<until:
+                            if fixture.mode not in ('finish-drain-stall','finish-early-stall') and (fixture.directory/'finish-release').exists(): break
+                            fixture.stop.wait(0.002)
+                        if fixture.mode in ('finish-drain-stall','finish-early-stall'): return
+                if fixture.mode=='finish-queue-stall' and not playlist: fixture.stop.wait(0.65)
+                if final and fixture.mode in ('finish-final-stall','finish-total-stall','finish-joined-stall'):
+                    fixture.stop.wait(10); return
                 if fixture.mode == 'playlist-stall' and not playlist:
                     # Spend most of the 400 ms budget before starting the playlist.
                     fixture.stop.wait(0.28)
@@ -226,13 +320,17 @@ class Fixture:
 
     def close(self):
         self.stop.set()
+        if self.abort_channel is not None:
+            self.abort_channel.shutdown(socket.SHUT_RDWR)
+            self.abort_channel.close()
+            self.abort_child.close()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), 'fixture stopped'
 
 
-def compile_binary(directory, name, source, packets=None, driver=None):
+def compile_binary(directory, name, source, packets=None, driver=None, process_scan=False):
     marker = 'session=[NSURLSession sessionWithConfiguration:configuration delegate:delegate delegateQueue:callbacks];'
     assert source.count(marker) == 1
     path = directory / (name + '.mm')
@@ -242,6 +340,23 @@ def compile_binary(directory, name, source, packets=None, driver=None):
     data_marker = '(NSData *)data {\n'
     assert source.count(data_marker) == 1
     source = source.replace(data_marker, data_marker+'    receivedResponseBytes+=data.length;\n')
+    if process_scan:
+        # Observe only existing string values, without retaining or copying them.
+        assert source.count('auto next=Poster::create(key);')==1, 'scan must select the loopback options'
+        assert source.count('NSURL *url=[[NSURL alloc] initWithString:text];')==1
+        source = source.replace('auto next=Poster::create(key);', 'auto next=Poster::create(key,processScanOptions);')
+        source = source.replace('NSURL *url=[[NSURL alloc] initWithString:text];',
+            'scanString(text,"port.url-text"); NSURL *url=[[NSURL alloc] initWithString:text]; '
+            'scanString((__bridge NSString *)CFURLGetString((__bridge CFURLRef)url),"port.url");')
+        key_source = (RT/'stream_key.m').read_text()
+        assert key_source.count('replaceKey(field.stringValue)')==1
+        assert key_source.count('NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];')==1
+        key_source = key_source.replace('replaceKey(field.stringValue)',
+            'replaceKey(scanString(field.stringValue,"port.save"))')
+        key_source = key_source.replace('volatile unsigned char *p=bytes;', 'volatile unsigned char *p=(unsigned char *)bytes;')
+        key_source = key_source.replace('NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];',
+            'NSString *text=scanString([NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString],"port.paste");')
+        (directory/'scan-key.m').write_text(key_source)
     path.write_text(source)
     exe = directory / name
     command = ['clang++', '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror',
@@ -251,6 +366,9 @@ def compile_binary(directory, name, source, packets=None, driver=None):
                '-I'+str(ROOT/'third_party/ffmpeg/include'),
                *[str(ROOT/'third_party/ffmpeg/lib'/('lib'+name+'.a')) for name in ('avformat','avcodec','avutil')],
                '-lz', str(directory/'socket-probe.dylib')]
+    if process_scan:
+        command += ['-DLIVESTREAM_PROCESS_SCAN=1', '-DSTREAM_KEY_SOURCE="'+str(directory/'scan-key.m')+'"',
+                    '-framework', 'Cocoa']
     for framework in ('Foundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'AudioToolbox', 'Security'):
         command += ['-framework', framework]
     built = subprocess.run(command+['-o', str(exe)], capture_output=True, text=True, timeout=90)
@@ -259,19 +377,32 @@ def compile_binary(directory, name, source, packets=None, driver=None):
     return exe
 
 
-def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False):
-    fixture = Fixture(directory/'cert.pem', directory/'key.pem', key, fixture_mode)
+def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False, abort_control=False):
+    for name in ('finish-release','finish-held'):
+        (directory/name).unlink(missing_ok=True)
+    fixture = Fixture(directory/'cert.pem', directory/'key.pem', key, fixture_mode, abort_control)
+    abort_env = {'NFS_TEST_ABORT_FD': str(fixture.abort_child.fileno())} if abort_control else {}
     libraries = ':'.join(filter(None, (str(directory/'socket-probe.dylib'),
                                       os.environ.get('DYLD_INSERT_LIBRARIES'))))
     try:
         result = subprocess.run([str(exe), mode, fixture.base, str(directory/'cert.der')],
-                                input=key+'\n', capture_output=True, text=True, timeout=18,
-                                env=dict(os.environ, DYLD_INSERT_LIBRARIES=libraries))
+                                input=key+'\n', capture_output=True, text=True, timeout=180 if mode=='process-scan' else 18,
+                                pass_fds=(fixture.abort_child.fileno(),) if abort_control else (),
+                                env=dict(os.environ, DYLD_INSERT_LIBRARIES=libraries, **abort_env))
     finally:
         fixture.close()
     session_path = directory/'cert.der.session.txt'
     session_text = session_path.read_text() if session_path.exists() else ''
     output = result.stdout+result.stderr
+    if mode=='process-scan':
+        assert 'memory-scan:' in output, f'process scan did not complete: rc={result.returncode}'
+        summary=re.search(r'memory-scan: matches=(\d+) port=(\d+) unattributed=(\d+).*read_errors=0 overflow=0 exclusions=1',output)
+        assert summary, 'process scan coverage/metadata must complete without read errors'
+        if broken:
+            assert int(summary[1])>=1 and int(summary[2])>=1 and 'owner=port.poster' in output, 'skipped poster erase must be detected and attributed'
+            assert 'FAIL stream: whole-process scan finds a remaining key copy' in output
+        else:
+            assert int(summary[1])==0, 'no raw/encoded key copies may remain'
     assert key not in session_text and key.split('+',1)[0] not in session_text, 'private session sink'
     (CACHE/(exe.name+'-'+mode+'-session.txt')).write_text(session_text)
     # The ASCII prefix survives URL escaping, so raw and encoded URL leaks fail.
@@ -284,6 +415,8 @@ def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False):
     (CACHE/(exe.name+'-'+mode+'.log')).write_text(safe)
     assert not (matches or urls) or leak, 'key or upload URL present in process output'
     valid = (result.returncode == 0 and not matches and not urls and not fixture.escaped and not fixture.invalid)
+    if mode == 'process-scan':
+        valid = valid and fixture.received==[True]*2 and fixture.playlists==[True]*3 and 'finals=1 finalized=1' in output
     if mode == 'ordered':
         valid = valid and fixture.received == [True]*6 and fixture.playlists == [True]*6 and fixture.accepted == 1
     if mode in ('jitter', 'oversize'):
@@ -296,7 +429,7 @@ def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False):
         valid = valid and fixture.playlists == [True]*7 and fixture.playlist_sequences == [0,0,0,1,2,3,0]
         expected = [[2.005 if j%2 else 2.0 for j in range(max(0,i-2),i+1)] for i in range(6)]+[[2.0]]
         valid = valid and fixture.durations == expected and fixture.accepted == 2
-    if fixture_mode in ('retry-segment', 'retry-playlist') and not broken:
+    if fixture_mode in ('retry-segment', 'retry-playlist') and not broken and not mode.startswith('wipe-'):
         times = [t for _,_,code,t in fixture.events if code == 500]
         assert len(times) == 2 and times[1]-times[0] >= 0.08, 'bounded exponential retry starts at 100 ms'
         last_retry = next(t for _,_,code,t in fixture.events if code in (200,202)) if fixture_mode == 'retry-segment' else fixture.events[-1][3]
@@ -309,6 +442,8 @@ def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False):
           f'playlists={len(fixture.playlists)} unique_names={len({name for kind,name,_,_ in fixture.events if kind == "segment"})} connections={fixture.accepted} invalid={fixture.invalid} escaped={fixture.escaped} key_matches={matches} url_matches={len(urls)}; '
           + safe.strip().replace('\n', '; '), flush=True)
     assert valid != broken, f'{exe.name}/{mode}: '+('broken control escaped' if broken else 'fixed check failed')
+    if abort_control:
+        assert 'abort control: stopped=1' in output, 'abort control must stop without deadline'
     return safe
 
 
@@ -349,6 +484,54 @@ __attribute__((used)) static const struct { const void *replacement,*original; }
     assert result.returncode == 0, result.stderr[-2500:]
 
 
+def fake_ingest_proof(directory):
+    sys.path.insert(0,str(RT))
+    import live_fake_ingest
+    state=live_fake_ingest.IngestState()
+    generation='12345678-1234-1234-1234-123456789abc'
+    names=[]; rows=[]
+    body=bytes([0x47,0,0]+[0]*185)
+    tail=b''
+    for index in range(12):
+        name=f'{generation}-{index}.ts'; names.append(name)
+        ok,extinf,eos,gen,refs=state.upload(name,body)
+        assert ok and not eos and gen==generation
+        rows.append(f'{index*2}\t{name}\t188\t1\t0\t0\t{gen}\t')
+        tail=('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n'
+              f'#EXT-X-MEDIA-SEQUENCE:{max(0,index-2)}\n'+
+              ''.join(f'#EXTINF:2.000000,\n{n}\n' for n in names[-3:])).encode()
+        ok,extinf,eos,gen,refs=state.upload('live.m3u8',tail)
+        assert ok and extinf==2 and not eos and refs==names[-3:]
+        rows.append(f'{index*2+0.1}\tlive.m3u8\t{len(tail)}\t1\t2\t0\t{gen}\t{",".join(refs)}')
+    final=tail+b'#EXT-X-ENDLIST\n'
+    assert not state.upload('live.m3u8',final.replace(b'2.000000',b'2.500000'))[0], 'EOS preserves exact snapshot'
+    assert not state.upload('live.m3u8',final+b'#EXT-X-ENDLIST\n')[0], 'duplicate ENDLIST rejected'
+    ok,extinf,eos,gen,refs=state.upload('live.m3u8',final)
+    assert ok and eos and gen==generation and refs==names[-3:]
+    rows.append(f'24\tlive.m3u8\t{len(final)}\t1\t2\t1\t{gen}\t{",".join(refs)}')
+    assert not state.upload('live.m3u8',final)[0], 'duplicate final rejected'
+    assert not state.upload(f'{generation}-12.ts',body)[0], 'post-final media rejected'
+    root=directory/'counts'; (root/'ingest').mkdir(parents=True); (root/'game').mkdir()
+    (root/'game.user').mkdir()
+    events='\n'.join('script: '+s for s in ('unfocus:15','hide:15','unfocus:30','livestop','livequit'))
+    (root/'game/events.log').write_text(events)
+    session=('live: first segment accepted code=202\n'
+             'live: Stop accepted=12 posted=12 playlists=13 cancelled=0 dropped=0 failed=0 retries=0 '
+             'bytes=0 peak_bytes=188 ticks=0 peak_ticks=180000 finals=1 finalized=1\n')
+    (root/'game.user/session.txt').write_text(session)
+    def judge(values,valid):
+        (root/'ingest/ingest.tsv').write_text('\n'.join(values)+'\n')
+        result=subprocess.run(['/bin/sh',str(RT/'live_fake.sh'),'--counts',str(root)],capture_output=True,text=True,timeout=15)
+        assert (result.returncode==0)==valid, result.stdout+result.stderr
+    judge(rows,True)
+    for broken in (rows[:-1],rows+[rows[-1]],rows+[rows[0]],
+                   [r.replace('\t1\t'+generation+'\t','\t0\t'+generation+'\t') for r in rows]):
+        judge(broken,False)
+    (root/'game.user/session.txt').write_text(session.replace('cancelled=0','cancelled=1'))
+    judge(rows,False)
+    print('fake ingest/counts: valid=1 rejected=5; exact tail, duplicate ENDLIST/final, post-final media rejected',flush=True)
+
+
 def main():
     if sys.platform != 'darwin':
         print('SKIP: requires macOS NSURLSession and media frameworks')
@@ -377,9 +560,80 @@ def main():
     with tempfile.TemporaryDirectory(prefix='https-', dir=CACHE) as temporary:
         directory = Path(temporary)
         certificate(directory)
+        fake_ingest_proof(directory)
         socket_probe(directory)
-        key = 'stream-sentinel-'+secrets.token_hex(16)+'+/?&=#%'
+        key = 'stream-sentinel-'+secrets.token_hex(16)+'+/?&=#%é😀'
         fixed = compile_binary(directory, 'fixed', source)
+        scan = compile_binary(directory, 'process-scan', source, process_scan=True)
+        scan_key = 'scan-'+secrets.token_hex(24)+'+/?&=#%'
+        run(scan,'process-scan','ordered',directory,scan_key)
+        erase = 'erase(keyBytes,sizeof keyBytes); keySize=0;'
+        assert function(source,'    void cancel()').count(erase)==1
+        broken_scan_source=source.replace(function(source,'    void cancel()'),
+            function(source,'    void cancel()').replace(erase,'keySize=0;'))
+        broken_scan=compile_binary(directory,'process-scan-no-erase',broken_scan_source,process_scan=True)
+        run(broken_scan,'process-scan','ordered',directory,scan_key,broken=True)
+        for name,fragment in FINAL_ABORT_FRAGMENTS.items():
+            assert hashlib.sha256(fragment.encode()).hexdigest()==FINAL_ABORT_DIGESTS[name]
+        # Delegate graceful entry back to the reviewed immediate abort, retaining
+        # today's exact stop/cancel fragments for the measured baseline.
+        immediate=source.replace(function(source,'void Poster::finish()'), 'void Poster::finish() { stop(); }')
+        for name,fragment in FINAL_ABORT_FRAGMENTS.items():
+            immediate=immediate.replace(function(immediate,name),fragment)
+        abort=compile_binary(directory,'finish-abort-original',immediate)
+        healthy=('finish-segment','finish-playlist','finish-five','finish-concurrent','finish-retry','finish-tail')
+        for mode in healthy:
+            run(fixed,mode,mode,directory,key)
+            if mode!='finish-tail':
+                failure=run(abort,mode,mode,directory,key,broken=True,abort_control=True)
+                assert re.search(r'cancelled=[1-9]\d*.*finals=0',failure), 'abort control must cancel and send no EOS'
+        lie=source.replace('        send();\n    }\n    void logStop()',
+            '        { std::lock_guard<std::mutex> guard(lock); counters.finalized=true; }\n        send();\n    }\n    void logStop()')
+        assert lie!=source
+        false_ack=compile_binary(directory,'finish-false-ack',lie)
+        run(false_ack,'finish-final-stall','finish-final-stall',directory,key,broken=True)
+        run(fixed,'finish-idle','segments',directory,key)
+        for mode in ('finish-drain-stall','finish-final-stall','finish-total-stall','finish-joined-stall','finish-early-stall','finish-queue-stall'):
+            run(fixed,mode,mode,directory,key)
+        reset_join=source.replace('            if(!active) self->cancel();',
+            '            if(active) self->finishDeadline(3); else self->cancel();')
+        assert reset_join!=source
+        mutant=compile_binary(directory,'finish-reset-join',reset_join)
+        failure=run(mutant,'finish-joined-stall','finish-joined-stall',directory,key,broken=True)
+        assert 'FAIL stream: finish bounded wait' in failure
+        reset_pair=source.replace('        finishDeadline(std::chrono::duration<double>(drainUntil-',
+            '        if(timer) { dispatch_source_cancel(timer); timer=nullptr; }\n        finishDeadline(std::chrono::duration<double>(drainUntil-')
+        assert reset_pair!=source
+        mutant=compile_binary(directory,'finish-reset-pair',reset_pair)
+        failure=run(mutant,'finish-early-stall','finish-early-stall',directory,key,broken=True)
+        assert 'FAIL stream: finish preserves active pair earlier deadline' in failure
+        no_shared_drain=source.replace('        finishDeadline(std::chrono::duration<double>(drainUntil-',
+            '        if(sending) return;\n        finishDeadline(std::chrono::duration<double>(drainUntil-')
+        assert no_shared_drain!=source
+        mutant=compile_binary(directory,'finish-no-shared-drain',no_shared_drain)
+        failure=run(mutant,'finish-queue-stall','finish-queue-stall',directory,key,broken=True)
+        assert 'finals=1 finalized=1' in failure and 'FAIL stream: timeout must not claim' in failure
+        early_snapshot=source.replace('            stoppingStream=std::move(currentStream);',
+            '            stoppingStream=std::move(currentStream);\n            lastStream=stoppingStream->stats();')
+        early_snapshot=early_snapshot.replace('        if(old) lastStream=old->stats();\n','')
+        assert early_snapshot!=source
+        mutant=compile_binary(directory,'finish-early-snapshot',early_snapshot)
+        failure=run(mutant,'finish-concurrent','finish-concurrent',directory,key,broken=True)
+        assert 'last snapshot: posted=0 playlists=0 finals=0' in failure
+        assert 'FAIL stream: global Stop snapshots final counters' in failure
+        assert hashlib.sha256(BASE_STOP_STREAM.encode()).hexdigest() == BASE_STOP_STREAM_SHA256
+        stop_original = source.replace(function(source, 'void stopStream()'), BASE_STOP_STREAM)
+        detached = compile_binary(directory, 'detached-stop-original', stop_original)
+        for mode in ('wipe-concurrent', 'wipe-concurrent-queue'):
+            failure = run(detached, mode, 'stall', directory, key, broken=True)
+            assert 'second_premature=1 held_matches=1' in failure
+            assert 'FAIL stream: concurrent stoppers wait for poster erasure' in failure
+            run(fixed, mode, 'stall', directory, key)
+        key_original = compile_binary(directory, 'key-original', original_key_lifetime(source))
+        for mode in ('wipe-idle','wipe-flight','wipe-failure','wipe-playlist','wipe-retry','wipe-external'):
+            fixture='retry-segment' if mode=='wipe-retry' else 'playlist-stall' if mode=='wipe-playlist' else 'stall'
+            run(key_original,mode,fixture,directory,key,broken=True)
+            run(fixed,mode,fixture,directory,key)
         # Restarting the timer for the playlist escaped the old two-second check.
         transition = 'makePlaylist(); playlist=true; attempts=0; send(); return;'
         assert source.count(transition) == 1
@@ -429,17 +683,18 @@ def main():
              '} else { ++s->counters.dropped; s->counters.running=false; }', 'oversize', 'ordered'),
             ('unaccount-flight', 'sending=std::move(pending.front()); pending.pop_front();',
              'sending=std::move(pending.front()); pending.pop_front(); subtract(sending);', 'bytes', 'stall'),
-            ('key-log', 'if(key.empty()) return {};', 'fprintf(stderr,"%s\\n",key.c_str()); if(key.empty()) return {};', 'ordered', 'ordered'),
-            ('key-url-log', 'auto request=[NSMutableURLRequest requestWithURL:url.URL];',
-             'fprintf(stderr,"%s\\n",url.URL.absoluteString.UTF8String); auto request=[NSMutableURLRequest requestWithURL:url.URL];', 'ordered', 'ordered'),
-            ('default-on', 'if(key.empty()) return {};', 'if(key.empty()) return create("default-on",options);', 'off', 'ordered'),
-            ('off-socket', 'if(key.empty()) return {};',
-             'if(key.empty()) { int fd=socket(AF_INET,SOCK_STREAM,0); if(fd>=0) close(fd); return {}; }', 'off', 'ordered'),
+            ('key-log', 'if(!validKey(key)) return {};', 'fprintf(stderr,"%s\\n",key.c_str()); if(!validKey(key)) return {};', 'ordered', 'ordered'),
+            ('key-url-log', 'request=[NSMutableURLRequest requestWithURL:url];',
+             'fprintf(stderr,"%s\\n",url.absoluteString.UTF8String); request=[NSMutableURLRequest requestWithURL:url];', 'ordered', 'ordered'),
+            ('default-on', 'if(!validKey(key)) return {};', 'if(key.empty()) return create("default-on",options); if(!validKey(key)) return {};', 'off', 'ordered'),
+            ('off-socket', 'if(!validKey(key)) return {};',
+             'if(key.empty()) { int fd=socket(AF_INET,SOCK_STREAM,0); if(fd>=0) close(fd); return {}; } if(!validKey(key)) return {};', 'off', 'ordered'),
             ('wrong-order', '(unsigned long long)nextSequence];', '(unsigned long long)0];', 'ordered', 'ordered'),
             ('host-policy', 'bool allowed=production;', 'bool allowed=true;', 'policy', 'ordered'),
-            ('no-deadline', 's->stop(StreamError::deadline);', '(void)s;', 'deadline', 'stall'),
-            ('no-cancel', '++counters.cancelled; }\n            [task cancel];',
-             '++counters.cancelled; }\n            return;', 'deadline', 'stall'),
+            ('no-deadline', 'dispatch_source_set_event_handler(timer,^{ if(auto s=weak.lock()) s->stop(StreamError::deadline); });',
+             'dispatch_source_set_event_handler(timer,^{ if(auto s=weak.lock()) (void)s; });', 'deadline', 'stall'),
+            ('no-cancel', '++counters.cancelled; }\n                [task cancel];',
+             '++counters.cancelled; }\n                return;', 'deadline', 'stall'),
             ('follow-redirect', 'if(auto s=state.lock()) s->stop(live::StreamError::redirect,(int)response.statusCode);\n    completion(nil);',
              'completion(request);', 'redirect', 'redirect'),
             ('ignore-http', 'if((code<200 || code>=300) && code!=500)', 'if(code<0)', 'http', 'http'),

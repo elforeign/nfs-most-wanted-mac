@@ -38,6 +38,7 @@ static void cpu(void) {
     CHECK(!strcmp(registered->label, "Smooth cut-out edges"));
     uint64_t off = pipeline(rs, 2, pd, &pa);
     CHECK(!pd.alphaToCoverageEnabled && !pa.alpha_to_coverage);
+    CHECK(pipeline(rs,2,pd,&pa)==off);
     registered->apply(1);
     uint64_t on = pipeline(rs, 2, pd, &pa);
     CHECK(off != on && pd.alphaToCoverageEnabled && pa.alpha_to_coverage == 1);

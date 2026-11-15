@@ -52,8 +52,14 @@ static inline const char *roots_file_(void) {
     if (e && *e) snprintf(path, sizeof path, "%s", e);
     else {
         const char *ud = getenv("BOOT_USERDATA"), *home = getenv("HOME");
+#if defined(NFS_GAME_PRIVATE) && NFS_GAME == NFS_GAME_PRIVATE   // Carbon builds force-include game_select.h
+        // Carbon reads its own manifest in its own profile folder (boot.c userdata_dir), never Most Wanted's beside it.
+        if (ud && *ud) snprintf(path, sizeof path, "%s/Carbon/roots.txt", ud);
+        else snprintf(path, sizeof path, "%s/Library/Application Support/NFSMW-port/Carbon/roots.txt", home ? home : "/tmp");
+#else
         if (ud && *ud) snprintf(path, sizeof path, "%s/roots.txt", ud);
         else snprintf(path, sizeof path, "%s/Library/Application Support/NFSMW-port/roots.txt", home ? home : "/tmp");
+#endif
     }
     struct stat st;
     if (stat(path, &st)) path[0] = 0;

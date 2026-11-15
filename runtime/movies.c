@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // movies.c - the X360 movies (720p WMV3, WMA Pro 5.1) in the PC movie player.
 //
 // The game plays movies with EA's RCMP AV_PLAYER (VP6 video, EA ADPCM stereo), driven by MoviePlayer:
@@ -459,15 +460,20 @@ static void audio_start(void) {
 
 // ---------------- the movie texture ----------------
 static uint32_t pow2(uint32_t v) { uint32_t p = 1; while (p < v) p <<= 1; return p; }
+#if NFS_GAME == NFS_GAME_MW
 static uint32_t shape_dims(Cpu *c, uint32_t shape, uint32_t *w, uint32_t *h) {
     c->ecx = shape;
     uint32_t blk = call_guest(c, FN_ShapeImage, 0, NULL);
     if (blk) { *w = M32(blk + 0x18); *h = M32(blk + 0x1C); }
     return blk;
 }
+#else
+static uint32_t shape_dims(Cpu *c, uint32_t shape, uint32_t *w, uint32_t *h) { return 0; }
+#endif
 // Has the game create (or keep) MovieTextureInfo and its D3D texture at w x h.
 // The PC movies are a 4:3 picture squeezed into 1024x512 (16:9 content letterboxed in rows 64-447), which the front
 // end stretches over a 4:3 quad. The WMVs are full-frame 16:9, so they go into a 4:3 texture (1280x960) with bars.
+#if NFS_GAME == NFS_GAME_MW
 static int movie_texture(Cpu *c, uint32_t self, int w, int h) {
     uint32_t fake = scratch, sw = 0, sh = 0;
     memset(G + fake, 0, 0x40);                     // a frame Shape stand-in: one 32-bit image block with the size
@@ -532,6 +538,10 @@ static void upload(Cpu *c, const uint8_t *bgra) {
     call_guest(c, M32(vt + 0x50), 2, u);                             // UnlockRect
     ++mv.frames_shown;
 }
+#else
+static int movie_texture(Cpu *c, uint32_t self, int w, int h) { return 0; }
+static void upload(Cpu *c, const uint8_t *bgra) {  }
+#endif
 
 // ---------------- open / update / close ----------------
 static void movie_close(const char *why) {
@@ -559,6 +569,7 @@ static void movie_close(const char *why) {
     memset(&mv, 0, sizeof mv);
 }
 
+#if NFS_GAME == NFS_GAME_MW
 static int host_play(Cpu *c, uint32_t self) {
     const char *pc = gptr(self + MP_FILENAME);
     char path[1024], why[1200];
@@ -626,6 +637,9 @@ static int host_play(Cpu *c, uint32_t self) {
          mv.tex_w, mv.tex_h, mv.top, mv.top + h - 1, mv.flip ? ", bottom-up" : "", n_wmv, n_fallback);
     return 1;
 }
+#else
+static int host_play(Cpu *c, uint32_t self) { return 0; }
+#endif
 
 static void movie_update(Cpu *c) {
     double t = now_s();
@@ -666,6 +680,7 @@ float movies_picture_aspect(void) { return mv.active && mv.th ? (float)mv.tw / (
 // before it plays and otherwise ends the movie at once. A movie the X360 folder has counts as there, so a movie with
 // no PC VP6 (eahd_bumper, the X360's EA HD bumper, bootflow.c) plays its WMV through Play below. A VP6 installed
 // only in another region or language stands in next (movie_substitute; the name is changed where the game keeps it).
+#if NFS_GAME == NFS_GAME_MW
 void f_0065F7A0(Cpu *c) {
     char *p = (char *)gptr(arg(c, 0));
     f_0065F7A0_orig(c);
@@ -711,3 +726,10 @@ void f_00525E60(Cpu *c) {                                  // MoviePlayer::~Movi
     ds_set_movie_playing(playing_player != 0);
     shape_is_ours = 0;
 }
+#else
+
+
+
+
+
+#endif

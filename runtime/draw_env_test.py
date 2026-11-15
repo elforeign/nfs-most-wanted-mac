@@ -13,6 +13,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 BASELINE = 'static int soft_smoke_on(void) {\n    if (diag_on) {\n        if (postfx_look_variant("softoff")) return 0;\n        if (postfx_look_variant("softon") || postfx_look_variant("softbroken")) return 1;\n    }\n    const char *e = getenv("NFS_SOFT_SMOKE");\n    return particles_physical_enabled() && (!e || strcmp(e, "off"));\n}\nint x360_post_ssao_enabled(void) {\n    if (look_var_is("ssaooff")) return 0;\n    if (look_var_is("ssaon")) return 1;\n    const char *e = getenv("NFS_SSAO");\n    return !e || strcasecmp(e, "off");\n}'
 BASELINE_SHA = 'd3259b60715b632115eb333ae182182338338c83f59c5160c0f886ecc2e4aa82'
@@ -80,7 +84,7 @@ def cache_safe(settings, live, src, name, reload):
 
 def main():
     assert hashlib.sha256(BASELINE.encode()).hexdigest() == BASELINE_SHA
-    render = (RT/'render.m').read_text()
+    render = mw_source(RT/'render.m')
     post = (RT/'x360_post.m').read_text()
     settings = (RT/'settings_port.c').read_text()
     # A cached switch is safe only if its row is restart-only, or live with a reload that clears the cache.

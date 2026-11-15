@@ -41,6 +41,7 @@
 #include "hdr_output.h"
 #include "rt_native.h"
 #include "pipeline_cache.h"
+#include "slowlog_lumab.h"
 // The HDR fixture uses direct buffers.
 void rt_native_encode(id<MTLCommandBuffer> b,RTNativeEncode encode,const void *p,size_t n,NSArray *r) {encode(b,p,n,r);}
 

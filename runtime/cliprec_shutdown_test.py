@@ -1,6 +1,8 @@
 """Shutdown regression using the production recorder and a slow writer stub.
 Proof: ORIGINAL replay-only quit 0.806214 s / exit 1; fixed 0.000000 s / exit 0.
 Requested save: ORIGINAL 0.809907 s, fixed 0.810076 s; both completed (10 s bound).
+Live shutdown companion (stream_live_test): held quit abort cancels 1 with 0 finals;
+graceful quit cancels/fails 0 and ACKs 1 final. Combined timeout 5.663 s <=6.25 s.
 The standalone cliprec suite also verifies real requested MP4 publication/decoding.
 """
 from pathlib import Path

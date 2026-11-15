@@ -1,7 +1,7 @@
 """Full player roster and native default through production store/light/ePoly.
 Game PlayerUsable + nonempty MODEL: 48 stock + 76 additions + 14 replacements.
 Default Off: all 138 stay dark after colour selection, then explicit Light On
-submits 4 strips + 1 pool each, Measured and Stronger: 5659108/5659108 each.
+submits 0 emitter quads + 1 pool each (four logical strips), Measured and Stronger: 5659108/5659108 each.
 Changed fresh-colour assertion on ORIGINAL On code: 41002/41004 (2 failures,
 4 strips/1 pool/3 allocations); fixed: 7/7, zero submissions/allocations.
 Pinned original choice_get reproduces that failure, no-colour 5/6 and roster
@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT / 'runtime'))
 import underglow_light_test as light
 
 
-def player_fixtures():
+def player_fixtures(observe=None):
     """Enumerate the game and catalog first; geometry cannot shrink either set."""
     sys.path.insert(0, str(ROOT / 'tools_snapshot'))
     sys.path.insert(0, str(ROOT / 'tools'))
@@ -106,6 +106,8 @@ def player_fixtures():
             # Converters retain these car-local axes, metres and wheel centres.
             # No donor wheel substitution is used for a pending catalog addition.
             wheel = readers[tag].extract(name)
+            if observe is not None:
+                lo, hi = observe(row, data, wheel, lo, hi)
             fields = (lo, hi, wheel['TireOffsets'], wheel['TireSkidWidth'])
             label = tag + '/' + name.lower()
             rows.append('{"' + label + '",' + ','.join(
@@ -176,9 +178,9 @@ int main(int argc,char **argv) {
   CHECK(underglow_light_get(profile,fixture_handle)==(unsigned)on);
   unsigned bs=strips,bp=pools,ba=allocs;Cpu saved=c;f_0074E160(&c);CHECK(!memcmp(&c,&saved,sizeof c));
   if(on) {
-   CHECK(strips-bs==4&&pools-bp==1);
-   if(strips-bs==4&&pools-bp==1){++passed;if(i<STOCK_COUNT+ADDITION_COUNT)++models;else ++replacements;}
-   if(strips-bs==4&&pools-bp==1)verify_pool();
+   CHECK(strips-bs==0&&pools-bp==1);
+   if(strips-bs==0&&pools-bp==1){++passed;if(i<STOCK_COUNT+ADDITION_COUNT)++models;else ++replacements;}
+   if(strips-bs==0&&pools-bp==1)verify_pool();
   } else CHECK(strips==bs&&pools==bp&&allocs==ba);
   printf("case=%s car=%s strips=%u pool=%u allocations=%u\n",mode,fixtures[i].name,strips-bs,pools-bp,allocs-ba);
  }
@@ -208,6 +210,7 @@ def main():
     store = (ROOT / 'runtime/underglow_store.c').read_text()
     diag = (ROOT / 'runtime/diag.c').read_text()
     wrapper = diag[diag.index('\nunsigned diag_car1[4];') + 1:diag.index('void f_007387E0_orig')]
+    wrapper = wrapper.replace('materials_car_diagnostics', 'f_0074E160')
     harness = light.HARNESS.split('int main(')[0]
     start = harness.index('unsigned underglow_light_get(')
     end = harness.index('void diag_event(', start)

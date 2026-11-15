@@ -314,3 +314,24 @@ an external ordinal-4 destroy request, and checks cleared imported-control
 handles. All six compiled detach/selector/ordinal/control/unlink/overlap controls
 fail without private banks. Private adapter replay covers 69 banks, 98 modules,
 400 players and 127/127 interfaces with every PCM borrow/control object retired.
+
+## Optional source grip
+
+F10 > Cars > Added cars' own grip defaults to Off; changes apply after the current grip scope ends, from the next race or car change; an explicit environment switch wins.
+
+`NFS_ADDCAR_GRIP=off|on` defaults to **off**. `on` selects admitted
+GRIP.BIN tyre coefficients for the local player's added car, using its live
+tyre upgrade level and installed Junkman scales. Stock cars, traffic and other
+players retain native handling. Missing or refused metadata retains native handling.
+
+The ordinary-road solver uses the X360/Carbon dynamic grip, static grip and
+grip scale; native yaw-limit and rear-friction routines consume the selected
+yaw-control table. C51 DRIFT_YAW_CONTROL adds source body yaw assistance after
+native drift torque and before wheel forces. Steering, yaw speed and all
+drift-only source fields retain their existing behavior. This is ordinary-road
+source grip, not a complete source vehicle simulation.
+
+Selection requires the current pvehicle identity and vault generation. Each
+call owns its guest tyre-layout shadow and restores the original pointer and
+thread-local scope on exit. Unload, reload and address reuse invalidate old
+selection tokens. The default remains off pending a handling comparison.

@@ -40,6 +40,7 @@
 
 #include "x360_internal.h"
 #include "materials.h"
+#include "temporal_state.h"
 #include "gen/x360_engine.inc"   // X360E_SHADOW_*: the X360 shadow map size, focus and near plane (default.xex)
 
 #define SHADOW_FOCUS_FAR   0x00901AB0u
@@ -452,6 +453,7 @@ void f_006CFAD0_orig(Cpu *c);
 void f_006308E0_orig(Cpu *c);
 void f_006308E0(Cpu *c) {                // ERestartRace finalizer: retail resets its singleton treatment here
     f_006308E0_orig(c);
+    if (temporal_state_requested) temporal_invalidate(TEMPORAL_RESET_PLAYER);
     if (!split_view_rect(0x00919650u, NULL) || !split_view_rect(0x009196C0u, NULL)) return;
     // Restart reuses the players, cameras and targets, so identity-based invalidation cannot see it.
     // Run after the retail reset so the next per-player treatment clones the reset singleton.

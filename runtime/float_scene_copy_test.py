@@ -12,6 +12,10 @@ import os
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -33,6 +37,7 @@ PRE = r'''
 #include <stdarg.h>
 #include <unistd.h>
 #include "d3d9_internal.h"
+#include "post_cuts.h"
 
 id<MTLDevice> mtl;
 id<MTLCommandQueue> queue;
@@ -181,7 +186,7 @@ FAILURE = 'FAIL native preserves float mip-surface promotion'
 
 
 def main():
-    source = (ROOT / 'render.m').read_text()
+    source = mw_source(ROOT / 'render.m')
     good = make_harness(source)
     broken = mutate(good)
     assert broken != good, 'mutation did not apply'
@@ -190,7 +195,7 @@ def main():
         fixture, executable = tmp / 'fixture.m', tmp / 'fixture'
         build = ['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                  '-Wno-unused-variable', '-Wno-incompatible-pointer-types', '-fobjc-arc',
-                 '-I', ROOT, '-I', ROOT.parent / 'recomp', fixture,
+                 '-I', ROOT, '-I', ROOT.parent / 'recomp', fixture, ROOT / 'post_cuts.c',
                  '-framework', 'Foundation', '-framework', 'Metal', '-o', executable]
         fixture.write_text(good)
         checked_run(build)

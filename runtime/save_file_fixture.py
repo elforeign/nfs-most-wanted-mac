@@ -1,11 +1,22 @@
 """Memory-backed guest and file fault controls for native save checks."""
 from pathlib import Path
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def mw_source(path):
+    """Select the shipped target before a native fixture extracts source text."""
+    result = subprocess.run(['unifdef', '-DNFS_GAME=1', '-DNFS_GAME_MW=1',
+                             '-DNFS_GAME_PRIVATE=2'], input=Path(path).read_text(),
+                            capture_output=True, text=True)
+    assert result.returncode in (0, 1), result.stderr
+    return result.stdout
+
+
 def marked(path, begin, end):
-    return (ROOT / path).read_text().split(begin, 1)[1].split('\n', 1)[1].split(end, 1)[0]
+    source = mw_source(ROOT / path) if path == 'runtime/boot.c' else (ROOT / path).read_text()
+    return source.split(begin, 1)[1].split('\n', 1)[1].split(end, 1)[0]
 
 
 FILE_PREFIX = r'''

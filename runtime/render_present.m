@@ -150,7 +150,11 @@ static void png_after(id<MTLCommandBuffer> cb, id<MTLBuffer> buf, const char *pa
         png_slots = dispatch_semaphore_create(8);
         atexit(png_drain);
     }
-    if (bounded) dispatch_semaphore_wait(png_slots, DISPATCH_TIME_FOREVER);   // earlier shots are on committed frames
+    if (bounded) {
+        diag_capture_begin();
+        dispatch_semaphore_wait(png_slots, DISPATCH_TIME_FOREVER);
+        diag_capture_end();
+    }   // earlier shots are on committed frames
     char *p = strdup(path);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
         (void)b;

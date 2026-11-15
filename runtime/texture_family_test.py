@@ -19,6 +19,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 
 ORIGINAL = {
@@ -204,8 +208,8 @@ def main():
     for name, fragment in ORIGINAL.items():
         assert hashlib.sha256(fragment.encode()).hexdigest() == SHA[name], name
     material = (RT / 'materials.m').read_text()
-    render = (RT / 'render.m').read_text()
-    d3d = (RT / 'd3d9.m').read_text()
+    render = mw_source(RT / 'render.m')
+    d3d = mw_source(RT / 'd3d9.m')
     header = (RT / 'd3d9_internal.h').read_text()
     types = re.search(r'enum Kind \{.*?\};', header, re.S).group()
     types += '\n' + re.search(r'typedef struct Obj \{.*?\} Obj;', header, re.S).group()

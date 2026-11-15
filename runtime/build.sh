@@ -7,6 +7,8 @@ cd "$(dirname "$0")"
 # The game-data tables (gen/*.inc) are generated from the player's own files, never kept in the repository; a no-op
 # (one stat per input) when nothing changed since the last run.
 "$TOOLS_PY" -I ../tools/gen_tables.py --if-stale
+"$TOOLS_PY" -I daynight_sky_test.py --generate ../recomp/out
+"$TOOLS_PY" -I daynight_lamps_test.py --generate ../recomp/out
 build_key=$("$TOOLS_PY" -I ../recomp/build_inputs.py --runtime-key)
 if "$TOOLS_PY" -I ../recomp/build_inputs.py --runtime-fresh "${BOOT_OUT:-boot}" "$build_key"; then
     "$TOOLS_PY" -I ../recomp/hook_coverage.py --host mac --binary "${BOOT_OUT:-boot}" --report ../recomp/out/hook-coverage.json
@@ -68,6 +70,11 @@ clang \
     music_balance.c \
     trigopt.c \
     car_audio.c \
+    car_grip.c \
+    car_grip_force.c \
+    car_grip_wheel.c \
+    car_grip_assist.c \
+    car_grip_bridge.c \
     car_audio_runtime.c \
     car_audio_csis.c \
     car_audio_engine_class.c \
@@ -78,7 +85,10 @@ clang \
     cash_cheat.c \
     underglow_ui.c \
     underglow_menu.c \
+    headlights.m \
+    headlight_profile.c \
     underglow_render.m \
+    rain_cover.m \
     underglow_light.m \
     underglow.c \
     underglow_store.c \
@@ -115,6 +125,9 @@ clang \
     replay_input.c \
     replay_bindings.c \
     render_post.m \
+    shared_depth.m \
+    atmosphere.m \
+    pre_treatment.m \
     post_cuts.c \
     render_thread.m \
     soft_smoke_half.m \
@@ -133,6 +146,7 @@ clang \
     movies.c \
     x360.m \
     x360_post.m \
+    lens_drops.c \
     x360_textures.m \
     padprompts.c \
     maxperf_career.c \
@@ -144,6 +158,8 @@ clang \
     chasecam.c \
     vinyls.m \
     widescreen.c \
+    temporal_state.c \
+    temporal_render.m \
     padguest.c \
     qrsplit.c \
     splitworld.c \
@@ -154,6 +170,7 @@ clang \
     live_picture.c \
     live_picture_sweep.c \
     alpha_to_coverage.c \
+    clearcoat.c \
     decal_depth.m \
     lampbatch.m \
     detail.c \
@@ -166,13 +183,25 @@ clang \
     feedback.c \
     overlay.m \
     probe.m \
+    paint_flake.c \
+    glass_port.m \
+    car_normals_port.m \
     materials.m \
+    water_port.m \
     particles_physical.c \
     realworld_materials.c \
     traffic_detail.c \
     traffic_pilot.c \
     roadfilm.m \
     lighting.c \
+    daynight.c \
+    daynight_clock.c \
+    daynight_stream.m \
+    daynight_lamps.c \
+    daynight_carlamps.c \
+    flare_streaks.c \
+    car_locallight.c \
+    -x objective-c daynight_sky.c -x none \
     settings.c \
     text_fit.c \
     roam_auth.c \
@@ -184,6 +213,8 @@ clang \
     onscreen_keyboard.c \
     gpuclients.m \
     slowlog.m \
+    slowlog_lumab.c \
+    slowclock.c \
     gameplay_opts.c \
     fe_console.c \
     attrib_x360.c \

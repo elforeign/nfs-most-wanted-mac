@@ -32,6 +32,7 @@ def function(source, name):
 PRE = r'''
 #include "funcs.h"
 #include "host.h"
+#include "temporal_state_fixture.h"
 #include <stdarg.h>
 #include <stdlib.h>
 uint8_t *G;

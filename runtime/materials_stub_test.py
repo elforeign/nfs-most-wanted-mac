@@ -68,6 +68,11 @@ def harness(src):
              '#include "materials.h"\n#include "../host/shaders/sm_coverage.h"\n',
              '#include "x360_shader_lits.inc"\n#include "x360_shader_body.inc"\n',
              'static uint64_t fixture_hash;\n', arrays(src),
+             # The console providers are what these sources exercise; the authored ones are water_port_test.py's and glass_port_test's.
+             'static int water_provider_get(void) { return 1; }\n'
+             'static char *water_port_shader(const char *m, int v) { (void)m; (void)v; return NULL; }\n'
+             'static int glass_provider_get(void) { return 1; }\n'
+             'static char *glass_port_vs(const char *s, int b) { (void)s; (void)b; return NULL; }\n',
              function(src, 'mat_grass_shadow_slot')]
     for kind in KINDS:
         body = function(src, f'mat_{kind}_shader')

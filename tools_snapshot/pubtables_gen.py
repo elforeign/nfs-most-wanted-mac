@@ -8,11 +8,13 @@
     pc_shader_lits.inc  speed.exe: the particles t2 PS's shadow floor (def c0.z; materials.m particles_msl's PC path)
   X360 (from the extracted X360 files; without them: no-X360 stubs, the rows are hidden by roots.h):
     look_x360.inc       GLOBAL/ATTRIBUTES.BIN visuallook records (no X360: the PC records, so the look is unchanged)
-    glass_x360.inc      GLOBAL/GLOBALB.BUN light materials (chunk 00135200): car glass alpha / environment scales
+    glass_x360.inc      GLOBAL/GLOBALB.BUN light materials: car glass scales (without X360: port-authored scales,
+                        keyed by the PC material identities; glass_port)
     grass_x360.inc      GLOBAL/ATTRIBUTES.BIN lightmaterials A79251B8 (grasstype1) layout fields + NOISESPACE
     x360_engine.inc     default.xex: the X360 post chain's engine constants (auto-exposure, speed blur, middle gray, bloom
                         scale, mirror brightness) at their addresses in the identity-checked image (x360_post.m; no
-                        X360 executable: zeros and X360_ENGINE_CONSTS 0, the PC chain)
+                        X360 executable: X360_ENGINE_CONSTS 0, zeros except the post chain, which runs on
+                        this port's own values, POST_FALLBACK)
   The executable is the USA or the European (PAL) retail build, told apart by the hash of the whole decoded image; each
   build has its own address tables (tables()).
 
@@ -197,6 +199,50 @@ def pc_shader_lits(pc):
 GLASS = ["WINDOWMASK", "WINDSHIELD", "*WINDSHIELD_TINT_", "HEADLIGHTGLASS", "CLEARPLASTIC", "MOLDINGS"]
 
 
+def glass_port(pc):
+    """Own opacity/reflection scales; only names, hashes and tint opacity come from the PC copy."""
+    out = ["// Generated port-authored car glass; identities from PC GLOBAL/GLOBALB.BUN. Do not edit.\n",
+           "static const GlassX360 glass_x360[] = {\n"]
+    records = []
+    for b in bun_chunks((pc / "GLOBAL/GLOBALB.BUN").read_bytes(), 0x00135200):
+        name = b[0x14:0x34].split(b"\0")[0].decode("latin1")
+        if name not in GLASS and not name.startswith("WINDSHIELD_TINT_"):
+            continue
+        h, = struct.unpack_from("<I", b, 0xC)
+        # A clear windscreen transmits 3/4 at normal incidence, falling to 1/10 at grazing. This is an authored
+        # approximation to the longer optical path through a pane, using the existing PC angular interpolation.
+        face, edge = 0.25, 0.9
+        # Side glass retains 3/5 normal transmission, 1/20 grazing (privacy tint and the longer edge path).
+        if name == "WINDOWMASK":
+            face, edge = 0.4, 0.95
+        elif name.startswith("WINDSHIELD_TINT_"):
+            # Preserve the PC game's tint ordering: multiply the clear pane's transmission by PC transmission.
+            a, = struct.unpack_from("<f", b, 0x50)
+            a = min(1.0, max(0.0, a))
+            face, edge = 1.0 - 0.75 * (1.0 - a), 1.0 - 0.1 * (1.0 - a)
+        elif name in ("HEADLIGHTGLASS", "CLEARPLASTIC"):
+            # Clear covers transmit 92/100 face-on and 1/5 edge-on; lamp-specific clear-cover handling still wins.
+            face, edge = 0.08, 0.8
+        if name == "MOLDINGS":
+            # Opaque rubber trim is neither a transmitting pane nor a reflecting glass surface.
+            face, edge, env_lo, env_hi = 1.0, 1.0, 0.0, 0.0
+        else:
+            # Air/glass IOR 1:1.5 gives ((1.5-1)/(1.5+1))^2 = .04 normal reflectance, tending to 1 at grazing.
+            # The paint shader multiplies the cube by .5 * alpha * (1+2 alpha); compensate that at each endpoint.
+            # EnvMin is the grazing endpoint, EnvMax the normal endpoint. PC colour tints remain in the setter.
+            env_lo = 1.0 / (0.5 * edge * (1.0 + 2.0 * edge))
+            env_hi = 0.04 / (0.5 * face * (1.0 + 2.0 * face))
+        # The PC VS interpolates MinA + N.V * (MaxA-MinA): MinA is EDGE, MaxA FACE, regardless of numeric order.
+        records.append((name, h, edge, face, env_lo, env_hi))
+    for name, h, *values in sorted(records):
+        out.append("    {0x%08Xu, %s},   // %s\n" % (h, ", ".join(gf(v) for v in values), name))
+    # Empty PC fixtures remain valid C, without a dummy record counted as usable glass.
+    if not records:
+        out.append("    {0},\n")
+    out.append("};\n#define GLASS_X360_COUNT %d\n" % len(records))
+    return "".join(out)
+
+
 def glass_x360(x360):
     d = (x360 / "GLOBAL/GLOBALB.BUN").read_bytes()
     mats = {}
@@ -345,7 +391,55 @@ ENGINE_DEC = [
 ]
 # What the source uses without the player's executable (the stub): zero for every engine constant, except the numbers the
 # runtime needs to keep working on the PC game: this port's own values, not the X360's.
+# POST_FALLBACK: the post chain (runtime/x360_post.m) for a player without the console executable. Every number is
+# authored here from the reasoning beside it; none is read from, or fitted to, the console's table.
+POST_FALLBACK = {
+    # Exposure = 2 x middle gray / (adapted + eps), adapted = the scene's mean luminance (0..1, as the PC game drew it).
+    # Middle gray is photography's 18 % card, so a scene whose mean sits at 0.36 keeps the PC artists' exposure (x1) and
+    # darker or brighter scenes are pulled toward it.
+    "X360E_MIDDLE_GRAY": "0.18f",
+    "X360E_EXPOSURE_EPS": "0.001f",         # only keeps the division finite: 90 times below the adaptation floor
+    "X360E_ADAPT_START": "0.36f",           # 2 x middle gray: exposure x1 until the first scene is measured
+    # Floor = middle gray / 2: the exposure never exceeds x4 (two stops). The scene is 8-bit, so two stops leave 64
+    # levels in the shadows, which the chain's deband pass (3 LSB) still smooths; more would show the source's steps.
+    "X360E_ADAPT_FLOOR": "0.09f",
+    # Fraction of the remaining difference taken per 1/30 s. The eye adapts to light faster than to dark: toward a
+    # brighter scene 1/20 (time constant 0.67 s: a tunnel exit settles in about 2 s), toward a darker one 1/50 (1.7 s:
+    # most of a 4 s tunnel is driven with the adapted picture, without the exposure pumping under every bridge).
+    "X360E_ADAPT_UP": "0.05f", "X360E_ADAPT_DOWN": "0.02f",
+    # Only the diagnostic `old` look variant reads this: the port's own bright-pass threshold (x360_post.m BLOOM_THRESH),
+    # so that variant differs from the current chain by its mask alone.
+    "X360E_BRIGHT_THRESH": "0.25f",
+    # Unit scale: the Bloom slider and x360_post.m's BLOOM_GAIN alone set the glow/halo strength (the default, natural
+    # glare, does not use it).
+    "X360E_BLOOM_SCALE": "1.0f",
+    # Speed blur, from a film camera at the chain's 30 Hz time base with a 180 degree shutter (1/60 s). A point at depth Z
+    # beside a camera moving at v streaks by v / (60 Z) of its distance from the screen centre. Speeds are m/s.
+    "X360E_BLUR_SPEED_MIN": "25.0f",        # 90 km/h, the traffic's cruising speed: no blur while keeping up with it
+    "X360E_BLUR_SPEED_FULL": "85.0f",       # 306 km/h, where the fastest stock cars top out: the full length
+    "X360E_BLUR_RAMP": "0.016666668f",      # 1 / (FULL - MIN): linear between the two
+    "X360E_BLUR_MAX": "1.0f",               # the amount is a 0..1 fraction of the full length
+    "X360E_BLUR_BASE": "1.0f",              # x1 without the game's speed effect ...
+    "X360E_BLUR_FX": "0.5f",                # ... and half as long again at its peak (nitrous)
+    # Per-tap step in screen widths at the screen edge, seven taps: at 85 m/s a point 15 m away streaks 85 / (60 x 15) =
+    # 9.4 % of its distance from the centre, 0.047 of the screen at the edge; / 7 taps = 0.0067, rounded down.
+    "X360E_BLUR_STEP": "0.006f",
+    "X360E_BLUR_FADE": "0.011764706f",      # 1 / FULL: the speed effect's edge blur fades in with speed, full at FULL
+    "X360E_BLUR_FX_SCALE": "0.5f",          # the speed effect widens the blurred ring half-way to the centre: the car stays sharp
+    # Depth of field: the composite measures depth in half metres (z / 0.5). The camera's focal distance and in-focus
+    # range are taken as metres, so both convert by x2 (the range reaches full blur at twice its width).
+    "X360E_DOF_FOCAL": "2.0f", "X360E_DOF_RANGE": "2.0f",
+    # Only the diagnostic mirror A/B reads this: the port's own mirror multiplier, x1 (the mirror follows the main view).
+    "X360E_MIRROR_WORLD": "1.0f",
+}
+# Authored shallow-film animation: 16 frames over two damping time constants.
+# beta=2*nu*k^2 + sqrt(nu*omega/2)*k/sinh(2*k*h), h=.001 m, lambda=.020 m,
+# nu=1e-6 m^2/s; omega^2=(g*k+sigma*k^3/rho)*tanh(k*h). FPS=8*beta.
+RIPPLE_FALLBACK = {"X360E_RIPPLE_FPS": "18.3863f"}
 FALLBACK = {
+    **RIPPLE_FALLBACK,
+    **POST_FALLBACK,
+    "X360E_DROP_RADIUS": "LENS_DROP_RADIUS", "X360E_DROP_LIFE": "LENS_DROP_LIFE",
     "X360E_BRIGHT_LOW": "0.60", "X360E_BRIGHT_HIGH": "1.10",
     "X360E_FB_HIT_SOFT": "6.0f", "X360E_FB_HIT_SLOPE": "0.04f", "X360E_FB_WORLD_SLOPE": "0.028571429f",
     "X360E_FB_GROUND_SLOPE": "0.25f", "X360E_FB_SAME_DOT": "0.2f", "X360E_FB_RAMP_LO": "25.0f", "X360E_FB_RAMP_HI": "60.0f",
@@ -543,7 +637,8 @@ def engine_consts(xex, work, build="USA"):
     return engine_text(r.stdout, "X360 default.xex (%s build, engine constants)" % build, build=build)
 
 
-ENGINE_STUB = (NO_X360 % "executable" + "#define X360_ENGINE_CONSTS 0\n" +
+ENGINE_STUB = (NO_X360 % "executable" + "// The post chain's constants are this port's own values (POST_FALLBACK): the chain runs on them.\n"
+               "#define X360_ENGINE_CONSTS 0\n" +
                "".join("#define %s %s\n" % (name, FALLBACK.get(name, "0.0f")) for name, _ in ENGINE + ENGINE_DEC) +
                "".join("#define %s 0\n" % name for name, _ in ENGINE_LI))
 
@@ -579,7 +674,7 @@ def main():
     else:
         files["look_x360.inc"] = (NO_X360 % "copy" + "// The PC records: blending to them leaves the look unchanged.\n" +
                                   look_text("LOOK_X360", pc_look, "GLOBAL/attributes.bin").split("\n", 1)[1])
-        files["glass_x360.inc"] = NO_X360 % "copy" + "static const GlassX360 glass_x360[1];\n#define GLASS_X360_COUNT 0\n"
+        files["glass_x360.inc"] = glass_port(a.pc)
         files["grass_x360.inc"] = NO_X360 % "copy"
     if a.xex and a.xex.exists():
         build = xex_build(a.xex, work)

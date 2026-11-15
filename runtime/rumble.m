@@ -15,6 +15,12 @@
 #include <zlib.h>
 
 #include "host.h"
+#include "game_select.h"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "carbon_padfx_output.inc"
+/* GameController also declares the socket send API. Keep the local HID helper. */
+#define send carbon_rumble_send
+#endif
 
 
 // Reports go out on their own serial queue: IOHIDDeviceSetReport waits for the controller (milliseconds over USB, more
@@ -70,6 +76,10 @@ static void removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     });
 }
 static void rumble_open(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (carbon_padfx_fake()) return;
+    carbon_padfx_count(FX_OPEN);
+#endif
     hid_q = dispatch_queue_create("nfsmw.rumble", DISPATCH_QUEUE_SERIAL);
     manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     NSArray *match = @[@{@kIOHIDVendorIDKey: @0x054C, @kIOHIDProductIDKey: @0x0CE6},     // DualSense
@@ -82,6 +92,10 @@ static void rumble_open(void) {
 }
 
 static int send(uint8_t heavy, uint8_t light) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (carbon_padfx_fake()) return 1;
+    carbon_padfx_count(FX_WRITE);
+#endif
     uint8_t r[78] = {0};
     uint8_t *c;                                             // the common part: flags, motors, ...
     CFIndex n;
@@ -187,6 +201,14 @@ void rumble_set_enabled(int on) {                           // the F10 menu (por
     if (diag_on) diag_event("rumble: now %s", on ? "on" : "off");
 }
 void rumble_update(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (carbon_padfx_fake()) {
+        float heavy, light;
+        feedback_levels(&heavy, &light);
+        if (heavy > 0 || light > 0) carbon_padfx_count(FX_MOTOR);
+        return;
+    }
+#endif
     int off = rumble_off;
     if (off < 0) { const char *e = getenv("NFS_RUMBLE"); rumble_off = off = e && !strcmp(e, "off"); }
     if (off) { float hf, lf; feedback_levels(&hf, &lf); return; }

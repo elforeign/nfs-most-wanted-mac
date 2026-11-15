@@ -101,7 +101,11 @@ int main(void) {
 # value spellings by the array a row names (index 0 first); rows without .values use the lower-cased choice labels
 ARR = {"kX360PcV": ["x360", "pc"], "kPcX360V": ["pc", "x360"], "kArrestV": ["pc", "x360"], "kLightDataV": ["pc", "x360"],
        "kDropsV": ["x360", "pc", "pc_before"], "kSpeedBlurV": ["off", "x360", "strong"], "kFitV": ["x360", "x360range", "pc"],
-       "kEngSndV": ["retail", "realistic"]}
+       "kEngSndV": ["retail", "realistic"], "kRipplesV": ["x360", "pc", "port"],
+       "kWaterV": ["pc", "x360", "port"]}
+ARR["kFlakeV"] = ["pc", "x360", "generated"]
+ARR["kBglassV"] = ["pc", "x360", "port"]
+ARR["kCarnmV"] = ["pc", "x360", "port"]
 WANT = {i: "x360" for i in """graphics.postfx graphics.car_paint graphics.car_glass graphics.car_normals graphics.car_flake
     graphics.x360_arrest graphics.grass graphics.trees graphics.water graphics.building_glass graphics.scenery_lights graphics.parallax
     graphics.lighting_data graphics.road_reflection graphics.rain_ripples graphics.raindrops graphics.speed_blur

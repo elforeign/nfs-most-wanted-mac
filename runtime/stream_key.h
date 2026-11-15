@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 void stream_key_edit(int unused);
+// Forget/quit scrub saved/editor storage before the bounded transport finish.
 void stream_key_forget(int unused);
 void stream_key_go(int unused);
 void stream_key_stop(int unused);

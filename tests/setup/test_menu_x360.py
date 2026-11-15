@@ -2,7 +2,7 @@
 row (X360 half screen) and the "Xbox 360 sound" heading whose rows are all hidden. With X360 files, or with no
 roots.txt (the owner's layout), the list is unchanged. Compiles runtime/settings.c with a small driver (no game).
 On main 20c0254 the PC-only case listed both (fails); run with the project's Python -I.
-Shader/engine menu retention: 68/68 row states pass; pinned original gate fails 1/1 test.
+Shader/engine menu retention: 72/72 row states pass; pinned original gate fails 1/1 test.
 Retail checks: 6/6 pass; treating world files as grade availability fails the missing-attributes assertion (1 failure).
 """
 from pathlib import Path
@@ -117,10 +117,20 @@ class MenuX360Traces(unittest.TestCase):
     def test_retained_shader_and_engine_rows_remain_available(self):
         """Original gate fails 1/1 test; retained gate passes, including missing inputs."""
         # Independent registry expectations: shader-only, engine-only and both.
-        shader_only = "graphics.car_paint graphics.car_normals graphics.car_flake graphics.trees graphics.scenery_lights graphics.water graphics.grass graphics.parallax".split()
-        both = "graphics.building_glass graphics.rain_ripples graphics.x360_arrest graphics.postfx graphics.tone_curve graphics.speed_blur graphics.curve_glow graphics.raindrops".split()
+        shader_only = "graphics.trees graphics.scenery_lights graphics.water graphics.grass graphics.parallax".split()
+        both = "graphics.rain_ripples graphics.x360_arrest".split()
         engine_only = ["graphics.shadow_fit"]
-        names = shader_only + both + engine_only
+        # The post chain, lens drops, car materials and generated flake have port-authored fallback values.
+        neither = "graphics.postfx graphics.tone_curve graphics.speed_blur graphics.curve_glow graphics.raindrops graphics.car_paint graphics.car_normals graphics.car_glass graphics.car_flake".split()
+        # Port building glass reads only the PC solids; X360 without the files falls back to Port in its own gate.
+        neither += ["graphics.building_glass"]
+        # Authored ripple provider is opt-in and needs no console inputs.
+        both.remove("graphics.rain_ripples")
+        neither += ["graphics.rain_ripples"]
+        # Authored water provider is opt-in and needs no console inputs.
+        shader_only.remove("graphics.water")
+        neither += ["graphics.water"]
+        names = shader_only + both + engine_only + neither
         d = Path(self.tmp.name) / "retained-menu"
         (d / "gen").mkdir(parents=True)
         for file, flag in (("x360_shader_lits.inc", "X360_SHADER_LITS"), ("x360_engine.inc", "X360_ENGINE_CONSTS")):
@@ -169,17 +179,16 @@ class MenuX360Traces(unittest.TestCase):
             observed = dict(line.split("=") for line in output.splitlines())
             self.assertEqual(set(observed), set(names))
             for name in names:
-                available = ((name in engine_only or shader_size == 413696) and
-                             (name in shader_only or has_engine))
+                available = name in neither or ((name in engine_only or shader_size == 413696) and
+                                                (name in shader_only or has_engine))
                 self.assertEqual(observed[name], "0/0" if available else "1/1", name)
 
-    def test_pc_only_hides_road_reflection_and_empty_x360_heading(self):
+    def test_pc_only_lists_road_reflection(self):
         world, audio, env, *_ = self.run_with(self.manifest("pc", False))
-        # Road reflection was the last listed row under "Surfaces and weather" in PC-only (M4 settings_rows): that
-        # heading goes with it, while "Sound" keeps its visible rows.
-        self.assertEqual(world, "graphics.world_lighting")
+        # Road reflection reads no console data (a render-target size): it stays listed, with its heading, in PC-only.
+        self.assertEqual(world, ALL_WORLD)
         self.assertEqual(audio, "audio.h_output audio.limiter")
-        self.assertEqual(env, "NFS_ROAD_REFLECTION=pc", "hidden: the PC 320x240 reflection is in effect")
+        self.assertEqual(env, "NFS_ROAD_REFLECTION=", "listed: the player's choice is not forced to PC")
 
     def test_x360_install_and_owner_layout_unchanged(self):
         for label, manifest in (("x360", self.manifest("x360", True)), ("owner", None)):

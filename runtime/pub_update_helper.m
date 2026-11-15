@@ -20,6 +20,7 @@
 #include <errno.h>
 #include "pub_update_rehearsal.h"
 #include "pub_update_write.h"
+#include "game_select.h"
 
 static const uint64_t ChecksumCap = 4096;
 #if defined(PUB_UPDATE_HELPER_TESTING)
@@ -27,7 +28,17 @@ static const uint64_t AssetCap = 1024 * 1024;
 #else
 static const uint64_t AssetCap = 4ULL * 1024 * 1024 * 1024;
 #endif
+#if NFS_GAME == NFS_GAME_PRIVATE
+static NSString *const SetupName = @"NFS Carbon Native Setup.app";
+static NSString *const SetupID = @"org.nfsc-native.setup";
+static NSString *const Repository = @"elforeign/nfs-carbon-mac";
+static NSString *const AssetPrefix = @"NFS-Carbon-Native-Setup";
+#else
 static NSString *const SetupName = @"NFS Most Wanted Native Setup.app";
+static NSString *const SetupID = @"org.nfsmw-native.setup";
+static NSString *const Repository = @"elforeign/nfs-most-wanted-mac";
+static NSString *const AssetPrefix = @"NFS-Most-Wanted-Native-Setup";
+#endif
 static int jobFD = -1;
 static NSString *jobPath, *tag, *asset, *checksum, *attachedDevice;
 static volatile sig_atomic_t cancelled;
@@ -99,7 +110,7 @@ static NSURL *TestBase(void) {
 static NSURL *AssetURL(NSString *name) {
     NSURL *base = TestBase();
     NSString *origin = base ? [NSString stringWithFormat:@"http://127.0.0.1:%@", base.port] : @"https://github.com";
-    return [NSURL URLWithString:[NSString stringWithFormat:@"%@/elforeign/nfs-most-wanted-mac/releases/download/%@/%@", origin, tag, name]];
+    return [NSURL URLWithString:[NSString stringWithFormat:@"%@/%@/releases/download/%@/%@", origin, Repository, tag, name]];
 }
 static BOOL AllowedRedirect(NSURL *u) {
     NSURL *base = TestBase();
@@ -313,7 +324,7 @@ static NSDictionary *VerifyImage(NSString *mount, NSString *version) {
             Fail(@"The update does not contain a safe Setup bundle.");
     }
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plist];
-    if (![info[@"CFBundleIdentifier"] isEqual:@"org.nfsmw-native.setup"] ||
+    if (![info[@"CFBundleIdentifier"] isEqual:SetupID] ||
         ![info[@"CFBundleExecutable"] isEqual:@"Setup"] || ![info[@"CFBundlePackageType"] isEqual:@"APPL"] ||
         ![info[@"CFBundleShortVersionString"] isEqual:version] || ![info[@"CFBundleVersion"] isEqual:version])
         Fail(@"Setup's bundle identity or version does not match the requested release.");
@@ -346,7 +357,7 @@ int main(int argc, const char **argv) {
             checksum = [NSString stringWithUTF8String:argv[4]];
             if (tag.length > 64 || !Matches(tag, @"\\Av[0-9]+(?:\\.[0-9]+){1,3}\\z")) Fail(@"Invalid release tag (expected v followed by a numeric version).");
             NSString *version = [tag substringFromIndex:1];
-            NSString *wanted = [NSString stringWithFormat:@"NFS-Most-Wanted-Native-Setup-v%@.dmg", version];
+            NSString *wanted = [NSString stringWithFormat:@"%@-v%@.dmg", AssetPrefix, version];
             if (![asset isEqual:wanted] || ![checksum isEqual:[wanted stringByAppendingString:@".sha256"]])
                 Fail(@"Asset names do not match the requested release's installer and checksum pair.");
             uint64_t size = 0;

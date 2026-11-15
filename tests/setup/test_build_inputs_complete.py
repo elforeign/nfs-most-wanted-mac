@@ -13,6 +13,12 @@ With producer headers absent, the initial audit reported one phantom funcs.h
 input; recognizing open(..., 'w') outputs reduces that count to zero.
 FFmpeg audit integration: 354/359 edges keyed (three omitted audit inputs and
 two phantom extracted paths); corrected inputs and directory tracking: 357/357.
+Runtime sky producer: 485/501 real edges keyed before, 501/501 after; omitting
+the producer closure rejects 16 edges. The original oracle also invented the
+test proof file (when present) and two children beneath it: nightly 19 missing
+versus worktree 18. Entry fixture: original 3 phantom inputs, repaired 0.
+Lamp producer (build.sh runs daynight_lamps_test.py --generate): 506/508 keyed on main, 507/507 after
+keying the producer and ignoring its harness-only C string (phantom runtime/retail_loaders.inc).
 """
 import ast
 import importlib.util
@@ -156,8 +162,16 @@ class SourceClosure:
                         if isinstance(node, ast.Name) and node.id in definitions and node.id not in reachable:
                             reachable.add(node.id)
                             pending.append(node.id)
-            tree.body = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef))
-                         or n.name in reachable]
+            # A module constant used only by the unreachable test harness (an embedded C
+            # harness string) is not an input of the generator entry either.
+            used = lambda nodes: {x.id for d in nodes for x in ast.walk(d) if isinstance(x, ast.Name)}
+            harness_only = used(d for k, d in definitions.items() if k not in reachable) - used(
+                d for k, d in definitions.items() if k in reachable)
+            tree.body = [n for n in tree.body if
+                         (not isinstance(n, (ast.FunctionDef, ast.ClassDef)) or n.name in reachable)
+                         and not (isinstance(n, ast.Assign) and len(n.targets) == 1
+                                  and isinstance(n.targets[0], ast.Name) and n.targets[0].id in harness_only)
+                         and not (isinstance(n, ast.If) and ast.unparse(n.test) == "__name__ == '__main__'")]
         # Coverage is a validation/reporting consumer, not a code generator.
         coverage = path == self.root / 'recomp/hook_coverage.py'
         # Ignore the table manifest even when it happens to be complete.
@@ -272,7 +286,15 @@ class SourceClosure:
             if candidate in self.drivers.values() and candidate != path:
                 continue
             if '$' not in name:
-                self.add(candidate)
+                # A generator entry point does not execute its test harness.
+                # Keep its parameter locals separate from __main__ variables.
+                generator = re.match(r'\s+--generate(?:\s|$)', text[match.end():])
+                functions = None
+                if generator and candidate.suffix == '.py' and candidate.is_file():
+                    definitions = ast.parse(candidate.read_text()).body
+                    if any(isinstance(n, ast.FunctionDef) and n.name == 'generate' for n in definitions):
+                        functions = ['generate']
+                self.add(candidate, functions=functions)
         if re.search(r'^\. .*?/env\.sh', text, re.M):
             self.add(path.parent / 'env.sh')
 
@@ -311,6 +333,29 @@ subprocess.run(['clang', '-I', str(HERE), '-I', str(HERE / 'out'), 'generated.c'
             support.write_text('// authored compiler input\n')
             required = SourceClosure(root, 'recompile', {'recompile': driver}).discover()
             self.assertEqual(required, {driver, support})
+
+    def test_generator_entry_ignores_test_harness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'driver.sh').write_text('python -I producer.py --generate out\n')
+            (root / 'producer.py').write_text("""from pathlib import Path
+def generate(output):
+    from decoder import decode
+    manifest = output / 'pixels.json'
+    include = output / 'pixels.inc'
+    if manifest.is_file(): manifest.read_text()
+    if include.is_file(): include.read_text()
+    include.write_text(decode())
+    manifest.write_text('{}')
+if __name__ == '__main__':
+    output = Path(__file__).parent / 'proof.txt'
+    output.write_text('test results')
+""")
+            (root / 'decoder.py').write_text('def decode(): return "pixels"\n')
+            (root / 'proof.txt').write_text('previous test results\n')
+            required = SourceClosure(root, 'runtime', {'runtime': root / 'driver.sh'}).discover()
+            self.assertEqual(required, {root / name for name in ('driver.sh', 'producer.py', 'decoder.py')})
+            print('generator entry: 3/3 source inputs; 0 phantom children of test proof file')
 
     def test_undeclared_generator_inputs_are_discovered(self):
         # This graph does not come from stage_inputs or GENERATORS. A new

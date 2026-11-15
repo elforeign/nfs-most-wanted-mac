@@ -5,6 +5,8 @@
 #endif
 #include <deque>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 extern "C" void report_note(const char *fmt, ...);
@@ -16,6 +18,29 @@ extern "C" void report_note(const char *fmt, ...);
 @end
 
 namespace live {
+static void erase(void *bytes,size_t size) {
+    volatile unsigned char *p=(volatile unsigned char *)bytes;
+    while(size--) *p++=0;
+}
+// Validate UTF-8 scalars without materializing a key-bearing Foundation string.
+static bool validKey(const std::string& key) {
+    if(key.empty() || key.size()>512) return false;
+    for(size_t i=0;i<key.size();) {
+        unsigned char c=key[i++]; uint32_t scalar=c, minimum=0; unsigned more=0;
+        if(c>=0xc2 && c<=0xdf) { scalar=c&31; more=1; minimum=0x80; }
+        else if(c>=0xe0 && c<=0xef) { scalar=c&15; more=2; minimum=0x800; }
+        else if(c>=0xf0 && c<=0xf4) { scalar=c&7; more=3; minimum=0x10000; }
+        else if(c>=0x80) return false;
+        if(i+more>key.size()) return false;
+        while(more--) {
+            unsigned char next=key[i++]; if((next&0xc0)!=0x80) return false;
+            scalar=(scalar<<6)|(next&63);
+        }
+        if(scalar<minimum || scalar>0x10ffff || (scalar>=0xd800 && scalar<=0xdfff) ||
+           [NSCharacterSet.controlCharacterSet longCharacterIsMember:scalar]) return false;
+    }
+    return true;
+}
 static const char *errorKind(StreamError error) {
     switch(error) {
         case StreamError::keyRejected: return "key_rejected";
@@ -41,8 +66,15 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
     bool playlist=false, stopLogged=false;
     unsigned attempts=0;
     NSInteger responseCode=0;
-    NSData *playlistBody=nil;
-    NSString *key;
+    NSData *playlistBody=nil, *acknowledgedBody=nil;
+    std::condition_variable completion;
+    bool finishing=false, finished=false; // guarded by lock; one completion for all callers
+    bool finalPlaylist=false; // set on work, cross-queue reads under lock
+    dispatch_source_t finishTimer=nullptr;
+    std::chrono::steady_clock::time_point drainUntil;
+    unsigned char keyBytes[512]={0};
+    size_t keySize=0;
+    bool taskCancelled=false;
     NSURLComponents *base;
     dispatch_queue_t work;
     dispatch_source_t timer=nullptr;
@@ -54,26 +86,95 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
 #ifdef LIVESTREAM_TESTING
     NSData *anchor=nil;
 #endif
-    StreamState(NSString *k,NSURLComponents *b):prefix(NSUUID.UUID.UUIDString),key(k),base(b),
-        work(dispatch_queue_create("live.https",DISPATCH_QUEUE_SERIAL)) { counters.running=true; }
+    StreamState(const std::string& k,NSURLComponents *b):prefix(NSUUID.UUID.UUIDString),base(b),
+        work(dispatch_queue_create("live.https",DISPATCH_QUEUE_SERIAL)) {
+        memcpy(keyBytes,k.data(),k.size()); keySize=k.size();
+        dispatch_queue_set_specific(work,this,this,nullptr);
+        counters.running=true;
+    }
+    ~StreamState() { erase(keyBytes,sizeof keyBytes); }
     void subtract(const OwnedSegment& s) {
         counters.bytes-=s->bytes.size(); counters.ticks-=s->end90k-s->start90k;
     }
     void stop(StreamError reason,int code=0,const char *detail=nullptr) {
         {
             std::lock_guard<std::mutex> guard(lock);
-            if(!counters.running) return;
-            counters.running=false; counters.error=reason; counters.httpCode=code; counters.reason=detail;
-            if(reason!=StreamError::stopped) {
-                if(detail && code) report_note("live: error kind=%s code=%d reason=%s",errorKind(reason),code,detail);
-                else if(detail) report_note("live: error kind=%s reason=%s",errorKind(reason),detail);
-                else report_note("live: error kind=%s code=%d",errorKind(reason),code);
+            if(counters.running || finishing) {
+                if(finishing) {
+                    report_note("live: finalization incomplete kind=%s",reason==StreamError::stopped?"aborted":errorKind(reason));
+                    if(finalPlaylist) ++counters.failed;
+                }
+                finishing=false;
+                counters.running=false; counters.error=reason; counters.httpCode=code; counters.reason=detail;
+                if(reason!=StreamError::stopped) {
+                    if(detail && code) report_note("live: error kind=%s code=%d reason=%s",errorKind(reason),code,detail);
+                    else if(detail) report_note("live: error kind=%s reason=%s",errorKind(reason),detail);
+                    else report_note("live: error kind=%s code=%d",errorKind(reason),code);
+                }
+                for(auto &s:pending) subtract(s);
+                pending.clear();
             }
-            for(auto &s:pending) subtract(s);
-            pending.clear();
         }
         auto self=shared_from_this();
-        dispatch_async(work, ^{ self->cancel(); });
+        // Serialize with request construction, but never dispatch_sync onto self.
+        if(dispatch_get_specific(this)==this) cancel();
+        else dispatch_sync(work, ^{ self->cancel(); });
+    }
+    void finish() {
+        // Callbacks must be free to run. Queue reentry is an unsafe join: abort.
+        if(dispatch_get_specific(this)==this) { stop(StreamError::stopped); return; }
+        bool begin=false;
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if(!finished && !finishing && counters.running) {
+                counters.running=false; finishing=true; begin=true;
+                drainUntil=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+            }
+        }
+        auto self=shared_from_this();
+        if(begin) dispatch_async(work, ^{ self->beginFinish(); });
+        else dispatch_sync(work, ^{
+            bool active;
+            { std::lock_guard<std::mutex> guard(self->lock); active=self->finishing; }
+            if(!active) self->cancel();
+        });
+        std::unique_lock<std::mutex> guard(lock);
+        completion.wait(guard,[&]{ return finished; });
+    }
+    void finishDeadline(double seconds) {
+        if(finishTimer) dispatch_source_cancel(finishTimer);
+        finishTimer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,work);
+        std::weak_ptr<StreamState> weak=shared_from_this();
+        dispatch_source_set_timer(finishTimer,dispatch_time(DISPATCH_TIME_NOW,
+            (int64_t)(std::max(0.0,seconds)*NSEC_PER_SEC)),DISPATCH_TIME_FOREVER,0);
+        dispatch_source_set_event_handler(finishTimer,^{ if(auto s=weak.lock()) s->stop(StreamError::deadline); });
+        dispatch_resume(finishTimer);
+    }
+    void beginFinish() {
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if(!finishing || finalPlaylist) return;
+        }
+        finishDeadline(std::chrono::duration<double>(drainUntil-std::chrono::steady_clock::now()).count());
+        pump();
+    }
+    void endPlaylist() {
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if(!finishing || finalPlaylist) return;
+        }
+        if(!acknowledgedBody) {
+            // Empty streams never create a session or request solely for EOS.
+            { std::lock_guard<std::mutex> guard(lock); finishing=false; counters.error=StreamError::stopped; }
+            cancel(); return;
+        }
+        NSMutableData *body=[acknowledgedBody mutableCopy];
+        const char end[]="#EXT-X-ENDLIST\n";
+        [body appendBytes:end length:sizeof end-1];
+        playlistBody=body; playlist=true; attempts=0;
+        { std::lock_guard<std::mutex> guard(lock); finalPlaylist=true; }
+        finishDeadline(3); // fixed phase deadline; retries and joiners never reset it
+        send();
     }
     void logStop() {
         if(stopLogged || task) return;
@@ -81,28 +182,40 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
         { std::lock_guard<std::mutex> guard(lock); s=counters; }
         if(s.running) return;
         stopLogged=true;
-        report_note("live: Stop accepted=%llu posted=%llu playlists=%llu cancelled=%llu dropped=%llu failed=%llu retries=%llu bytes=%zu peak_bytes=%zu ticks=%lld peak_ticks=%lld",
+        report_note("live: Stop accepted=%llu posted=%llu playlists=%llu cancelled=%llu dropped=%llu failed=%llu retries=%llu bytes=%zu peak_bytes=%zu ticks=%lld peak_ticks=%lld finals=%llu finalized=%d",
             (unsigned long long)s.accepted,(unsigned long long)s.posted,(unsigned long long)s.playlists,
             (unsigned long long)s.cancelled,(unsigned long long)s.dropped,(unsigned long long)s.failed,
-            (unsigned long long)s.retries,s.bytes,s.peakBytes,(long long)s.ticks,(long long)s.peakTicks);
+            (unsigned long long)s.retries,s.bytes,s.peakBytes,(long long)s.ticks,(long long)s.peakTicks,(unsigned long long)s.finalPlaylists,s.finalized);
     }
     void cancel() {
+        if(finishTimer) { dispatch_source_cancel(finishTimer); finishTimer=nullptr; }
         if(timer) { dispatch_source_cancel(timer); timer=nullptr; }
         if(task) {
-            { std::lock_guard<std::mutex> guard(lock); ++counters.cancelled; }
-            [task cancel];
-        } else {
+            if(!taskCancelled) {
+                taskCancelled=true;
+                { std::lock_guard<std::mutex> guard(lock); ++counters.cancelled; }
+                [task cancel];
+            }
+        }
+        {
             std::lock_guard<std::mutex> guard(lock);
-            if(sending) { subtract(sending); sending.reset(); }
+            if(sending) { ++counters.failed; subtract(sending); sending.reset(); }
         }
         [session invalidateAndCancel]; session=nil;
-        key=nil; playlistBody=nil; window.clear();
+        erase(keyBytes,sizeof keyBytes); keySize=0;
+        playlistBody=nil; acknowledgedBody=nil; window.clear();
         logStop();
+        { std::lock_guard<std::mutex> guard(lock); finishing=false; finished=true; }
+        completion.notify_all();
     }
     void pump() {
         {
             std::lock_guard<std::mutex> guard(lock);
-            if(!counters.running || sending || pending.empty()) return;
+            if((!counters.running && !finishing) || sending || finalPlaylist) return;
+            if(pending.empty()) {
+                if(finishing) { auto self=shared_from_this(); dispatch_async(work, ^{ self->endPlaylist(); }); }
+                return;
+            }
             sending=std::move(pending.front()); pending.pop_front();
         }
         playlist=false; attempts=0;
@@ -116,7 +229,7 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
         send();
     }
     void send() {
-        { std::lock_guard<std::mutex> guard(lock); if(!counters.running) return; }
+        { std::lock_guard<std::mutex> guard(lock); if(!counters.running && !finishing) return; }
         @autoreleasepool {
             if(!session) {
                 auto delegate=[NFSSegmentSession new]; delegate->state=shared_from_this();
@@ -135,12 +248,36 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
                 callbacks.underlyingQueue=work;
                 session=[NSURLSession sessionWithConfiguration:configuration delegate:delegate delegateQueue:callbacks];
             }
-            NSURLComponents *url=[base copy];
-            url.queryItems=@[[NSURLQueryItem queryItemWithName:@"cid" value:key],
-                [NSURLQueryItem queryItemWithName:@"copy" value:@"0"],
-                [NSURLQueryItem queryItemWithName:@"file" value:playlist?@"live.m3u8":sendingName]];
-            url.percentEncodedQuery=[url.percentEncodedQuery stringByReplacingOccurrencesOfString:@"+" withString:@"%2B"];
-            auto request=[NSMutableURLRequest requestWithURL:url.URL];
+            // Only this bounded, erasable buffer holds our encoded cid. NSURL
+            // and NSURLRequest copy internally; their storage is not writable.
+            char address[2048]={0};
+            size_t used=0;
+            const char *root=base.URL.absoluteString.UTF8String;
+            size_t rootSize=strlen(root);
+            const char *name=(playlist?@"live.m3u8":sendingName).UTF8String;
+            size_t nameSize=strlen(name);
+            if(rootSize+5+3*keySize+13+nameSize>=sizeof address) {
+                stop(StreamError::transport); return;
+            }
+            memcpy(address,root,rootSize); used=rootSize;
+            memcpy(address+used,"?cid=",5); used+=5;
+            const char hex[]="0123456789ABCDEF";
+            for(size_t i=0;i<keySize;++i) {
+                unsigned char c=keyBytes[i];
+                if((c>='a' && c<='z') || (c>='A' && c<='Z') ||
+                   (c>='0' && c<='9') || c=='-' || c=='_' || c=='.' || c=='~') address[used++]=c;
+                else { address[used++]='%'; address[used++]=hex[c>>4]; address[used++]=hex[c&15]; }
+            }
+            const char suffix[]="&copy=0&file=";
+            memcpy(address+used,suffix,sizeof suffix-1); used+=sizeof suffix-1;
+            memcpy(address+used,name,nameSize); used+=nameSize;
+            NSMutableURLRequest *request;
+            @autoreleasepool {
+                NSString *text=[[NSString alloc] initWithBytes:address length:used encoding:NSASCIIStringEncoding];
+                NSURL *url=[[NSURL alloc] initWithString:text];
+                request=[NSMutableURLRequest requestWithURL:url];
+            }
+            erase(address,sizeof address);
             request.HTTPMethod=@"POST"; request.timeoutInterval=deadline+1;
             [request setValue:@"NFS / Mac / 1.0" forHTTPHeaderField:@"User-Agent"];
             [request setValue:playlist?@"application/vnd.apple.mpegurl":@"video/MP2T" forHTTPHeaderField:@"Content-Type"];
@@ -152,6 +289,7 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
                     length:body->bytes.size() deallocator:^(void *,NSUInteger) { (void)body; }];
             }
             responseBytes=0; responseCode=0;
+            taskCancelled=false;
             task=[session dataTaskWithRequest:request];
             inFlight=shared_from_this();
             [task resume];
@@ -170,7 +308,7 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
         task=nil;
         inFlight.reset(); // the delegate holds this state for the completion call
         bool running;
-        { std::lock_guard<std::mutex> guard(lock); running=counters.running; }
+        { std::lock_guard<std::mutex> guard(lock); running=counters.running || finishing; }
         if(error && running) stop(StreamError::transport,(int)responseCode);
         else if(running && responseCode==500) {
             if(attempts<2) {
@@ -183,6 +321,13 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
             }
             stop(StreamError::http,500);
         } else if(running && responseCode>=200 && responseCode<300) {
+            if(finalPlaylist) {
+                { std::lock_guard<std::mutex> guard(lock);
+                  ++counters.playlists; ++counters.finalPlaylists; counters.finalized=true;
+                  counters.error=StreamError::stopped; finishing=false; }
+                report_note("live: final playlist accepted code=%d",(int)responseCode);
+                cancel(); return;
+            }
             if(!playlist) {
                 {
                     std::lock_guard<std::mutex> guard(lock);
@@ -194,15 +339,18 @@ struct StreamState : std::enable_shared_from_this<StreamState> {
                 std::lock_guard<std::mutex> guard(lock);
                 if(++counters.playlists==1) report_note("live: first playlist accepted code=%d",(int)responseCode);
             }
+            acknowledgedBody=playlistBody; // snapshot before trimming the acknowledged tail
             while(window.size()>2) window.pop_front();
             ++nextSequence; playlistBody=nil;
         } else if(running) stop(StreamError::transport);
         if(timer) { dispatch_source_cancel(timer); timer=nullptr; }
         {
             std::lock_guard<std::mutex> guard(lock);
-            if(!counters.running) ++counters.failed;
-            subtract(sending); sending.reset();
-            running=counters.running;
+            if(sending) {
+                if(!counters.running && !finishing) ++counters.failed;
+                subtract(sending); sending.reset();
+            }
+            running=counters.running || finishing;
         }
         if(running) pump(); else cancel();
     }
@@ -218,11 +366,8 @@ std::shared_ptr<Poster> Poster::create(const std::string& key
     , const StreamTestOptions& options
 #endif
 ) {
-    if(key.empty()) return {};
-    if(key.size()>512) return {};
+    if(!validKey(key)) return {};
     @autoreleasepool {
-        NSString *text=[[NSString alloc] initWithBytes:key.data() length:key.size() encoding:NSUTF8StringEncoding];
-        if(!text || !text.length || [text rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location!=NSNotFound) return {};
         NSString *address=@"https://a.upload.youtube.com/http_upload_hls";
 #ifdef LIVESTREAM_TESTING
         if(!options.baseURL.empty()) address=[NSString stringWithUTF8String:options.baseURL.c_str()];
@@ -245,7 +390,7 @@ std::shared_ptr<Poster> Poster::create(const std::string& key
 #endif
         if((!loopback && ![base.scheme isEqualToString:@"https"]) || !allowed || base.user || base.password || base.query || base.fragment ||
             ![base.path isEqualToString:@"/http_upload_hls"] || !base.URL) return {};
-        auto state=std::make_shared<StreamState>(text,base);
+        auto state=std::make_shared<StreamState>(key,base);
 #ifdef LIVESTREAM_TESTING
         state->deadline=options.deadlineSeconds;
         if(!production && !options.anchorDER.empty()) state->anchor=[NSData dataWithBytes:options.anchorDER.data() length:options.anchorDER.size()];
@@ -276,25 +421,37 @@ bool Poster::post(OwnedSegment segment) {
     return true;
 }
 void Poster::stop() { state->stop(StreamError::stopped); }
+void Poster::finish() { state->finish(); }
 void Poster::fail(StreamError reason,int code,const char *detail) { state->stop(reason,code,detail); }
 StreamStats Poster::stats() const { std::lock_guard<std::mutex> guard(state->lock); return state->counters; }
 namespace {
 std::mutex streamLock;
-std::shared_ptr<Poster> currentStream;
+std::shared_ptr<Poster> currentStream, stoppingStream;
 StreamStats lastStream;
 }
 bool startStream(const std::string& key) {
     std::lock_guard<std::mutex> guard(streamLock);
-    if(currentStream && currentStream->stats().running) return false;
+    if(stoppingStream || (currentStream && currentStream->stats().running)) return false;
     auto next=Poster::create(key);
     currentStream=next; lastStream={};
     return !!next;
 }
 void stopStream() {
     std::shared_ptr<Poster> old;
-    { std::lock_guard<std::mutex> guard(streamLock); old=std::move(currentStream);
-      if(old) lastStream=old->stats(); }
-    if(old) old->stop();
+    {
+        std::lock_guard<std::mutex> guard(streamLock);
+        if(currentStream) {
+            stoppingStream=std::move(currentStream);
+        }
+        old=stoppingStream;
+    }
+    // Join one bounded completion outside streamLock so callbacks remain free.
+    if(old) old->finish();
+    {
+        std::lock_guard<std::mutex> guard(streamLock);
+        if(old) lastStream=old->stats();
+        if(stoppingStream==old) stoppingStream.reset();
+    }
 }
 Segmenter::Output streamOutput() {
     std::shared_ptr<Poster> poster;
@@ -328,7 +485,7 @@ int livestream_status(void) {
 }
 void livestream_fail_reason(int kind,int code,const char *reason) {
     std::shared_ptr<live::Poster> poster;
-    { std::lock_guard<std::mutex> guard(live::streamLock); poster=live::currentStream; }
+    { std::lock_guard<std::mutex> guard(live::streamLock); poster=live::currentStream?live::currentStream:live::stoppingStream; }
     if(poster) poster->fail(kind==LIVESTREAM_FAILURE_CAPTURE?live::StreamError::capture:live::StreamError::encoder,code,reason);
     live::stopStream();
 }

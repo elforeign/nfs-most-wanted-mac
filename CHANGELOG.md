@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.6.0
+
+- **Console looks without console files:** without your own Xbox 360 files the game now draws its own post-processing chain, car paint, tyre and badge detail, metallic flake, building-window glass, lens rain drops, sea and road reflection size, all On. With your Xbox 360 files the console versions are still used.
+- **Clear coat:** a glossy lacquer layer on car paint, On by default (F10 > Cars > Clear coat).
+- **Rain cover:** rain stays out from under roofs and bridges, On by default; it follows your world detail setting.
+- **Tunnel shadows:** the default is now Keep + sky light, so a car in a cast shadow keeps its sky light.
+- **Tyre tread detail:** F10 > Cars > Tyre and badge detail has a new Port choice with tread grooves generated from the PC files; Off by default.
+- **Underglow:** the shop preview lifts the car, the light reaches the car's sides, and the light on the road follows the road surface.
+- **Added cars:** six more approved cars can be imported by Setup.
+- **Fixed:** rain under roofs no longer costs about 25 fps; the hood-view slowdown is gone; post-processing is cheaper (0.24 ms less GPU time a frame) with an identical picture and the brightness read-back never waits; a controller input no longer hides the pointer repeatedly; Setup imports your added cars again; the live-stream key leaves no readable copies after Stop, Forget or quit.
+
 ## 4.5.0
 
 - **Your own later-game cars:** point Setup at your own Need for Speed Carbon PC or Xbox 360 game files and tick the cars you want from the approved list (default unticked; a missing source is skipped by name). Added cars have their own engine sound by default.

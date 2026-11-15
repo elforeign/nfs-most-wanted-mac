@@ -340,14 +340,39 @@ def main():
         return
     if not args.generate_only:
         stamp.unlink(missing_ok=True)
+    funcs = add_data_referenced(load_functions())
+    pe = recomp.PE()
+    build_image(funcs, pe, OUT, "speed", jobs=args.jobs, generate_only=args.generate_only)
+    if args.generate_only:
+        return
+    if not args.skip_server:
+        import server_module
+        server_path = (args.server_dll or os.environ.get("NFS_SERVER_DLL") or
+                       os.path.join(os.path.dirname(recomp.EXE), "server.dll"))
+        server_module.build(server_path, args.jobs, speed_pe=pe)
+    build_inputs.record(stamp, fingerprint, build_inputs.outputs())
+
+
+def build_image(funcs, pe, out, prefix, *, jobs=None, mw_patches=True, compile=True,
+                generate_only=False, hook_registry=None, game=None):
+    """Shared chunk/table/archive pipeline. Private images supply their own PE and starts.
+
+    MW defaults, hooks, fingerprints and emitted bytes are unchanged. Private callers
+    must choose an ignored output directory and explicitly disable MW-specific patches.
+    Carbon also selects game="carbon" to emit its PE-derived region identity.
+    """
+    os.makedirs(out, exist_ok=True)
     # A failed translation, compiler launch or archive must never leave an older
     # library looking like the output of this invocation.
-    lib = os.path.join(OUT, "speed.a")
-    if not args.generate_only and os.path.exists(lib):
+    lib = os.path.join(out, prefix + ".a")
+    if not generate_only and os.path.exists(lib):
         os.remove(lib)
-    funcs = load_functions()
-    funcs = add_data_referenced(funcs)
-    rc = recomp.Recompiler(functions={a: l for a, l, _ in funcs})
+    private = {}
+    if not mw_patches and hook_registry is not None:
+        import private_hooks
+        private = private_hooks.load_registry(pe, funcs, hook_registry)
+    rc = recomp.Recompiler(pe=pe, functions={a: l for a, l, _ in funcs},
+                          mw_patches=mw_patches, import_thunks=not mw_patches)
     rc.calls = True
     bodies, reasons, insns = [], collections.Counter(), 0
     for a, limit, name in funcs:
@@ -358,15 +383,17 @@ def main():
         else:
             insns += code.count("\n    /* ")
         bodies.append((a, name, code))
-    (Path(OUT) / "breaker_diag.inc").write_text(breaker_diagnostic_bodies(bodies))
-    hooks = load_hooks()
+    if mw_patches:
+        (Path(out) / "breaker_diag.inc").write_text(breaker_diagnostic_bodies(bodies))
+    hooks = load_hooks() if mw_patches else {}
     for k, (a, name, code) in enumerate(bodies):
-        code = water_reflection_gates(a, code)
-        code = split_shadow_operands(a, code)
-        code = split_capture_operands(a, code)
-        code = split_fx_operands(a, code)
-        code = traffic_detail_lod(a, code)
-        code = car_render_diagnostics(a, code)
+        if mw_patches:
+            code = water_reflection_gates(a, code)
+            code = split_shadow_operands(a, code)
+            code = split_capture_operands(a, code)
+            code = split_fx_operands(a, code)
+            code = traffic_detail_lod(a, code)
+            code = car_render_diagnostics(a, code)
         bodies[k] = (a, name, code)
         if a in hooks:
             # The runtime replaces this function: the translated body becomes f_X_orig, and f_X a weak wrapper that a
@@ -374,7 +401,9 @@ def main():
             code = code.replace(f"void f_{a:08X}(Cpu *restrict c) {{", f"void f_{a:08X}_orig(Cpu *restrict c) {{", 1)
             code += f"\n__attribute__((weak)) void f_{a:08X}(Cpu *c) {{ f_{a:08X}_orig(c); }}"
             bodies[k] = (a, name, code)
-    with open(os.path.join(OUT, "funcs.h"), "w", newline="\n", encoding="utf-8") as h:
+        if a in private:
+            bodies[k] = (a, name, private_hooks.wrap(a, code, private[a]))
+    with open(os.path.join(out, "funcs.h"), "w", newline="\n", encoding="utf-8") as h:
         h.write('#pragma once\n#include "runtime.h"\nvoid untranslated(Cpu *c, uint32_t addr);\n')
         h.write('int traffic_detail_on(void);\n')
         h.write('extern int diag_on;\nvoid diag_car_observe(Cpu *c, uint32_t site);\nvoid diag_car_reject(uint32_t site);\n')
@@ -390,41 +419,53 @@ def main():
                 'void x360_shadow_casters(Cpu *c, uint32_t cull, uint32_t light_view);\n')
         h.writelines(f"void f_{a:08X}(Cpu *c);\n" for a, _, _ in bodies)
         h.writelines(f"void f_{a:08X}_orig(Cpu *c);   /* hooked: {hooks[a]} */\n" for a, _, _ in bodies if a in hooks)
-    with open(os.path.join(OUT, "table.c"), "w", newline="\n", encoding="utf-8") as t:
+        if private:
+            h.write(private_hooks.declarations(private))
+    with open(os.path.join(out, "table.c"), "w", newline="\n", encoding="utf-8") as t:
         t.write('#include "funcs.h"\n')
         t.write("const uint32_t guest_func_addr[] = {" + ",".join(f"0x{a:08X}u" for a, _, _ in bodies) + "};\n")
         t.write("void (*const guest_func_ptr[])(Cpu *) = {" + ",".join(f"f_{a:08X}" for a, _, _ in bodies) + "};\n")
         t.write(f"const unsigned guest_func_count = {len(bodies)};\n")
-        # The runtime only loads a speed.exe with the code these functions were translated from (the game folder
+        # The runtime only loads an executable with the code these functions were translated from (the game folder
         # check): the code fingerprint and its per-region digests (to name the region that differs), see
         # exe_fingerprint.py. speed_exe_sha256 is the owner's whole-file hash, still accepted as an alias.
         fp = recomp.exe_fingerprint
-        t.write(f'const char speed_exe_fingerprint[] = "{rc.pe.fingerprint}";\n')
-        t.write("const char speed_exe_region_sha256[4][65] = {" + ",".join(f'"{fp.SUPPORTED[k]}"' for k in fp.NAMES) + "};\n")
-        t.write(f'const char speed_exe_sha256[] = "{fp.WHOLE_FILE_SHA256}";\n')
+        if mw_patches or game == "carbon":
+            t.write(fp.table_constants(pe.data, game="mw" if mw_patches else game))
+        else:
+            t.write(f'const char speed_exe_fingerprint[] = "{rc.pe.fingerprint}";\n')
+            t.write('const char speed_exe_region_sha256[4][65] = {"","","",""};\n')
+            t.write(f'const char speed_exe_sha256[] = "{pe.sha256}";\n')
     files = []
     for k in range(0, len(bodies), CHUNK):
-        path = os.path.join(OUT, f"speed_{k // CHUNK:02d}.c")
+        path = os.path.join(out, f"{prefix}_{k // CHUNK:02d}.c")
         with open(path, "w", newline="\n", encoding="utf-8") as f:
             f.write('#include "funcs.h"\n\n')
             f.write("\n\n".join(code for _, _, code in bodies[k:k + CHUNK]))
         files.append(path)
-    files.append(os.path.join(OUT, "table.c"))
-    rows = hook_coverage.generate(OUT)
-    print(f'coverage: {len(rows)} hooks/inline dependencies checked for mac and windows')
+    files.append(os.path.join(out, "table.c"))
+    if mw_patches:
+        rows = hook_coverage.generate(out)
+        print(f'coverage: {len(rows)} hooks/inline dependencies checked for mac and windows')
+
+    if not compile and not generate_only:
+        return {"functions": len(funcs), "translated": len(funcs) - sum(reasons.values()), "insns": insns}
 
     def compile_one(path):
         obj = path[:-2] + ".o"
-        r = subprocess.run(["clang", "-c"] + recomp.CFLAGS + os.environ.get("RECOMP_CFLAGS", "").split() + ["-I", HERE, "-I", OUT, path, "-o", obj],
+        r = subprocess.run(["clang", "-c"] + recomp.CFLAGS + ([] if mw_patches else ["-frounding-math"]) + os.environ.get("RECOMP_CFLAGS", "").split() + ["-I", HERE, "-I", out, path, "-o", obj],
                            capture_output=True, text=True)
-        return path, obj, r.returncode, r.stderr[-2000:]
+        if not mw_patches:
+            with open(path + ".log", "w") as log:
+                log.write(r.stdout + r.stderr)
+        return path, obj, r.returncode, r.stderr[-2000:] if mw_patches else r.stderr
 
     objs, errors = [], []
-    if not args.generate_only:
-        with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
+    if not generate_only:
+        with concurrent.futures.ThreadPoolExecutor(jobs) as ex:
             for path, obj, rc_, err in ex.map(compile_one, files):
                 (objs if rc_ == 0 else errors).append(obj if rc_ == 0 else (path, err))
-    if not args.generate_only and not errors:
+    if not generate_only and not errors:
         pending = lib + ".new"
         try:
             if os.path.exists(pending):
@@ -442,20 +483,15 @@ def main():
            "stub reasons:"] + [f"  {n:5d}  {w}" for w, n in reasons.most_common(30)]
     for path, err in errors[:3]:
         rep.append(f"ERROR {path}:\n{err}")
-    with open(os.path.join(OUT, "report.txt"), "w", newline="\n", encoding="utf-8") as report:
+    with open(os.path.join(out, "report.txt"), "w", newline="\n", encoding="utf-8") as report:
         report.write("\n".join(rep) + "\n")
     print("\n".join(rep[:6]))
     if errors:
         raise SystemExit(1)
-    if args.generate_only:
+    if generate_only:
         print('GENERATED speed sources only; no native tools invoked')
-        return
-    if not args.skip_server:
-        import server_module
-        server_path = (args.server_dll or os.environ.get("NFS_SERVER_DLL") or
-                       os.path.join(os.path.dirname(recomp.EXE), "server.dll"))
-        server_module.build(server_path, args.jobs, speed_pe=rc.pe)
-    build_inputs.record(stamp, fingerprint, build_inputs.outputs())
+    return {"functions": len(funcs), "translated": translated, "insns": insns,
+            "compile_errors": len(errors), "files": len(files)}
 
 
 if __name__ == "__main__":

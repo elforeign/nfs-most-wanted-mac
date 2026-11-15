@@ -8,6 +8,7 @@ Transport proof: 8 prefix sizes reject before promotion with the completion guar
 its mutant promotes all 8. Before the delivery barrier, the 1-byte prefix delivered
 0 bytes and hit the checksum guard instead, masking the disabled completion guard.
 No external network or release dependencies. runtime/*_test.py discovery registers this test.
+Product proof: Carbon delivery good=1 / MW product refused=1; packaged products=2/2.
 The production binary is checked for absence of the fixture URL environment variable.
 """
 import contextlib
@@ -39,7 +40,7 @@ def run(args, **kwargs):
     return result
 
 
-def build(root, name, patch=None, testing=True):
+def build(root, name, patch=None, testing=True, game="mw"):
     source = (ROOT / 'pub_update_helper.m').read_text()
     if patch:
         for before, after in (patch if isinstance(patch, list) else [patch]):
@@ -49,7 +50,8 @@ def build(root, name, patch=None, testing=True):
     path.write_text(source)
     exe = root / name
     run(['clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
-         *(['-DPUB_UPDATE_HELPER_TESTING=1'] if testing else []), '-I', ROOT, path, '-framework', 'Foundation', '-o', exe])
+         *(['-DPUB_UPDATE_HELPER_TESTING=1'] if testing else []),
+         *(['-DNFS_GAME=2'] if game == 'carbon' else []), '-I', ROOT, path, '-framework', 'Foundation', '-o', exe])
     return exe
 
 
@@ -68,7 +70,7 @@ def image(root, name, mode='good'):
     (contents / 'MacOS').mkdir(parents=True)
     (contents / 'Resources').mkdir()
     (contents / 'Resources/sealed.txt').write_text('original contents\n')
-    info = dict(CFBundleIdentifier='org.nfsmw-native.setup', CFBundleExecutable='Setup',
+    info = dict(CFBundleIdentifier='org.nfsc-native.setup' if 'Carbon' in SETUP else 'org.nfsmw-native.setup', CFBundleExecutable='Setup',
                 CFBundlePackageType='APPL', CFBundleName='Setup', CFBundleShortVersionString='4.2.0',
                 CFBundleVersion='4.2.0')
     if mode == 'version':
@@ -242,12 +244,13 @@ def bundle_check(root, release):
     shutil.copy2(ROOT / 'bundle.sh', runtime / 'bundle.sh')
     (runtime / 'docs').mkdir()
     shutil.copy2(ROOT / 'docs/guide.md', runtime / 'docs/guide.md')
+    shutil.copy2(ROOT / 'docs/guide_carbon.md', runtime / 'docs/guide_carbon.md')
     for name in ('NOTICE', 'LICENSE', 'media/PREBUILT.md', 'media/licenses/LGPL-2.1.txt',
                  'media/licenses/FFmpeg-notices.txt'):
         target = runtime.parent / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT.parent / name, target)
-    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h', 'pub_update_write.h', 'bundle_roots.h'):
+    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h', 'pub_update_write.h', 'bundle_roots.h', 'game_select.h'):
         shutil.copy2(ROOT / name, runtime / name)
     shutil.copy2(release, runtime / 'boot')
     (runtime / 'app_icon.m').touch()
@@ -280,12 +283,23 @@ chmod +x "$1"
         assert 'PUB_UPDATE_REHEARSAL_BASE_URL' not in run(['/usr/bin/strings', binary]).stdout
     # A packaging mutation must lose this executable.
     script = runtime / 'bundle.sh'
-    text = script.read_text()
+    original = script.read_text()
+    text = original
     text = text.replace('cp "$TMP/pub_update_helper" "$APP/Contents/MacOS/pub_update_helper"', ':')
     text = text.replace('codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_helper"', ':')
     script.write_text(text)
     run(['/bin/sh', script, dest, '--version', '4.2.0'], env=env)
     assert not helper.exists(), 'packaging broken control still included the helper'
+
+    script.write_text(original)
+    carbon_dest = root / 'package/carbon-output'
+    run(['/bin/sh', runtime / 'bundle.sh', carbon_dest, '--version', '4.2.0', '--game', 'carbon'], env=env)
+    for name in ('pub_update_helper', 'pub_update_worker'):
+        data = run(['/usr/bin/strings', carbon_dest / 'NFSMW.app/Contents/MacOS' / name]).stdout
+        assert 'NFS Carbon Native Setup.app' in data, name
+        if name == 'pub_update_helper':
+            assert 'elforeign/nfs-carbon-mac' in data and 'NFS-Carbon-Native-Setup' in data
+    print('Product packaging: MW/Carbon update tools select their Setup (2/2)')
 
 
 def await_file(path, process):
@@ -465,6 +479,28 @@ def review_checks(root, exe, server, data, good_data):
     print('REVIEW: 7 good protections PASS; 7 broken controls detected; cleanup/retry PASS')
 
 
+def carbon_delivery(root):
+    global ASSET, SUM, PREFIX, SETUP
+    saved = ASSET, SUM, PREFIX, SETUP
+    ASSET = 'NFS-Carbon-Native-Setup-v4.2.0.dmg'
+    SUM = ASSET + '.sha256'
+    PREFIX = '/elforeign/nfs-carbon-mac/releases/download/' + TAG + '/'
+    SETUP = 'NFS Carbon Native Setup.app'
+    try:
+        exe = build(root, 'carbon-helper', game='carbon')
+        data = image(root, 'carbon-image')
+        with fixture() as server:
+            result, progress, _, requests = invoke(exe, root, server, data)
+            assert result.returncode == 0 and progress['state'] == 'verified', progress
+            assert [x[0] for x in requests][:2] == [PREFIX + SUM, PREFIX + ASSET], requests
+            # A MW build cannot accept the Carbon asset or fetch from its repository.
+            wrong = build(root, 'wrong-product-helper')
+            assert rejected(invoke(wrong, root, server, data))
+        print('Carbon delivery: verified=1; MW helper with Carbon asset refused=1; Carbon repository requests=2')
+    finally:
+        ASSET, SUM, PREFIX, SETUP = saved
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='update-delivery-') as temp:
         root = Path(temp).resolve()
@@ -595,6 +631,7 @@ def main():
                 broken_size = (broken[2] / (ASSET + '.part')).stat().st_size
                 assert good_size <= CAP and broken_size > CAP, (mode, good_size, broken_size)
                 print(mode, 'good bounded %d, broken %d' % (good_size, broken_size))
+        carbon_delivery(root)
     print('PUB UPDATE HELPER PASS: 2 verified releases; 12 hostile releases rejected; 8 guard + 1 packaging mutants detected; 7 review controls detected; interruption/retry/lock PASS')
 
 

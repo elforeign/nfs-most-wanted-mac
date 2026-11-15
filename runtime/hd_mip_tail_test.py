@@ -19,6 +19,10 @@ import sys
 import struct
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 # Only the original swap body consumed by uiblur_test.build; no repository history.
 BASELINE = r'''
@@ -98,9 +102,9 @@ def main():
     replay = importlib.util.module_from_spec(spec); spec.loader.exec_module(replay)
     baseline = BASELINE.encode()
     assert hashlib.sha256(baseline).hexdigest() == BASE_SHA256, 'pinned baseline changed'
-    render = (ROOT / 'runtime/render.m').read_text()
+    render = mw_source(ROOT / 'runtime/render.m')
     gpu = render.split('RenderTex *gpu_tex(Obj *t) {', 1)[1].split('// Static vertex/index buffers', 1)[0]
-    release = (ROOT / 'runtime/d3d9.m').read_text().split('static uint32_t obj_release(Obj *o) {', 1)[1].split('\nstatic void dev_bind', 1)[0]
+    release = mw_source(ROOT / 'runtime/d3d9.m').split('static uint32_t obj_release(Obj *o) {', 1)[1].split('\nstatic void dev_bind', 1)[0]
     with tempfile.TemporaryDirectory(prefix='hd-tail-') as directory:
         root = Path(directory)
         skipped = False

@@ -12,6 +12,7 @@ Publication I/O faults (mkdir/hash/prune/copy/manifest/rename/cleanup):
 Stale pending plus low space on a cache hit: 0/1 installs before / 1/1 after;
 lock-before-cleanup/space preserves a live publication: 0/1 before / 1/1 after.
 Shader retention: version 1 fails 1/1 cache-version regression; version 2 passes 1/1.
+Carbon artwork keys: game in the preparation key passes 2/2 new tests; ignoring it fails 1/2.
 Run with the project's Python -I; the offline suite discovers this file.
 """
 import json
@@ -69,6 +70,27 @@ class PersistentPreparationTests(Fixture):
             full_archive_key = cache_impl.preparation_key(*args)
         self.assertNotEqual(retained_key, full_archive_key)
         self.assertEqual(retained_key, cache_impl.preparation_key(*args))
+
+    def test_game_is_part_of_the_preparation_key(self):
+        args = ('disc-content', None, {}, {'clang': 'test'})
+        mw = cache_impl.preparation_key(*args)
+        self.assertEqual(mw, cache_impl.preparation_key(*args, game='mw'))   # Most Wanted's existing entries stay valid
+        self.assertNotEqual(mw, cache_impl.preparation_key(*args, game='carbon'))
+        inventory = {'tools/setup_kit/carbon_x360.py': 'a'}
+        self.assertNotEqual(cache_impl.preparation_key('c', None, inventory, {}, game='carbon'),
+                            cache_impl.preparation_key('c', None, {'tools/setup_kit/carbon_x360.py': 'b'}, {}, game='carbon'))
+
+    def test_a_single_root_preparation_round_trips(self):
+        source = self.home / 'prepared-art'
+        write(source / 'prepared/files/GLOBAL/GLOBALB.BUN', b'art')
+        cache = b.PreparedCache(self.home / 'cache-x360', cache_impl.preparation_key('c', None, {}, {}, game='carbon'))
+        roots = {'x360_root': source / 'prepared/files'}
+        self.assertTrue(cache.publish(source, roots, dict(features=True, missing=[])))
+        record = {}
+        restored = cache.restore(self.home / 'restored-art', record)
+        self.assertEqual(set(restored), {'x360_root'})
+        self.assertEqual((restored['x360_root'] / 'GLOBAL/GLOBALB.BUN').read_bytes(), b'art')
+        self.assertTrue(record['features'])
 
     def test_second_install_skips_preparation(self):
         original = (self.iso.read_bytes(), self.iso.stat())

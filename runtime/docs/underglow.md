@@ -1,10 +1,10 @@
 # Underglow core
 
-The core models an RGB LED strip proxy with four mounted emitters and a dry
-projected pool. Customize > Visual > Underglow saves independent per-car colour
-and Light choices. Colour and Light start Off for every car. Choosing a colour keeps Light Off
-until Light On is selected. Explicit saved Light On/Off choices are retained;
-Road pool choices are independent.
+The core models an RGB LED strip proxy with four logical mounted strips and a dry
+projected pool. Visible emitter quads are not submitted. Customize > Visual > Underglow saves independent per-car colour
+and Light choices. Colour and Light start Off for every car. Choosing a colour (not Off) switches Light On
+(Back restores both); Light Off can be set again on the Light row. Explicit saved Light On/Off choices are retained;
+Road pool and Pulse choices are independent; Pulse defaults Off.
 Cosmetics never change the retail save layout or decide whether a save is valid.
 
 ## Measured source
@@ -199,7 +199,9 @@ selected car (GetCarRecordByHandle 0056ECC0 on the selected handle, owned career
 after `owned:<car>` it uses that car. It needs diagnostics and TEST's started career, from
 MainMenu_Sub.fng, and stops input after at most 30 wall-clock seconds or 1,800 fixed ticks.
 Shop uses SetGameMode and BeginCarCustomize (00589D60) and checks the resulting package, career
-bit and owned record. `underglow:save` and `underglow:reload` are rejected without requesting
+bit and owned record; it also names its car as the owner of the shown ride (`underglow_light_fixture_owner`),
+because this entry does not pass CarViewer::SetRideInfo and the shop car would keep the garage car's light choice.
+Only stock cars: an added car (`jaguarxk`) fails "stock car not found" without the added-cars catalogue. `underglow:save` and `underglow:reload` are rejected without requesting
 MemcardEnter.
 
 Bootstrap: after the save screen's Continue, `pkg:MainMenu_Sub.fng:RETURN` reaches the safe house
@@ -208,8 +210,8 @@ wait (within 30 s) while `Dialog.fng` closes. On CustomizeMain, Visual is two RI
 
 ## Mounted underglow (first visible version)
 
-The native **Light** choice enables four mounted emissive strips and one bounded
-dry projected pool when a non-Off colour is also selected. Its default is **Off**
+The native **Light** choice enables four logical light sources and one bounded
+dry projected pool when a non-Off colour is also selected. Its default is **Off** until a colour is chosen
 for stock and added cars, including fresh profiles. Saved Light On/Off choices
 are retained without migration or save format changes. Existing version 1
 colour-only saves retain their inherited Light On state.
@@ -223,15 +225,18 @@ is recorded separately from the numerical helpers.
 (006C68B0). The Measured pool covers the transformed strip footprint plus a one metre margin on
 each side, with a 25 cm edge fade, generated from the four finite Lambertian
 sources. Its dimensions and uploaded radiance update when the car changes. It uses a dry diffuse
-albedo assumption rho=.18 and the conversion below. Emitters use
-flux/(pi * .010 * 100) radiance. Both textures retain unbounded linear RGB in
-RGBA32Float before the existing exposure/bloom path.
+albedo assumption rho=.18 and the conversion below. The pool retains unbounded
+linear RGB in RGBA32Float before the existing exposure/bloom path. The four
+10 mm source quads are no longer drawn; only the pool reaches ePoly.
 
 Owned-car provenance comes from FEPlayerCarDB::BuildRideForPlayer (005910E0),
 propagates through CarViewer::SetRideInfo (007A9DB0) and
 FrontEndRenderingCar::ReInit (007609B0), and is invalidated by RideInfo::Init
 (00739A70). VehicleRenderConn::Load (0075D220) compares all 139 installed-part
 indices against the owned customization record before binding the runtime ride.
+The owned car it compares is the one QuickGame::CreateCars (006F47A0) builds: the career's car in career mode
+(database +12C bit 0), otherwise the quick-race selection of the current race type (GetQuickRaceSettings 0056DBE0,
++10), so a My Cars or career car picked for a quick race keeps its light.
 The live render connection world ID must equal local player slot 0
 ISimable::GetWorldID (virtual +70), reached through IPlayer::GetSimable (+4).
 CarRenderInfo+88 is car-type data, not the live vehicle.
@@ -242,16 +247,34 @@ one frame-owned slot and flushed through RenderVehicleFlares (00750B00),
 after opaque geometry; stale frames, held Off passes and duplicate flushes
 submit nothing.
 The existing ambient-shadow ground elevation at CarRenderInfo+1178 supplies
-the road plane; the measured safe-house floor uses z=0. No new collision
-adapter is used. The first version projects onto a horizontal plane rather
-than replaying road triangles. Its dry receiver albedo is an assumption, not
-a sample of the road texture.
+the photometric reference height; the measured safe-house floor uses z=0.
+On roads the unchanged pool texture is clipped to the ground triangles already
+in the car's WCollider cache, with interpolated UVs and the existing 2 mm lift.
+No additional collision query or streaming request is made. Vertical faces and
+receivers outside the car's ground layer are rejected. Its dry receiver albedo
+is an assumption, not a sample of the road texture.
 
-Deferred: wet road response, reflections/split views, bridge scenes, collision
-adapter, body/wheel masks. Normal depth testing remains; no source-visibility
-claim is made for this first projected version. A bounded shadowless plane can
-intersect geometry on slopes and uneven roads. Off returns before the scratch
-block, two texture objects, their storage/uploads, and all five submissions.
+Shop fix: outside racing the strips are raised 10 cm (`SHOP_STRIP_LIFT`, `underglow_light_begin`), so the light reaches
+all four sides; racing is unchanged. The limit below describes the height before it.
+
+Known limit (customization shop, measured on a Carrera GT, Green, pool Stronger): the glow shows beside the car
+on its right side and is missing on the left, at the front and at the rear. Glow pixels more than 40 levels over
+the light-off frame at mirrored showcase views: right side 5,814 / left side 81, front right 5,304 / front left 114,
+rear right 5,684 / rear left 4, rear 604, front 10. The floor does not cut the pool: a depth bias toward the camera
+of 8 to 128 rows adds 0 pixels, and the pool plane lowered by 2 to 14 cm is never cut (the front end draws mirrored
+car, backdrop, car: ___eDisplayFrame 006DE300; the pool goes out with the car as one SRCALPHA/ONE fan, depth test
+on, depth write off). The car stands level with its origin 7.5 cm up, so the strips hang 6.5 cm above the pool plane
+(M3 GTR 2.5 cm): the layout's tyre z is 0 for all four wheels, so "wheel-centre Z minus 10 mm" is 1 cm below the car
+origin. The line is as wide as the strips are high and lies under the body, at the edge of what the showcase camera
+sees under the sill. With 10 cm more height between strips and plane the same views give 27,117 / 22,887, 23,011 /
+13,539, 23,542 / 19,497, rear 10,837, front 236 (`run_shots/glowsides-shop-strip-height.jpg`). Why right and left
+differ at the present height is not decoded yet. `run_shots/glowsides-shop-floor-lift.jpg` shows parallax of a
+lifted quad, not a floor cut.
+
+Deferred: wet road response, reflections/split views, bridge scenes and
+body/wheel source masks. Normal depth testing remains; no source-visibility
+claim is made. Missing cached ground submits no road light. Off returns before the scratch
+block, texture objects, their storage/uploads, and the pool submission.
 
 Mounts now derive from each live car, with no model, BODY hash, handle or LOD
 allowlist. `CarRenderInfo::UpdateCarParts` (00755800, decoded
@@ -263,14 +286,15 @@ UpdateWheelYRenderOffset (0074D780), so +110 contains lateral centres including
 kit offsets (`speed_0074d050.c:575,632,17734`). Array lengths use the same +2
 u16 as Attrib::Private::GetLength (00452940).
 
-`underglow_light.m:car_mounts` places the side strips 5 cm inside the lateral
-bounds, between axle radius envelopes plus 5 cm clearance. Cross strips sit
-10 cm inside front/rear bounds, with their width inside all four inner tyre
-edges plus 5 cm clearance. Strip height uses the mean wheel-centre Z minus
-10 mm, clamped to the live vertical bounds with 5 mm mounting clearance. This
-avoids an isolated low exhaust/bumper vertex moving all emitters below the
-floor; the 997S fixture exercises this at chassis Z=.08 m. These are chassis
-and wheel proxies, not measured mesh attachment points.
+`underglow_light.m:car_mounts` places side strips 3 cm inside the smallest
+of the four inner tyre faces (absolute lateral centre minus half tyre width).
+Their longitudinal span retains the axle-radius envelopes and 5 cm clearance.
+Front/rear cross strips sit 10 cm beyond the tyre envelope, clamped 10 cm inside
+the chassis ends; their half-width is the side offset minus 5 cm. CEMTR's
+BODY_A mixer-truck frame narrows to 0.698085 m inside its tyres: its side
+offset is capped at 0.668085 m to retain the same 3 cm inset. Height remains mean wheel-centre Z minus 10 mm,
+clamped to vertical bounds with 5 mm clearance; bounds retain sanity checks.
+
 Rigid chassis transforms carry all four mounts; the pool uses their transformed
 footprint. Finite, ordered bounds, four valid wheel records and nonempty mount
 intervals are required. Reflection, missing ownership and missing road ground
@@ -286,7 +310,7 @@ The per-render-object cache includes owned handle and identity, all 76 installed
 part pointers, layout identity, bounds and wheel inputs. Unchanged frames copy
 cached strips; car, kit, part or geometry changes rebuild once. Rejected geometry
 is cached too. Measured preset duties are solved once per preset and shared by
-the emitter and every pool pixel; turning does not solve them again.
+every pool pixel; turning does not solve them again.
 
 The production admission test reads 73 stock BODY_A assets with wheel data and
 admits 66 viable mount intervals, including every career chassis in that set. TRAFCAMPER has duplicated
@@ -348,22 +372,18 @@ establish road appearance. Their log records 4 strips + 1 pool, a valid road
 face and dry ground. Carrera GT (general mounts, Magenta): `neonmenu_carreragt_{garage,road}_{on,off}.jpg`;
 the road pool barely leaves the body footprint in chase view.
 
-`underglow_light_test.py` executes production ownership, geometry, float texture
-payloads and native ePoly submission. BMW M3 GTR, Carrera GT, Punto, Elise,
-Mustang GT, Clio and 997S use independently decoded stock BODY_A bounds and
-wheel values, distinct handles 82/11..16, and shared textures across car swaps.
-Independent midpoint quadrature of submitted emitter quads checks pool RGB.
-Diagnostic On, native On and forced On with saved Light Off pass 410,107 /
-410,109 / 410,107 checks. Native Off, master Off and colour Off each pass 7/7
-with no allocations, draws or road queries. Mutation results for ownership,
-LOD, mounting height, native/queued admission, units and cache gates are in
-the test header. These are submission checks, not appearance or frame cost.
+`underglow_light_test.py` executes production ownership, geometry, float textures
+and ePoly submission. BMW M3 GTR, Carrera GT, Punto, Elise, Mustang GT, Clio
+and 997S share textures across car swaps. Independent quadrature integrates
+captured logical sources, since emitter submissions are now zero. Light/colour
+Off allocate and submit nothing. Pulse changes submitted RGB without changing
+pool bytes, its dirty flag or allocation count. These checks do not judge looks.
 
 `underglow_cars_test.py` independently enumerates 48 stock player models,
 76 catalog additions and 14 replacements. Each must decode actual BODY_A
 bounds and source wheels; missing data fails. All **124 player models plus
-14 replacements** stay dark after colour selection, then submit **4 strips +
-1 pool** after explicit Light On, at both Road pool strengths. The pinned
+14 replacements** stay dark after colour selection, then submit **0 emitter quads +
+1 pool** after explicit Light On (four logical strips), at both Road pool strengths. The pinned
 original On default fails 276 roster checks. Fresh colour, no-colour default,
 v1 load/restart, explicit Off, v2 saved Off and zero-colour saved Off are
 checked separately. Omitted v1 compatibility or zero retention must fail.
@@ -376,11 +396,69 @@ diagnostic (old admitted); X/Z and disjoint bounds also reject. All 35 v1/v2/v3
 colour/Light cases retain intent (old nine wrong colours), and the old v2
 publisher retains both other careers when saving a third (old zero retained).
 
-The pool assumes rho=.18 and a horizontal plane with 2 mm depth lift; it can
-intersect uneven geometry. Its texture refreshes on mount changes, preset
+The pool assumes rho=.18; road geometry follows cached ground triangles with
+2 mm depth lift. Its texture refreshes on mount changes, preset
 changes, >2 mm height change, or >1e-4 basis-component change. General slopes,
 airborne cars, exact body attachment, source masks, legacy exposure calibration
 and solo frame cost remain unverified.
+
+
+## Wheel fit and Pulse
+
+`underglow_fit_test.py` independently decodes the complete player roster's body
+skins, including converted bumper/door/skirt parts, and intersects their projected
+edges to derive the filled top-down silhouette (no convex hull or mount-derived
+outline). It samples 31 positions per strip with a 0.05 m outside-length limit.
+The SHA-256-pinned original rule measures Carrera GT 2.566129 m, M3 GTR
+4.246774 m and Jaguar XK 4.884516 m (mirrors included in bounds); all three
+become 0.000000 m. The supplied XK reference was 4.80 m; its exact difference from this
+independent complete-skin/endpoint decoder is not decoded. **138/138 pass.**
+The existing roster includes CEMTR through PlayerUsable=1 (collection 51D9FFFA).
+Its wheel-only control fails at 1.740645 m; the decoded narrow-frame entry
+reduces it to 0.000000 m. No limit or roster exemption is used.
+
+Native **Pulse: Off/On** (mode 0x30B) uses the global app preference
+`cars.underglow_pulse`; hover previews, Back restores, Accept saves. Colour,
+Light, pool strength and retail save bytes are independent. Pulse uses monotonic
+real time: `1 - .7*(1-cos(pi*t))/2`, a two-second period from 1.0 to .30.
+Only pool vertex RGB changes, quantized to D3DCOLOR; alpha stays opaque.
+The road shader doubles alpha: alpha pulsing clamps on the normal UNORM
+receiver and produces .603922 instead of .30. The old alpha control fails.
+The real retail worldprelit VS/PS fixture renders dim/bright **0.301960796**
+on both UNORM and float targets (42/42 each);
+ignoring vertex colour renders 1.0 and fails. At t=0/1/2 seconds the mathematical
+factor is 1/.30/1, and Off stays 1. Menu cancellation/save/reload mutants fail.
+No new environment switch, texture refresh or store/save-format change is used.
+
+Current game stills: `run_shots/glowfit-carreragt-road.jpg` and
+`glowfit-pulse-{bright,dim}.jpg` (1920x1080, <500 KB). The Pulse pair's PNG
+capture times differ by .992704 s. They show Carrera GT in free roam, Measured,
+native Light On with the override unset. The same run admits frontend and road
+handle 83, 139 matching parts, local slot 0, face 1 and a .105194 m road gap.
+A disk-saved Light On restart/race is not decoded yet. Nine garage views,
+BMW M3 GTR/Jaguar XK road views and race 15.1.1 remain unverified; these stills
+do not establish the requested all-car visual acceptance.
+
+### Ground cut
+
+The matched Carrera GT road frame places the old horizontal pool at
+152.299623 m while sampled ground ranges from 152.207046 to 152.344230 m.
+Where the sloping road rises through the plane, depth rejects the pool; the
+intersection of two planes projects as a straight diagonal. The texture has
+no cut, UVs span its unit rectangle, and stencil, clip planes and scissor are
+disabled. The additive draw keeps depth testing and disables depth writes.
+
+Clipping the same texture onto the nine cached ground polygons removes the
+visible cut in `run_shots/glowcut-carreragt-rear.jpg`; the matched baseline is
+`glowcut-carreragt-before.jpg`. Both are native Green/Light On, Measured,
+Pulse Off, far chase in free roam. At the matched camera and depth buffer,
+145881/321520 (45.372294%) rectangle pixels passed before versus
+240928/321520 (74.934063%) after; the body remains an occluder.
+`underglow_ground_test.py` executes production clipping and UV packing:
+40401/40401 ground samples pass, versus 15959/40401 with the deliberately
+broken horizontal receiver. All 3481 foreground samples stay unlit.
+The pool texture/photometry and defaults are unchanged. BMW M3 GTR and
+Jaguar XK road stills and a Carrera GT side still remain unverified.
 
 
 ## Road pool strength

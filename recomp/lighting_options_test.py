@@ -16,6 +16,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"runtime"))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -188,7 +192,7 @@ def check_targets(rows, review=False):
 
 
 def main():
-    effect = (ROOT / "runtime/d3dx_effect.c").read_text()
+    effect = mw_source(ROOT / "runtime/d3dx_effect.c")
     setter = re.search(r"static int e_SetFloat\(Cpu \*c\) \{.*?\n\}", effect, re.S).group()
     # The actual recompiled instructions prove both uploads call vtable +0x78
     # (ID3DXEffect::SetFloat), using the same parameter-handle offset +0x86C.
@@ -245,9 +249,9 @@ static int close3(const float a[3], const float b[3]) {
 }
 int main(int argc, char **argv) {
     int saved = argc > 1 && !strcmp(argv[1], "saved");
-    if (saved) strcpy(saved_tunnel, "pc");   // Keep is the default, so the saved value is the non-default Original
+    if (saved) strcpy(saved_tunnel, "pc");   // Keep + sky light is the default, so the saved value is the non-default Original
     settings_init();
-    assert(s_tunnel.def == 1 && s_tunnel.value == !saved);
+    assert(s_tunnel.def == 2 && s_tunnel.value == (saved ? 0 : 2));
     Cpu cpu = {0};
     cpu.esp = 0x4000;
     wf(0x008FAE68u, .8f);
@@ -264,7 +268,7 @@ int main(int argc, char **argv) {
         s_tunnel.value=1;
         assert(settings_set(&s_tunnel,0) && !strcmp(saved_tunnel,"pc"));
         settings_reset(&s_tunnel);
-        assert(s_tunnel.value==1 && !*saved_tunnel);
+        assert(s_tunnel.value==2 && !*saved_tunnel);
     }
     M32(TIME_OF_DAY_PTR)=0x1000; M32(GAMEFLOW_STATE)=6;
     wf(0x103C,4);

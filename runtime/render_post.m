@@ -1,9 +1,14 @@
+#include "game_select.h"
 // render_post.m - the X360 post passes and the mirror pass (split from render.m; shared state in render_internal.h).
 #include "render_internal.h"
 #include "hdrclip.h"
+#include "lens_drops.h"
 #include "post_cuts.h"
 #include "sign_diag.h"
 #include "slowlog.h"
+#include "shared_depth.h"
+#include "pre_treatment.h"
+#include "slowlog_lumab.h"
 #include "gen/x360_shader_lits.inc"   // tools/gen_tables.py: X360S_VT_* (the X360 visualtreatment PS literals, fs_vt)
 #include "gen/x360_engine.inc"         // X360E_DROP_* (the lens raindrops, from default.xex)
 
@@ -172,6 +177,25 @@ static const char *x360_src =
 
 #include "lampglow_shader.h"
 
+// Off retains the original source. These substitutions preserve each sum's
+// order, including the blur interpolation when its contribution is nonzero.
+static NSString *x_cuts_source(NSString *src) {
+    if (!post_cuts_enabled()) return src;
+    src=[src stringByReplacingOccurrencesOfString:@"float4 a = 0; for (int n = 0; n < 16; ++n) a += s.sample(sm, i.uv + k.off[n].xy); a *= 0.0625;"
+        withString:@"float4 a = 0; float3 g = 0; for (int n = 0; n < 16; ++n) { float4 t = s.sample(sm, i.uv + k.off[n].xy); a += t; if (k.p0.w > 0.5) g += t.rgb * gw(t.rgb); } a *= 0.0625;"];
+    src=[src stringByReplacingOccurrencesOfString:@"float3 g = 0; for (int n = 0; n < 16; ++n) { float3 t = s.sample(sm, i.uv + k.off[n].xy).rgb; g += t * gw(t); }"
+        withString:@"// g reuses the ordered colour fetches above."];
+    src=[src stringByReplacingOccurrencesOfString:@"for (int n = 0; n < 16; ++n) a += s.sample(sm, i.uv + k.off[n].xy) * k.wgt[n];"
+        withString:@"for (int n = 0; n < int(k.p0.w); ++n) a += s.sample(sm, i.uv + k.off[n].xy) * k.wgt[n];"];
+    NSRange begin=[src rangeOfString:@"    float d = depth.sample(lin, uv);"];
+    NSRange end=[src rangeOfString:@"    float3 col = c.rgb + (blur - c.rgb) * amt;"];
+    NSString *amount=[src substringWithRange:NSMakeRange(begin.location,end.location-begin.location)];
+    src=[src stringByReplacingCharactersInRange:NSMakeRange(begin.location,end.location-begin.location) withString:@""];
+    src=[src stringByReplacingOccurrencesOfString:@"    float3 blur;" withString:[amount stringByAppendingString:@"    float3 blur = c.rgb;\n    if (amt != 0.0) {"]];
+    return [src stringByReplacingOccurrencesOfString:@"    float3 col = c.rgb + (blur - c.rgb) * amt;"
+        withString:@"    }\n    float3 col = c.rgb + (blur - c.rgb) * amt;"];
+}
+
 // Separate curve library: Off never compiles or appends this source.
 id<MTLRenderPipelineState> post_cuts_curve_pipeline(id<MTLDevice> device, MTLPixelFormat format) {
     static id<MTLLibrary> lib;
@@ -309,23 +333,13 @@ static const char *ssao_src =
 "    return z.sample(pt, clamp(k.rect.xy + uv*k.rect.zw, k.bounds.xy, k.bounds.zw));\n"
 "}\n"
 "inline float3 ao_point(float2 uv,float raw,constant AK &k) {float d=ao_z(raw,k);return float3((uv*float2(2,-2)+float2(-1,1))*k.proj.xy*d,d);}\n"
-"inline float3 ao_pos(depth2d<float> z, float2 uv, constant AK &k) {return ao_point(uv,ao_depth(z,uv,k),k);}\n"
-"inline float3 ao_normal(depth2d<float> z, float2 uv, constant AK &k) {\n"
-"    float3 p=ao_pos(z,uv,k); float2 t=k.size.xy;\n"
-"    float3 l=p-ao_pos(z,uv-float2(t.x,0),k), r=ao_pos(z,uv+float2(t.x,0),k)-p;\n"
-"    float3 u=p-ao_pos(z,uv-float2(0,t.y),k), d=ao_pos(z,uv+float2(0,t.y),k)-p;\n"
-"    float3 n=cross(abs(l.z)<abs(r.z)?l:r, abs(u.z)<abs(d.z)?u:d);\n"
-"    n *= rsqrt(max(dot(n,n),1e-20)); return dot(n,p)>0 ? -n : n;\n"
-"}\n"
-"inline float2 ao_encode(float3 n) { n/=max(abs(n.x)+abs(n.y)+abs(n.z),1e-9); return n.z<0 ? (1.0-abs(n.yx))*select(float2(1),float2(-1),n.xy<0) : n.xy; }\n"
-"inline float3 ao_decode(float2 e) { float3 n=float3(e,1.0-abs(e.x)-abs(e.y)); if(n.z<0)n.xy=(1.0-abs(n.yx))*select(float2(1),float2(-1),n.xy<0);return normalize(n); }\n"
 "constant float2 directions[8]={float2(1,0),float2(0.70710678,0.70710678),float2(0,1),float2(-0.70710678,0.70710678),float2(-1,0),float2(-0.70710678,-0.70710678),float2(0,-1),float2(0.70710678,-0.70710678)};\n"
-"fragment float2 fs_ao(VOut i [[stage_in]], depth2d<float> z [[texture(1)]], texture2d<float> mask [[texture(3)]], constant AK &k [[buffer(0)]]) {\n"
+"fragment float2 fs_ao(VOut i [[stage_in]], depth2d<float> z [[texture(1)]], texture2d<float> mask [[texture(3)]], texture2d<float> geometry [[texture(4)]], constant AK &k [[buffer(0)]]) {\n"
 "    constexpr sampler pt(coord::normalized, filter::nearest, address::clamp_to_edge);\n"
 "    // Snap to the full-res depth pixel that owns this AO sample.\n"
 "    float2 uv=(floor(i.uv/k.size.xy)+0.5)*k.size.xy;\n"
-"    float raw=ao_depth(z,uv,k);float3 p=ao_point(uv,raw,k); if (raw>=0.999999 || mask.sample(pt,k.rect.xy+uv*k.rect.zw).r<0.999) return float2(0,p.z);\n"
-"    float3 n=ao_normal(z,uv,k); float occ=0;\n"
+"    float raw=ao_depth(z,uv,k);float4 dn=geometry.read(uint2(i.pos.xy));float3 p=float3((uv*float2(2,-2)+float2(-1,1))*k.proj.xy*dn.w,dn.w); if (raw>=0.999999 || mask.sample(pt,k.rect.xy+uv*k.rect.zw).r<0.999) return float2(0,p.z);\n"
+"    float3 n=dn.xyz; float occ=0;\n"
 "    float2 radius=clamp(k.tune.x/(max(p.z,0.01)*abs(k.proj.xy))*0.5, k.size.xy*2.0, k.size.xy*24.0);\n"
 "    #pragma clang loop unroll(full)\n"
 "    for (int tap=0;tap<4;++tap) {\n"
@@ -365,6 +379,10 @@ static const char *ssao_src =
 "}\n"
 "fragment float4 fs_ao_multiply(VOut i [[stage_in]], depth2d<float> z [[texture(1)]], texture2d<float> ao [[texture(2)]], texture2d<float> mask [[texture(3)]], constant AK &k [[buffer(0)]]) {return float4(0,0,0,ao_at(i.uv,z,ao,mask,k));}\n";
 
+#if NFS_GAME == NFS_GAME_PRIVATE
+// Native post callers share the shipping kernel and its reference normal math.
+const char *render_contact_source(int reference) { return reference ? ssao_legacy_src : ssao_src; }
+#endif
 typedef struct { float proj[4],size[4],rect[4],bounds[4],tune[4]; } AOParams;
 
 typedef struct { float off[16][4], wgt[16][4], p0[4]; } XK;
@@ -373,11 +391,12 @@ static id<MTLLibrary> x_lib;
 static id<MTLSamplerState> xs_lin, xs_vig, xs_point;
 // Resource ownership follows the source player, including odd-height scratch sizes.
 #define X_LUM_SLOTS 3
+static int x_lum_nowait_on = -1;
 static int x_lum_nowait(void) {
-    static int on = -1;
-    if (on < 0) { const char *e=getenv("NFS_LUM_NOWAIT"); on=e && !strcmp(e,"1"); }
-    return on;
+    if (x_lum_nowait_on < 0) { const char *e=getenv("NFS_LUM_NOWAIT"); x_lum_nowait_on=!(e && !strcmp(e,"0")); }
+    return x_lum_nowait_on;
 }
+void render_lum_set_nowait(int on) { x_lum_nowait_on = !!on; }
 struct XLumSlot { id<MTLBuffer> buffer; uint64_t serial; uint32_t generation; int pending, floating; };
 typedef struct {
     id<MTLTexture> q0,q1,bright,bblur,lum,bloomA,bloomB,dof,t,scene[2],lamp,drop;
@@ -393,6 +412,12 @@ static XPostResources x_resources[3];
 static XPostResources *xr = &x_resources[0];
 static uint32_t x_mode_generation=1;
 void render_x360_post_reset(void) { ++x_mode_generation; }
+SlowlogLumSnapshot render_lum_snapshot(void) {
+    const XPostResources *r = &x_resources[0];
+    return (SlowlogLumSnapshot){.nowait=x_lum_nowait(),
+        .ready=r->lum_ready && r->mode_generation == x_mode_generation,
+        .single_player=xr == r, .epoch=r->epoch, .mode=x_mode_generation};
+}
 #define xt_q0 (xr->q0)
 #define xt_q1 (xr->q1)
 #define xt_bright (xr->bright)
@@ -459,6 +484,10 @@ static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format
 // independent of the switch controlling background scene descriptor replay.
 // The smoke multiply is render_post_lazy_warm's (another worker thread): warming it here too would race its statics.
 void render_post_prewarm(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    extern void render_carbon_contact_prewarm(void);
+    render_carbon_contact_prewarm();
+#endif
     int failed=0;
     for (unsigned slot=0;slot<5;++slot) failed+=!x_post_library(slot);
     failed+=!x_pipeline_init(); // the EDR chain also uses the original post setup
@@ -573,7 +602,7 @@ static id<MTLRenderPipelineState> x_view_pso(NSUInteger samples) {
     static id<MTLLibrary> lib;
     static id<MTLRenderPipelineState> pipelines[9];
     if (samples>8) return nil;
-    if (!lib) lib=pipeline_library_source(hdrclip_shader(x_view_source([NSString stringWithUTF8String:x360_src])),__func__,NULL);
+    if (!lib) lib=pipeline_library_source(hdrclip_shader(x_view_source(x_cuts_source([NSString stringWithUTF8String:x360_src]))),__func__,NULL);
     if (!pipelines[samples]) {
         MTLRenderPipelineDescriptor *d=[MTLRenderPipelineDescriptor new];
         d.vertexFunction=[lib newFunctionWithName:@"vs_full"];d.fragmentFunction=[lib newFunctionWithName:@"fs_vt"];
@@ -590,7 +619,7 @@ static id<MTLLibrary> x_post_library(unsigned slot) {
     static dispatch_once_t once[5];
     if (slot>=5) return nil;
     dispatch_once(&once[slot], ^{
-        NSString *src=[NSString stringWithUTF8String:x360_src];
+        NSString *src=x_cuts_source([NSString stringWithUTF8String:x360_src]);
         if (slot==2) {
             src=[src stringByReplacingOccurrencesOfString:@"texture2d<float> bself [[texture(6)]]" withString:@"texture2d<float> bself [[texture(6)]], texture2d<float> lamp [[texture(7)]]"];
             src=[src stringByReplacingOccurrencesOfString:@"    if (patch) bl = 0;" withString:@"    bl += lamp.sample(lin,uv).rgb;\n    if (patch) bl = 0;"];
@@ -650,6 +679,7 @@ static void x_gauss5(uint32_t w, uint32_t h, XK *k) {
             k->wgt[n][0] = g; total += g; ++n;
         }
     for (int i = 0; i < n; ++i) { float g = k->wgt[i][0] / total; for (int c = 0; c < 4; ++c) k->wgt[i][c] = g; }
+    if (post_cuts_enabled()) k->p0[3] = (float)n;
 }
 static void x_bloomk(uint32_t size, int horizontal, XK *k, int normalise) {
     memset(k, 0, sizeof *k);
@@ -666,6 +696,7 @@ static void x_bloomk(uint32_t size, int horizontal, XK *k, int normalise) {
         float sum = 0; for (int i = 0; i < 15; ++i) sum += k->wgt[i][0];
         for (int i = 0; i < 15; ++i) for (int c = 0; c < 4; ++c) k->wgt[i][c] /= sum;
     }
+    if (post_cuts_enabled()) k->p0[3] = 15;
 }
 // what the bloom chain makes of a uniform field of 1 in the bright pass: the 5x5 gauss and the downsample sum to 1,
 // the Bloom kernels H and V to ~1.96 each (2 x a 15-tap gaussian, dev 3): ~3.85 (NFS_BLOOM_SURFACES=halo subtracts it)
@@ -766,6 +797,7 @@ static dispatch_queue_t x_contact_io(void) {
 }
 // Held depth sidecar avoids HUD/rain refraction contaminating edge measurement.
 // AOZ2: width, height, near, far, inverse projection x/y (28 bytes), float32 depth.
+#if NFS_GAME == NFS_GAME_MW
 static void x_contact_depth(id<MTLTexture> depth,const X360PostParams *p,const X360PostView *view) {
     if (!diag_on||(!x_contact_pair()&&p->debug!=5)||!depth) return;
     uint32_t w=view?view->depth[2]:(uint32_t)depth.width,h=view?view->depth[3]:(uint32_t)depth.height;
@@ -791,6 +823,9 @@ static void x_contact_depth(id<MTLTexture> depth,const X360PostParams *p,const X
         }});
     }];
 }
+#else
+static void x_contact_depth(id<MTLTexture> depth,const X360PostParams *p,const X360PostView *view) { }
+#endif
 static void x_contact_shot(id<MTLTexture> texture,const char *variant,const char *suffix) {
     int floating=texture.pixelFormat==MTLPixelFormatRGBA16Float;
     NSUInteger w=texture.width,h=texture.height,pitch=((w*(floating?8:4)+255)/256)*256;
@@ -884,9 +919,12 @@ static id<MTLTexture> x_contact_scene(id<MTLTexture> scene,id<MTLTexture> depth,
     return result;
 }
 static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> depth,
+#if NFS_GAME == NFS_GAME_MW
                                     const X360PostParams *p, const X360PostView *view) {
     xr->ao_ready=0;
     if (!x360_post_ssao_enabled() || !depth) return scene;
+    const SharedDepthSet *geometry=shared_depth_get(view?(view->source_view==0x009196C0u?2:1):0,frame_serial);
+    if (!geometry) return scene;
     id<MTLTexture> mask=render_ssao_coverage(depth,!view && scene.width==depth.width && scene.height==depth.height);
     if (!mask) {
         static int warned;
@@ -981,6 +1019,7 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
             if(smoke_pso){[e setFragmentTexture:smoke atIndex:4];if(smoke_hz)[e setFragmentTexture:smoke_hz atIndex:5];render_soft_smoke_layer_applied();}
             if(pass!=3||!multiplied)[e setFragmentTexture:input atIndex:0];[e setFragmentTexture:depth atIndex:1];
             if (pass==0||pass==3) [e setFragmentTexture:variant==4?uncovered:variant==3?cpu_mask:variant==2?reference_mask:mask atIndex:3];
+            if (pass==0 && variant!=2) [e setFragmentTexture:geometry->depth_normal atIndex:4];
             if (pass==3) [e setFragmentTexture:chain[0] atIndex:2];
             [e setFragmentBytes:&k length:sizeof k atIndex:0];
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
@@ -990,8 +1029,48 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
     xr->ao_ready=1;
     return applied;
 }
+#else
+                                    const X360PostParams *p, const X360PostView *view) { return (id<MTLTexture>){0}; }
+#endif
 
 
+
+extern void render_soft_smoke_late_finish(id<MTLTexture> scene);
+static id<MTLTexture> x_ao_smoke_node(id<MTLTexture> scene,const PreTreatmentFrame *frame) {
+    scene=x_contact_scene(scene,frame->depth,frame->params,frame->view);
+    if (!frame->view) render_soft_smoke_late_finish(scene);
+    return scene;
+}
+// The existing AO/smoke composite is the only registered node. It loads/blends
+// the scene attachment; its two AO targets and optional smoke layer stay owned
+// by the existing encoders. No added scene copy, binding, target or Metal pass.
+static PreTreatmentGraph x_pre_treatment={.count=1,.external_inputs=POST_SPATIAL_INPUTS,.nodes={{
+    // AO's optional geometry is requested by its enabled setting below. With
+    // AO Off this node only finishes smoke and requires no normal pyramid.
+    .name="ao/smoke composite",.id=0,.inputs=POST_BIT(POST_SCENE)|POST_BIT(POST_DEPTH),
+    .outputs=POST_BIT(POST_SCENE),
+    .intermediates=POST_BIT(POST_AO_MASK)|POST_BIT(POST_AO_PING)|POST_BIT(POST_AO_PONG)|POST_BIT(POST_SMOKE)|POST_BIT(POST_SMOKE_DEPTH),
+    .colour_in=POST_SCENE,.colour_out=POST_SCENE,.in_place=1,.encode=x_ao_smoke_node}}};
+int render_pre_treatment_register(const PreTreatmentNode *node) {
+    return pre_treatment_register(&x_pre_treatment,node);
+}
+static id<MTLTexture> x_pre_treatment_dispatch(id<MTLTexture> scene,id<MTLTexture> depth,
+#if NFS_GAME == NFS_GAME_MW
+    unsigned samples,unsigned hdr,const X360PostParams *p,const X360PostView *view,unsigned mode) {
+    if (!x_pre_treatment.count) return scene;
+    if (view && view->source_view!=0x00919650u && view->source_view!=0x009196C0u) return scene;
+    unsigned slot=view?(view->source_view==0x009196C0u?2:1):0;
+    unsigned inputs=0;
+    for (int i=0;i<x_pre_treatment.count;++i) inputs|=x_pre_treatment.nodes[i].inputs;
+    if (inputs&(POST_BIT(POST_NORMALS)|POST_BIT(POST_MINMAX))) shared_depth_request(slot,frame_serial);
+    render_shared_depth_pre_treatment(scene,depth,samples,hdr,p,view,mode);
+    PreTreatmentFrame pre={.depth=depth,.params=p,.view=view,
+        .geometry=shared_depth_get(slot,frame_serial)};
+    return pre_treatment_run(&x_pre_treatment,scene,&pre);
+}
+#else
+    unsigned samples,unsigned hdr,const X360PostParams *p,const X360PostView *view,unsigned mode) { return (id<MTLTexture>){0}; }
+#endif
 
 float render_x360_post(uint32_t src, uint32_t dst, uint32_t vignette, const X360PostParams *p) {
     return render_x360_post_view(src,dst,vignette,p,NULL);
@@ -1134,8 +1213,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
     if (diag_on && sign_diag_on && !view) sign_diag_scene(cmd, scene);
     id<MTLTexture> original_scene=scene;
     x_contact_depth(depth_tex,p,view);
-    scene=x_contact_scene(scene,depth_tex,p,view);
-    if(!view)render_soft_smoke_late_finish(scene);
+    scene=x_pre_treatment_dispatch(scene,depth_tex,depth_rt&&depth_rt->ms?(unsigned)depth_rt->ms.sampleCount:1,x_edr_processing,p,view,x_mode_generation);
     if(x_contact_pair()&&xr->ao_ready)original_scene=xr->ao_original;
     // Each proof renders the complete chain on the same held input. The final
     // iteration restores ordinary On output; diagnostic work cannot set the look.
@@ -1349,6 +1427,91 @@ static const char *drops_src =
 static id<MTLRenderPipelineState> drops_pso;
 static id<MTLSamplerState> s_wrap, s_clamp;
 static id<MTLLibrary> drops_lib;
+// Separate entry point: preserve the console shader verbatim. The footprint edge
+// is a signed distance drawn 1.5 pixels wide, with the outer two texels shaded
+// as glass lit from the top left (brighter there, darker bottom right, no net
+// change), as the console drop's rim shading reads. Thin-lens defocus:
+// each pupil ray crosses the wet surface at its own point (i.ba.w: pupil radius
+// in quad units) and refracts through the sharp cap there; radiance, not the
+// ray field, is averaged over 29 rays. Each ray reads the frame's mip level that
+// covers the gap to its neighbour ray (finite difference of the field over one
+// ray step), so the rays' images overlap instead of printing the 7x7 pattern as
+// dots. Rays missing the drop see the frame (blend); rays leaving the frame see
+// the frame behind the drop (the world off screen is unknown; clamping would
+// read the vignetted border).
+static const char *lens_fragment =
+"fragment float4 fs_lens_drop(DV i [[stage_in]], texture2d<float> disp [[texture(0)]], texture2d<float> scene [[texture(1)]],\n"
+" texture2d<float> opac [[texture(2)]], sampler wrap [[sampler(0)]], sampler clamp [[sampler(1)]], sampler mip [[sampler(2)]]) {\n"
+" float2 a = opac.sample(clamp, float2(i.uv.x*.25+i.ba.y,i.uv.y)).yx;\n"
+" float edge = (a.y-.5)*16, texel = 32*fwidth(i.uv.x);   // texels inside the edge; texels per pixel\n"
+" a.y = saturate(.5+edge/(1.5*texel));                   // a 1.5 pixel rim at any drop size\n"
+" if (i.ba.z>.5) return float4(1,0,1,a.y>.01 ? 1.0:0.0);\n"
+" float2 c = i.uv-.5; float rim = 1-saturate(edge*.5);   // lit glass: the outer 2 texels catch light from the top left\n"
+" a.x *= 1+.35*rim*dot(normalize(c+1e-5),float2(-.7071,-.7071));\n"
+" float2 px = float2(scene.get_width(),scene.get_height())*abs(i.lc.zw), dry = float2(i.uv.x,1-i.uv.y)*i.lc.zw+i.lc.xy;\n"
+" float gap = i.ba.w/3; float3 s = 0; float weight = 0;\n"
+" for (int y=0;y<7;++y) for (int x=0;x<7;++x) {\n"
+"   float2 p = float2(x-3,y-3)/3; if (dot(p,p)>1) continue;\n"
+"   float2 q = metal::clamp(i.uv+p*i.ba.w, 1.0/64, 63.0/64), t = float2(q.x*.25+i.ba.y,q.y);\n"
+"   float w = opac.sample(clamp,t).z;\n"
+"   float2 d = disp.sample(clamp,t).yz, e = disp.sample(clamp,t+float2(gap*.25,gap)).yz;\n"
+"   float2 uv = d*i.lc.zw+i.lc.xy; if (any(uv<0) || any(uv>1)) uv = dry;\n"
+"   float lod = log2(max(length((e-d)*px)*.7071,1.0));\n"
+"   s += w*scene.sample(mip,uv,level(lod)).rgb; weight += w;\n"
+" }\n"
+" return float4((weight>0 ? s/weight : scene.sample(clamp,dry).rgb)*a.x,saturate(i.ba.x)*a.y);\n"
+"}\n";
+// The frame with mips for the authored pass (one per post view), and its trilinear sampler.
+static id<MTLTexture> lens_mips[3];
+static id<MTLSamplerState> s_mip;
+static id<MTLTexture> lens_scene(id<MTLTexture> src, int slot) {
+    id<MTLTexture> m = lens_mips[slot];
+    if (!m || m.width != src.width || m.height != src.height || m.pixelFormat != src.pixelFormat) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:YES];
+        d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        m = lens_mips[slot] = [mtl newTextureWithDescriptor:d];
+        if (!m) return nil;
+    }
+    if (!s_mip) {
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.mipFilter = MTLSamplerMipFilterLinear;
+        sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        s_mip = [mtl newSamplerStateWithDescriptor:sd];
+    }
+    id<MTLBlitCommandEncoder> b = [cmd blitCommandEncoder];
+    [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(src.width,src.height,1)
+             toTexture:m destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+    [b generateMipmapsForTexture:m];
+    [b endEncoding];
+    return m;
+}
+static id<MTLRenderPipelineState> lens_pipeline(NSUInteger samples, MTLPixelFormat format) {
+    static id<MTLLibrary> lib;
+    static id<MTLRenderPipelineState> pso;
+    static NSUInteger old_samples;
+    static MTLPixelFormat old_format;
+    NSError *err = nil;
+    if (!lib) {
+        NSString *source = [[NSString stringWithUTF8String:drops_src] stringByAppendingString:[NSString stringWithUTF8String:lens_fragment]];
+        lib = pipeline_library_source(source, "lensdrops", &err);
+        if (!lib) { fprintf(stderr,"boot: lens drops: %s\n",err.localizedDescription.UTF8String); return nil; }
+    }
+    if (!pso || old_samples != samples || old_format != format) {
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs_drop"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"fs_lens_drop"];
+        MTLRenderPipelineColorAttachmentDescriptor *ca = pd.colorAttachments[0];
+        ca.pixelFormat = format; ca.blendingEnabled = YES;
+        ca.sourceRGBBlendFactor = ca.sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+        ca.destinationRGBBlendFactor = ca.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        ca.writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+        pd.rasterSampleCount = samples;
+        pso = pipeline_build(pd, "lensdrops", &err);
+        old_samples = samples; old_format = format;
+        if (!pso) fprintf(stderr,"boot: lens drops: %s\n",err.localizedDescription.UTF8String);
+    }
+    return pso;
+}
 // The library and samplers: compiled at load (render_post_lazy_warm); the pipeline follows the target.
 static int raindrops_library(void) {
     id<MTLLibrary> lib = drops_lib;
@@ -1415,6 +1578,9 @@ int render_x360_raindrops(uint32_t dst, const RainDrop *d, int n, uint32_t disp_
     return render_x360_raindrops_view(dst,d,n,disp_tex,alpha_tex,signature,NULL);
 }
 int render_x360_raindrops_view(uint32_t dst, const RainDrop *d, int n, uint32_t disp_tex, uint32_t alpha_tex, int signature, const X360PostView *view) {
+    return render_lens_drops_view(dst,d,n,disp_tex,alpha_tex,signature,0,view);
+}
+int render_lens_drops_view(uint32_t dst, const RainDrop *d, int n, uint32_t disp_tex, uint32_t alpha_tex, int signature, int authored, const X360PostView *view) {
     if (!mtl || n <= 0) return 0;
     Obj *o0 = obj(disp_tex), *o1 = obj(alpha_tex);
     RenderTex *g0 = o0 ? gpu_tex(o0) : NULL, *g1 = o1 ? gpu_tex(o1) : NULL;
@@ -1431,7 +1597,8 @@ int render_x360_raindrops_view(uint32_t dst, const RainDrop *d, int n, uint32_t 
     if (!g0 || !g0->tex || !g1 || !g1->tex || !r || !r->tex || !out || (out.pixelFormat != MTLPixelFormatBGRA8Unorm && out.pixelFormat != MTLPixelFormatRGBA16Float)) return 0;
     xr=&x_resources[view ? (view->source_view==0x009196C0u ? 2:1):0];
     if (!raindrops_prepare(out.sampleCount,out.pixelFormat)) return 0;
-    id<MTLRenderPipelineState> pso = drops_pso;
+    id<MTLRenderPipelineState> pso = authored ? lens_pipeline(out.sampleCount,out.pixelFormat) : drops_pso;
+    if (!pso) return 0;
     // the source: the composited frame (resolved when multisampled; else a copy, since the pass draws into it)
     id<MTLTexture> src = r->tex;
     if (r->ms) msaa_resolve(r);
@@ -1442,14 +1609,20 @@ int render_x360_raindrops_view(uint32_t dst, const RainDrop *d, int n, uint32_t 
         src=x_crop(src,view ? view->destination:full,&xr->drop);
         if (!src) return 0;
     }
+    if (authored && !(src=lens_scene(src,(int)(xr-x_resources)))) return 0;
     struct { float rect[4], lc[4], ba[4]; } q[64];
     if (n > 64) n = 64;
     float aspect = view ? (float)view->destination[2]/view->destination[3] : (float)out.width/(float)out.height;
     for (int i = 0; i < n; ++i) {
-        float rr = X360E_DROP_RADIUS * d[i].size, x0 = d[i].x * 2.0f - 1.0f, y0 = 1.0f - d[i].y * 2.0f;
+        float rr = (authored ? LENS_DROP_RADIUS : X360E_DROP_RADIUS) * d[i].size, x0 = d[i].x * 2.0f - 1.0f, y0 = 1.0f - d[i].y * 2.0f;
+        if (authored && LENS_DEFOCUS) rr *= LENS_DEFOCUS_EXPAND;
         q[i].rect[0] = x0; q[i].rect[1] = y0; q[i].rect[2] = x0 + rr / aspect * 2.0f; q[i].rect[3] = y0 + rr * 2.0f;
         q[i].lc[0] = d[i].x - rr; q[i].lc[1] = d[i].y + rr; q[i].lc[2] = rr; q[i].lc[3] = -rr;
-        q[i].ba[0] = d[i].life * X360E_DROP_LIFE; q[i].ba[1] = (float)(d[i].variant & 3) * 0.25f; q[i].ba[2] = signature ? 1.0f : 0.0f; q[i].ba[3] = 0;
+        if (authored) {
+            q[i].lc[0] = d[i].x; q[i].lc[1] = d[i].y; q[i].lc[2] = rr / aspect;
+        }
+        q[i].ba[0] = d[i].life * (authored ? LENS_DROP_LIFE : X360E_DROP_LIFE); q[i].ba[1] = (float)(d[i].variant & 3) * 0.25f; q[i].ba[2] = signature ? 1.0f : 0.0f; q[i].ba[3] = 0;
+        if (authored && LENS_DEFOCUS) q[i].ba[3] = LENS_PUPIL_QUAD / LENS_DEFOCUS_EXPAND;
     }
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = out; rp.colorAttachments[0].level = dl; rp.colorAttachments[0].slice = dsl;
@@ -1465,6 +1638,7 @@ int render_x360_raindrops_view(uint32_t dst, const RainDrop *d, int n, uint32_t 
     [e setFragmentTexture:g1->tex atIndex:2];
     [e setFragmentSamplerState:s_wrap atIndex:0];
     [e setFragmentSamplerState:s_clamp atIndex:1];
+    if (authored) [e setFragmentSamplerState:s_mip atIndex:2];
     [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:(NSUInteger)n];
     [e endEncoding];
     if (r->ms) r->stale = 1;

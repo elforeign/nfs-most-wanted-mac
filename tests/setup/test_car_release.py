@@ -22,12 +22,32 @@ admits 9; altered X360 source input and converter output files each fail their
 pin before publication (2/2 refused: changed source input / changed converter
 output). An altered installed X360 output admits zero cars (exit 1). PC 10/10
 identities and their original ordered approval variants remain unchanged.
-Packaged selection metadata: 19/19 reviewed rows (PC 10, X360 9); edited
+Additional measured contracts: PC 6/6, X360 5/6; all 343 changed input
+pins and 88 changed output pins reject (including one deliberately broken
+pin per edition/car). Original 19 selections and ordered approval variants
+remain byte-identical to their GRIP.BIN refresh. In an exported source tree,
+reproduce the rows with --review-additions PC_ROOT X360_ISO MW_ROOT WORK
+(measured with GRIP.BIN, 8 outputs each); trust artifacts use --generate
+and --generate-selections as before. No converter check is relaxed.
+X360 MUSTANGSHLBYN refuses source parity: KIT00_REAR_WINDOW_T0_A UV error
+0.876464844 exceeds the unchanged 0.0015 threshold; PC remains approved.
+Packaged selection metadata: 30/30 reviewed rows (PC 16, X360 14); edited
 display/source/slot/parts/output and omitted/extra rows: 7 FAIL refusals,
 original canonical metadata: PASS. Generator reproduces identical bytes.
 Exported metadata edit: --verify-policy FAIL exit 1; original PASS exit 0.
+Current converter inventories: original rows match 0/19 measured inventories
+(FAIL: 19 missing GRIP.BIN); regenerated rows match and approve 19/19 (PASS).
+Actual measured contracts: original approvals accept 0/19; regenerated 19/19.
+Exported converter pins (published HUFF, Setup's locked Python/NumPy): rows
+pinned from the private interpreter and HUFF: 30/30 mismatched, 0/30 approved
+(FAIL); re-pinned in the exported tree: 0/30 mismatched, 30/30 approved, the
+same with the shipped interpreter itself. --refresh-converter-pins and
+--review-additions refuse any other interpreter or an unexported tree.
+SHA-checked PC/X360 conversion receipts independently pin the output inventory.
+Generator preserves reviewed inputs, identities, compatibility and variant order.
 """
 import copy
+from contextlib import closing
 import hashlib
 import importlib.util
 import json
@@ -35,6 +55,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -49,7 +70,12 @@ from setup_kit import car_catalog as cc
 POLICY = 'tools/setup_kit/car_approvals.json'
 HEADER = (Path('runtime') / 'car_approvals_public.h').as_posix()
 SELECTIONS = 'tools/setup_kit/car_selections.json'
-PIN = re.compile(r'^PACKAGED_POLICY_SHA256 = .*$', re.M)
+LOCK = 'tools/installer/deps.lock.json'
+SETUP_PYTHON = 'build/installer/dmg/NFS Most Wanted Native Setup.app/Contents/Resources/python/bin/python3'
+PIN =re.compile(r'^PACKAGED_POLICY_SHA256 = .*$', re.M)
+# Generated from actual PC/X360 conversions by --refresh-converter-pins.
+MEASURED_OUTPUTS = '{"pc":{"converter":{"policy":"e76dbb8d2696c012b8d1f08b7adb612045dff215f20a4d5aa566675a89fac46a","revision":2},"outputs":{"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"411f270fa259bf25ae5e462a2581e57d769a3ae8a51ceab7e0dd77c6968522c2","size":31794516},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"130f958a3932f42c42a5dd13b8c8f961b503b8b22a29890ece199b9e0b56b36e","size":894620},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0},"x360":{"converter":{"policy":"dcf0d651d26021d5833f1a480e524d15d5d0ff6e5264461947b7b90c33f457c2","revision":2},"outputs":{"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"19e5f1960dd8463ef5e99d84e245d03d348edcc5509612bfbdc02a46eebffd97","size":24023885},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"2bd3ebccf9d75de9e773b140297ca7283fe1f1a1345ae08ed308ddda659f0e39","size":931484},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0}}\n'
+MEASURED_OUTPUTS_SHA256 = '52e56dea01d46b8ed211658737de9f87411c6b00b1e93104c275e368656448a0'
 FORBIDDEN = (
     'tools_snapshot/carbon_car.py', 'tools_snapshot/carbon_batch.py',
     'tools_snapshot/private_cars.py', 'tools_snapshot/carbon_namespace.py',
@@ -60,6 +86,147 @@ FORBIDDEN = (
 )
 FORBIDDEN_PREFIXES = ('tools/publish/', 'tools_snapshot/private_cars_fixtures/',
                       'runtime/private_cars_fixtures/', 'run_shots/')
+
+# Permanent slots and donor choices; source bindings and part keys are decoded
+# from the local inputs by derive_addition_specs, never copied from game data.
+ADDITIONS = (
+    (0, '240SX', 'RX7', 'NISSAN'),
+    (3, '997TT', '911TURBO', 'PORSCHE'),
+    (5, 'CAMARON', 'MUSTANGGT', 'CHEVROLET'),
+    (17, 'G35', 'IS300', 'INFINITI'),
+    (20, 'MAZDASPEED3', 'GTI', 'MAZDA'),
+    (23, 'MUSTANGSHLBYN', 'MUSTANGGT', 'SHELBY'),
+)
+
+
+def derive_addition_specs(pc, mw):
+    """Reproduce review metadata from source RefSpecs and native donor parts."""
+    from collections import OrderedDict
+    from setup_kit import car_convert as cv
+    from setup_kit.car_grip import raw_field
+    attributes = cv.FitAttributes((pc / 'GLOBAL/attributes.bin').read_bytes())
+    frontend = cv.FitAttributes((pc / 'GLOBAL/FE_ATTRIB.bin').read_bytes())
+    attributes.collections.update(frontend.collections)
+    attributes.defs.update(frontend.defs)
+    names = {}
+    for path in (pc / 'GLOBAL/attributes.bin', pc / 'GLOBAL/FE_ATTRIB.bin'):
+        for _, binary, _ in cv.read_vpak(path.read_bytes()):
+            for word in re.findall(rb'[A-Za-z0-9_]{1,60}', binary):
+                name = word.decode('ascii')
+                names[cv.hash32(name)] = name
+    data = cv.unpack_file((mw / 'GLOBAL/GLOBALB.LZC').read_bytes())
+    root, size = cv.find(data, 0x80034602)
+    chunks = {key: data[offset+8:offset+8+length]
+              for key, offset, length in cv.children(data, root+8, root+8+size)}
+    parts, count = chunks[0x34604], cv.u32(data, root+0x48)
+    assert count * 14 <= len(parts) < count * 14 + 4
+    types = [x[0] for x in struct.iter_unpack('<I', chunks[0x3460b])]
+    assert len(types) == cv.u32(data, root+0x38)
+    offset, size = cv.find(data, 0x34607)
+    slots = data[offset+8:offset+8+size]
+    assert len(slots) >= 0x458 and (len(slots)-0x458) % 16 == 0
+    defaults = list(struct.iter_unpack('<II', slots[:0x458]))
+    overrides = list(struct.iter_unpack('<4I', slots[0x458:]))
+    result = []
+    for slot, folder, donor, maker in ADDITIONS:
+        key = cv.hash32(folder.lower())
+        assert (cv.hash32('ecar'), key) in attributes.collections
+        cls, front, _ = struct.unpack('<III', raw_field(attributes, 'pvehicle', key, 'frontend'))
+        assert cls == cv.hash32('frontend') and (cls, front) in attributes.collections
+        front_name = names[front]
+        assert cv.hash32(front_name) == front
+        donor_hash = cv.name_hash(donor)
+        allowed = {donor_hash if v == 0xffffffff else v for row in defaults for v in row}
+        allowed.update(v for owner, _, *values in overrides if owner == donor_hash for v in values)
+        allowed.discard(0)
+        keys = OrderedDict()
+        for index in range(count):
+            row = parts[index*14:(index+1)*14]
+            kind, type_index = row[4], row[7]
+            assert type_index < len(types)
+            part_type = types[type_index]
+            if part_type in allowed:
+                assert kind < 255
+                semantic = f'P_{cv.u32(row):08X}_{part_type:08X}_{index:05d}'
+                keys.setdefault(kind, []).append(semantic)
+        assert keys
+        result.append(dict(slot=slot, folder=folder, display=dict(name=folder, manufacturer=maker),
+            bindings=dict(folder=folder, pvehicle=folder, frontend=front_name.upper(), ecar=folder),
+            donors=dict(model=donor, price=donor),
+            parts=[dict(type=kind, keys=values) for kind, values in keys.items()]))
+    return result
+
+
+def locked_runtime(root):
+    """Python and NumPy versions Setup ships, from its dependency lock."""
+    lock = json.loads((root / LOCK).read_bytes())
+    python = [int(v) for v in lock['python']['version'].split('+')[0].split('.')]
+    return python, next(w['version'] for w in lock['wheels'] if w['name'] == 'numpy')
+
+
+def require_shipped_runtime():
+    """Contracts pin the interpreter and HUFF bytes Setup runs: exported tree, shipped Python only."""
+    from setup_kit import car_convert
+    python, numpy = locked_runtime(ROOT)
+    if (list(sys.version_info[:3]) != python or car_convert.np.__version__ != numpy or
+            (ROOT / 'tools/publish/import.py').exists()):
+        raise SystemExit('measure contracts in the exported payload with Setup\'s Python ' +
+                         '.'.join(map(str, python)) + ' and NumPy ' + numpy + ' (tools/publish/README.md)')
+
+
+def converter_pin_report(emulate):
+    """Compare every packaged row with the converter inputs Setup measures here."""
+    import types
+    from setup_kit import car_import, car_selection
+    if emulate:
+        # _code reads only these interpreter facts; every code pin comes from this tree's bytes.
+        python, numpy = locked_runtime(ROOT)
+        car_import.sys = types.SimpleNamespace(version_info=tuple(python), implementation=sys.implementation)
+        car_import.converter.np = types.SimpleNamespace(__version__=numpy)
+    else:
+        require_shipped_runtime()
+    rows = car_selection.load()
+    measured = refreshed_converter_rows(rows)
+    mismatched = [r['origin']['platform'] + ' ' + r['origin']['folder'] for r, m in zip(rows, measured) if r != m]
+    accepted = 0
+    for row in measured:
+        reservations = cc.reservations()
+        reservations[row['slot']] = row
+        try:
+            cc.make_catalog(reservations, cc.packaged_policy())
+            accepted += 1
+        except cc.CatalogError as exc:
+            if 'conversion contract is not approved' not in str(exc):
+                raise
+    return dict(rows=len(rows), mismatched=len(mismatched), first=mismatched[:3], accepted=accepted)
+
+
+def review_additions(pc, x360, mw, work):
+    """Measure each edition independently; retain exact fail-closed refusals."""
+    require_shipped_runtime()
+    from setup_kit.car_import import CarImporter
+    from test_car_x360_assets import compare_car
+    from setup_kit import car_sources
+    from setup_kit.x360 import Source
+    work.mkdir(parents=True, exist_ok=True)
+    specs = derive_addition_specs(pc, mw)
+    contracts, refusals = [], []
+    for platform, source in (('pc', pc), ('x360', x360)):
+        for spec in specs:
+            importer = CarImporter(work / ('catalog-' + platform),
+                work / ('work-' + platform + '-' + spec['folder']))
+            try:
+                if platform == 'x360':
+                    with closing(Source(source)) as reader:
+                        logical = car_sources._logical(reader, car_sources._physical(reader))
+                        compare_car(spec['folder'], pc / 'CARS', reader, logical)
+                plan = importer.plan(source, mw_pc=mw, cars=[spec], measure=True)
+                contracts.append(plan['cars'][0]['contract'])
+            except (ValueError, OSError, AssertionError) as exc:
+                refusals.append(dict(platform=platform, folder=spec['folder'], reason=str(exc)))
+            (work / 'contracts.json').write_bytes(cc.encoded(contracts))
+            (work / 'refusals.json').write_bytes(cc.encoded(refusals))
+    print(json.dumps(dict(contracts=len(contracts), refusals=refusals), sort_keys=True))
 
 
 def trust_outputs(root, data):
@@ -140,6 +307,80 @@ def generate_selections(contracts):
     path.write_text(text)
 
 
+def refreshed_converter_rows(rows):
+    """Check executable dependencies separately from measured output inventories."""
+    from setup_kit import car_import
+    refreshed = copy.deepcopy(rows)
+    for row in refreshed:
+        mw_names = list(car_import.MW_SHARED) + [
+            f'CARS/{row["donors"]["model"]}/{name}' for name in ('GEOMETRY.BIN', 'TEXTURES.BIN')]
+        available = row['inputs']['dependencies'].keys() | row['inputs']['donor'].keys()
+        code, policy, _ = car_import._code(row['origin']['platform'], sorted(set(mw_names) - available))
+        row['inputs']['converter'] = code.pins
+        row['converter']['policy'] = policy['sha256']
+    return refreshed
+
+
+def measured_converter_rows(rows, pc, x360, mw):
+    """Run the importer writer; never infer outputs from an obsolete inventory."""
+    from setup_kit import car_import, car_selection
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td).resolve()
+        engine = car_import.CarImporter(work / 'catalog', work / 'work')
+        measured = []
+        for before in rows:
+            source = pc if before['origin']['platform'] == 'pc' else x360
+            result = engine.plan(source, mw_pc=mw, cars=[car_selection.spec(before)], measure=True)
+            after = result['cars'][0]['contract']
+            # Approval refresh must not silently bless changed source assets or
+            # selection semantics. Only executable policy and outputs may move.
+            expected = refreshed_converter_rows([before])[0]
+            expected['outputs'] = after['outputs']
+            if after != expected:
+                raise ValueError('measured inputs/metadata changed: ' + before['origin']['folder'])
+            measured.append(after)
+            print('measured ' + before['origin']['platform'] + ' ' + before['origin']['folder'] +
+                  ': ' + str(len(after['outputs'])) + ' outputs', flush=True)
+        return measured
+
+
+def generate_output_fixture(rows):
+    """Keep one complete writer receipt per platform as an independent baseline."""
+    samples = {}
+    for row in rows:
+        samples.setdefault(row['origin']['platform'],
+                           dict(slot=row['slot'], outputs=row['outputs'], converter=row['converter']))
+    data = cc.encoded(samples)
+    path = Path(__file__)
+    text = path.read_text()
+    for name, value in (('MEASURED_OUTPUTS', data.decode('ascii')),
+                        ('MEASURED_OUTPUTS_SHA256', hashlib.sha256(data).hexdigest())):
+        text, count = re.subn('^' + name + r' = .*$', lambda _: name + ' = ' + repr(value), text, flags=re.M)
+        if count != 1:
+            raise ValueError('measured output fixture pin must occur exactly once')
+    path.write_text(text)
+
+
+def refresh_converter_pins(pc, x360, mw):
+    """Regenerate existing variants from real writes, preserving variant ordering."""
+    require_shipped_runtime()
+    from setup_kit import car_selection
+    rows = car_selection.load()
+    refreshed = measured_converter_rows(rows, pc, x360, mw)
+    policy = verify_policy(ROOT)
+    for before, after in zip(rows, refreshed):
+        variants = policy['slots'][before['slot']]['variants']
+        variant = dict(contract=cc.contract_hash(before), compatibility=cc.slot_compatibility(before))
+        index = variants.index(variant)
+        assert cc.slot_compatibility(before) == cc.slot_compatibility(after)
+        variants[index] = dict(contract=cc.contract_hash(after), compatibility=cc.slot_compatibility(after))
+    (ROOT / POLICY).write_bytes(cc.encoded(policy))
+    generate(ROOT)
+    cc.PACKAGED_POLICY_SHA256 = cc.digest(policy)
+    generate_selections(refreshed)
+    generate_output_fixture(refreshed)
+
+
 def verify_selections(root):
     from setup_kit import car_selection
     rows = car_selection.load(root / SELECTIONS)
@@ -160,7 +401,7 @@ def native_reader(root, work):
     source.write_text('#include <stdlib.h>\n' + source.read_text())
     binary = work / 'reader'
     command(['clang', '-std=c11', '-Werror', '-DNFS_PUBLIC=1', '-I', str(root / 'runtime'),
-             str(source), str(root / 'runtime/car_catalog.c'), '-o', str(binary)])
+             str(source), str(root / 'runtime/car_grip.c'), str(root / 'runtime/car_catalog.c'), '-o', str(binary)])
     return binary
 
 
@@ -180,10 +421,10 @@ def export_payload(base, fault=None):
     repo, public = base / 'indexed', base / 'public'
     repo.mkdir()
     names = command(['git', '-C', str(ROOT), 'ls-files', '-z']).stdout.split('\0')
-    names += [POLICY, HEADER, SELECTIONS, 'tools/setup_kit/car_selection.py',
+    names += ['tools/publish/denylist_carbon.txt', POLICY, HEADER, SELECTIONS, 'tools/setup_kit/car_selection.py',
               'tests/setup/test_car_release.py', 'runtime/save_file_fixture.py']
     allowed = publish.patterns(ROOT / 'tools/publish/allowlist.txt')
-    denied = publish.patterns(ROOT / 'tools/publish/denylist.txt')
+    denied = publish.deny_patterns(ROOT / 'tools/publish')
     for name in sorted(set(names) - {''}):
         src = ROOT / name
         if not src.is_file() or (not name.startswith('tools/publish/') and
@@ -385,11 +626,37 @@ def synthetic(root, install=True):
 
 
 class CarRelease(unittest.TestCase):
+    def test_existing_entries_are_byte_identical(self):
+        from setup_kit import car_selection
+        new_slots = {r[0] for r in ADDITIONS}
+        original = [r for r in car_selection.load() if r['slot'] not in new_slots]
+        self.assertEqual(len(original), 19)
+        self.assertEqual(hashlib.sha256(cc.encoded(original)).hexdigest(),
+                         'd9966bce9d10352692e7946a2611163a26af1716a4f4eb36e2a049bc66afa7e0')
+        policy = verify_policy(ROOT)
+        previous = [r for r in policy['slots'] if r['variants'] and r['slot'] not in new_slots]
+        self.assertEqual(hashlib.sha256(cc.encoded(previous)).hexdigest(),
+                         '56ec8a89376d40efd4bb72362354ddddc08502839f9311a491a9c2fc2660eb12')
+
+    def test_additional_contracts_and_broken_pins(self):
+        from setup_kit import car_selection
+        folders = {r[1] for r in ADDITIONS}
+        rows = [r for r in car_selection.load() if r['origin']['folder'] in folders]
+        expected = {(p, f) for p in ('pc', 'x360') for f in folders}
+        expected.remove(('x360', 'MUSTANGSHLBYN'))
+        self.assertEqual({(r['origin']['platform'], r['origin']['folder']) for r in rows}, expected)
+        proof = verify_contracts(ROOT, rows)
+        self.assertEqual(proof['platforms'], dict(pc=6, x360=5))
+        self.assertEqual(proof['contracts'], 11)
+        self.assertEqual(proof['rejected']['inputs'], 343)
+        self.assertEqual(proof['rejected']['outputs'], 88)
+        print('additional contracts: ' + json.dumps(proof, sort_keys=True))
+
     def test_packaged_selections_and_tamper_controls(self):
         from setup_kit import car_selection as selection
         rows = selection.load()
         self.assertEqual({p: sum(r['origin']['platform'] == p for r in rows)
-                          for p in ('pc', 'x360')}, dict(pc=10, x360=9))
+                          for p in ('pc', 'x360')}, dict(pc=16, x360=14))
         data = (ROOT / SELECTIONS).read_bytes()
         self.assertIn('let carSelectionsSHA256 = "' + hashlib.sha256(data).hexdigest() + '"',
                       (ROOT / 'tools/installer/SetupApp.swift').read_text())
@@ -415,7 +682,41 @@ class CarRelease(unittest.TestCase):
                 with self.assertRaises(cc.CatalogError):
                     selection.load(path)
         self.assertEqual(len(faults), 7)
-        print('selection metadata: PASS 19 approved; FAIL controls 7/7 refused')
+        print('selection metadata: PASS 30 approved; FAIL controls 7/7 refused')
+
+    @unittest.skipUnless((ROOT / 'tools/publish/import.py').is_file(), 'exporter belongs to the source checkout')
+    def test_current_converter_contracts_approve(self):
+        from setup_kit import car_selection
+        rows = car_selection.load()
+        # Setup measures the exported tree (published HUFF) under its locked Python/NumPy;
+        # the private checkout's interpreter and HUFF never define a packaged pin.
+        with tempfile.TemporaryDirectory(prefix='car-pins-') as td:
+            result, public = export_payload(Path(td).resolve())
+            self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-1000:])
+            script = str(public / 'tests/setup/test_car_release.py')
+            runs = {'locked identity': [sys.executable, '-I', script, '--converter-pins', '--emulate-locked']}
+            if (ROOT / SETUP_PYTHON).is_file():
+                runs['shipped Python'] = [str(ROOT / SETUP_PYTHON), '-I', '-B', script, '--converter-pins']
+            for label, args in runs.items():
+                report = json.loads(command(args, cwd=public).stdout.splitlines()[-1])
+                print(f'exported converter pins ({label}): {report["mismatched"]}/{report["rows"]} rows '
+                      f'mismatched, {report["accepted"]}/{report["rows"]} measured contracts approved')
+                self.assertEqual(report['mismatched'], 0, report['first'])
+                self.assertEqual(report['accepted'], len(rows))
+        self.assertEqual(hashlib.sha256(MEASURED_OUTPUTS.encode('ascii')).hexdigest(),
+                         MEASURED_OUTPUTS_SHA256)
+        measured = json.loads(MEASURED_OUTPUTS)
+        self.assertEqual(set(measured), {'pc', 'x360'})
+        inventories = 0
+        for row in rows:
+            sample = measured[row['origin']['platform']]
+            with self.subTest(platform=row['origin']['platform'], slot=row['slot']):
+                self.assertEqual(row['converter'], sample['converter'], 'remeasure changed converter')
+                self.assertEqual(set(row['outputs']), set(sample['outputs']), 'measured output inventory')
+                if row['slot'] == sample['slot']:
+                    self.assertEqual(row['outputs'], sample['outputs'], 'measured output pins')
+                inventories += 1
+        print(f'current converter: {inventories}/{len(rows)} measured inventories')
 
     def test_importer_pins_native_huff_dependency(self):
         from setup_kit import car_import
@@ -470,7 +771,7 @@ class CarRelease(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td).resolve()
             (root / 'runtime').mkdir()
-            for name in ('car_catalog.c', 'car_catalog.h'):
+            for name in ('car_catalog.c', 'car_catalog.h', 'car_grip.c', 'car_grip.h'):
                 shutil.copyfile(ROOT / 'runtime' / name, root / 'runtime' / name)
             shutil.copyfile(ROOT / HEADER, root / HEADER)
             binary = native_reader(root, root)
@@ -534,7 +835,13 @@ class CarRelease(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] == ['--generate']:
+    if sys.argv[1:2] == ['--refresh-converter-pins']:
+        if len(sys.argv) != 5:
+            raise SystemExit('usage: --refresh-converter-pins CARBON_PC CARBON_X360 MW_PC')
+        refresh_converter_pins(*(Path(p).expanduser().resolve() for p in sys.argv[2:]))
+    elif len(sys.argv) == 6 and sys.argv[1] == '--review-additions':
+        review_additions(*(Path(p).resolve() for p in sys.argv[2:]))
+    elif sys.argv[1:] == ['--generate']:
         generate(ROOT)
     elif sys.argv[1:] == ['--verify-policy']:
         verify_policy(ROOT)
@@ -543,6 +850,8 @@ if __name__ == '__main__':
         print(json.dumps(verify_contracts(ROOT, json.loads(Path(sys.argv[2]).read_bytes())), sort_keys=True))
     elif sys.argv[1:2] == ['--generate-selections'] and len(sys.argv) in (2, 3):
         generate_selections(json.loads(Path(sys.argv[2] if len(sys.argv) == 3 else ROOT / SELECTIONS).read_bytes()))
+    elif sys.argv[1:] in (['--converter-pins'], ['--converter-pins', '--emulate-locked']):
+        print(json.dumps(converter_pin_report(len(sys.argv) == 3), sort_keys=True))
     elif sys.argv[1:] == ['--synthetic']:
         synthetic(ROOT)
     elif sys.argv[1:] == ['--synthetic-baseline']:

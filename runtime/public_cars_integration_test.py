@@ -43,6 +43,7 @@ NATIVE = r'''
 #include <stdio.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "car85.c"
+#include "temporal_state_fixture.h"
 #include "carsave_public.h"
 #include "settings.h"
 uint8_t *G;
@@ -431,7 +432,7 @@ def main():
                   '-Wno-deprecated-declarations', '-I', str(root), '-I', str(ROOT / 'runtime'),
                   '-I', str(ROOT / 'recomp'), '-I', str(ROOT / 'recomp/out'),
                   '-DCAR_CATALOG_APPROVAL_HEADER="' + str(root / 'approval.h') + '"']
-        inputs = [str(ROOT/'runtime/traffic_pilot.c'), str(root / 'native.c'), str(root / 'reader.c'), str(ROOT / 'runtime/private_cars_public.c'),
+        inputs = [str(ROOT/'runtime/car_grip.c'), str(ROOT/'runtime/traffic_pilot.c'), str(root / 'native.c'), str(root / 'reader.c'), str(ROOT / 'runtime/private_cars_public.c'),
                   str(root / 'carsave.c'), '-framework', 'CoreGraphics', '-framework', 'CoreText', '-framework', 'CoreFoundation']
         cases = assertions = controls = 0
 
@@ -564,7 +565,7 @@ int snapshot_handles(const char *path) {
     if (private_cars_count()) CHECK(snapshot_handles(private_cars_get(0)->geometry));''')
         (root / 'save.c').write_text(native)
         save_inputs = [str(root / 'save.c'), str(root / 'file.c'), str(ROOT / 'runtime/carsave_public.c'),
-                       str(ROOT / 'runtime/car_catalog.c'), str(ROOT / 'runtime/private_cars_public.c'), str(root / 'public.c')]
+                       str(ROOT / 'runtime/car_grip.c'), str(ROOT / 'runtime/car_catalog.c'), str(ROOT / 'runtime/private_cars_public.c'), str(root / 'public.c')]
         (root / 'public.c').write_text(public)
         build(common + save_inputs + ['-o', str(root / 'save')])
         for mode in ('seed', 'load', 'secondary', 'backup-load', 'reconcile', 'transaction'):

@@ -2,7 +2,7 @@
 import math
 import struct
 
-from .car_convert import FitAttributes, hash32, require, span, u32, words
+from .car_convert import FitAttributes, FormatError, hash32, require, span, u32, words
 
 MAGIC = 0x31505247  # GRP1
 VERSION = 1
@@ -85,7 +85,7 @@ def tyre_schema(attrib):
             'grip unsupported field shape')
 
 
-def metadata(data, car, donor, *, mode='shared', attrib=None):
+def metadata(data, car, donor, *, mode='shared', attrib=None, read_field=None):
     """Serialize every authored reference, retaining the independent counter.
 
     Donor mode intentionally never parses data. Missing schemas omit the file;
@@ -99,12 +99,15 @@ def metadata(data, car, donor, *, mode='shared', attrib=None):
     if hash32('pvehicle') not in attrib.defs or hash32('tires') not in attrib.defs:
         return None
     tyre_schema(attrib)
+    # A typed platform reader returns canonical LE values after resolving its
+    # own inheritance and array headers. Schema validation still happens here.
+    read = (lambda cls, key, field: raw_field(attrib, cls, key, field)) if read_field is None else read_field
     source, target = hash32(car.lower()), hash32(donor.lower())
     require(source and target and car and donor and len(car) < 64 and len(donor) < 64
             and car.isascii() and donor.isascii() and '\0' not in car and '\0' not in donor,
             'grip identity')
-    refs = raw_field(attrib, 'pvehicle', source, 'tires')
-    counter = raw_field(attrib, 'pvehicle', source, 'tires_upgrades')
+    refs = read('pvehicle', source, 'tires')
+    counter = read('pvehicle', source, 'tires_upgrades')
     require(len(refs) % 12 == 0 and 1 <= len(refs) // 12 <= MAX_TIERS,
             'grip reference count')
     require(len(counter) == 4 and u32(counter) <= 8, 'grip upgrade counter')
@@ -113,7 +116,7 @@ def metadata(data, car, donor, *, mode='shared', attrib=None):
         require(cls == hash32('tires') and key != 0 and flags == 0, 'grip reference identity')
         body += struct.pack('<2I', ordinal, key)
         for field, count, _, semantics in FIELDS:
-            raw = raw_field(attrib, cls, key, field)
+            raw = read(cls, key, field)
             require(len(raw) % 4 == 0, 'grip float alignment')
             n = len(raw) // 4
             require(n == count if count else 1 <= n <= (10 if field == 0xD15B2BDE else MAX_VALUES),
@@ -125,3 +128,16 @@ def metadata(data, car, donor, *, mode='shared', attrib=None):
     require(size <= MAX_BYTES, 'grip file size')
     return struct.pack('<10I', MAGIC, VERSION, size, source, target, SHARED,
                        len(refs) // 12, u32(counter), len(FIELDS), 0) + body
+
+
+def optional_metadata(data, car, donor, **kwargs):
+    """Omit the entire optional record if any source metadata is invalid.
+
+    The strict serializer remains available to validate inputs. Conversion
+    falls back to donor handling; it never publishes a partially read endpoint.
+    Source-only fields retain evidence semantics, including yaw assistance.
+    """
+    try:
+        return metadata(data, car, donor, **kwargs)
+    except (FormatError, ValueError, KeyError, IndexError, struct.error):
+        return None

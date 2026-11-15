@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PRE = r'''
 #include "funcs.h"
 #include "host.h"
+#include "temporal_state_fixture.h"
 #include <stdarg.h>
 int sign_diag_on;
 void sign_diag_world(Cpu *c) { (void)c; __builtin_trap(); }

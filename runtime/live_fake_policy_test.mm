@@ -5,6 +5,8 @@
 #include <Foundation/Foundation.h>
 #include <deque>
 #include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <algorithm>
 #include <memory>
 #include <string>

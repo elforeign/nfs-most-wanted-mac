@@ -5,10 +5,13 @@
 # so the parent does not matter (the player may open the app, or start it from a terminal). Matching command lines
                                                                                                                   
 # matrix waited 17 min on one.
+# A launcher the player runs outside the app bundle marks its session with a file $NFS_RUNS/player/<pid> (the name is
+# the game's pid): while that pid is alive the player is playing ("<pid> marker"). A dead pid or a name that is not all
+# digits is ignored; a missing folder is fine.
 # Env: NFS_RUNS (default <checkout parent>/.runs), PLAYER_RUNNING_GAME (path suffix, default
 # /NFSMW.app/Contents/MacOS/NFSMW). Used by solo_matrix.sh, run_guarded.sh and the other launch checks.
 # Proof: player_running_test.py (a process whose argv only names the path: not the player; a game started from a
-# terminal: the player; copies of the old command-line pattern and the old launchd-parent rule fail).
+# terminal: the player; a marker file named after a live pid: the player, a dead pid or a non-numeric name: not; copies of the old command-line pattern and the old launchd-parent rule fail).
 game=${PLAYER_RUNNING_GAME:-/NFSMW.app/Contents/MacOS/NFSMW}
 runs=${NFS_RUNS:-$(cd "$(dirname "$0")/../.." && pwd)/.runs}
 ours=" "
@@ -23,6 +26,14 @@ players() {
         case "$path" in *"$game") echo "$p $path";; esac
     done
 }
-found=$(players)
+markers() {
+    for f in "$runs"/player/*; do
+        [ -f "$f" ] || continue
+        p=${f##*/}
+        case "$p" in ''|*[!0-9]*) continue;; esac
+        kill -0 "$p" 2>/dev/null && echo "$p marker"
+    done
+}
+found=$(players; markers)
 [ -n "$found" ] || exit 1
 echo "$found"

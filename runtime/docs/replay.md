@@ -165,8 +165,11 @@ F10 > Display > Live streaming provides **Enter stream key**, **Forget stream
 key**, **Go live**, **Stop live**, and a fixed status readout. The native secure
 sheet accepts 1–512 UTF-8 bytes without truncation; control characters are
 rejected. Save replaces only the in-memory key; Cancel preserves the previous
-key. Stop keeps it for another explicit Go; Forget and quit clear the owned
-buffer. There is no Keychain, preference, environment key, reveal control or
+key. Stop and errors preserve the saved key for another Go; Forget and quit
+clear it. Stop, Forget and quit attempt to finish accepted uploads and acknowledge
+one final playlist within a shared six-second network bound, then erase the
+poster key before returning.
+Terminal failures abort and erase immediately. There is no Keychain, preference, environment key, reveal control or
 automatic restart/reconnect. Stop live before replacing the key. Secure entry
 bypasses generic text settings, the controller keyboard and report notes.
 Copy/cut/drag exports, services, contextual menus and undo are disabled. Cmd+V
@@ -177,15 +180,39 @@ Go live starts capture without a clip or replay and without the local diagnostic
 switch. It can also attach to an existing capture; stopping a file, disarming
 replay and stopping live release only that owner. The last owner stops capture.
 Each explicit Go creates a fresh H.264/TS generation, beginning with an IDR;
-late callbacks retain the old cancelled poster. Transport or encoder failure
+late callbacks retain the old stopped poster. Transport or encoder failure
 stops live independently and requires another Go. Key entry and restart create
 zero capture, encoder, poster or session resources.
 
 Public strings contain only fixed status/error text. Report export redacts
 labelled stream keys and ingest `cid`, including bounded percent/JSON escape
-decoding, before truncation/export. Mutable key buffers are erased; Cocoa/URL
-framework copies cannot be reliably zeroed. Full memory dumps, debuggers and
-swap are outside this guarantee. The offline secure-control and loopback tests
+decoding, before truncation/export. The saved 512-byte key, validation scratch and
+poster's 512-byte copy are explicitly erased. Stop closes admission, drains accepted work and sends ENDLIST; its bounded
+completion erases the poster copy synchronously on its serial queue. Terminal
+poster errors abort in-flight work and erase immediately. Stop and terminal errors preserve the saved UI key so Go can start again without
+re-entry. Forget and quit erase it.
+Forget and the initial AppKit quit request clear saved/editor storage before
+waiting for transport completion (the game may defer exit). Immediate quit and
+`applicationWillTerminate` use the same cleanup; both `atexit` paths are
+idempotent fallbacks.
+
+The key-bearing storage and its lifetime are:
+
+| Storage | Lifetime and cleanup |
+| --- | --- |
+| Saved `keyBytes` | Save until replacement, Forget or quit; full allocation overwritten. |
+| `replaceKey` UTF-8 scratch | Validation call only; full stack buffer overwritten on acceptance/rejection. |
+| Secure field/cell and field editor text storage | Entry until Save, Cancel, close, Stop, Forget or quit; replace the full text with an equal-length run, then empty it and clear undo. |
+| Pasteboard `NSString` and Save's field-value `NSString` | Scoped autorelease pools drain after insertion/Save; immutable Foundation copies can only be released. The user's clipboard remains untouched. |
+| Start API's temporary `std::string` | Start call only; bytes overwritten before return. |
+| Poster key bytes | Explicit Go until graceful completion or its bounded timeout; terminal failure erases immediately. Full allocation overwritten synchronously, including while old callbacks retain the state. Validation examines UTF-8 scalars without creating a key string. |
+| Per-request encoded `cid` buffer | Segment/playlist/retry request creation only; bounded stack buffer overwritten immediately after creating the request. |
+| URL string, `NSURL`, `NSURLRequest` and task/session copies | Per upload; local string/URL references released in a scoped pool, local request released after task creation, retained task released on completion. Only the destination without a key is kept in `NSURLComponents`. Graceful completion waits for the final 2xx acknowledgement before releasing the session; timeout/error cancels it. Cancellation requests CFNetwork cleanup but cannot overwrite its internal URL/request/session copies. |
+
+Overwriting reachable editor storage does not prove AppKit erased retired
+immutable strings or internal allocations. Foundation/CFNetwork retain internal
+copies that this code cannot reach or zero, including after cancellation. Full
+memory dumps, debuggers and swap are outside this guarantee. The offline secure-control and loopback tests
 use generated sentinels; native focus/VoiceOver and actual game capture remain
 UI checks, and production ingest requires a real stream key.
 
@@ -207,7 +234,16 @@ segments and 16 MiB. Only small playlist metadata survives payload retirement.
 HTTP 202 is accepted, including a segment that precedes its playlist. HTTP 500
 gets at most two retries after 100/200 ms. One three-second absolute budget
 covers a segment, its playlist and both backoffs; Foundation's backup timeout
-is four seconds. Stop cancels promptly, without waiting for networking.
+is four seconds. Stop atomically closes admission and gives all accepted work
+one shared three-second drain budget, preserving an active pair's earlier deadline.
+After drain it POSTs the exact last acknowledged playlist with one trailing
+`#EXT-X-ENDLIST`, allowing at most three more seconds for its 2xx acknowledgement.
+Retries and concurrent Stop/Forget/quit callers share those original deadlines.
+Errors or either timeout abort and report incomplete finalization; empty streams
+create no final request or session. No incomplete encoder GOP is flushed into a
+new media segment. Go is blocked during finalization. Completion proves the
+transport ended cleanly; whether YouTube retains a recording still requires a
+real stream and is not established by this protocol check.
 
 The encoder emits H.264 without reordered frames, with forced IDRs at two-second
 intervals; capture admits at most 60 fps. Each TS segment starts with PAT/PMT,
@@ -230,14 +266,21 @@ VideoToolbox status (`Error: encoder -12902`) or the segmenter's reason
 adds `reason=`. Terminal reasons survive capture
 detachment until the next Go. The existing session-note feed writes Go, the first
 accepted segment and playlist with their status codes, each error kind/code, and
-Stop with accepted/posted/playlist/cancelled/dropped/failed/retry and memory/time
-counts to `session.txt`. None of these notes contain keys, URLs, `cid` or bodies.
-Unattended check: `runtime/live_fake.sh <dir>` (the gate's `live fake` stage) streams a guarded front-end run
+Stop with accepted/posted/playlist/cancelled/dropped/failed/retry, acknowledged
+final-playlist/finalized and memory/time counts to `session.txt`. None of these notes contain keys, URLs, `cid` or bodies.
+Unattended check: `runtime/live_fake.sh <dir>` (the nightly `livefake` part) streams a guarded front-end run
 for 330 s to `runtime/live_fake_ingest.py`, a 127.0.0.1 HTTP fake of the ingest (202 per segment, 200 per
 playlist). `NFS_TEST_LIVE_FAKE=<port>` (test only, `live_fake.m`) arms the `BOOT_KEYS` step `livego` (diag runs), which
 presses Go with a fixed internal key; only that key goes to the loopback URL, any other key to YouTube; the script takes the focus
 away three times (unfocus 15 s, hide 15 s, unfocus 30 s). PASS needs no `live: error`, valid uploads, >= 80 % of
-the 2 s segments the span holds and no gap over 6 s between segments.
+the 2 s segments the span holds and no gap over 6 s between segments. The default
+`--stop-quit` script stops, waits ten seconds, then quits; `--quit-live` quits while
+live. Both preserve the focus losses and leave time for the six-second completion
+before the outer deadline. Diagnostic `livestop` and `livequit` are fake-only and
+log before invoking the production Stop/AppKit quit paths. The ingest validates
+ENDLIST, generation and referenced uploaded names. Each nonempty generation needs
+exactly one final playlist, no later uploads, accepted=posted, cancelled=failed=0,
+bytes=ticks=0, and normal playlists=segments plus one final.
 
 Response bytes are discarded, with cancellation above a 4 KiB delivery budget
 (one delegate chunk may cross it). Other HTTP errors, TLS/transport errors,

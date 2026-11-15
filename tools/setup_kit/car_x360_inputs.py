@@ -20,7 +20,7 @@ import struct
 
 import numpy as np
 
-from . import car_convert as cc, car_paint, car_physics, car_sources as cs, car_x360 as cx
+from . import car_convert as cc, car_grip, car_paint, car_physics, car_sources as cs, car_x360 as cx
 
 require = cc.require
 FormatError = cc.FormatError
@@ -156,6 +156,20 @@ class XenonAttributes:
 def _little(raw, unit=4):
     require(len(raw) % unit == 0, 'X360 typed field alignment')
     return b''.join(raw[i:i + unit][::-1] for i in range(0, len(raw), unit))
+
+
+def grip_metadata(data, car, donor):
+    """Read complete optional tyre endpoints before the render projection.
+
+    Keep actual array lengths and resolve every inherited reference/field in
+    BE source space. Only typed values, never source layouts, become GRP1.
+    """
+    try:
+        src = XenonAttributes(data)
+    except (FormatError, ValueError, KeyError, IndexError, struct.error):
+        return None
+    return car_grip.optional_metadata(data, car, donor, attrib=src,
+        read_field=lambda cls, key, field: _little(src.raw(cls, key, field)))
 
 
 def _project_vpak(rows):

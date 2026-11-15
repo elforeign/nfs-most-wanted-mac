@@ -1,6 +1,38 @@
-# X360 renderer features, widescreen, antialiasing, display changes (part 1 of 6)
+# X360 renderer features, widescreen, antialiasing, display changes (part 1 of 7)
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
+
+`temporal_state.c` provides dormant rendered-frame metadata for future scene consumers.
+No consumer enables it yet: there is no look change, jitter, image history, GPU allocation,
+or per-frame tracking work beyond guarded hook branches. Opting in on the game thread captures
+view/projection/VP after widescreen setup; a consumer must call `temporal_view_accept` at its
+first actual scene draw with actual colour/depth identities, rectangle, dimensions, sample
+count, format, domain and resource generation. This freezes one snapshot per accepted frame
+and retains its preceding accepted snapshot separately for SP and split P0/P1. Mirror matrices
+are isolated CPU metadata and never enable history or jitter. Cuts, restarts, mover/player lifetimes,
+pause/menu, mode/target changes, invalid/discontinuous matrices and missing/duplicate frames
+invalidate continuity. Car tokens pair the CRI address with a monotonic constructor epoch;
+unknown lifetimes and table overflow cannot inherit previous poses. `temporal_state_test.py`
+checks the production hooks, disabled-path memory/CPU equivalence and an invalidation-disabled
+build that must fail. The motion renderer below accepts the first real draw; image histories remain future work.
+
+Queued rigid car parts additionally retain their final submitted world matrices, keyed by
+CRI lifetime, view, part/LOD slot, model, mesh and submission site. Shared body models,
+rim instances and the four direct tire submissions keep independent poses. Queue-slot,
+batch and part generations reject reused descriptors; sorted playback validates the owned
+matrix and mesh before exposing `temporal_pose_draw`. A consumer first accepts its actual
+scene view, reads poses only on supported real draws, and calls `temporal_pose_commit`
+once after encoding that view's history. Submission, repeated draws, reflections and
+diagnostic playback never advance history by themselves. Missing observations, unencoded
+views, LOD/mesh changes, lifetime/view resets and table overflow reject correspondence;
+ambiguous repeated transforms at a single site and deformed queue records remain untracked.
+The bounded pose tables occupy 1,900,544 bytes. No consumer requests them yet: each pose
+hook site adds one integer opt-in test, with zero pose-layer guest reads, copies, lookups
+or allocations when disabled. `temporal_pose_test.py` checks the production hooks with an
+entry counter and inaccessible guest memory, and requires stale-generation and per-draw
+commit mutations to fail. The motion renderer commits poses after encoding a requested resolve; no image-history consumer exists yet.
+
+Motion raster/resolve, storage and offline proof: [temporal motion](temporal-motion.md).
 
 ## X360 renderer features (`x360.m`, `x360_post.m`, `x360_textures.m`)
 

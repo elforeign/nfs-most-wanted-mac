@@ -1,4 +1,8 @@
-"""Which speed.exe the port supports: the PC v1.3 *code*, not one exact file.
+"""Which executable the port supports: the translated *code*, not one exact file.
+
+Most Wanted is the default and keeps its PC v1.3 pins. Carbon builds derive the three
+regions from their input PE and emit their layout and digests into the generated table;
+no image-specific constants are needed here.
 
 The recompiled functions, hooks and function starts are addresses in the loaded image; the runtime loads the
 exe's sections at their virtual addresses and binds imports by slot. So the port depends on exactly these bytes:
@@ -65,14 +69,34 @@ def _region(data, secs, rva, size):
     return None
 
 
-def describe(data):
+def regions(data=None, *, game="mw"):
+    """(name, rva, loaded size) for the translated code, constants and globals."""
+    if game == "mw":
+        return REGIONS
+    if game != "carbon":
+        raise ValueError(f"unknown game: {game}")
+    opt, secs = _parse(data)
+    s0 = opt + struct.unpack_from("<H", data, opt - 4)[0]
+    named = {data[s0 + i * 40:s0 + i * 40 + 8].rstrip(b"\0").decode("ascii"): sec
+             for i, sec in enumerate(secs)}
+    out = []
+    for name in NAMES[1:]:
+        if name not in named or not named[name][0]:
+            raise ValueError(f"missing {name} region")
+        vs, rva, _, _ = named[name]
+        out.append((name, rva, vs))
+    return tuple(out)
+
+
+def describe(data, *, game="mw"):
     """({'layout'|'.text'|'.rdata'|'.data': hex digest or None}, fingerprint hex) of a speed.exe image."""
     opt, secs = _parse(data)
+    image_regions = regions(data, game=game)
     base, entry = struct.unpack_from("<I", data, opt + 28)[0], struct.unpack_from("<I", data, opt + 16)[0]
     imp = struct.unpack_from("<II", data, opt + 96 + 8)
     out = {"layout": hashlib.sha256(struct.pack("<III", base, entry, imp[0]) + struct.pack("<I", imp[1]) +
-                                    b"".join(struct.pack("<II", r, s) for _, r, s in REGIONS)).hexdigest()}
-    for name, rva, size in REGIONS:
+                                    b"".join(struct.pack("<II", r, s) for _, r, s in image_regions)).hexdigest()}
+    for name, rva, size in image_regions:
         blob = _region(data, secs, rva, size)
         out[name] = hashlib.sha256(blob).hexdigest() if blob is not None else None
     h = hashlib.sha256(b"nfsmw-exe-fp-v1\n")
@@ -94,3 +118,18 @@ def check(data, path="speed.exe"):
         what = ", ".join(("PE layout" if k == "layout" else k) for k in bad)
         raise SystemExit(f"{path}: {what} differs: {WHY}.\n  code fingerprint {fp}\n  expected         {SUPPORTED_FINGERPRINT}")
     return fp
+
+
+def table_constants(data, *, game="mw"):
+    """The executable identity and region descriptors shared with runtime/app.m."""
+    parts, fp = describe(data, game=game)
+    if any(parts[k] is None for k in NAMES):
+        raise ValueError("executable does not contain the translated regions")
+    whole = WHOLE_FILE_SHA256 if game == "mw" else hashlib.sha256(data).hexdigest()
+    return (f'const char speed_exe_fingerprint[] = "{fp}";\n' +
+            "const char speed_exe_region_sha256[4][65] = {" +
+            ",".join(f'"{parts[k]}"' for k in NAMES) + "};\n" +
+            f'const char speed_exe_sha256[] = "{whole}";\n' +
+            "const struct ExeRegion { const char *name; uint32_t rva, size; } speed_exe_regions[3] = {" +
+            ",".join(f'{{"{name}",0x{rva:X},0x{size:X}}}' for name, rva, size in regions(data, game=game)) +
+            "};\n")

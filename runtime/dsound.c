@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // dsound.c - DSOUND.dll for the guest: COM objects over port/host/audio (DirectSound 8 -> CoreAudio 5.1).
 //
 // The library owns devices, buffers, cursors and the mixer; this file owns the vtables, reference counts and
@@ -10,6 +11,9 @@
 
 #include "../host/audio/dsound_host.h"
 #include "host.h"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_audio_policy.inc"
+#endif
 
 void threads_set_event_async(uint32_t h);   // threads.c
 uint32_t diag_thread_id(void);
@@ -118,6 +122,7 @@ static int wd_test_block(const DsObj *b) {
 const char *report_session_dir(void);   // report.m
 void report_note(const char *fmt, ...);
 int threads_list(pthread_t *ths, Cpu **cpus, uint32_t *tids, int cap);
+#if NFS_GAME == NFS_GAME_MW
 static void wd_snapshot(DsObj *hit, uint64_t now, double quiet, double cycles) {
     const char *dir = report_session_dir();
     char path[1300] = "";
@@ -190,6 +195,10 @@ void dsound_watchdog_tick(void) {
         }
     }
 }
+#else
+static void wd_snapshot(DsObj *hit, uint64_t now, double quiet, double cycles) {  }
+void dsound_watchdog_tick(void) {  }
+#endif
 // Largest quiet stretch (ms) seen on any watched stream and the check count: BOOT_DIAG's dsaudio line prints them.
 static double wd_max_quiet_ms(void) {
     double m = 0;
@@ -203,6 +212,7 @@ static void wd_watch(DsObj *b) {
 
 // Called by diag_frame with the guest lock held: no host audio callback reads guest state or writes this log.
 // Also logs on pause/state changes so a short menu visit is visible between the one-second snapshots.
+#if NFS_GAME == NFS_GAME_MW
 void dsound_diag_tick(void) {
     if (!diag_on) return;
     static uint64_t last;
@@ -259,6 +269,9 @@ void dsound_diag_tick(void) {
         b->diag.max_unlock_gap = 0;
     }
 }
+#else
+void dsound_diag_tick(void) {  }
+#endif
 
 static void notify_cb(void *user, uint32_t event) { (void)user; threads_set_event_async(event); }
 // The host's output changes (device created/released, output opened/kept/closed, device changes, underruns) also go to
@@ -310,6 +323,9 @@ static int d_CreateSoundBuffer(Cpu *c) {       // (this, DSBUFFERDESC*, ppBuffer
     uint32_t desc = arg(c, 1);
     uint32_t flags = M32(desc + 4), bytes = M32(desc + 8), wfx = M32(desc + 16);
     DsObj *b = new_obj(2, vt_buf);
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if(game_sound_mix_muted() && !(flags & DSBCAPS_PRIMARYBUFFER))flags |= DSBCAPS_CTRLVOLUME;
+#endif
     if (!(flags & DSBCAPS_PRIMARYBUFFER)) { b->mem = gmalloc(bytes ? bytes : 16); b->bytes = bytes; }
     DsResult r = ds_device_create_buffer(d->dev, flags, bytes, gp(wfx), b->mem ? G + b->mem : NULL, &b->buf);
     b->dev = d->dev;
@@ -348,10 +364,14 @@ static int d_Initialize(Cpu *c) { RET((uint32_t)DSERR_ALREADYINITIALIZED, 2); }
 static int b_GetCaps(Cpu *c) { RET((uint32_t)ds_buffer_get_caps(THIS->buf, G + arg(c, 1)), 2); }
 static int b_GetCurrentPosition(Cpu *c) {      // (this, play*, write*)
     DsObj *b = THIS;
+#if NFS_GAME == NFS_GAME_MW
     uint32_t sys = M32(0x009885E0u), sim = sys ? M32(sys + 0x2C) : 0;
     // Guest state is read under the guest lock, never by the host mixer. Only the startup front end is eligible;
     // no delayed reopen during an in-game pause/load or after Snd's later device re-creation.
     ds_device_launch_reopen_tick(b->dev, M32(0x0091CAE4u) != 0 || sim == 4 || M32(0x00925E90u) > 3);
+#else
+    if (game_sound_can_startup_reopen()) game_sound_startup_reopen(b->dev);
+#endif
     uint32_t p = 0, w = 0;
     DsResult r = ds_buffer_get_current_position(b->buf, &p, &w);
     if (arg(c, 1)) M32(arg(c, 1)) = p;
@@ -389,6 +409,9 @@ static int b_Lock(Cpu *c) {                    // (this, off, bytes, p1*, l1*, p
     RET((uint32_t)r, 8);
 }
 static int b_Play(Cpu *c) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if(game_sound_mix_muted())ds_buffer_set_volume(THIS->buf,-10000);
+#endif
     DsObj *b = THIS;
     DsResult r = ds_buffer_play(b->buf, arg(c, 3));
     wd_op(b, DA_PLAY, 0, b->bytes, r);
@@ -412,7 +435,11 @@ static int b_SetFormat(Cpu *c) {
 }
 static int b_SetVolume(Cpu *c) {
     DsObj *b = THIS;
+#if NFS_GAME == NFS_GAME_MW
     DsResult r = ds_buffer_set_volume(b->buf, (int32_t)arg(c, 1));
+#else
+    DsResult r = ds_buffer_set_volume(b->buf, game_sound_mix_muted() ? -10000 : (int32_t)arg(c, 1));
+#endif
     buf_diag_call(c, b, DA_VOLUME, r, arg(c, 1), 0, 0);
     RET((uint32_t)r, 2);
 }
@@ -528,6 +555,7 @@ DsDevice *dsound_current_device(void) {
 // to one 6-channel buffer (FL FR C LFE BL BR) and the host folds down if the output isn't 5.1.
 // NFS_SND_MODE=game keeps the game's own choice; NFS_SND_MODE=<n> forces mode n.
 void f_0081B4AC_orig(Cpu *c);
+#if NFS_GAME == NFS_GAME_MW
 void f_0081B4AC(Cpu *c) {
     static int force = -2;
     if (force == -2) {
@@ -545,6 +573,9 @@ void f_0081B4AC(Cpu *c) {
     f_0081B4AC_orig(c);
     if (diag_on) diag_event("Snd output mode %u -> %X", want, c->eax);
 }
+#else
+
+#endif
 
 // The overlay's audio line: output mode name, live (1) / null sink (0) / waiting for a device (-1), underruns.
 int dsound_output_info(const char **mode, int *live, uint64_t *underruns) {
@@ -610,3 +641,7 @@ int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited, double *
     for (int k = 0; k < 6; ++k) *clipped += c[k];
     return ok;
 }
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+#include "game_sound.inc"
+#endif

@@ -4,7 +4,7 @@
 Good: 40/40 binding actions and 85/85 callout IDs match the former output.
 Wrong Type-2 gas mapping (A -> B): 1/40 binding mismatch, exit 1.
 Authored text returns: 17/17 preserve the guest stack; extra return pop exits 6.
-PC-only Setup without GLOBALB.BUN produces the same 3/3 controller includes.
+PC-only Setup with material-only GLOBALB.BUN (no glyph bundle) produces the same 3/3 controller includes.
 The ordinary run also executes that negative control. No baseline game values
 are stored here; private files are read only by this check, never by Setup's
 controller generator. Without assets the synthetic/bridge proof runs, then exit 3.
@@ -202,10 +202,15 @@ def pc_only_setup(pc, work):
         path = driver.find(pc / "GLOBAL", name)
         if path.exists():
             (source / "GLOBAL" / name).symlink_to(path)
+    # Car glass now needs PC material identities. Retain only light-material chunks, so this fixture still has
+    # neither the glyph texture bundle nor any console inputs; controller recipes remain independent of both.
+    materials = pg.bun_chunks((pc / "GLOBAL/GLOBALB.BUN").read_bytes(), 0x00135200)
+    material_pack = b"".join(struct.pack("<II", 0x00135200, len(b)) + b for b in materials)
+    (source / "GLOBAL/GLOBALB.BUN").write_bytes(material_pack)
     out = work / "pc-only-setup"
     subprocess.run([sys.executable, "-I", str(ROOT / "tools/gen_tables.py"), "--pc", str(source),
                     "--no-x360", "--out", str(out)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert not (source / "GLOBAL/GLOBALB.BUN").exists()
+    assert not pg.bun_chunks(material_pack, 0xB3300000), "fixture must have no glyph texture bundle"
     for name in driver.PADTABLES:
         assert (out / name).read_bytes() == (work / "good" / name).read_bytes(), name
     print("PC-only Setup without glyph bundle/X360 inputs: 3/3 authored includes unchanged")
@@ -235,7 +240,8 @@ def main():
         pub = (HERE / "pubtables_gen.py").read_text()
         assert all(token not in pub for token in ("padprompts_l1", "callout_labels", "828FFBB0", 'b"L1'))
         pc, x360 = driver.resolve(argparse.Namespace(pc=None, x360=None, no_x360=False))
-        assert driver.find(pc / "GLOBAL", "GLOBALB.BUN") not in driver.inputs(pc, x360)
+        # The pad tables are authored: neither generator reads GLOBALB.BUN (gen_tables hashes it for port_car_normals.inc only).
+        assert all("GLOBALB" not in (HERE / f).read_text() for f in ("pad_metadata.py", "controltype_gen.py"))
         assert set(driver.PADTABLES).isdisjoint(driver.STUBS)
         assert "tools_snapshot/pad_metadata.py" in driver.GENERATORS
         stamp = driver.outputs_text(work / "good" if not args.wrong_mapping else work / "wrong")

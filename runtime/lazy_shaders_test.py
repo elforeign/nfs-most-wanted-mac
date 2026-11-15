@@ -14,11 +14,17 @@
 
 
 
+
+
 """
 from pathlib import Path
 import hashlib
 import re
 import sys
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,6 +36,7 @@ REVIEWED = {
     ('render.m', 'soft_proof_begin'): 'diagnostic (soft smoke proof)',
     ('render_post.m', 'render_contact_warm'): 'load: asynchronous compile on Metal\'s queue',
     ('render_post.m', 'x_contact_scene_impl'): 'diagnostic (legacy AO pair proof)',
+    ('shared_depth.m', 'pipelines'): 'async demand compile; synchronous branch is fixture-only, guarded below',
     ('overlay.m', 'pso_init'): 'performance overlay, compiled when the player first opens it',
     ('envcube.m', 'envcube_pipeline'): 'non-default PC mip path and diagnostic compare',
     ('cliprec.mm', 'prepare:'): 'clip recorder start (player action, recorder thread)',
@@ -123,6 +130,13 @@ def racy_statics(text):
     return [n for n in names if re.search(r'\b' + n + r'\s*=(?!=)', outside)]
 
 
+def shared_async(text):
+    """Only the fixture branch may compile synchronously; production returns pending."""
+    b = body(text, 'pipelines').split('#else', 1)[1].rsplit('#endif', 1)[0]
+    return b.count('newLibraryWithSource:') == 1 and bool(
+        re.search(r'newLibraryWithSource:[^;]*completionHandler:', b))
+
+
 def main():
     sources = [p for p in sorted(ROOT.glob('*.m')) + sorted(ROOT.glob('*.mm'))
                if '_test' not in p.name and not p.name.endswith('_bench.m')]
@@ -136,7 +150,7 @@ def main():
     for name, (warm, helpers) in WARMED.items():
         b = body((ROOT / name).read_text(), warm)
         unwarmed += [f'{name}:{warm} misses {h}' for h in helpers if not re.search(r'\b' + h + r'\(', b)]
-    texts = {n: (ROOT / n).read_text() for n in ('render.m', 'render_post.m', 'render_present.m')}
+    texts = {n: mw_source(ROOT / n) for n in ('render.m', 'render_post.m', 'render_present.m')}
     # Post effects stay prepared even when scene replay is explicitly disabled.
     def scene_guards(text):
         return body(text, 'render_post_prewarm').count('NFS_PSO_PREWARM')
@@ -148,8 +162,12 @@ def main():
     schedules = warm_schedules(texts)
     twice = [f'{h} warmed by {n} concurrent load blocks' for h, n in sorted(schedules.items()) if n != 1]
     racy = [f'pipeline_library_source static {n} set outside dispatch_once'
-            for n in racy_statics((ROOT / 'pipeline_cache.m').read_text())]
-    for f in flagged + unwarmed + twice + racy:
+            for n in racy_statics(mw_source(ROOT / 'pipeline_cache.m'))]
+    shared = (ROOT / 'shared_depth.m').read_text()
+    assert not shared_async(shared.replace('completionHandler:', 'error:')), 'blocking compile control survived'
+    blocking = [] if shared_async(shared) else ['shared_depth.m:pipelines lacks asynchronous compile']
+    print(f'shared geometry async={not blocking}; blocking-call control=False')
+    for f in flagged + unwarmed + twice + racy + blocking:
         print('FAIL:', f)
     digest = hashlib.sha256(OLD_SMOKE_FRAGMENT.encode()).hexdigest()
     assert digest == OLD_SMOKE_SHA, digest
@@ -160,7 +178,7 @@ def main():
     if len(control) != 1:
         print('FAIL: the pinned original lazy compile was not flagged')
         return 1
-    return 1 if flagged or unwarmed or twice or racy or guards else 0
+    return 1 if flagged or unwarmed or twice or racy or guards or blocking else 0
 
 
 if __name__ == '__main__':

@@ -11,6 +11,10 @@ import hashlib
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 ROOT = RT.parent
 
@@ -337,7 +341,7 @@ int main(int argc, char **argv) {
 def main():
     assert hashlib.sha256((OLD_RESET + OLD_MODE + OLD_CALLBACKS + OLD_SET).encode()).hexdigest() == BASE_SHA256
     live = (RT / 'live_picture.c').read_text()
-    d3d = (RT / 'd3d9.m').read_text()
+    d3d = mw_source(RT / 'd3d9.m')
     assert 'live_picture_on_reset(c);' in function(d3d, 'static int v_Reset(')
     release = '\n'.join(function(d3d, sig) for sig in (
         'static Obj *ref_owner(', 'static uint32_t obj_release(', 'static int m_Release('))

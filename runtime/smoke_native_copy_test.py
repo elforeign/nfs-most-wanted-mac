@@ -12,6 +12,10 @@ import os
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -114,7 +118,7 @@ FAILURE = 'FAIL matched-size smoke composition byte-identical'
 
 
 def main():
-    source = (ROOT / 'render.m').read_text()
+    source = mw_source(ROOT / 'render.m')
     good = make_harness(source)
     broken = mutate(good)
     assert broken != good, 'mutation did not apply'

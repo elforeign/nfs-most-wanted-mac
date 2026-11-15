@@ -13,6 +13,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT=Path(__file__).resolve().parents[1]
 
 PRE=r'''
@@ -141,7 +145,7 @@ def function(src,name):
 
 
 def source():
-    src=(ROOT/'runtime/render.m').read_text()
+    src=mw_source(ROOT/'runtime/render.m')
     storage='\n'.join(re.search(r'^static '+declaration+r'.*$',src,re.M)[0] for declaration in (
         r'RenderTex lamp_rt;',r'int lamp_replay;',r'uint64_t lamp_serial;',r'uint64_t lamp_valid\[2\];'))+'\n'
     storage+=function(src,'lamp_prepare')+'\n'

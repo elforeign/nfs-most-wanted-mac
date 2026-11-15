@@ -21,7 +21,8 @@
 //
 // The glyph art: the PC packs have none of it except L1/R1 (PC arrows in a ring). The PlayStation layout gets
 // PlayStation glyphs drawn here at start-up (64x64 A8R8G8B8, CoreGraphics), the Xbox layout the X360's own glyphs
-// (32x32 DXT5 in X360 GLOBAL/GLOBALB.BUN, which keeps the PS2 texture names with Xbox art in them), through the
+// (32x32 DXT5 in X360 GLOBAL/GLOBALB.BUN, which keeps the PS2 texture names with Xbox art in them), or optionally
+// port-drawn Xbox art when that set is unavailable (on unless NFS_XBOX_PROMPT_ART=off), through the
 // texture creation path (x360_textures.m). Both sets are made; GetTextureInfo resolves each private hash
 // (PADPROMPT_<name>) directly to the current layout's TextureInfo. The game's 30-entry extra-texture list already
 // holds the loading backdrop and arrest textures, so it cannot also hold every prompt.
@@ -59,6 +60,7 @@ static int env_mode = -1;                  // 0 pc, 1 console, 2 auto
 void user32_hide_pointer(void);
 static int pad_lost;                       // the controller that was the active input has gone (fe_console.c: the game's unplugged check)
 static int pad_active = -1;                // auto: the last input came from a controller (1) or keyboard/mouse (0)
+static int pointer_hidden;                // our hide request is valid until an event can show the system pointer
 static int physical_input;                // connection/prompt overrides never count as physical input
 int prompts_last_input(void) { return physical_input; }
 static int mode(void) {
@@ -73,12 +75,19 @@ static int console(void) {
     int m = mode();
     return m && (m == 1 || pad_active == 1) && have_art();
 }
+void prompts_pointer_visible(void) {
+    pointer_hidden = 0;
+}
 void prompts_input(int pad) {              // user32.m: a key or mouse button (0), a controller button or stick (1)
     static float moved;
+    if (pad != 1) prompts_pointer_visible();  // before the mouse prompt threshold: macOS shows it at the first movement
     if (pad < 0) { moved += 1; if (moved < 16) return; pad = 0; }   // mouse movement: about 16 points of it
     moved = 0;
     physical_input = pad;
-    if (pad == 1) user32_hide_pointer();   // F21: hidden until the mouse moves (a key press or click also hands the prompts back)
+    if (pad == 1 && !pointer_hidden) {
+        user32_hide_pointer();
+        pointer_hidden = 1;
+    }
     if (!pad) pad_lost = 0;                // keys or the mouse: the player has moved on from the lost controller
     if (pad_active == pad) return;
     pad_active = pad;
@@ -86,6 +95,7 @@ void prompts_input(int pad) {              // user32.m: a key or mouse button (0
     if (diag_on) diag_event("prompts: input from the %s", pad ? "controller" : "keyboard/mouse");
 }
 void prompts_mouse_moved(float points) {   // user32.m: mouse movement over the window
+    if (points > 0) prompts_pointer_visible();  // fractional movement also unhides the system pointer
     for (float d = points; d >= 1; d -= 1) prompts_input(-1);
 }
 void prompts_pad_seen(int connected) {     // user32.m pad_read: a controller is there (at start-up: console prompts)
@@ -260,8 +270,53 @@ static void draw_art(CGContextRef g, int art) {
     case A_LSTICK: stick(g, "L", 0, 0); break;
     }
 }
-// One PlayStation glyph as a texture: drawn premultiplied, stored straight-alpha BGRA (D3DFMT_A8R8G8B8).
-static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) {
+// Xbox names are the .xb texture names, including the retail L1/L2 bumper/trigger swap.
+static void draw_xbox_art(CGContextRef g, const char *xb) {
+    const char *face = NULL;
+    double r = 0, green = 0, b = 0;
+    if (!strcmp(xb, "CROSS")) { face = "A"; r = 0.15; green = 0.68; b = 0.25; }
+    else if (!strcmp(xb, "TRIANGLE")) { face = "B"; r = 0.85; green = 0.16; b = 0.16; }
+    else if (!strcmp(xb, "SQUARE")) { face = "X"; r = 0.12; green = 0.42; b = 0.86; }
+    else if (!strcmp(xb, "CIRCLE")) { face = "Y"; r = 0.86; green = 0.67; b = 0.08; }
+    if (face) {
+        base_disc(g);
+        rgb(g, r, green, b, 1);
+        CGContextFillEllipseInRect(g, CGRectMake(6, 6, S - 12, S - 12));
+        label(g, face, 36, S / 2.0, S / 2.0);
+    } else if (!strcmp(xb, "L2")) shoulder(g, "LB", 0);
+    else if (!strcmp(xb, "R2")) shoulder(g, "RB", 0);
+    else if (!strcmp(xb, "L1")) shoulder(g, "LT", 1);
+    else if (!strcmp(xb, "R1")) shoulder(g, "RT", 1);
+    else if (!strcmp(xb, "START")) {
+        base_disc(g);
+        CGContextSetLineWidth(g, 3);
+        rgb(g, 0.95, 0.95, 0.95, 0);
+        for (int y = 23; y <= 41; y += 9) {
+            CGContextMoveToPoint(g, 20, y); CGContextAddLineToPoint(g, 44, y);
+        }
+        CGContextStrokePath(g);
+    } else if (!strcmp(xb, "BACK")) {
+        base_disc(g);
+        CGContextSetLineWidth(g, 3);
+        rgb(g, 0.95, 0.95, 0.95, 0);
+        CGContextStrokeRect(g, CGRectMake(18, 28, 20, 16));
+        CGContextStrokeRect(g, CGRectMake(26, 20, 20, 16));
+    } else if (!strcmp(xb, "R3")) {
+        stick(g, "RS", 0, 0);
+        rgb(g, 0.95, 0.95, 0.95, 0); CGContextSetLineWidth(g, 2);
+        CGContextStrokeEllipseInRect(g, CGRectMake(10, 10, S - 20, S - 20));
+    } else if (!strcmp(xb, "RIGHT_ANALOG")) stick(g, "RS", 0, 0);
+    else if (!strcmp(xb, "RIGHT_ANALOG_UP")) stick(g, "RS", 1, 0);
+    else if (!strcmp(xb, "RIGHT_ANALOG_DOWN")) stick(g, "RS", 0, 1);
+    else if (!strcmp(xb, "LEFT_ANALOG")) stick(g, "LS", 0, 0);
+    else if (!strcmp(xb, "DPAD")) dpad(g, 1, 1, 1, 1);
+    else if (!strcmp(xb, "DPAD_DOWN")) dpad(g, 0, 1, 0, 0);
+    else if (!strcmp(xb, "DPAD_LEFT")) dpad(g, 0, 0, 1, 0);
+    else if (!strcmp(xb, "DPAD_RIGHT")) dpad(g, 0, 0, 0, 1);
+    else if (!strcmp(xb, "DPAD_LEFTRIGHT")) dpad(g, 0, 0, 1, 1);
+}
+// One drawn glyph: premultiplied drawing, straight-alpha BGRA storage (D3DFMT_A8R8G8B8).
+static uint32_t make_glyph(Cpu *c, int art, const char *xb, const char *name, uint32_t hash) {
     uint32_t size = S * S * 4, data = gmalloc(size);
     uint8_t *px = G + data;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -269,7 +324,7 @@ static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) 
     CGColorSpaceRelease(cs);
     if (!g) return 0;
     CGContextClearRect(g, CGRectMake(0, 0, S, S));
-    draw_art(g, art);
+    if (xb) draw_xbox_art(g, xb); else draw_art(g, art);
     CGContextFlush(g);
     CGContextRelease(g);
     for (uint32_t i = 0; i < S * S; ++i) {
@@ -296,6 +351,12 @@ static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) 
     }
     return ti;
 }
+static uint32_t make_ps_glyph(Cpu *c, int art, const char *name, uint32_t hash) {
+    return make_glyph(c, art, NULL, name, hash);
+}
+static uint32_t make_xb_glyph(Cpu *c, const char *xb, const char *name, uint32_t hash) {
+    return make_glyph(c, 0, xb, name, hash);
+}
 // Selects the layout's art (made at start-up, selected when the Controller menu changes the layout).
 static void use_layout(void) {
     int xb = glyphs_xbox();
@@ -303,7 +364,7 @@ static void use_layout(void) {
     art_layout = xb;
     if (diag_on) diag_event("prompts: %s glyphs", xb ? "Xbox" : "PlayStation");
 }
-static int have_art(void) {                // the layout has its glyphs (the Xbox ones come from the X360 files)
+static int have_art(void) {                // the layout has a complete set of glyphs
     if (!art_made) return 0;
     use_layout();
     return glyph_ti[art_layout][0] != 0;
@@ -311,7 +372,7 @@ static int have_art(void) {                // the layout has its glyphs (the Xbo
 void prompts_textures(Cpu *c) {            // x360_textures.m, at the first texture Init (start-up)
     if (art_made || !mode()) return;
     art_made = 1;
-    int nps = 0, nxb = 0;
+    int nps = 0, nxb = 0, ndrawn = 0;
     for (unsigned i = 0; i < NGLYPH; ++i) {
         char name[48];
         snprintf(name, sizeof name, "PADPROMPT_%s", glyphs[i].name);
@@ -320,10 +381,23 @@ void prompts_textures(Cpu *c) {            // x360_textures.m, at the first text
         nps += (glyph_ti[0][i] = make_ps_glyph(c, glyphs[i].ps, name, glyph_private[i])) != 0;
         nxb += (glyph_ti[1][i] = x360_texture_load(c, "GLOBAL/GLOBALB.BUN", str_hash(glyphs[i].xb), glyph_private[i])) != 0;
     }
-    if (nxb < (int)NGLYPH) for (unsigned i = 0; i < NGLYPH; ++i) glyph_ti[1][i] = 0;   // all or nothing
-    fprintf(stderr, "boot: button prompt glyphs: %d PlayStation, %d Xbox (prompts %s)\n", nps, nxb < (int)NGLYPH ? 0 : nxb,
+    if (nxb < (int)NGLYPH) {
+        const char *e = getenv("NFS_XBOX_PROMPT_ART");
+        int draw = !(e && (!strcasecmp(e, "off") || !strcmp(e, "0")));
+        for (unsigned i = 0; i < NGLYPH; ++i) {
+            char name[48];
+            snprintf(name, sizeof name, "PADPROMPT_XB_%s", glyphs[i].name);
+            glyph_ti[1][i] = draw ? make_xb_glyph(c, glyphs[i].xb, name, glyph_private[i]) : 0;
+            ndrawn += glyph_ti[1][i] != 0;
+        }
+        if (ndrawn < (int)NGLYPH) for (unsigned i = 0; i < NGLYPH; ++i) glyph_ti[1][i] = 0;
+    }
+    fprintf(stderr, "boot: button prompt glyphs: %d PlayStation, %d Xbox (%d port-drawn; prompts %s)\n", nps,
+            nxb == (int)NGLYPH ? nxb : ndrawn == (int)NGLYPH ? ndrawn : 0, ndrawn,
             mode() == 1 ? "console" : "auto");
     if (diag_on) diag_event("prompts: %d PlayStation glyphs, %d of %u Xbox glyphs from the X360 files", nps, nxb, (unsigned)NGLYPH);
+    if (diag_on) diag_event("prompts: %d port-drawn Xbox glyphs; complete Xbox set %s", ndrawn,
+                            glyph_ti[1][0] ? "available" : "unavailable, PC keycaps");
 }
 static uint32_t glyph_sub(uint32_t tex) {  // the private hash to draw instead of a console glyph texture (0: none)
     for (unsigned i = 0; i < NGLYPH; ++i) if (glyph_hash[i] == tex) return glyph_ti[0][i] || glyph_ti[1][i] ? glyph_private[i] : 0;

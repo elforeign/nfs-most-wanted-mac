@@ -14,6 +14,10 @@ disabled-attenuation control remain unchanged.
 """
 from pathlib import Path
 import re, subprocess, tempfile, sys, ast
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 ROOT=Path(__file__).resolve().parents[1]
 def run(cmd):
     p=subprocess.run([str(x) for x in cmd],capture_output=True,text=True)
@@ -38,6 +42,9 @@ with tempfile.TemporaryDirectory(prefix='ssao-review-') as td:
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+static int headlight_receiver_encoding;
+static int headlights_casting(void){return 0;}
+static void headlights_drawn(int receiver){(void)receiver;}
 static int failures,emits,ssao_replay=2,ssao_tree_fringe=1,ssao_reference_record,q_active,lamp_replay,enabled=1,chain=1;
 #define CHECK(x) do{if(!(x)){++failures;printf("FAIL %s\n",#x);}}while(0)
 static uint8_t *G;
@@ -77,10 +84,10 @@ static void aux_emit(AuxDraw*a,void(^g)(void)){(void)a;(void)g;}
 static void grass_emit(GrassDraw*a,void(^g)(void)){(void)a;g();}
 static void mat_water_emit(int x){(void)x;}
 '''
-    fixed=(ROOT/'runtime/render.m').read_text()
+    fixed=mw_source(ROOT/'runtime/render.m')
     old=fixed.replace(function(fixed,'ssao_can_record'),'static int ssao_can_record(void){return x360_post_ssao_enabled() && x360_post_chain_on() && M32(0x925E90)==6;}')
     old=old.replace('(dev.rs[27] || ssao_tree_fringe)','dev.rs[27]')
-    old=old.replace('    trees_prepare(vs, ps,','    if (!ssao_replay) trees_prepare(vs, ps,',1)
+    old=old.replace('if(!headlights_casting()) trees_prepare(vs, ps,','if(!headlights_casting() && !ssao_replay) trees_prepare(vs, ps,',1)
     old=old.replace('if (ssao_replay) { if (!trees_emit(geometry)) geometry();return; }','if (ssao_replay) { geometry();return; }')
     (td/'old-render.m').write_text(old)
     for mode,path in [('fixed',ROOT/'runtime/render.m'),('old',td/'old-render.m')]:
@@ -295,7 +302,7 @@ static void ms_attach(id x,RenderTex*r,int n){(void)x;(void)r;(void)n;CHECK(0);}
 static void gpt_render_auto(id x,const char*s){(void)x;(void)s;}
 static void gpt_name(id x){(void)x;}
 '''
-    src=(ROOT/'runtime/render.m').read_text()
+    src=mw_source(ROOT/'runtime/render.m')
     for mode in ('r8-fixed','bgra-mutant'):
         alloc=function(src,'ssao_prepare')
         if mode=='bgra-mutant':alloc=alloc.replace('MTLPixelFormatR8Unorm','MTLPixelFormatBGRA8Unorm')
@@ -319,7 +326,7 @@ int main(void){@autoreleasepool{
         assert int(re.search(r': (\d+)',output)[1])==(0 if mode=='r8-fixed' else 1)
 
     # Actual multiply descriptor: shade RGB in place while retaining scene alpha.
-    xpost=(ROOT/'runtime/render_post.m').read_text()
+    xpost=mw_source(ROOT/'runtime/render_post.m')
     builder=function(xpost,'x_contact_multiply')
     stub=layout.replace('@implementation Device', '@implementation Device\n-(id)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor*)d error:(NSError**)e{(void)e;return d;}')
     stub+='\nstatic id pipeline_build(MTLRenderPipelineDescriptor *d,const char *pass,NSError **e){(void)pass;return [mtl newRenderPipelineStateWithDescriptor:d error:e];}\n'

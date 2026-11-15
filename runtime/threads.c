@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // threads.c - guest threads and Win32 synchronization objects.
 //
 // Each guest thread is a real pthread with its own Cpu, guest stack and TEB, but only one runs guest code at a
@@ -158,6 +159,9 @@ typedef struct {
     uint32_t owner, recursion;    // mutex
     uint64_t due, period;         // timer (host ns)
     // thread
+#if NFS_GAME == NFS_GAME_PRIVATE
+    uint32_t private_ideal;
+#endif
     uint32_t tid, start, param, exit_code, teb, stack_lo, stack_size;
     int suspend, terminate, running, module_attached;
     Cpu *cpu;
@@ -394,6 +398,7 @@ static void *thread_main(void *p) {
     return NULL;
 }
 
+#if NFS_GAME == NFS_GAME_MW
 static void split_sound_worker_reap(uint32_t start) {
     // Both modes leak this exact saved handle: shutdown joins but never closes
     // it, and init overwrites it. Close only that handle, and only for a finished
@@ -405,6 +410,9 @@ static void split_sound_worker_reap(uint32_t start) {
     threads_close(handle);
     if (diag_on) diag_event("split lifecycle: closed completed SNDREAL thread handle %04X (00820063/00820C64)", handle);
 }
+#else
+static void split_sound_worker_reap(uint32_t start) {  }
+#endif
 
 static uint32_t thread_create(uint32_t stack, uint32_t start, uint32_t param, uint32_t flags, uint32_t *tid_out) {
     split_sound_worker_reap(start);
@@ -417,6 +425,9 @@ static uint32_t thread_create(uint32_t stack, uint32_t start, uint32_t param, ui
     if (!lo) lo = galloc(stack + 0x2000);
     uint32_t teb = (lo + stack + 0x1000 + 0xFFF) & ~0xFFFu;     // a page-aligned TEB above the stack
     uint32_t top = (lo + stack) & ~15u;
+#if NFS_GAME == NFS_GAME_PRIVATE
+    t->private_ideal = 32;
+#endif
     t->tid = next_tid++;
     t->start = start;
     t->param = param;
@@ -615,9 +626,11 @@ int win32_threads(Cpu *c, const char *fn) {
                 const char *sym = diag_symbol(a, &off);
                 if (sym && off < 0x4000) { snprintf(who + strlen(who), sizeof who - strlen(who), " %s+0x%X", sym, off); ++nres; }
             }
+#if NFS_GAME == NFS_GAME_MW
             diag_event("sleep: game thread %s(%u) %.2f ms (wait %.2f, GIL %.2f) frame %llu flow %u from%s", fn, ms,
                        (host_ticks() - t0) / 1e6, (t1 - t0) / 1e6, (host_ticks() - t1) / 1e6,
                        (unsigned long long)perf_nframes, M32(0x00925E90u), who);
+#endif
         }
         thread_checkpoint(c);
         RET(0, n);
@@ -837,3 +850,8 @@ int threads_event_set(uint32_t h, int on) {   // with the GIL held
     return 1;
 }
 uint32_t threads_wait(Cpu *c, uint32_t n, const uint32_t *h, int all, uint32_t ms) { return wait_handles(c, n, h, all, ms); }
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+#include "game_thread.inc"
+uint32_t private_thread_create(uint32_t stack, uint32_t start, uint32_t param, uint32_t flags, uint32_t *tid_out) { return thread_create(stack, start, param, flags, tid_out); }
+#endif

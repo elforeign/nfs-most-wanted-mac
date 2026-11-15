@@ -6,12 +6,15 @@
  * entry. Hooks: AddCustomOption 007BB560 (SetupVisual 007BC210 calls it), Setup 007BFBD0, and the notification wrapper in maxperf_career.c. */
 #include "host.h"
 #include "underglow.h"
+#include "underglow_ui.h"
 #include <stdlib.h>
 #include <string.h>
 
 #define UG_MODE 0x308u                 /* category id and CustomizeSub page mode */
 #define UG_LIGHT_MODE 0x309u
 #define UG_POOL_MODE 0x30Au
+#define UG_PULSE_MODE 0x30Bu
+#define H_PULSE (H_TITLE + 16u)
 #define H_POOL (H_TITLE + 12u)
 #define H_LIGHT (H_TITLE + 9u)
 #define UG_ID0 0x901u                  /* colour option ids 0x901..0x908 = presets 0..7 (until retargeted at Visual) */
@@ -43,13 +46,31 @@ static void pool_save(void) {
     if(pool_override<0) app_pref_set("cars.underglow_pool",pool_strength ? "stronger" : "measured");
 }
 
+static unsigned pulse;
+static int pulse_loaded;
+unsigned underglow_pulse(void) {
+    if(!pulse_loaded) {
+        const char *v=app_pref("cars.underglow_pulse");
+        pulse=v && !strcmp(v,"on");
+        pulse_loaded=1;
+    }
+    return pulse;
+}
+static void pulse_preview(unsigned on) {
+    underglow_pulse();
+    if(on<2) pulse=on;
+}
+static void pulse_save(void) {
+    app_pref_set("cars.underglow_pulse",pulse ? "on" : "off");
+}
+
 uint32_t underglow_menu_text(uint32_t hash) {   /* guest copy of the label, 0 when the hash is not ours */
-    static uint32_t guest[16];
-    if (hash < H_TITLE || hash > H_TITLE + 15) return 0;
+    static uint32_t guest[18];
+    if (hash < H_TITLE || hash > H_TITLE + 17) return 0;
     uint32_t i = hash - H_TITLE;
     if (!guest[i]) {
         const char *extra[]={"Road pool: Measured","Road pool: Stronger","Measured","Stronger"};
-        guest[i] = gstr(i>=12 ? extra[i-12] : i == 9 ? "Light: Off" : i == 10 ? "Light: On" : i == 11 ? "On" : i ? k_names[i - 1] : "Underglow");
+        guest[i] = gstr(i>=16 ? (i==16 ? "Pulse: Off" : "Pulse: On") : i>=12 ? extra[i-12] : i == 9 ? "Light: Off" : i == 10 ? "Light: On" : i == 11 ? "On" : i ? k_names[i - 1] : "Underglow");
     }
     return guest[i];
 }
@@ -71,12 +92,13 @@ static int owned(void) {
     return ok;
 }
 
-static struct { int open, committed; unsigned saved, shown, light, shown_light, pool, shown_pool, mode; uint32_t profile, handle, opts[10]; } st;
+static struct { int open, committed; unsigned saved, shown, light, shown_light, pool, shown_pool, pulse, shown_pulse, mode; uint32_t profile, handle, opts[11]; } st;
 static void settle(void) {                 /* Back restores the opening colour and light choice. */
     if (st.open && !st.committed) {
         underglow_set(st.profile, st.handle, st.saved);
         underglow_light_set(st.profile, st.handle, st.light);
         if(st.mode==UG_POOL_MODE) pool_preview(st.pool);
+        if(st.mode==UG_PULSE_MODE) pulse_preview(st.pulse);
         if (diag_on) diag_event("underglow menu: cancelled, restored %u (stored %u)", st.saved, underglow_get(st.profile, st.handle));
     }
     st.open = 0;
@@ -112,10 +134,10 @@ void f_007BB560(Cpu *c) {                  /* CustomizeCategoryScreen::AddCustom
     if (diag_on) diag_event("underglow menu: Visual entry added");
 }
 
-static unsigned colour_index(uint32_t self) {   /* retail current option at +38; 10 means none */
+static unsigned colour_index(uint32_t self) {   /* retail current option at +38; 11 means none */
     uint32_t opt = M32(self + 0x38);
-    for (unsigned i = 0; i < 10; ++i) if (opt && opt == st.opts[i]) return i;
-    return 10;
+    for (unsigned i = 0; i < 11; ++i) if (opt && opt == st.opts[i]) return i;
+    return 11;
 }
 
 void f_007BFBD0_orig(Cpu *c);
@@ -123,7 +145,7 @@ void f_007BFBD0(Cpu *c) {                  /* CustomizeSub::Setup */
     uint32_t self = c->ecx;
     f_007BFBD0_orig(c);
     unsigned mode=M32(self+0x150);
-    if ((mode != UG_MODE && mode != UG_LIGHT_MODE && mode != UG_POOL_MODE) || !owned()) return;
+    if ((mode != UG_MODE && mode != UG_LIGHT_MODE && mode != UG_POOL_MODE && mode != UG_PULSE_MODE) || !owned()) return;
     settle();
     Cpu saved = *c;
     st.profile = 0;
@@ -131,9 +153,10 @@ void f_007BFBD0(Cpu *c) {                  /* CustomizeSub::Setup */
     st.saved = st.shown = underglow_get(st.profile, st.handle);
     st.light = st.shown_light = underglow_light_get(st.profile, st.handle);
     st.pool = st.shown_pool = underglow_pool_strength();
+    st.pulse = st.shown_pulse = underglow_pulse();
     st.mode = mode;
     memset(st.opts,0,sizeof st.opts);
-    M32(self + 0x1B0) = mode==UG_MODE ? H_TITLE : mode==UG_LIGHT_MODE ? H_LIGHT+st.light : H_POOL+st.pool;
+    M32(self + 0x1B0) = mode==UG_MODE ? H_TITLE : mode==UG_LIGHT_MODE ? H_LIGHT+st.light : mode==UG_POOL_MODE ? H_POOL+st.pool : H_PULSE+st.pulse;
     M32(self + 0x14C) = M32(mode==UG_MODE ? 0x00905EA8u : 0x00905EACu);
     M32(self+0x154)=mode==UG_MODE ? 0x803u : UG_MODE;
     unsigned count=mode==UG_MODE ? 8 : 2;
@@ -141,8 +164,9 @@ void f_007BFBD0(Cpu *c) {                  /* CustomizeSub::Setup */
         st.opts[i] = add(c,self,mode==UG_MODE ? H_TITLE+1+i : mode==UG_POOL_MODE ? H_POOL+2+i : i ? H_TITLE+11 : H_TITLE+1,UG_ID0+i);
     if (mode==UG_MODE) st.opts[8]=add(c,self,H_LIGHT+st.light,UG_LIGHT_MODE);
     if (mode==UG_MODE) st.opts[9]=add(c,self,H_POOL+st.pool,UG_POOL_MODE);
+    if (mode==UG_MODE) st.opts[10]=add(c,self,H_PULSE+st.pulse,UG_PULSE_MODE);
     st.open = 1; st.committed = 0;
-    uint32_t init = (mode==UG_MODE ? st.saved : mode==UG_LIGHT_MODE ? st.light : st.pool)+1;
+    uint32_t init = (mode==UG_MODE ? st.saved : mode==UG_LIGHT_MODE ? st.light : mode==UG_POOL_MODE ? st.pool : st.pulse)+1;
     c->ecx = self + 0x2C;
     call_guest(c, M32(M32(self + 0x2C) + 0x40), 1, &init);
     /* Colours return to Visual; the light's native Off/On choices return to
@@ -167,15 +191,19 @@ void underglow_menu_notify(uint32_t self, uint32_t msg) {
     if (i<count) {
         if (st.mode==UG_MODE && i!=st.shown) {
             st.shown=i; underglow_set(st.profile,st.handle,i);
+            if (i) underglow_light_set(st.profile,st.handle,1);   /* a chosen colour lights; Back restores both */
         } else if (st.mode==UG_LIGHT_MODE && i!=st.shown_light) {
             st.shown_light=i; underglow_light_set(st.profile,st.handle,i);
         } else if (st.mode==UG_POOL_MODE && i!=st.shown_pool) {
             st.shown_pool=i; pool_preview(i);
+        } else if (st.mode==UG_PULSE_MODE && i!=st.shown_pulse) {
+            st.shown_pulse=i; pulse_preview(i);
         }
     }
     if (msg==0x0C407210u && i<count) {
         st.committed=1;
         if(st.mode==UG_POOL_MODE) pool_save();
+        if(st.mode==UG_PULSE_MODE) pulse_save();
         if (diag_on && st.mode==UG_MODE) diag_event("underglow menu: accepted preset=%u label=%s", i, k_names[i]);
     }
     else if (msg==0xE1FDE1D1u) settle();

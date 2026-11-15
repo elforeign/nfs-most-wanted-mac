@@ -1063,6 +1063,7 @@ void cliprec_stop(void) {
 void cliprec_shutdown(void) {
     ClipSession *s;
     { std::lock_guard<std::mutex> lock(control); s = current; }
+    cliprec_live_stop(); livestream_stop();
     if (!s) { if(replayExport) replayExport->wait(5); return; }
     // Live Stop clears broadcast before its queued detach (state 3) completes.
     if (s->replayOnly && !s->fileRequested && !s->retiringFiles &&
@@ -1076,7 +1077,7 @@ void cliprec_shutdown(void) {
         s->stopping=true;
         return;
     }
-    livestream_stop(); liveState=0;
+    liveState=0;
     cliprec_stop();
     // Preserve requested files within the existing quit bound. A replay save
     // may still need the encoder's pending packets to complete its snapshot.

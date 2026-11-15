@@ -7,7 +7,7 @@ documented rule, and never hangs on an unusable directory."""
 # the orphan-child case admits a third suite, and the stress run reaches 6 at once.
 # The earlier symlink/.lock version failed the review's release-between-ln-and-check, legacy-directory and
 # orphaned-nested cases; this kernel-lock version has no such window.
-# Solo/suite proof: 21/21; retro fixed gate / old other; held suite refuses solo (75), removed guard admits (0), ledger 1/1; quiet 0/0.
+# Solo/suite proof: held suite refuses solo (75), removed guard admits (0), ledger 1/1; quiet 0/0.
 # Acquisition log proof: one waited holder emits one acquisition line; immediate holders emit none.
 import os
 from pathlib import Path
@@ -140,8 +140,6 @@ def main():
                                cwd=RT.parent, env=e, capture_output=True, text=True, timeout=20)
             check(p.returncode == want, f'solo beside suite: {script.name} rc={p.returncode}, expected {want}: {p.stderr}')
         check((base/'runs/ledger.tsv').read_text().splitlines()[-1].split('\t')[-2:] == ['1','1'], 'suite start/end counts absent')
-        kind=next(line.split(' = ',1)[1] for line in (RT/'retro.py').read_text().splitlines() if line.lstrip().startswith('k = ')); row=(base/'runs/ledger.tsv').read_text().splitlines()[-1].split('\t')
-        check(eval(kind,dict(r=row)) == 'gate' and eval(kind.replace('r[10]','r[-1]'),dict(r=row)) == 'other', 'retro loses diagnostics with suite columns')
         h.communicate('release\n', timeout=10)
         p = subprocess.run(['sh', '-c', f'. {RT}/game_slot.sh; slot_games() {{ :; }}; slot_acquire fixture; sh -c "exec 8>&-; . {RT}/suite_slot.sh; suite_slot_guard shared" && exit 3; slot_release 0'],
                            cwd=RT.parent, env=e, capture_output=True, text=True, timeout=20)

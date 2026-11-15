@@ -25,6 +25,10 @@ import tempfile
 import collections
 import statistics
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent.parent
 RT = ROOT / 'runtime'
 
@@ -167,7 +171,7 @@ def cstring(text, name):
 
 
 def builtin_checks():
-    renderer = (RT / "render.m").read_text()
+    renderer = mw_source(RT / "render.m")
     with tempfile.TemporaryDirectory(prefix="soft-smoke-builtin-") as scratch:
         tmp = Path(scratch)
         # Project production registry ids, as builtin_features_test.py does;
@@ -255,7 +259,7 @@ def main():
         print('SKIP: private generated particle shader literals absent')
         raise SystemExit(3)
     materials = (RT / 'materials.m').read_text()
-    renderer = (RT / 'render.m').read_text()
+    renderer = mw_source(RT / 'render.m')
     # Normalized Retail source pinned at e09a0440; no repository history needed.
     retail_digest = '24074aa892329eb1c1e3cb77ed33e9fb47b7883dd7b7fabf873e141666048c3c'
     # Alpha-to-coverage adds only a shared optional epilogue. Preserve the full

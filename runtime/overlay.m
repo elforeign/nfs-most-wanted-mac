@@ -148,6 +148,10 @@ static void snapshot(Snap *s, int lv) {
     if (host_ticks() / 1e9 < notice_until) snprintf(s->notice, sizeof s->notice, "%s", notice_text);
     s->scale = layer ? (float)backing_scale() : 1;
     if (lv == OVERLAY_NOTICE) return;   // nothing else is shown: no counters
+#if NFS_GAME != NFS_GAME_MW
+    extern int carbon_sim_hz(void);
+    s->sim_hz = carbon_sim_hz();
+#endif
     // the last second of frames, newest first (the same window stats.log uses)
     static float ft[PERF_RING];
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
@@ -192,22 +196,35 @@ static void snapshot(Snap *s, int lv) {
     render_overlay_stats(&s->compiling, &s->nshaders, &s->npipes, &uploads, &s->deferred, &renamed);
     s->uploads = head > last_frames ? (float)(uploads - last_uploads) / (float)(head - last_frames) : 0;
     last_uploads = uploads; last_frames = head;
+#if NFS_GAME == NFS_GAME_MW
     s->sim_hz = pacing_sim_hz();
+#endif
     s->rss = rss_now();
+    #if NFS_GAME == NFS_GAME_MW
     s->bump = galloc_used(); s->gm = gmalloc_used(); s->heap = heap_used();
     vinyls_live(&s->vinyls, &s->vinyls_mb, &s->skins, &s->skins_mb);
+    #endif
     render_live_stats(&s->tex, &s->tex_mb, &s->buf, &s->buf_mb);
     s->bw = dev.pp[0]; s->bh = dev.pp[1];
     if (layer) { CGSize b = layer.bounds.size; s->ww = (uint32_t)(b.width * s->scale); s->wh = (uint32_t)(b.height * s->scale); }
+#if NFS_GAME == NFS_GAME_MW
     s->shadow = M32(0x00901830u);                                // g_ShadowDetail
     s->shadow_size = (uint32_t)x360_shadow_map_size();
     s->fsaa = M32(0x00901808u);                                  // g_FSAALevel
+#endif
     s->msaa = render_msaa_samples();
     const char *ws = getenv("NFS_WIDESCREEN");
     int settings_get(const char *id);                            // settings.c: the live values (F10 menu, switches)
+#if NFS_GAME == NFS_GAME_MW
     s->postfx_x360 = settings_get("graphics.postfx") != 1;
+#endif
     s->widescreen = !(ws && !strcmp(ws, "off"));
+#if NFS_GAME == NFS_GAME_MW
     s->rumble_off = settings_get("controls.rumble") == 0;
+#else
+    const char *rumble = getenv("NFS_RUMBLE");
+    s->rumble_off = rumble && (!strcmp(rumble, "off") || !strcmp(rumble, "0"));
+#endif
     s->pad_xbox = user32_pad_native() ? 2 : user32_pad_layout_xbox();
     // the slower queries once a second
     static double slow_at;
@@ -244,7 +261,11 @@ static int panel_lines(const Snap *s, int lv, Line *L) {
         return n;
     }
     if (lv == OVERLAY_COMPACT) {
+#if NFS_GAME == NFS_GAME_MW
         LN("", "%5.1f fps  %5.2f ms p50  %5.2f p99  sim %d Hz", s->fps, s->p50, s->p99, pacing_sim_hz());
+#else
+        LN("", "%5.1f fps  %5.2f ms p50  %5.2f p99  sim %d Hz", s->fps, s->p50, s->p99, s->sim_hz);
+#endif
         if (s->notice[0]) LN("", "%s", s->notice);
         return n;
     }
@@ -256,10 +277,16 @@ static int panel_lines(const Snap *s, int lv, Line *L) {
     LN("gpu", "%5.2f ms  %4.0f draws  compiling %d  uploads %.1f/frame", s->gpu, s->draws, s->compiling, s->uploads);
     LN("", "%d shader variants  %d pipelines  %llu draws deferred", s->nshaders, s->npipes, (unsigned long long)s->deferred);
     L[n - 1].dim = 1;
+#if NFS_GAME == NFS_GAME_MW
     LN("memory", "RSS %llu MB  bump %u MB  gmalloc %u MB  heap %u MB", (unsigned long long)(s->rss >> 20), s->bump >> 20, s->gm >> 20, s->heap >> 20);
+#else
+    LN("memory", "RSS %llu MB", (unsigned long long)(s->rss >> 20));
+#endif
     LN("", "GPU textures %lld (%lld MB)  buffers %lld (%lld MB)", (long long)s->tex, (long long)s->tex_mb, (long long)s->buf, (long long)s->buf_mb);
+#if NFS_GAME == NFS_GAME_MW
     LN("", "HD vinyls %u (%u MB)  skins %u (%u MB)", s->vinyls, s->vinyls_mb, s->skins, s->skins_mb);
     L[n - 1].dim = 1;
+#endif
     uint32_t g = 1;
     for (uint32_t a = s->bw, b = s->bh; b;) { uint32_t t = a % b; a = b; b = t; g = a; }
     char aspect[32];
@@ -270,10 +297,14 @@ static int panel_lines(const Snap *s, int lv, Line *L) {
     char aa[32];
     if (s->msaa > 1) snprintf(aa, sizeof aa, "MSAA %dx", s->msaa);
     else snprintf(aa, sizeof aa, "AA off");
+#if NFS_GAME == NFS_GAME_MW
     char sh[32];
     if (s->shadow) snprintf(sh, sizeof sh, "shadows %u (%u)", s->shadow, s->shadow_size);
     else snprintf(sh, sizeof sh, "shadows off");
     LN("", "post %s  %s  %s", s->postfx_x360 ? "X360" : "PC", sh, aa);
+#else
+    LN("", "%s", aa);
+#endif
     if (s->audio_live > 0) LN("audio", "%s  %s  %llu underruns", s->audio, s->device, (unsigned long long)s->underruns);
     else LN("audio", "%s", s->audio_live == -2 ? "no sound device" : s->audio_live < 0 ? "waiting for an output device (mixing on the wall clock)"
                                                                                         : "silent (NFS_AUDIO=null)");

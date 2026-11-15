@@ -1,3 +1,36 @@
+// Abort controls, four yes processes: 14/20 failed before (concurrent only),
+// 0/40 after in each of segment/playlist/five/concurrent/retry, plus 0/40 in
+// each graceful counterpart. Socket handshake holds the response through Stop.
+// Restored graceful abort control: rejected 1/1 (deadline, not immediate Stop).
+// Whole-process key scan, unchanged baseline/acceptance: 0/0 matches after
+// Save, Go, two uploads, Stop and Forget (7.83 GB, 260 readable VM regions,
+// 0 read errors). Skip cancel's poster erase: 1 match, port.poster, inside a
+// 1280-byte DefaultMallocZone allocation. Generated input/pattern/readback
+// storage is the only excluded VM allocation; output never contains the key.
+// This is one process snapshot, not proof about swap, crash dumps or all
+// AppKit/CFNetwork behavior. Named-object quit/Stop checks remain separate.
+// Early global snapshot control: final ACKs=0 in saved stats vs fixed 1; bytes 752/0.
+// Graceful completion: reviewed abort cancelled=1/finals=0; fixed held segment,
+// playlist and five queued segments cancelled=failed=0, exactly one final ACK.
+// Combined Stop timeout 5.669 s; final retry 2 retries/1 ACK; key residue 0/512 bytes.
+// Join-deadline reset: 6.673 s FAIL vs 5.669 s PASS; pair reset: 1.244 s FAIL vs 0.233 s PASS.
+// False ACK on stalled final is rejected (finals=0, finalized=1); healthy finalized=1/finals=1.
+// Shared drain: five queued items, fixed deadline/cancelled=1/finals=0;
+// disabled common timer posts five and a final (cancelled=0/finals=1), FAIL.
+// Concurrent global Stop, original/fixed: second premature return 1/0 in
+// both plain and poster-queue reentry cases (FAIL/PASS); first returns 0/0
+// early, held key scans 1/1, final residue 0/0. Both fixed stoppers finish
+// within 2 s of releasing the queue; queue reentry does not deadlock.
+// Hardening original/fixed: 5/5 on-queue Stop/failure scans find 1/0 sentinel
+// matches each; external Stop prematurely returns 1/0 times, final residue 0/0.
+// Original lifetime premise: livestream.mm:45,57 retains the NSString key from
+// Go until queued cancellation (:74,:97), which releases without overwriting.
+// :136-141 query items/encoded query/URL/request live until the send pool drains;
+// :50 task retains URL/request copies until completion (:168), while CFNetwork's
+// own session copies have framework-controlled lifetime and cannot be zeroed.
+// :296 start's std::string copy is already scrubbed before returning.
+// Tests retain the stopped state and scan the full owned allocation; fixture
+// input and inaccessible Foundation/CFNetwork allocations are outside the scan.
 // Livefix original/fixed: 7 segments/0 playlists vs 7/7, names 6/7 unique;
 // protocol/session checks 7/0 failures; queue count 6/5, detached Stop notes 0/1.
 // Original 202/500/401 and playlist deadline controls fail; fixed pass.
@@ -13,15 +46,175 @@
 #include "live_encode.h"
 #import <Foundation/Foundation.h>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <thread>
 #include <sys/socket.h>
+#include <poll.h>
 #include <unistd.h>
 #include <cstdarg>
 #include <mutex>
+#ifdef LIVESTREAM_PROCESS_SCAN
+#import <Cocoa/Cocoa.h>
+#include <mach/mach_vm.h>
+#include <malloc/malloc.h>
+
+// Scanner-owned input/patterns/readback live in one explicitly excluded VM
+// allocation. Read stdin directly: stdio/iostream would leave fixture copies.
+static constexpr size_t scanChunk=1024*1024, scanRangeCap=500000;
+struct ScanRange { uintptr_t address; size_t size; const char *owner; };
+struct ScanStorage {
+    unsigned char raw[512], patterns[4][3072], readback[scanChunk+3072];
+    size_t lengths[4], inputSize;
+    ScanRange allocations[scanRangeCap], tracked[256];
+    size_t allocationCount, trackedCount;
+    bool overflow;
+};
+static ScanStorage *scanStorage;
+static live::StreamTestOptions processScanOptions;
+static void scanTrack(const void *address,size_t size,const char *owner) {
+    if(!address || !size) return;
+    auto s=scanStorage;
+    if(s->trackedCount==256) { s->overflow=true; return; }
+    s->tracked[s->trackedCount++]={(uintptr_t)address,size,owner};
+}
+static NSString *scanString(NSString *value,const char *owner) {
+    const char *bytes=CFStringGetCStringPtr((__bridge CFStringRef)value,kCFStringEncodingUTF8);
+    if(bytes) scanTrack(bytes,strlen(bytes),owner);
+    const UniChar *wide=CFStringGetCharactersPtr((__bridge CFStringRef)value);
+    if(wide) scanTrack(wide,value.length*sizeof(UniChar),owner);
+    return value;
+}
+static kern_return_t scanReader(task_t,vm_address_t address,vm_size_t,void **memory) {
+    *memory=(void *)address; return KERN_SUCCESS;
+}
+static void scanRanges(task_t,void *context,unsigned,vm_range_t *ranges,unsigned count) {
+    auto s=scanStorage;
+    for(unsigned i=0;i<count;++i) {
+        if(s->allocationCount==scanRangeCap) { s->overflow=true; return; }
+        s->allocations[s->allocationCount++]={ranges[i].address,ranges[i].size,(const char *)context};
+    }
+}
+static void scanInput() {
+    mach_vm_address_t address=0;
+    if(mach_vm_allocate(mach_task_self(),&address,sizeof(ScanStorage),VM_FLAGS_ANYWHERE)!=KERN_SUCCESS) abort();
+    scanStorage=(ScanStorage *)address;
+    auto s=scanStorage;
+    while(s->inputSize<sizeof s->raw) {
+        ssize_t n=read(STDIN_FILENO,s->raw+s->inputSize,1);
+        if(n!=1 || s->raw[s->inputSize]=='\n') break;
+        ++s->inputSize;
+    }
+    if(!s->inputSize || s->inputSize==sizeof s->raw) abort();
+    const char hex[]="0123456789ABCDEF";
+    for(size_t i=0;i<s->inputSize;++i) {
+        unsigned char c=s->raw[i];
+        // This scan fixture is ASCII with URL punctuation, not a compiled literal.
+        if(c>=128) abort();
+        s->patterns[0][s->lengths[0]++]=c;
+        if((c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') ||
+           c=='-' || c=='_' || c=='.' || c=='~') s->patterns[1][s->lengths[1]++]=c;
+        else {
+            s->patterns[1][s->lengths[1]++]='%';
+            s->patterns[1][s->lengths[1]++]=hex[c>>4];
+            s->patterns[1][s->lengths[1]++]=hex[c&15];
+        }
+    }
+    for(unsigned p=0;p<2;++p) for(size_t i=0;i<s->lengths[p];++i) {
+        s->patterns[p+2][s->lengths[p+2]++]=s->patterns[p][i];
+        s->patterns[p+2][s->lengths[p+2]++]=0;
+    }
+}
+static unsigned scanProcess() {
+    auto s=scanStorage;
+    vm_address_t *zones=nullptr; unsigned zoneCount=0;
+    if(malloc_get_all_zones(mach_task_self(),scanReader,&zones,&zoneCount)!=KERN_SUCCESS) abort();
+    for(unsigned i=0;i<zoneCount;++i) {
+        auto zone=(malloc_zone_t *)zones[i];
+        if(zone->introspect->enumerator(mach_task_self(),(void *)zone->zone_name,
+            MALLOC_PTR_IN_USE_RANGE_TYPE,zones[i],scanReader,scanRanges)!=KERN_SUCCESS) abort();
+    }
+    std::sort(s->allocations,s->allocations+s->allocationCount,[](const ScanRange& a,const ScanRange& b) {
+        return a.address<b.address;
+    });
+    unsigned matches=0, port=0, unknown=0, regions=0, readErrors=0;
+    uint64_t scanned=0;
+    mach_vm_address_t previousEnd=0;
+    size_t tailSize=0;
+    unsigned tailTag=0;
+    mach_vm_address_t address=0; natural_t depth=0;
+    while(true) {
+        mach_vm_size_t size=0;
+        vm_region_submap_info_data_64_t info={};
+        mach_msg_type_number_t count=VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t rc=mach_vm_region_recurse(mach_task_self(),&address,&size,&depth,
+            (vm_region_recurse_info_t)&info,&count);
+        if(rc==KERN_INVALID_ADDRESS) break;
+        if(rc!=KERN_SUCCESS) abort();
+        if(info.is_submap) { ++depth; continue; }
+        if(info.protection&VM_PROT_READ) {
+            ++regions;
+            for(mach_vm_size_t offset=0;offset<size;) {
+                size_t amount=(size_t)std::min<mach_vm_size_t>(scanChunk,size-offset);
+                mach_vm_address_t begin=address+offset;
+                // This is the only excluded address range, including patterns.
+                if(begin<(uintptr_t)s+sizeof *s && begin+amount>(uintptr_t)s) {
+                    if(begin<(uintptr_t)s) amount=(uintptr_t)s-begin;
+                    else { offset+=std::min<mach_vm_size_t>(size-offset,(uintptr_t)s+sizeof *s-begin); continue; }
+                }
+                // Carry the previous bytes across chunks AND adjacent readable
+                // VM regions, so a key straddling either boundary is counted.
+                if(begin!=previousEnd) tailSize=0;
+                mach_vm_size_t got=0;
+                rc=mach_vm_read_overwrite(mach_task_self(),begin,amount,(mach_vm_address_t)(s->readback+tailSize),&got);
+                if(rc!=KERN_SUCCESS || got!=amount) { ++readErrors; tailSize=0; previousEnd=0; offset+=amount; continue; }
+                scanned+=amount;
+                size_t available=tailSize+got;
+                for(unsigned p=0;p<4;++p) {
+                    const unsigned char *cursor=s->readback;
+                    const unsigned char *end=s->readback+available;
+                    while((size_t)(end-cursor)>=s->lengths[p]) {
+                        auto hit=(const unsigned char *)memmem(cursor,end-cursor,s->patterns[p],s->lengths[p]);
+                        if(!hit) break;
+                        cursor=hit+1;
+                        if(hit+s->lengths[p]<=s->readback+tailSize) continue; // already counted
+                        uintptr_t location=begin-tailSize+(hit-s->readback);
+                        const char *owner="unattributed";
+                        for(size_t i=0;i<s->trackedCount;++i) {
+                            const auto &r=s->tracked[i];
+                            if(location>=r.address && location+s->lengths[p]<=r.address+r.size) owner=r.owner;
+                        }
+                        auto allocation=std::upper_bound(s->allocations,s->allocations+s->allocationCount,location,
+                            [](uintptr_t value,const ScanRange& r) { return value<r.address; });
+                        const ScanRange *r=allocation==s->allocations?nullptr:allocation-1;
+                        if(r && location>=r->address+r->size) r=nullptr;
+                        ++matches;
+                        if(!strncmp(owner,"port.",5)) ++port; else ++unknown;
+                        printf("memory-match: form=%u address=0x%llx owner=%s zone=%s allocation=0x%llx size=%zu tag=%u\n",
+                            p,(unsigned long long)location,owner,r&&r->owner?r->owner:"none/freed",
+                            (unsigned long long)(r?r->address:0),r?r->size:0,location<begin?tailTag:info.user_tag);
+                    }
+                }
+                tailSize=std::min<size_t>(3071,available);
+                memmove(s->readback,s->readback+available-tailSize,tailSize);
+                memset(s->readback+tailSize,0,sizeof s->readback-tailSize);
+                previousEnd=begin+amount;
+                tailTag=info.user_tag;
+                offset+=amount;
+            }
+        }
+        if(!size || address+size<address) break;
+        address+=size;
+    }
+    printf("memory-scan: matches=%u port=%u unattributed=%u regions=%u bytes=%llu read_errors=%u overflow=%d exclusions=1\n",
+        matches,port,unknown,regions,(unsigned long long)scanned,readErrors,s->overflow);
+    if(s->overflow || readErrors) abort();
+    return matches;
+}
+#endif
 static std::mutex sessionNotesLock;
 static std::vector<std::string> sessionNotes;
 static FILE *sessionNoteFile;
@@ -42,6 +235,48 @@ extern "C" unsigned livestream_test_socket_count();
 #define LIVESTREAM_SOURCE "livestream.mm"
 #endif
 #include LIVESTREAM_SOURCE
+
+#ifdef LIVESTREAM_PROCESS_SCAN
+// Use the production secure controller and poster together; only capture and
+// window attachment are doubled. The fixture's external clipboard bytes live
+// in the excluded input allocation; its returned NSString is scanned normally.
+static int scanCaptureState;
+extern "C" int cliprec_live_state(void) { return scanCaptureState; }
+extern "C" int cliprec_live_start(void) { scanCaptureState=1; return 1; }
+extern "C" void cliprec_live_stop(void) { scanCaptureState=0; }
+@interface ScanParent : NSWindow @end
+@implementation ScanParent
+- (void)beginSheet:(NSWindow *)sheet completionHandler:(void (^)(NSModalResponse))handler { (void)sheet; (void)handler; }
+@end
+@interface ScanApp : NSObject
+@property NSWindow *keyWindow;
+- (void)sendEvent:(NSEvent *)event;
+@end
+@implementation ScanApp
+- (void)sendEvent:(NSEvent *)event { (void)event; }
+@end
+static ScanApp *scanApp;
+@interface ScanPasteboard : NSObject
++ (instancetype)generalPasteboard;
+- (NSString *)stringForType:(NSPasteboardType)type;
+@end
+@implementation ScanPasteboard
++ (instancetype)generalPasteboard { return [self new]; }
+- (NSString *)stringForType:(NSPasteboardType)type {
+    if(![type isEqual:NSPasteboardTypeString]) return nil;
+    return [[NSString alloc] initWithBytes:scanStorage->raw length:scanStorage->inputSize encoding:NSASCIIStringEncoding];
+}
+@end
+#define NSPasteboard ScanPasteboard
+#undef NSApp
+#define NSApp scanApp
+#ifndef STREAM_KEY_SOURCE
+#define STREAM_KEY_SOURCE "stream_key.m"
+#endif
+#include STREAM_KEY_SOURCE
+#undef NSApp
+#undef NSPasteboard
+#endif
 
 static void check(bool ok,const char *why) {
     if(!ok) { fprintf(stderr,"FAIL stream: %s\n",why); exit(1); }
@@ -99,7 +334,240 @@ static void captureHealthy(const std::shared_ptr<live::Poster>& p) {
     check(recorded==100 && replayed==100 && !file->failed() && !replay->failed() && stream->failed() && capture.healthy(),"recording and replay survive live failure");
     live::stopStream();
 }
+// The scanner visits the complete owned allocation, not just its logical size.
+// The fallback exercises the original retained NSString without changing it.
+template<class S> static auto keyResidue(const S& state,const std::string& sentinel,int)
+    -> decltype(sizeof(state->keyBytes),size_t{}) {
+    (void)sentinel;
+    unsigned residue=0;
+    for(unsigned char byte:state->keyBytes) residue|=byte;
+    return residue?1:0; // every byte must be zero, including unused capacity
+}
+template<class S> static size_t keyResidue(const S& state,const std::string& sentinel,long) {
+    NSString *text=[[NSString alloc] initWithBytes:sentinel.data() length:sentinel.size() encoding:NSUTF8StringEncoding];
+    return state->key && [state->key containsString:text];
+}
+static int keyExternalStopProof(const std::string& key,const live::StreamTestOptions& options) {
+    auto poster=live::Poster::create(key,options);
+    check(!!poster,"external wipe activation");
+    auto state=poster->testState();
+    dispatch_semaphore_t gate=dispatch_semaphore_create(0), entered=dispatch_semaphore_create(0);
+    dispatch_async(state->work,^{
+        dispatch_semaphore_signal(entered);
+        dispatch_semaphore_wait(gate,DISPATCH_TIME_FOREVER);
+    });
+    dispatch_semaphore_wait(entered,DISPATCH_TIME_FOREVER);
+    std::atomic<bool> returned{false};
+    std::thread stopper([&] { poster->stop(); returned=true; });
+    // Wait for the stopping thread to retire the producer while work is held.
+    check(await([&]{return !poster->stats().running;}),"external stop retires producer");
+    bool premature=await([&]{return returned.load();},0.05);
+    dispatch_semaphore_signal(gate);
+    stopper.join();
+    __block size_t residual=0;
+    dispatch_sync(state->work,^{ residual=keyResidue(state,key,0); });
+    printf("external key wipe: premature_return=%d residual_matches=%zu\n",premature,residual);
+    check(!premature && !residual,"Stop waits for cancellation and erasure on another queue");
+    return 0;
+}
+// Hold the poster queue so the first global Stop has retired the producer but
+// cannot erase. A second global Stop must join it, including queue reentry.
+static int keyConcurrentStopProof(const std::string& key,const live::StreamTestOptions& options,bool reenter) {
+    auto poster=live::Poster::create(key,options);
+    check(!!poster,"concurrent wipe activation");
+    auto state=poster->testState();
+    { std::lock_guard<std::mutex> guard(live::streamLock); live::currentStream=poster; }
+    dispatch_semaphore_t gate=dispatch_semaphore_create(0), entered=dispatch_semaphore_create(0);
+    dispatch_async(state->work,^{
+        dispatch_semaphore_signal(entered);
+        check(!dispatch_semaphore_wait(gate,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC)),"release held poster queue");
+        if(reenter) livestream_stop(); // must not deadlock on streamLock
+    });
+    check(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC)),"poster queue held");
+    std::atomic<bool> firstReturned{false}, secondEntered{false}, secondReturned{false};
+    std::thread first([&] { livestream_stop(); firstReturned=true; });
+    check(await([&]{return !poster->stats().running;},1),"first stopper retires producer before drain");
+    std::thread second([&] { secondEntered=true; livestream_stop(); secondReturned=true; });
+    check(await([&]{return secondEntered.load();},1),"second stopper enters");
+    bool premature=await([&]{return secondReturned.load();},0.05);
+    bool firstPremature=firstReturned.load();
+    // The gate still prevents any writes to the key allocation here.
+    size_t held=keyResidue(state,key,0);
+    dispatch_semaphore_signal(gate);
+    check(await([&]{return firstReturned.load() && secondReturned.load();},2),"both stoppers finish bounded queue drain");
+    first.join(); second.join();
+    __block size_t residual=0;
+    dispatch_sync(state->work,^{ residual=keyResidue(state,key,0); });
+    printf("concurrent key wipe: first_premature=%d second_premature=%d held_matches=%zu residual_matches=%zu queue_reentry=%d\n",
+        firstPremature,premature,held,residual,reenter);
+    check(!firstPremature && !premature && held==1 && !residual,"concurrent stoppers wait for poster erasure");
+    check(livestream_status()==0,"concurrent stop leaves stream Off");
+    return 0;
+}
+static int keyWipeProof(const std::string& mode,const std::string& key,const live::StreamTestOptions& options) {
+    if(mode=="wipe-concurrent" || mode=="wipe-concurrent-queue")
+        return keyConcurrentStopProof(key,options,mode=="wipe-concurrent-queue");
+    if(mode=="wipe-external") return keyExternalStopProof(key,options);
+    auto poster=live::Poster::create(key,options);
+    check(!!poster,"wipe poster activation");
+    auto state=poster->testState();
+    check(keyResidue(state,key,0)>0,"scanner sees active key before cancellation");
+    if(mode!="wipe-idle") {
+        check(poster->post(segment()),"wipe request admission");
+        check(await([&]{return startedRequests.load()>0;}),"wipe request starts");
+        if(mode=="wipe-playlist") check(await([&]{return startedRequests.load()>1;}),"playlist starts");
+        if(mode=="wipe-retry") check(await([&]{return poster->stats().retries>0;}),"retry scheduled");
+    }
+    __block size_t residual=0;
+    // The original dispatch_async cancellation cannot run before this block
+    // returns, making the old readable copy deterministic, without sleeps.
+    dispatch_sync(state->work,^{
+        if(mode=="wipe-failure") poster->fail(live::StreamError::capture);
+        else poster->stop();
+        residual=keyResidue(state,key,0);
+    });
+    printf("key wipe: residual_matches=%zu running=%d\n",residual,poster->stats().running);
+    check(!residual && !poster->stats().running,"Stop/terminal failure synchronously clears owned poster bytes");
+    drained(poster);
+    return 0;
+}
+// Graceful fixtures release after admission closes; abort fixtures hold the
+// response until Stop returns, so it cannot win the race against cancellation.
+static int finishProof(const std::string& mode,const std::string& key,const live::StreamTestOptions& options,
+                       const std::string& anchor) {
+    const char *abortFD=std::getenv("NFS_TEST_ABORT_FD");
+    int responseFD=abortFD?std::atoi(abortFD):-1;
+    auto p=live::Poster::create(key,options);
+    check(!!p,"finish activation");
+    auto state=p->testState();
+    std::string directory=anchor.substr(0,anchor.find_last_of('/')+1);
+    bool idle=mode=="finish-idle", stalled=mode.find("stall")!=std::string::npos;
+    unsigned count=(mode=="finish-five" || mode=="finish-queue-stall")?5:mode=="finish-tail"?6:1;
+    if(!idle) {
+        for(unsigned i=0;i<count;++i) {
+            check(p->post(segment(i,752,i%2?180450:180000)),"finish admission");
+            if(mode=="finish-tail") check(await([&]{ return !p->stats().bytes; }),"tail acknowledged");
+        }
+        if(mode=="finish-segment" || mode=="finish-playlist" || mode=="finish-five" ||
+           mode=="finish-concurrent" || mode=="finish-retry" || mode=="finish-drain-stall" ||
+           mode=="finish-total-stall" || mode=="finish-joined-stall" || mode=="finish-early-stall" || mode=="finish-queue-stall")
+        {
+            if(abortFD) {
+                pollfd ready={responseFD,POLLIN,0}; char held=0;
+                check(poll(&ready,1,8000)==1 && read(responseFD,&held,1)==1 && held=='H',"abort response held by fixture");
+            } else check(await([&]{return std::ifstream(directory+"finish-held").good();}),"response held by fixture");
+        }
+        else if(mode=="finish-final-stall")
+            check(await([&]{return !p->stats().bytes;}),"normal pair acknowledged before final stall");
+    }
+    if(mode=="finish-early-stall") std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    std::thread release;
+    if(!abortFD) release=std::thread([&] {
+        check(await([&]{return !p->stats().running;}),"finish closes admission");
+        if(mode=="finish-concurrent") check(!live::startStream(key),"Go blocked during shared completion");
+        if(mode=="finish-total-stall" || mode=="finish-joined-stall") std::this_thread::sleep_for(std::chrono::milliseconds(2650));
+        std::ofstream(directory+"finish-release")<<"release";
+    });
+    auto began=std::chrono::steady_clock::now();
+    if(mode=="finish-concurrent") {
+        { std::lock_guard<std::mutex> guard(live::streamLock); live::currentStream=p; }
+        std::thread second([]{ livestream_stop(); });
+        livestream_stop(); second.join();
+    } else if(mode=="finish-joined-stall") {
+        std::thread first([&]{ p->finish(); });
+        check(await([&]{return !p->stats().running;}),"first finish starts shared deadline");
+        std::this_thread::sleep_for(std::chrono::milliseconds(4000));
+        p->finish(); first.join();
+    } else p->finish();
+    double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
+    if(abortFD) {
+        // Stop has issued cancellation before the fixture may answer. The
+        // graceful-only Go check above belongs to the held completion path;
+        // an immediate abort has already completed when this point is reached.
+        check(write(responseFD,"R",1)==1,"abort releases held response after Stop");
+    } else release.join();
+    auto result=p->stats();
+    __block size_t residue=0;
+    dispatch_sync(state->work,^{ residue=keyResidue(state,key,0); });
+    printf("finish proof: mode=%s accepted=%llu posted=%llu playlists=%llu cancelled=%llu failed=%llu finals=%llu finalized=%d bytes=%zu ticks=%lld residue=%zu seconds=%.3f\n",
+        mode.c_str(),(unsigned long long)result.accepted,(unsigned long long)result.posted,
+        (unsigned long long)result.playlists,(unsigned long long)result.cancelled,(unsigned long long)result.failed,
+        (unsigned long long)result.finalPlaylists,result.finalized,result.bytes,(long long)result.ticks,residue,elapsed);
+    if(abortFD) {
+        check(result.error==live::StreamError::stopped,"abort control must stop without deadline");
+        printf("abort control: stopped=1\n");
+    }
+    check(elapsed<=6.25 && !residue && !result.bytes && !result.ticks,"finish bounded wait and complete key/payload erasure");
+    check(!p->post(segment()),"finish rejects stale callback");
+    if(mode=="finish-early-stall") check(elapsed<0.55,"finish preserves active pair earlier deadline");
+    if(mode=="finish-retry") check(result.retries==2,"final playlist retains bounded retries");
+    if(stalled) check(!result.finalized && !result.finalPlaylists && result.error==live::StreamError::deadline,
+                      "timeout must not claim acknowledged EOS");
+    else if(idle) check(!result.accepted && !createdSessions && !result.playlists,"empty finish creates no session");
+    else check(result.accepted==count && result.posted==count && result.playlists==count+1 &&
+               result.finalPlaylists==1 && result.finalized && !result.cancelled && !result.failed,
+               "graceful held response completes without cancellation and acknowledges one EOS");
+    if(mode=="finish-concurrent") {
+        std::lock_guard<std::mutex> guard(live::streamLock);
+        auto last=live::lastStream;
+        printf("last snapshot: posted=%llu playlists=%llu finals=%llu finalized=%d bytes=%zu\n",
+            (unsigned long long)last.posted,(unsigned long long)last.playlists,
+            (unsigned long long)last.finalPlaylists,last.finalized,last.bytes);
+        check(last.posted==result.posted && last.playlists==result.playlists &&
+              last.finalPlaylists==result.finalPlaylists && last.finalized==result.finalized && !last.bytes,
+              "global Stop snapshots final counters after completion");
+    }
+    p->finish(); // repeated callers never reset deadlines or send another EOS
+    check(p->stats().finalPlaylists==result.finalPlaylists,"repeated finish is idempotent");
+    return 0;
+}
+#ifdef LIVESTREAM_PROCESS_SCAN
+static int processScanProof(const char *base,const char *anchor) {
+    scanInput();
+    processScanOptions.baseURL=base;
+    std::ifstream cert(anchor,std::ios::binary);
+    processScanOptions.anchorDER.assign(std::istreambuf_iterator<char>(cert),{});
+    check(!processScanOptions.anchorDER.empty(),"scan fixture anchor");
+    std::shared_ptr<live::StreamState> heldState;
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        scanApp=[ScanApp new];
+        scanApp.keyWindow=[[ScanParent alloc] initWithContentRect:NSMakeRect(0,0,640,480)
+            styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+        stream_key_edit(0);
+        NSEvent *paste=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:0 context:nil
+            characters:@"v" charactersIgnoringModifiers:@"v" isARepeat:NO keyCode:9];
+        check(stream_key_route_event(paste),"scan command-paste");
+        [controller save:nil];
+        check(keySize==scanStorage->inputSize && !panel,"scan Save");
+        stream_key_go(0);
+        check(!!live::currentStream,"scan Go");
+        heldState=live::currentStream->testState();
+        scanTrack(keyBytes,sizeof keyBytes,"port.saved");
+        scanTrack(heldState->keyBytes,sizeof heldState->keyBytes,"port.poster");
+        auto output=live::streamOutput();
+        check(output(segment(0)) && output(segment(1)),"scan two admissions");
+        check(await([&]{ return live::currentStream->stats().playlists==2; }),"scan two uploads acknowledged");
+        stream_key_stop(0);
+        check(live::lastStream.finalized && live::lastStream.posted==2,"scan Stop completed");
+        stream_key_forget(0);
+        scanApp=nil;
+    }
+    // Drain the serial callback pool and main run loop before the snapshot.
+    // Keep the stopped poster allocation alive so a skipped erase is observable.
+    dispatch_sync(heldState->work, ^{});
+    @autoreleasepool { [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+    unsigned matches=scanProcess();
+    check(matches==0,"whole-process scan finds a remaining key copy");
+    return 0;
+}
+#endif
 int main(int argc,char **argv) {
+#ifdef LIVESTREAM_PROCESS_SCAN
+    check(argc==4 && !strcmp(argv[1],"process-scan"),"process scan arguments");
+    return processScanProof(argv[2],argv[3]);
+#endif
     @autoreleasepool {
         check(argc==4,"mode/base/anchor arguments");
         sessionNoteFile=fopen((std::string(argv[3])+".session.txt").c_str(),"w");
@@ -111,6 +579,8 @@ int main(int argc,char **argv) {
         std::ifstream cert(argv[3],std::ios::binary);
         options.anchorDER.assign(std::istreambuf_iterator<char>(cert),{});
         check(!options.anchorDER.empty(),"fixture anchor");
+        if(mode=="finish-early-stall") options.deadlineSeconds=0.4;
+        if(mode.rfind("finish-",0)==0) return finishProof(mode,key,options,argv[3]);
         if(mode=="policy") {
             unsigned rejected=0;
             for(const char *url:{"https://example.invalid/http_upload_hls", "http://a.upload.youtube.com/http_upload_hls",
@@ -138,6 +608,7 @@ int main(int argc,char **argv) {
             check(!live::startStream(""),"empty start remains inactive");
             return 0;
         }
+        if(mode.rfind("wipe-",0)==0) return keyWipeProof(mode,key,options);
         if(mode=="untrusted") options.anchorDER.clear();
         if(mode=="deadline" || mode=="playlist-stall") options.deadlineSeconds=0.4;
         auto p=live::Poster::create(key,options);

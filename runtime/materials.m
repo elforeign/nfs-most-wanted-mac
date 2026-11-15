@@ -21,7 +21,7 @@
 // PC's fixed 2 * pow(R.V, 16). The PC's shadow lookups, environment term (x 0.5, no X360 (1 + 2a) boost), alpha
 // (DiffuseRange.w x 0.25, from the PC vertex shader) and vertex shader are kept; the metallic flake is R30 (below). t0 (shadows off, ps_1_1 with its own VS) stays PC.
 //
-// Payload 2, rain ripples on wet roads (NFS_RAIN_RIPPLES=x360|pc, default x360): the PC worldreflect shaders patched
+// Payload 2, rain ripples on wet roads (NFS_RAIN_RIPPLES=x360|pc|port, console default when complete): the PC worldreflect shaders patched
 // with the X360 `wetroad` PS 09c17c18 rain term (x360/shaders/hlsl/17_road): two scales of an animated RAINSPLASH
 // frame perturb the projective reflection lookup and add glints; see "payload 2" below. A payload either replaces
 // the shader source (msl) or edits the translation (patch), which keeps everything else the PC shader does exactly.
@@ -33,13 +33,20 @@
 
 #include "x360_internal.h"
 #include "roots.h"
+#include "car_locallight.h"
 #include "materials.h"
 #include "underglow_render.h"
 #include "roadfilm.h"
 #include "realworld_materials.h"
+#include "clearcoat.h"
+#include "car_normals_port.h"
 #include "particles_physical.h"
 #include "traffic_detail.h"
 #include "trees.h"
+#include "temporal_state.h"
+#include "rain_cover.h"
+#include "daynight_sky.h"
+#include "daynight_stream.h"
 
 #define TIME_OF_DAY_PTR   0x009B392Cu    // TimeOfDayPointer: +0x60 the specular/hotspot time-of-day gain
 #define CUR_EFFECT        0x00982C80u    // the effect being set up: +4 its type (4 = car)
@@ -48,6 +55,7 @@
 // FUN_006c76e0 (eLightMaterial setter, decomp speed_006c5350.c:1906) stops at +0x9C; the X360 setter 824531C0 also
 // reads +0xA0 MetallicScale and +0xA4 SpecularHotSpot (x TimeOfDay+0x60), and gives the PS the raw SpecularPower +0x58.
 MatCarPaint mat_car;
+static int coat_material;
 
 // The converter switch selects only its explicit material identities.
 // Native headlamp covers use the separate X360 glass selection below.
@@ -164,16 +172,20 @@ static int glass_boost_on(void) {
 // x360_tex.py on 997S_TIRE / 997S_TIRE_N (X360 TEXTURES.BIN): R correlates +0.205 with the diffuse's d/du and G +0.191 with its d/dv
 // (same sign, same size), so G is a gradient along +v like R along +u: B points to +v (image down, D3D). The derivative frame
 // (T = d/du, B = d/dv, 1/det applied, so mirrored uv keep the same meaning) is that frame, G is not flipped (k[7].y = +1).
-static int carnm = -1;
+// Port (NFS_CAR_NORMALMAPS=port): the X360 path, plus car_normals_port.m's generated TREAD / TREADR / DOORLINE map for a
+// family whose console map is not loaded (no console files); a loaded console map is used exactly as by X360.
+static int carnm = -1;                    // 0 pc, 1 x360, 2 port
 static int carnm_on(void) {
-    if (carnm < 0) { const char *e = getenv("NFS_CAR_NORMALMAPS"); carnm = !(e && !strcmp(e, "pc")) && X360_SHADER_LITS; }
+    if (carnm < 0) { const char *e = getenv("NFS_CAR_NORMALMAPS"); carnm = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "port") ? 2 : 1; }
     return carnm;
 }
-void materials_set_car_normals(int x360) { carnm = x360 != 0; if (diag_on) diag_event("materials: car normal maps live now %s", carnm ? "x360" : "pc"); }
+void materials_set_car_normals(int mode) { carnm = mode; if (diag_on) diag_event("materials: car normal maps live now %s", carnm == 2 ? "port" : carnm ? "x360" : "pc"); }
 static char carnm_name[32];
 static int carnm_kind;                    // 1: map from the material's own slot, 2: <CAR>_TIRE_N, 3: <CAR>_BADGING_N, 0: X360-only TREAD...
 static uint32_t carnm_tex;                // this draw's normal map (guest D3D texture), 0 = none
+static int carnm_port;                    // this draw's port-authored map: car_normals_port.h family + 1, 0 = none
 uint32_t mat_carnm_texture(void) { return carnm_tex; }
+int mat_carnm_port(void) { return carnm_port; }
 static const struct { const char *diffuse, *file; uint32_t d3d; } carnm_x360[] = {
     {"TREAD", "GLOBAL/GLOBALB.BUN", 0}, {"TREADR", "GLOBAL/GLOBALB.BUN", 0},
     {"DOORLINE", "GLOBAL/GLOBALB.BUN", 0}, {"DAMAGE0", "GLOBAL/INGAMEA.BUN", 0},
@@ -193,7 +205,7 @@ void materials_car_textures(Cpu *c) {      // x360_textures.m, at the first text
 }
 static uint32_t ti_d3d(uint32_t ti) { return ti && M32(ti) ? M32(M32(ti) + 0x18) : 0; }
 static void carnm_find(Cpu *c) {
-    carnm_tex = 0;
+    carnm_tex = 0; carnm_port = 0;
     if (!carnm_on()) return;
     uint32_t dti = M32(0x00982CB4u), nti = M32(0x00982CB8u);
     if (!dti) return;
@@ -210,8 +222,10 @@ static void carnm_find(Cpu *c) {
         tex = ti_d3d(ti);
         if (diag_on) { static uint32_t seen[64]; static int ns; int i = 0; while (i < ns && seen[i] != a[0]) ++i;
             if (i == ns && ns < 64) { seen[ns++] = a[0]; diag_event("carnm: %s -> TextureInfo %08X d3d %08X", nm, ti, tex); } }
-    } else
+    } else if (X360_SHADER_LITS)          // these four families require console textures; PC maps above do not
         for (int i = 0; i < 4; ++i) if (!strcmp(name, carnm_x360[i].diffuse)) tex = carnm_x360_d3d[i];
+    if (!tex && !carnm_kind && carnm_on() == 2)     // Port: the generated map where the console one is missing
+        for (int i = 0; i < 4; ++i) if (!strcmp(name, carnm_x360[i].diffuse) && car_normals_port_has(i)) carnm_port = i + 1;
     carnm_tex = tex;
     snprintf(carnm_name, sizeof carnm_name, "%s", name);
 }
@@ -280,8 +294,9 @@ void f_006C76E0(Cpu *c) {                // (eLightMaterial *m, uint flags), cal
     mat_car.spec_power = F32(m + 0x58);
     mat_car.metallic = F32(m + 0xA0);
     mat_car.hotspot = F32(m + 0xA4) * g;
+    coat_material = clearcoat_is_paint((const char *)G + m + 0x14, 28);
     glass_boost = gx && glass_boost_on() && !glass_ab_held();
-    if (carbon_lamp) carnm_tex = 0;
+    if (carbon_lamp) carnm_tex = 0, carnm_port = 0;
     else carnm_find(c);
     if (diag_on) {                       // each material once: what the PC data carries
         static uint32_t seen[512];
@@ -464,7 +479,15 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "    float metal = m.k[11].w >= 0.0f ? m.k[11].w : m.k[0].z;                        // k[11].w: test, MetallicScale forced (-1: the material's)\n"
 "    float flake = m.k[11].x > 0.5f ? metal * " X360S_CAR_FLAKE_SCALE "f * (m.k[11].z > 0.5f ? 1.0f : saturate(pi.texcoord3.w)) : 0.0f;   // k[11].z: test, no fade\n"
 "    float3 fv = flake > 0.0f ? 2.0f * flake_vol.sample(fls, pi.texcoord6.xyz * " X360S_CAR_FLAKE_VOL "f, level(0)).xyz - 1.0f : float3(0.0f);\n"
-"    float3 nn = normalize(normalize(pi.texcoord4.xyz) + fv * flake), l = normalize(pi.texcoord3.xyz), v = pi.texcoord5.xyz;\n"
+"    bool generated_flake = m.k[11].x > 1.5f;\n"
+"    if (generated_flake) {\n"
+"        float fade = m.k[11].z > 0.5f ? 1.0f : saturate(1.2f + m.k[11].z * pi.texcoord5.w);   // the console's A 1.2 and B 0.25 (zero at 4.8 m), not tied to the render size\n"
+"        flake = metal * 0.04f * fade;                                                 // the console's strength, 0.04 x MetallicScale\n"
+"        float4 grain = flake_vol.sample(fls, pi.texcoord6.xyz * 62.5f, level(0));\n"
+"        fv = (2.0f * grain.rgb - 1.0f) * grain.a;\n"
+"    }\n"
+"    float3 nn_base = normalize(pi.texcoord4.xyz);\n"
+"    float3 nn = normalize(nn_base + (generated_flake ? (fv - nn_base * dot(nn_base, fv)) : fv) * flake), l = normalize(pi.texcoord3.xyz), v = pi.texcoord5.xyz;\n"
 "    float rv = saturate(dot(2.0f * dot(nn, v) * nn - v, l));\n"
 "    float sp = m.k[0].x;\n"
 "    float spec = car_spec_pow(rv, sp) + " X360S_CAR_HOT_SCALE "f * m.k[0].y * lit * car_spec_pow(rv, " X360S_CAR_HOT_POWER "f * sp);\n"
@@ -473,6 +496,12 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "        float3 t3 = pi.texcoord3.xyz, t4 = pi.texcoord4.xyz;\n"
 "        float p = saturate(dot(2.0f * dot(t4, t3) * t4 - t3, pi.texcoord5.xyz)); p *= p; p *= p; p *= p; p *= p;\n"
 "        s = 2.0f * p * v0.w * v1.rgb * shade;\n"
+"    }\n"
+"    if (m.k[7].z > 0.5f) {                       // Tunnel shadows Keep + sky light (lighting.c): the shadow takes the sun, not the fill lights\n"
+"        float3 n = normalize(pi.texcoord4.xyz);  // the PC VS's per-light term sat(N.L + 0.1) x colour; AO and DiffuseMin cancel in the share\n"
+"        float3 sun = saturate(dot(n, normalize(pi.texcoord3.xyz)) + 0.1f) * m.k[1].rgb;\n"
+"        float3 fill = saturate(dot(n, m.k[2].yzw) + 0.1f) * m.k[3].rgb + saturate(dot(n, m.k[4].xyz) + 0.1f) * m.k[5].xyz;\n"
+"        v0.rgb *= 1.0f + (1.0f / max(shade, 1e-3f) - 1.0f) * fill / max(sun + fill, 1e-4f);   // x shade below: sun x shade + fill\n"
 "    }\n"
 "    Out o;\n"
 "    o.c0 = float4((v0.rgb * tex.rgb + s) * shade + env.rgb * v1.w * v0.w * 0.5f * (1.0f + 2.0f * m.k[2].x * v0.w), tex.a * v0.w);\n"
@@ -498,12 +527,13 @@ CAR_SHADOW_OFF16   // tools/gen_tables.py, from the player's speed.exe (the PC c
 "        float3 Bn = cross(N, T); Bn = dot(Bn, B) < 0.0f ? -Bn : Bn;\n"
 "        float3 nt = normalize(nmap.sample(smp0, uv).xyz * 2.0f - 1.0f);        // r2.wxy = 2 rgb - 1, normalised\n"
 "        nt.y *= m.k[7].y;                                                      // green flip (the handedness check)\n"
-"        nt = normalize(nt + fv * flake);                                       // R30: the X360 09bc003c adds the same " X360S_CARNM_FLAKE_T " MetallicScale volume term, faded by oT3.w\n"
+"        nt = normalize(nt + (generated_flake ? (fv - nt * dot(nt, fv)) : fv) * flake);                                       // R30: the X360 09bc003c adds the same " X360S_CARNM_FLAKE_T " MetallicScale volume term, faded by oT3.w\n"
 "        float3 n = normalize(T * nt.x + Bn * nt.y + N * nt.z);\n"
 "        float nv = max(dot(N, V), " X360S_CARNM_NV_MIN "f);\n"
 "        float3 D = m.k[4].xyz + nv * m.k[5].xyz;                              // oColor0 = DiffuseMin + max(N.V, " X360S_CARNM_NV_MIN_T ") DiffuseRange\n"
 "        float w0 = saturate(dot(n, L0) + " X360S_CARNM_WRAP "f), w1 = saturate(dot(n, L1) + " X360S_CARNM_WRAP "f);   // two wrap lights, wrap " X360S_CARNM_WRAP_T "\n"
 "        float3 dif = m.k[1].rgb * w0 + m.k[3].rgb * w1;                       // LocalColourMatrix[c].x w0 + [c].y w1\n"
+"        if (m.k[7].z > 0.5f) dif += m.k[3].rgb * w1 * (1.0f / max(shade, 1e-3f) - 1.0f);   // Keep + sky light: light 1 unshadowed\n"
 "        float rv = saturate(dot(2.0f * dot(n, L0) * n - L0, V));\n"
 "#if MAT_PAINT_NAN_TINT == 2\n"
 "        cp_tint_zero_domain = rv == 0.0f && sp == 0.0f;\n"
@@ -618,14 +648,14 @@ static int car_paint_on(void) {
             diag_event("carpaint_nan_test: normal=%d broken=%d finite-mutant=%d expected=0/1/1 %s", good, bad, finite, good == 0 && bad == 1 && finite == 1 ? "PASS" : "FAIL");
         }
     }
-    if (car_paint < 0) { const char *e = getenv("NFS_CAR_PAINT"); car_paint = !(e && !strcmp(e, "pc")) && X360_SHADER_LITS; }
+    if (car_paint < 0) { const char *e = getenv("NFS_CAR_PAINT"); car_paint = !(e && !strcmp(e, "pc")); }
     return car_paint;
 }
 // The F10 menu (portmenu.m): the replacement is chosen when a shader is translated, so a run started with the X360
 // paint switches live to PC through the replaced shader's PC-specular path (the A/B's held pass, k[0][3] = 2) and
 // back; a run started with PC paint keeps the PC shaders until the next start.
 void materials_set_car_paint(int x360) { car_paint_live = x360 != 0; if (diag_on) diag_event("materials: car paint live now %s", car_paint_live ? "x360" : "pc"); }
-// ---- R30: X360 metallic flake (NFS_CAR_FLAKE=pc|x360, default pc; live) ----
+// ---- Metallic flake (NFS_CAR_FLAKE=pc|x360|generated; generated is the default without console files, live) ----
 // X360 car PS 09bb919c / 09bc003c [V]: the normal is jittered by (2 tex3D(VOLUMEMAP, V pos) - 1) x MetallicScale x S x
 // saturate(A - B dist) (V, S, A, B: the VS's literals, X360S_CAR_FLAKE_* / X360S_CAR_FADE_*) (dist = |LocalEyePos - pos| in object space, from the VS 09bb7b1c; point filter, wrap), the 32^3 volume R27
 // loads (GLOBALB chunk 30300200). The PC data has the same MetallicScale (+0xA0) as the X360's GLOBALB (offline read of both
@@ -636,16 +666,17 @@ static int flake = -1;
 static int flake_on(void) {
     if (flake < 0) {
         const char *e = getenv("NFS_CAR_FLAKE"), *t = getenv("NFS_TEST_FLAKE_TINT"), *f = getenv("NFS_TEST_FLAKE_FORCE");
-        flake = !(e && !strcmp(e, "pc")) && X360_SHADER_LITS;
+        flake = e && !strcmp(e, "generated") ? 2 : !(e && !strcmp(e, "pc")) && X360_SHADER_LITS ? 1 : !e && !X360_SHADER_LITS ? 2 : 0;   // unset: console files -> x360, none -> generated
         if (t) materials_flake_tint = atoi(t);
         if (f) materials_flake_force = atoi(f);
     }
     return flake;
 }
 void materials_flake_test(int tint, int force) { materials_flake_tint = tint; materials_flake_force = force; if (diag_on) diag_event("materials: flake test tint %d force %d", tint, force); }
-void materials_set_car_flake(int x360) { flake = x360 != 0; if (diag_on) diag_event("materials: car flake live now %s", flake ? "x360" : "pc"); }
-int mat_flake_volume_ok(void) { uint32_t w, h, b; return mat_grass_noise(&w, &h) && mat_grass_volume(&b); }   // render.m binds the same volume as R27's
+void materials_set_car_flake(int mode) { flake = mode >= 0 && mode <= 2 ? mode : 0; if (diag_on) diag_event("materials: car flake live now %s", flake == 2 ? "generated" : flake ? "x360" : "pc"); }
+int mat_flake_volume_ok(void) { if (flake_on() == 2) return 2; uint32_t w, h, b; return mat_grass_noise(&w, &h) && mat_grass_volume(&b); }   // render.m binds the same volume as R27's
 static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
+    o->k[10][3] = (float)coat_material;
     o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
     o->k[6][0] = (float)clear_headlamp;
     o->k[6][2] = lamp_cover ? 1.0f : 0.0f;
@@ -654,7 +685,7 @@ static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
     o->k[0][3] = (probe_sig & PROBE_CARPAINT) ? 1.0f : (ab_state == 2 && !glass_ab_held() && !aux_ab_on() && !lamp_ab_on()) || !car_paint_live ? 2.0f : 0.0f;
     o->k[2][0] = glass_boost ? 1.0f : 0.0f;
     {
-        o->k[11][0] = flake_on() && mat_flake_volume_ok() && o->k[0][3] != 2.0f ? 1.0f : 0.0f;
+        o->k[11][0] = flake_on() && mat_flake_volume_ok() && o->k[0][3] != 2.0f ? (float)flake_on() : 0.0f;
         o->k[11][1] = materials_flake_tint ? 1.0f : 0.0f;
         o->k[11][2] = materials_flake_tint == 2 ? 1.0f : 0.0f;                   // tint 2 (test): distance fade ignored (which draws carry MetallicScale at any range)
         if (materials_flake_force >= 0) o->k[11][3] = (float)materials_flake_force;       // force 0 / 1 (test): the flake's MetallicScale (0 = the negative control)
@@ -662,7 +693,7 @@ static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
         if (diag_on) {
             static uint32_t nd, nm, nf;
             ++nd; nm += mat_car.metallic > 0.0f; nf += o->k[11][0] > 0.0f && mat_car.metallic > 0.0f;
-            if (nd % 20000 == 0) diag_event("flake: %u car paint draws, %u with MetallicScale > 0, %u flaking (switch %s)", nd, nm, nf, flake_on() ? "x360" : "pc");
+            if (nd % 20000 == 0) diag_event("flake: %u car paint draws, %u with MetallicScale > 0, %u flaking (switch %s)", nd, nm, nf, flake_on() == 2 ? "generated" : flake_on() ? "x360" : "pc");
         }
     }
     if (probe_sig & PROBE_CARPAINT) probe_applied(PROBE_CARPAINT, 1);
@@ -672,7 +703,7 @@ static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
     // R26 (above): the normal-map path needs this draw's map, the PC specular compare off, and the t1 VS's object position in texcoord6
     static int tint = -1;
     if (tint < 0) tint = getenv("NFS_TEST_CARNM_TINT") ? atoi(getenv("NFS_TEST_CARNM_TINT")) : 0;
-    o->k[3][3] = carnm_tex && carnm_on() && o->k[0][3] != 2.0f && o->k[0][3] != 1.0f ? 1.0f : 0.0f;
+    o->k[3][3] = (carnm_tex || carnm_port) && carnm_on() && o->k[0][3] != 2.0f && o->k[0][3] != 1.0f ? 1.0f : 0.0f;
     if (o->k[3][3] > 0.0f) {
         for (int i = 0; i < 3; ++i) {
             o->k[2][1 + i] = vsc[15][i];           // LocalDirectionMatrix[1] (light 1)
@@ -685,7 +716,15 @@ static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
         o->k[7][0] = tint == 1 || (tint == 2 && carnm_kind != 1) || (tint == 3 && carnm_kind == 2) || (tint == 4 && carnm_kind == 3) ? 1.0f : 0.0f;   // =2 not the slot-keyed MISC, =3 only _TIRE_N, =4 only _BADGING_N
         o->k[7][1] = 1.0f;                         // green sign: +1 (decoded, see the note above the PS)
         o->k[10][0] = vsc[24][0];                  // EnvmapPower
-        if (diag_on) { static uint32_t n; ++n; if (n < 6 || n % 2000 == 0) diag_event("carnm: %u normal-mapped car draws (%.31s)", n, carnm_name); }
+        if (diag_on) { static uint32_t n, port[4]; ++n; if (carnm_port) ++port[carnm_port - 1];
+            if (n < 6 || n % 2000 == 0) diag_event("carnm: %u normal-mapped car draws (%.31s); port TREAD %u TREADR %u DOORLINE %u DAMAGE0 %u",
+                                                   n, carnm_name, port[0], port[1], port[2], port[3]); }
+    }
+    int lighting_car_sky_fill(void);             // lighting.c: Tunnel shadows Keep + sky light (the PS reads k[7].z)
+    o->k[7][2] = lighting_car_sky_fill() ? 1.0f : 0.0f;
+    if (o->k[7][2] > 0.0f) {                     // the fill lights: 1 in k[2].yzw / k[3].rgb (as R26), 2 in k[4] / k[5] unless R26 uses those
+        for (int i = 0; i < 3; ++i) { o->k[2][1 + i] = vsc[15][i]; o->k[3][i] = vsc[11 + i][1]; }
+        if (o->k[3][3] == 0.0f) for (int i = 0; i < 3; ++i) { o->k[4][i] = vsc[16][i]; o->k[5][i] = vsc[11 + i][2]; }
     }
     if (diag_on) {                       // R26 premise: which car draws carry a normal-map slot (006c6d10's cache)
         uint32_t nt = M32(0x00982CB8u), dt = M32(0x00982CB4u);
@@ -726,50 +765,64 @@ static void car_paint_constants(const float (*vsc)[4], MatConsts *o) {
 #define CUR_VIEW       0x00982A20u     // the eView being drawn: +4 its id
 #define VIEW_RAIN      0x00919648u     // eViews[0] + 0x68 (Rain *), stride 0x70
 #define SIM_TIME       0x009885D8u     // Sim::GetTime, seconds of sim time
-static int ripples = -1, ripples_live = 1;
+#include "gen/port_rain_ripples.inc"
+static int ripples, ripples_live = 1, ripple_provider; // 0 none, 1 console, 2 authored
+static int ripple_prepared;
 static uint8_t *ripple_rgba[16];
 static uint32_t ripple_w, ripple_h;
-static int ripples_on(void) {          // any thread (shader compiles): the env only, the textures are checked per draw
-    if (ripples < 0) { const char *e = getenv("NFS_RAIN_RIPPLES"); ripples = !(e && !strcmp(e, "pc")) && X360_SHADER_LITS && X360_ENGINE_CONSTS; }
-    return ripples;
-}
-void materials_set_rain_ripples(int x360) { ripples_live = x360 != 0; if (diag_on) diag_event("materials: rain ripples live now %s", ripples_live ? "x360" : "pc"); }   // the F10 menu: live in a run started with x360
-uint8_t *x360_texture_rgba(const char *file, uint32_t hash, uint32_t *w, uint32_t *h);   // x360_textures.m
-void materials_textures(void) {        // x360_textures.m, at the first texture Init (start-up, after the X360 dir is known)
-    if (!ripples_on()) return;
+static int ripples_on(void) { return ripples; }                                      
+void materials_set_rain_ripples(int enabled) { ripples_live = enabled != 0; }
+uint8_t *x360_texture_rgba(const char *file, uint32_t hash, uint32_t *w, uint32_t *h);
+void x360_texture_configure(void);
+void materials_ripples_prepare(void) {
+    if (ripple_prepared) return;
+    ripple_prepared = 1;
+    x360_texture_configure();
+    const char *mode = getenv("NFS_RAIN_RIPPLES");
+    int authored = mode && !strcmp(mode, "port");
+    int disabled = mode && !strcmp(mode, "pc");
     int n = 0;
-    for (int i = 0; i < 16; ++i) {
-        char name[16];
-        snprintf(name, sizeof name, "RAINSPLASH%02d", i);
-        uint32_t hh = 0xFFFFFFFFu, w = 0, h = 0;
-        for (const char *q = name; *q; ++q) hh = hh * 33 + (uint8_t)*q;    // bStringHash
-        ripple_rgba[i] = x360_texture_rgba("GLOBAL/GLOBALB.BUN", hh, &w, &h);
-        if (ripple_rgba[i] && (!n || (w == ripple_w && h == ripple_h))) { ripple_w = w; ripple_h = h; ++n; }
-        else { free(ripple_rgba[i]); ripple_rgba[i] = NULL; }
+    if (!authored && X360_SHADER_LITS && X360_ENGINE_CONSTS) {
+        for (int i = 0; i < 16; ++i) {
+            char name[16];
+            snprintf(name, sizeof name, "RAINSPLASH%02d", i);
+            uint32_t hh = 0xFFFFFFFFu, w = 0, h = 0;
+            for (const char *q = name; *q; ++q) hh = hh * 33 + (uint8_t)*q;
+            ripple_rgba[i] = x360_texture_rgba("GLOBAL/GLOBALB.BUN", hh, &w, &h);
+            if (ripple_rgba[i] && w == 128 && h == 128) { ripple_w = w; ripple_h = h; ++n; }
+        }
     }
-    if (n < 16) {
+    if (n == 16) ripple_provider = 1;
+    else {
         for (int i = 0; i < 16; ++i) { free(ripple_rgba[i]); ripple_rgba[i] = NULL; }
-        fprintf(stderr, "boot: rain ripples: no X360 RAINSPLASH frames, wet roads stay PC\n");
-    } else if (diag_on) diag_event("materials: rain ripples: 16 RAINSPLASH frames %ux%u from the X360 GLOBALB.BUN", ripple_w, ripple_h);
+        ripple_w = ripple_h = 128;
+        ripple_provider = 2;
+    }
+    // New authored look stays opt-in; complete console installs keep their default.
+    ripples = !disabled && (ripple_provider == 1 || authored);
+    fprintf(stderr, "boot: rain ripples: provider=%s frames=16 size=%ux%u enabled=%d console_frames=%d\n",
+            ripple_provider == 1 ? "console" : "port", ripple_w, ripple_h, ripples, n);
 }
+void materials_textures(void) { materials_ripples_prepare(); } // later texture hook is idempotent
 const uint8_t *mat_ripple_frame(int i, uint32_t *w, uint32_t *h) {   // render.m: RGBA8 frame i (NULL: none)
     *w = ripple_w; *h = ripple_h;
-    return i >= 0 && i < 16 ? ripple_rgba[i] : NULL;
+    return i >= 0 && i < 16 ? (ripple_provider == 2 ? port_ripple_rgba[i] : ripple_rgba[i]) : NULL;
 }
 static void ripple_constants(const float (*vsc)[4], MatConsts *o) {
     (void)vsc;
     uint32_t view = M32(CUR_VIEW), rain = view ? M32(VIEW_RAIN + M32(view + 4) * 0x70u) : 0;
-    float r = rain && ripple_rgba[15] && ripples_live ? F32(rain + 0x28C) : 0.0f;
+    float r = rain && ripples_on() && ripples_live ? F32(rain + 0x28C) : 0.0f;
     if (!(r > 0.0f)) r = 0.0f;
     if (r > 1.0f) r = 1.0f;
     double t = F32(SIM_TIME);
-    int frame = (int)(X360E_RIPPLE_FPS * fmod(t, 16.0 / X360E_RIPPLE_FPS));   // 16 frames at the X360's rate
+    double fps = ripple_provider == 1 ? X360E_RIPPLE_FPS : PORTE_RIPPLE_FPS;
+    int frame = (int)(fps * fmod(t, 16.0 / fps));   // 16 frames at the X360's rate
     o->k[0][0] = r; o->k[0][1] = (float)(frame < 0 ? 0 : frame > 15 ? 15 : frame);
     o->k[0][2] = (probe_sig & PROBE_RIPPLES) ? 1.0f : 0.0f;
     if ((probe_sig & PROBE_RIPPLES) && r > 0.0f) probe_applied(PROBE_RIPPLES, 1);
     if (diag_on) {
         static int calls;
-        if (calls++ % 20000 == 0) diag_event("materials: rain ripples draw %d: rain %.3f frame %d", calls, r, frame);
+        if (calls++ % 20000 == 0) diag_event("materials: rain ripples draw %d: rain %.3f frame %d provider=%s frames=16", calls, r, frame, ripple_provider == 1 ? "console" : "port");
     }
 }
 // The PS patch (all six worldreflect PS translate the lookup the same way; anything else keeps the translation).
@@ -783,6 +836,22 @@ static const char ripple_ps_helpers[] =
 "    uint f = uint(m.k[0].y);\n"
 "    float3 s = tr.sample(rs, t2.zw, f).rgb + tr.sample(rs, t2.zw * " X360S_RIPPLE_SCALE2 "f, f).rgb;\n"
 "    return float4(0.5f * rain * s.x, " X360S_RIPPLE_GLINT "f * rain * (s.y - s.z), 1.0f - " X360S_RIPPLE_REFL "f * rain, 0.0f);\n"
+"}\n"
+"static float4 mat_refl(texture2d<float> t, sampler s, float4 p, float4 rip, float lodbias) {   // X360 09c17c18\n"
+"    float4 q = p + float4(rip.x, rip.x, 0.0f, rip.x);\n"
+"    float4 r = t.sample(s, q.xy / q.w, bias(lodbias));\n"
+"    return float4((r.rgb + rip.y) * rip.z, r.a);\n"
+"}\n";
+static const char port_ripple_ps_helpers[] =
+"struct MatConsts { float4 k[4]; };\n"
+"// rain ripples (materials.m): rip = (lookup offset 0.5 R s.x, glint " PORTS_RIPPLE_GLINT_T " R (s.y - s.z), reflection scale 1 - " PORTS_RIPPLE_REFL_T " R)\n"
+"static float4 mat_ripple(float4 t2, constant MatConsts &m, texture2d_array<float> tr) {\n"
+"    constexpr sampler rs(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));\n"
+"    float rain = m.k[0].x;\n"
+"    if (!(rain > 0.0f)) return float4(0.0f, 0.0f, 1.0f, 0.0f);\n"
+"    uint f = uint(m.k[0].y);\n"
+"    float3 s = tr.sample(rs, t2.zw, f).rgb + tr.sample(rs, t2.zw * " PORTS_RIPPLE_SCALE2 "f, f).rgb;\n"
+"    return float4(0.5f * rain * s.x, " PORTS_RIPPLE_GLINT "f * rain * (s.y - s.z), 1.0f - " PORTS_RIPPLE_REFL "f * rain, 0.0f);\n"
 "}\n"
 "static float4 mat_refl(texture2d<float> t, sampler s, float4 p, float4 rip, float lodbias) {   // X360 09c17c18\n"
 "    float4 q = p + float4(rip.x, rip.x, 0.0f, rip.x);\n"
@@ -814,7 +883,7 @@ static char *ripple_ps_patch(const char *msl) {
     snprintf(old, sizeof old, "tex3.sample(smp3, (%s).xy / (%s).w, bias(aux.lodbias[3]))", var, var);
     snprintf(rep, sizeof rep, "mat_refl(tex3, smp3, %s, si.tex[2], aux.lodbias[3])", var);
     char *s = strdup(msl);
-    int ok = edit(&s, NULL, old, rep, 0) && edit(&s, NULL, "static void sm_body(", ripple_ps_helpers, 1);
+    int ok = edit(&s, NULL, old, rep, 0) && edit(&s, NULL, "static void sm_body(", ripple_provider == 2 ? port_ripple_ps_helpers : ripple_ps_helpers, 1);
     if (ok && !strstr(s, "[[user(texcoord2)]]"))
         ok = edit(&s, "struct SmPSStageIn", "    float4 texcoord3 [[user(texcoord3)]];\n", "    float4 texcoord2 [[user(texcoord2)]];\n", 1);
     ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n",
@@ -827,9 +896,11 @@ static char *ripple_ps_patch(const char *msl) {
     return s;
 }
 static char *ripple_vs_patch(const char *msl) {
-    char *s = strdup(msl);
-    if (!edit(&s, NULL, "    r.texcoord2 = so.tex[2];\n",
-              "    r.texcoord2 = float4(so.tex[2].xy, si.v[0].xy * " X360S_RIPPLE_TILE "f);   // + the X360 wetroad ripple coordinates (materials.m)\n", 0)) {
+    char *s = strdup(msl), replacement[256];
+    const char *tile = ripple_provider == 2 ? PORTS_RIPPLE_TILE : X360S_RIPPLE_TILE;
+    snprintf(replacement, sizeof replacement,
+             "    r.texcoord2 = float4(so.tex[2].xy, si.v[0].xy * %sf);   // + the X360 wetroad ripple coordinates (materials.m)\n", tile);
+    if (!edit(&s, NULL, "    r.texcoord2 = so.tex[2];\n", replacement, 0)) {
         free(s); return NULL;
     }
     return s;
@@ -932,6 +1003,8 @@ static char *car_vs_nm_patch(const char *msl) {
     if (!edit(&s, NULL, "    r.texcoord6 = so.tex[6];\n", "    r.texcoord6 = float4(si.v[0].xyz, si.v[2].x);   // R26 (materials.m)\n", 0)) { free(s); return NULL; }
     // R30: the X360 car VS 09bb7b1c gives the PS oT3.w = saturate(A - B |LocalEyePos - pos|), the flake's distance fade (the PC leaves oT3.w unused)
     if (!edit(&s, NULL, "    r.texcoord3 = so.tex[3];\n", "    r.texcoord3 = float4(so.tex[3].xyz, saturate(" X360S_CAR_FADE_A "f - " X360S_CAR_FADE_B "f * length(c[17].xyz - si.v[0].xyz)));   // R30 (materials.m)\n", 0)) { free(s); return NULL; }
+    // texcoord7 belongs to local lights. Carry generated-flake eye distance in the unused view-vector w.
+    if (!edit(&s, NULL, "    r.texcoord5 = so.tex[5];\n", "    r.texcoord5 = float4(so.tex[5].xyz, length(c[17].xyz - si.v[0].xyz));\n", 0)) { free(s); return NULL; }
     return s;
 }
 static int car_vs_nm_on(void) { return 1; }
@@ -965,7 +1038,8 @@ static const char carbon_lamp_math[] = CARBON_LAMP_MSL;
 static const char carbon_lamp_retail_math[] = CARBON_LAMP_RETAIL_MSL;
 static int car_t0_on(void) { return car_light_hdr(); }
 static void carbon_lamp_constants(const float (*vsc)[4], MatConsts *o) {
-    (void)vsc;
+    o->k[10][3] = (float)coat_material;
+    for (int i = 0; i < 3; ++i) o->k[1][i] = vsc[7 + i][0];
     o->k[6][3] = carbon_lamp ? 1.0f : 0.0f;
     o->k[6][0] = (float)clear_headlamp;
     o->k[6][2] = lamp_cover ? 1.0f : 0.0f;
@@ -1205,7 +1279,8 @@ static void particle_constants(const float (*vsc)[4], MatConsts *o) {
 void f_0074ACC0_orig(Cpu *c);
 void f_0074ACC0(Cpu *c) {   // Rain::Render: its quads (FUN_006d1e30) are flushed by FUN_006d1f60 inside this call
     particles_rain = 1;
-    f_0074ACC0_orig(c);
+    if (rain_cover_enabled) rain_cover_render(c, f_0074ACC0_orig);
+    else f_0074ACC0_orig(c);
     particles_rain = 0;
 }
 
@@ -1309,6 +1384,69 @@ static const MatShader table[] = {
     RIPPLE_PS("worldreflect t5 ps_2_x (shadow level 5)", 0x242B92C6A96DE029ULL),
 };
 
+// Independent lamp term, compiled only for the opt-in switch. The native source
+// remains byte-identical when disabled; zero RGB takes no arithmetic path.
+static const char car_local_math[] =
+"static float3 car_local_diffuse(float3 n, float3 p, constant float4 *k) {\n"
+"    float3 sum = float3(0.0f);\n"
+"    for (uint i = 0; i < min(uint(k[13].w), 19u); ++i) {\n"
+"        uint slot = i == 0 ? 12 : 14 + 2 * i;\n"
+"        if (k[slot + 1].w < 0.5f) continue;\n"
+"        float3 d = k[slot].xyz - p;\n"
+"        sum += k[slot + 1].rgb * max(dot(normalize(n), d * rsqrt(max(dot(d, d), 1e-12f))), 0.0f);\n"
+"    }\n"
+"    return sum;\n"
+"}\n";
+static char *car_local_shader(char *s, int vertex, int no_shadow) {
+    if (!s || !car_locallight_enabled()) return s;
+    int ok = 1;
+    if (vertex) {
+        // texcoord6 carries local position/AO, texcoord7 the PC diffuse material
+        // response. The normal-map branch uses its own decoded D instead.
+        const char *eye = no_shadow ? "c[13]" : "c[17]";
+        const char *mn = no_shadow ? "c[14]" : "c[18]";
+        const char *range = no_shadow ? "c[15]" : "c[19]";
+        char extra[640];
+        snprintf(extra, sizeof extra,
+            "    r.texcoord6 = float4(si.v[0].xyz, si.v[2].x);\n"
+            "    r.texcoord7 = float4(saturate(2.0f * si.v[2].x) * (%s.rgb + max(dot(si.v[1].xyz, normalize(%s.xyz - si.v[0].xyz)), 0.0f) * %s.rgb), 0.0f);\n", mn, eye, range);
+        if (no_shadow) {
+            // t0's clear-coat variant uses texcoord6 for its sun direction.
+            // Keep that channel and carry lamp position/AO in texcoord7.
+            strcpy(extra, "    r.texcoord7 = float4(si.v[0].xyz, saturate(2.0f * si.v[2].x));\n");
+            if (strstr(s, "    r.texcoord4 = so.tex[4];\n"))
+                ok = edit(&s, NULL, "    r.texcoord4 = so.tex[4];\n", "    r.texcoord4 = float4(si.v[1].xyz, 0.0f);\n", 0);
+            if (strstr(s, "    r.texcoord5 = so.tex[5];\n"))
+                ok = ok && edit(&s, NULL, "    r.texcoord5 = so.tex[5];\n", "    r.texcoord5 = float4(c[13].xyz - si.v[0].xyz, 0.0f);\n", 0);
+        }
+        ok = ok && edit(&s, NULL, "    r.fog = so.fog;", extra, 1);
+    } else {
+        ok = edit(&s, NULL, "struct SmPSAux", car_local_math, 1);
+        if (strstr(s, "struct MatConsts { float4 k[12]; };"))
+            ok = ok && edit(&s, NULL, "struct MatConsts { float4 k[12]; };", "struct MatConsts { float4 k[52]; };", 0);
+        else ok = ok && edit(&s, NULL, "static void sm_body(", "struct MatConsts { float4 k[52]; };\n", 1);
+        if (no_shadow) {
+            if (!strstr(s, "float4 texcoord4 [[user(texcoord4)]];"))
+                ok = ok && edit(&s, "struct SmPSStageIn {", "};", "    float4 texcoord4 [[user(texcoord4)]];\n    float4 texcoord5 [[user(texcoord5)]];\n", 1);
+            ok = ok && edit(&s, "struct SmPSStageIn {", "};", "    float4 texcoord7 [[user(texcoord7)]];\n", 1);
+            if (!strstr(s, "constant MatConsts &mk [[buffer(4)]]"))
+                ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", ") {\n", ",\n    constant MatConsts &mk [[buffer(4)]]) {\n", 0);
+            ok = ok && edit(&s, "fragment SmPSStageOut sm_main(", "    sm_body(si, so,",
+                "    if (mk.k[13].w > 0.5f) si.col[0].rgb += pi.texcoord7.w * (mk.k[14].rgb + max(dot(pi.texcoord4.xyz, normalize(pi.texcoord5.xyz)), 0.0f) * mk.k[15].rgb) * car_local_diffuse(pi.texcoord4.xyz, pi.texcoord7.xyz, mk.k);\n", 1);
+        } else {
+            ok = ok && edit(&s, "struct In {", "};", "    float4 texcoord7 [[user(texcoord7)]];\n", 1);
+            // Add after the native paint output, outside its sun shadow. The
+            // normal-map output below overwrites it and adds using the mapped N.
+            ok = ok && edit(&s, "    o.c0 = float4(", "#if MAT_PAINT_FINITE_AB\n",
+                "    if (m.k[13].w > 0.5f) o.c0.rgb += pi.texcoord7.rgb * tex.rgb * car_local_diffuse(pi.texcoord4.xyz, pi.texcoord6.xyz, m.k);\n", 1);
+            ok = ok && edit(&s, NULL, "        float rv = saturate(dot(2.0f * dot(n, L0)",
+                "        if (m.k[13].w > 0.5f) dif += car_local_diffuse(n, P, m.k) / max(shade, 1e-3f);\n", 1);
+        }
+    }
+    if (!ok) { free(s); return NULL; }
+    return s;
+}
+
 static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id, int lamp) {
     *id = 0;
     uint64_t h = 1469598103934665603ull;
@@ -1341,6 +1479,8 @@ static char *mat_replace_profile(const uint32_t *tokens, uint32_t n, const SmRes
         }
         if (src && !pc_lamp && lamp && car)
             src = lamp == 1 ? carbon_lamp_retail_patch(src, e->patch == car_t0_ps_patch) : carbon_lamp_patch(src, e->patch == car_t0_ps_patch);
+        if (src && (car || e->patch == car_vs_nm_patch || cover_vs))
+            src = car_local_shader(src, e->stage == SM_VERTEX, cover_vs || e->patch == car_t0_ps_patch);
         if (!src) {
             if (diag_on) diag_event("materials: %s: %s, translated PC shader kept", e->name, ok ? "translation not as expected" : "unexpected samplers");
             return NULL;
@@ -1359,9 +1499,45 @@ char *mat_roadfilm_shader(const uint32_t *tokens, uint32_t n, const SmResult *re
     return film;
 }
 char *mat_replace(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    char *lamp = daynight_stream_shader(tokens, n, refl, id, mat_replace_profile); if (lamp) return lamp;
+    char *sky = daynight_sky_shader(tokens, n, refl); if (sky) { *id = 0; return sky; }
     // Even an inactive branch can change Metal's optimized native arithmetic.
     // Keep its source exact; the renderer selects the lamp variant per draw.
     return mat_replace_profile(tokens, n, refl, id, 0);
+}
+char *mat_clearcoat_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < 4 * (size_t)n; ++i) hash = (hash ^ ((const uint8_t *)tokens)[i]) * 1099511628211ull;
+    *id = 0;
+    if (refl->shader_type == SM_VERTEX && hash == 0x1BEA38904139377AULL) {
+        char *base = car_light_hdr() ? car_vs_patch(refl->msl) : strdup(refl->msl);
+        char *out = base ? clearcoat_vertex(base) : NULL;
+        out = car_local_shader(out, 1, 1);
+        free(base);
+        return out;
+    }
+    if (refl->shader_type == SM_PIXEL && hash == 0x89E9A52CCEE09BCFULL) {
+        if (refl->n_samplers != 2) return NULL;
+        unsigned seen = 0;
+        for (int i = 0; i < 2; ++i) {
+            const SmSampler *s = &refl->samplers[i];
+            if (s->reg > 1 || s->shadow || (seen & (1u << s->reg)) ||
+                s->type != (s->reg ? SM_TEX_2D : SM_TEX_CUBE)) return NULL;
+            seen |= 1u << s->reg;
+        }
+        char *base = car_t0_ps_patch(refl->msl);
+        char *out = base ? clearcoat_t0_patch(base) : NULL;
+        out = car_local_shader(out, 0, 1);
+        free(base);
+        if (out) for (size_t i = 0; i < sizeof table / sizeof *table; ++i)
+            if (table[i].hash == hash) { *id = (int)i + 1; break; }
+        return out;
+    }
+    char *base = mat_replace(tokens, n, refl, id);
+    if (!base || *id <= 0 || table[*id - 1].msl != car_paint_msl) { free(base); return NULL; }
+    char *coated = clearcoat_patch(base, 1);
+    free(base);
+    return coated;
 }
 int mat_carbon_lamp_draw(void) {
     uint32_t fx = M32(CUR_EFFECT);
@@ -1411,10 +1587,22 @@ char *mat_realworld_shader(const uint32_t *tokens, uint32_t n, const SmResult *r
     return NULL;
 }
 
-void mat_constants(int id, const float (*vsc)[4], MatConsts *out) {
-    memset(out, 0, sizeof *out);
-    if (id == MAT_REAL_T0 || id == MAT_REAL_SHADOWED) { realworld_materials_constants(id, vsc, out); return; }
+unsigned mat_constants(int id, const float (*vsc)[4], MatConsts *out) {
+    if (diag_on) car_locallight_diag(CAR_LOCAL_MATERIAL, car_locallight_enabled());
+    int lamps = car_locallight_enabled() && id > 0 && id <= (int)(sizeof table / sizeof *table) &&
+        (table[id - 1].msl == car_paint_msl || table[id - 1].patch == car_t0_ps_patch);
+    unsigned length = lamps ? sizeof *out : MAT_CONST_BASE_BYTES;
+    memset(out, 0, length);
+    if (id == MAT_REAL_T0 || id == MAT_REAL_SHADOWED) { realworld_materials_constants(id, vsc, out); return length; }
     if (id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].constants) table[id - 1].constants(vsc, out);
+    if (lamps) {
+        car_locallight_constants(out->k);
+        if (out->k[13][3] > 0 && table[id - 1].patch == car_t0_ps_patch) {
+            memcpy(out->k[14], vsc[14], sizeof out->k[14]);
+            memcpy(out->k[15], vsc[15], sizeof out->k[15]);
+        }
+    }
+    return length;
 }
 int mat_extra_texture(int id) { return id > 0 && id <= (int)(sizeof table / sizeof *table) ? table[id - 1].extra_tex : 0; }
 
@@ -1422,6 +1610,20 @@ int mat_extra_texture(int id) { return id > 0 && id <= (int)(sizeof table / size
 // A distinct variant adds one explicitly bound snapshot; rain never selects it.
 int mat_is_particle(int id) {
     return id > 0 && id <= (int)(sizeof table / sizeof *table) && table[id - 1].msl == particles_msl;
+}
+int mat_temporal_static(uint64_t vertex_program) {
+    // Decoded world/worldnormalmap/worldreflect rigid VS fixtures. Depth-only
+    // car and world programs share bytecode, so are deliberately not inferred.
+    switch (vertex_program) {
+    case 0xED211730CCB25F1Eull: case 0x090160E8E9A32D2Cull:
+    case 0x3883F8FFC7E49878ull: case 0x6EC3DBAF015942F1ull:
+    case 0x6D1A1765677D50DEull: case 0xBB253668A28870F5ull:
+    case 0x668D008752809FA9ull: case 0x8BBB8DFEF2EDAE21ull:
+    // Rigid building-glass techniques, including the custom glass replacement.
+    case 0xEAA7AABC9BAF0607ull: case 0x3B7041897590C529ull: case 0x74E7D294D4B2ECD6ull:
+        return 1;
+    default: return 0;
+    }
 }
 unsigned mat_particle_view(const uint32_t viewport[4]) {
     // Trails can precede PlatStartParticleRender and still carry the previous
@@ -1475,9 +1677,124 @@ char *mat_soft_smoke_late_shader(const uint32_t *tokens, uint32_t n, const SmRes
 }
 
 // ---------------- R20: load generations and queue-owned auxiliary contexts ----------------
+// RenderPart scopes end before sorted playback. Only stable part slots and
+// submission sites identify instances; the world pointer is copied, never keyed.
+static TemporalPartKey temporal_part_source;
+// WorldModel owns a destructible's lifetime; hierarchy+node identify its part.
+// The final copied queue matrix includes the live SpaceNode transform.
+void f_0073B9C0_orig(Cpu *c);
+void f_0073B9C0(Cpu *c) {
+    if (!temporal_state_requested) { f_0073B9C0_orig(c); return; }
+    TemporalPartKey saved = temporal_part_source;
+    TemporalCarId object = temporal_car_identity(c->ecx);
+    // A consumer can be enabled after this WorldModel was constructed.
+    if (!object.epoch) { temporal_car_construct(c->ecx); object = temporal_car_identity(c->ecx); }
+    temporal_part_source = (TemporalPartKey){.car = object,
+        .view = temporal_guest_view_id(M32(c->esp + 8)), .model = M32(c->esp + 4),
+        .part = saved.car.address == c->ecx && saved.car.epoch == object.epoch ? saved.part : UINT32_MAX-1,
+        .instance = saved.car.address == c->ecx && saved.car.epoch == object.epoch ? saved.instance : 0};
+#ifndef TEMPORAL_TEST_STATIC_DESTRUCTIBLE
+    f_0073B9C0_orig(c);
+#else
+    temporal_part_source = (TemporalPartKey){0}; f_0073B9C0_orig(c);
+#endif
+    temporal_part_source = saved;
+}
+void f_00749BE0_orig(Cpu *c);
+void f_00749BE0(Cpu *c) {
+    if (!temporal_state_requested) { f_00749BE0_orig(c); return; }
+    TemporalPartKey saved = temporal_part_source;
+    TemporalCarId object = temporal_car_identity(c->ecx);
+    if (!object.epoch) { temporal_car_construct(c->ecx); object = temporal_car_identity(c->ecx); }
+    temporal_part_source = (TemporalPartKey){.car = object,
+        .part = M32(c->esp + 8) + 1, .instance = M32(c->esp + 4)};
+    f_00749BE0_orig(c);
+    temporal_part_source = saved;
+}
+void f_00753650_orig(Cpu *c);
+void f_00753650(Cpu *c) {
+    if (temporal_state_requested) temporal_car_destroy(c->ecx);
+    f_00753650_orig(c);
+}
+void f_0075A130_orig(Cpu *c);
+void f_0075A130(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
+    f_0075A130_orig(c);
+}
+void f_0075A200_orig(Cpu *c);
+void f_0075A200(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
+    f_0075A200_orig(c);
+}
+void f_0075A330_orig(Cpu *c);
+void f_0075A330(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
+    f_0075A330_orig(c);
+}
+void f_0075A400_orig(Cpu *c);
+void f_0075A400(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
+    f_0075A400_orig(c);
+}
+void f_0075A520_orig(Cpu *c);
+void f_0075A520(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
+    f_0075A520_orig(c);
+}
+void mirror_scenery_render(Cpu *c);
+void materials_car_diagnostics(Cpu *c);
+void f_0074E160(Cpu *c) {
+    if (!temporal_state_requested) { materials_car_diagnostics(c); return; }
+    TemporalPartKey saved = temporal_part_source;
+    temporal_part_source = (TemporalPartKey){.car = temporal_car_identity(c->ecx),
+        .view = temporal_guest_view_id(M32(c->esp + 4))};
+    materials_car_diagnostics(c);
+    temporal_part_source = saved;
+}
+void materials_car_part_diagnostics(Cpu *c);
+void f_007387E0(Cpu *c) {
+    if (!temporal_state_requested) { materials_car_part_diagnostics(c); return; }
+    TemporalPartKey saved = temporal_part_source;
+    uint32_t slot = M32(c->esp + 8), view = M32(c->esp + 4);
+    temporal_part_source = (TemporalPartKey){0};
+    TemporalCarId car = temporal_car_identity(c->ecx);
+    // CRI's body/LOD table and wheel slots are owned members, not model hashes.
+    if (slot >= c->ecx + 0xB84 && slot < c->ecx + 0x1174 && !((slot - c->ecx) & 3)) {
+        temporal_part_source = (TemporalPartKey){.car = car, .view = temporal_guest_view_id(view),
+            .part = slot - c->ecx, .instance = M32(c->esp), .model = M32(slot) & ~3u};
+    }
+    materials_car_part_diagnostics(c);
+    temporal_part_source = saved;
+}
+static void temporal_materials_model_render(Cpu *c) {
+    TemporalPartKey saved = temporal_part_source;
+    uint32_t model = M32(c->esp + 4);
+    if (!saved.car.epoch || temporal_guest_view_id(c->ecx) != saved.view ||
+        (saved.part && saved.model != model)) temporal_part_source = (TemporalPartKey){0};
+    else if (!saved.part) {
+        // Direct CRI submissions include the four tire matrices. Their distinct
+        // call sites separate shared models; ambiguous repeated transforms at
+        // one site are rejected by the state layer rather than order-matched.
+        temporal_part_source.part = UINT32_MAX;
+        temporal_part_source.instance = M32(c->esp);
+        temporal_part_source.model = model;
+    }
+    mirror_scenery_render(c);
+    temporal_part_source = saved;
+}
+static void temporal_materials_pose_append(uint32_t old) {
+    if (!old) temporal_pose_queue_reset();
+    if (old >= TEMPORAL_QUEUE_CAPACITY || M32(0x00982CDCu) != old + 1) return;
+    uint32_t q = 0x0093E878u + old * 0x44, world = M32(q + 28);
+    TemporalPartKey key = temporal_part_source;
+    key.mesh = M32(q);
+    // Every append owns a fresh descriptor, including unrelated/nested scenery.
+    temporal_pose_submit(old, M32(q + 4) || M32(q + 32) ? NULL : &key,
+        world ? (const float *)(G + world) : NULL);
+}
 typedef struct { uint32_t header, instances, count, id, generation; } AuxSection;
 static AuxSection aux_sections[1024];
-static uint32_t aux_generation, aux_queue_generation;
+static uint32_t aux_generation, aux_queue_generation, aux_serial;
 static MatAuxDraw aux_source, aux_queue[4096];
 MatAuxDraw mat_aux_draw;
 static struct { uint32_t matched, attached, draws, lights, fallback[AUX_REASONS]; } aux_diag;
@@ -1514,11 +1831,20 @@ void f_007311F0(Cpu *c) {
     }
     if (!slot) { mat_aux_fallback(AUX_SECTION); return; }
     *slot = (AuxSection){h, M32(h+0x20), M32(h+0x24), M32(h+0xc), ++aux_generation};
+    ++aux_serial;
+}
+// car_locallight.c: the loaded scenery sections. The serial changes with every load and unload.
+unsigned materials_aux_serial(void) { return aux_serial; }
+int materials_aux_section(unsigned slot, uint32_t *id, uint32_t *instances, uint32_t *count) {
+    if (slot >= 1024 || !aux_sections[slot].header) return 0;
+    *id = aux_sections[slot].id; *instances = aux_sections[slot].instances; *count = aux_sections[slot].count;
+    return 1;
 }
 void f_007307E0_orig(Cpu *c);
 void f_007307E0(Cpu *c) {
     uint32_t h = aux_header(M32(c->esp+4));
     if (h) {
+        ++aux_serial;
         for (unsigned i = 0; i < 1024; ++i) if (aux_sections[i].header == h) memset(&aux_sections[i],0,sizeof aux_sections[i]);
         // Queued descriptors own their data; invalidate only this section's generation.
         for (unsigned i = 0; i < 4096; ++i) if (aux_queue[i].valid && aux_queue[i].section == M32(h+0xc)) aux_queue[i].valid = 0;
@@ -1562,7 +1888,8 @@ void f_006DA9B0(Cpu *c) {
         }
     }
     // Leave the guest NULL light argument intact: PC 006C7420 only accepts type0.
-    mirror_scenery_render(c);
+    if (temporal_state_requested) temporal_materials_model_render(c);
+    else mirror_scenery_render(c);
     aux_source = saved;
 }
 void f_006E0AB0_orig(Cpu *c);
@@ -1570,6 +1897,7 @@ void f_006E0AB0(Cpu *c) {
     uint32_t old = M32(0x00982CDCu);
     if (!old) ++aux_queue_generation; // invalidate old slots without clearing megabytes in PC mode
     f_006E0AB0_orig(c);
+    if (temporal_state_requested) temporal_materials_pose_append(old);
     if (old < 4096 && M32(0x00982CDCu) == old+1) {
         aux_queue[old] = aux_source; // including a fresh empty descriptor for every unlit append
         aux_queue[old].queue_generation = aux_queue_generation;
@@ -1621,13 +1949,19 @@ void materials_aux_record(uint32_t q) {
 }
 void f_006D7660_orig(Cpu *c);
 void materials_glass_clear(void);
-void f_006D7660(Cpu *c) {
+static void materials_queue_record(Cpu *c) {
     materials_aux_record(c->ecx);
     f_006D7660_orig(c);
     if (diag_on) underglow_render_receiver_clear();
     materials_aux_clear();
     materials_glass_clear();              // R19: a record that skipped its draw must not mark the next unrelated draw
     materials_trees_clear();              // R28, same reason
+}
+void f_006D7660(Cpu *c) {
+    if (!temporal_state_requested) { materials_queue_record(c); return; }
+    temporal_guest_pose_record(c->ecx);
+    materials_queue_record(c);
+    temporal_pose_clear();
 }
 void mat_aux_emit(void) {
     mat_aux_draw.emitted = 1;
@@ -1770,7 +2104,7 @@ void materials_grass_record(uint32_t q) {
     }
 }
 void f_006E0200_orig(Cpu *c);
-void f_006E0200(Cpu *c) {
+static void materials_queue_flush(Cpu *c) {
     materials_grass_clear();
     materials_aux_clear();
     f_006E0200_orig(c);
@@ -1781,6 +2115,13 @@ void f_006E0200(Cpu *c) {
     // Other PC append routines (e.g. particle strips) bypass 006E0AB0. Retire
     // the whole host queue when the guest flush retires its generation.
     if (!M32(0x00982CDCu)) ++aux_queue_generation;
+}
+void f_006E0200(Cpu *c) {
+    if (!temporal_state_requested) { materials_queue_flush(c); return; }
+    temporal_pose_clear();
+    materials_queue_flush(c);
+    temporal_pose_clear();
+    if (!M32(0x00982CDCu)) temporal_pose_queue_reset();
 }
 uint32_t mat_grass_texture(int slot) {
     uint32_t ti = mat_grass_draw.textures[slot], plat = ti ? M32(ti) : 0;
@@ -1930,7 +2271,7 @@ static const char grass_common_msl[] =
 "};\n"
 ;
 static const char grass_vs_head[] =
-"struct GrassAux { float4 fixup; float point_size; float3 pad; };\n"
+"struct GrassAux { float4 fixup; float point_size; float pad[3]; };\n"
 ;
 static const char grass_vs_pre[] =
 "float4 oPos = float4(0);\n"
@@ -2120,6 +2461,18 @@ char *mat_grass_shader(const SmResult *pc, int stage, int shell, uint16_t input_
 // Fresnel term, pow(R.V, c254.z), diffuse x c254.y + c255.rgb and fog exactly (09bfd3e0's literals).
 MatWaterDraw mat_water_draw;
 static int water_mode = -1;
+// NFS_WATER=port: the port's own water (water_port.m), chosen from the environment alone so every shader compile
+// (start-up warming included) sees the same provider; it never reads console data. 1 console, 2 authored.
+// Unset: the console's when its files are present (roots.txt), otherwise the port's. pc and x360 keep the console path.
+#include "water_port.h"
+static int water_provider;
+static int water_provider_get(void) {
+    if (!water_provider) {
+        const char *s = getenv("NFS_WATER");
+        water_provider = s && *s ? (!strcmp(s, "port") ? 2 : 1) : roots_x360_has("shaders") ? 1 : 2;
+    }
+    return water_provider;
+}
 static unsigned water_this_frame[3], water_previous_frame[3]; // retail, split P1, split P2
 static unsigned water_owner(void) {
     uint32_t source = split_capture_source();
@@ -2134,8 +2487,9 @@ void mat_water_reset_view(uint32_t source) {
     water_this_frame[owner] = water_previous_frame[owner] = 0;
 }
 static unsigned water_draws, water_variants, water_forced, water_shader_fail, water_pipeline_fail;
+int mat_water_port(void) { return water_provider_get() == 2; }
 int mat_water_enabled(void) {
-    if (!X360_SHADER_LITS) return 0;
+    if (water_provider_get() == 1 && !X360_SHADER_LITS) return 0;
     if (water_mode < 0) { const char *s = getenv("NFS_WATER"); water_mode = !(s && !strcmp(s, "pc")); }
     return water_mode;
 }
@@ -2203,6 +2557,20 @@ int mat_water_constants(const SmResult *pcvs, const float (*vsc)[4], float out[3
         out[15 + col][row] = mat_water_draw.world[row][col];
         for (int k = 0; k < 4; ++k)
             out[12 + col][row] += mat_water_draw.world[row][k] * F32(v + 0x40 + k * 16 + col * 4);
+    }
+    if (water_provider_get() == 2) {
+        int sun = grass_reg(pcvs, "DiffuseColour", 1);   // the sun's colour the PC lights the water with
+        if (sun < 0 || sun >= 256) return 0;
+        water_port_constants(out, vsc[sun], F32(SIM_TIME));
+        static uint32_t logged[8];
+        for (int i = 0; diag_on && i < 8 && logged[i] != mat_water_draw.mesh; ++i)
+            if (!logged[i]) {
+                logged[i] = mat_water_draw.mesh;
+                diag_event("water: port mesh %08X translation z %.2f light %.2f %.2f %.2f sun %.2f %.2f %.2f", mat_water_draw.mesh,
+                           mat_water_draw.world[3][2], out[18][0], out[18][1], out[18][2], out[22][0], out[22][1], out[22][2]);
+                break;
+            }
+        return 1;
     }
     out[21][0] = X360F_WAVE0_0; out[23][0] = X360F_WAVE0_2; out[24][0] = X360F_WAVE0_3;   // wave0/wave1: the VS's defaults
     out[25][0] = X360F_WAVE1_0; out[27][0] = X360F_WAVE1_2; out[28][0] = X360F_WAVE1_3; out[28][1] = X360F_WAVE1_3N;
@@ -2272,6 +2640,7 @@ X360B_WATER_PS_BODY_1
 ;
 
 char *mat_water_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint) {
+    if (water_provider_get() == 2) return stage == SM_VERTEX || stage == SM_PIXEL ? water_port_shader(pc->msl, stage == SM_VERTEX) : NULL;
     if (!X360_SHADER_BODIES) return NULL;
     char *result = NULL;
     if (stage == SM_VERTEX) {
@@ -2400,7 +2769,7 @@ char *mat_aux_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t
     }
     return result;
 }
-// ---- R19 building glass (NFS_BUILDING_GLASS=pc|x360, default PC; F10 Graphics > Building glass, live) ----
+// ---- R19 building glass (NFS_BUILDING_GLASS=pc|x360|port, default X360 with console files, else Port; F10 Graphics > Building glass, live) ----
 // X360 effect15 glassreflect/p0: VS 09BC692C, PS 09BC78B4 (translated at build time as R18/R27).
 // Replaces PC effect5 glossywindow (all six techniques) for records reaching 006C8000 from 006D7660 / 006E0200, in
 // every view that draws it (main, mirror, wet-road reflection, car env-map faces; entry 4, the shadow map, never does).
@@ -2413,9 +2782,18 @@ static int glass_mode = -1;
 static unsigned glass_seen, glass_replaced, glass_blended, glass_skips[GLASS_SKIP_COUNT], glass_shader_fail, glass_pipeline_fail;
 static unsigned glass_rejects;            // RT entries whose rejection was logged once (diag)
 static unsigned glass_entry[16][2];       // records per RT entry, accepted / not (diag): 0 main, 1 road reflection, 3 mirror, 4 shadow map
+// NFS_BUILDING_GLASS=port: the PC glossywindow with the port's own reflection V = UV0.y (glass_port.m), chosen from the
+// environment alone so every shader compile (start-up warming included) sees the same provider; it never reads
+// console data and the console path below is untouched. 1 console, 2 authored.
+#include "glass_port.h"
+static int glass_provider;
+static int glass_provider_get(void) {
+    if (!glass_provider) { const char *s = getenv("NFS_BUILDING_GLASS"); glass_provider = s ? !strcmp(s, "port") ? 2 : 1 : X360_SHADER_LITS && X360_ENGINE_CONSTS ? 1 : 2; }   // unset: console files -> console, none -> port
+    return glass_provider;
+}
 int mat_glass_enabled(void) {
     int postfx_look_variant(const char *v);
-    if (!X360_SHADER_LITS || !X360_ENGINE_CONSTS) return 0;
+    if (glass_provider_get() == 1 && (!X360_SHADER_LITS || !X360_ENGINE_CONSTS)) return 0;
     if (glass_mode < 0) { const char *s = getenv("NFS_BUILDING_GLASS"); glass_mode = !(s && !strcmp(s, "pc")); }
     if (postfx_look_variant("glasspc")) return 0;
     if (postfx_look_variant("glassx360")) return 1;
@@ -2467,6 +2845,7 @@ void materials_glass_record(uint32_t q) {
 static unsigned glass_uv_draws[2], glass_uv_vertices[2];      // per draw: [0] no row (uv0half), [1] row; vertices matched / not
 static float *glass_uv1_rows[GLASS_UV1_BUFFERS];
 int mat_glass_uv1(const uint8_t *bytes, uint32_t size, const float **out, uint32_t *matched) {
+    if (glass_provider_get() == 2) return -1;     // port: V comes from UV0 in the shader (glass_port.m), no side row
     uint64_t h = 1469598103934665603ull;
     for (uint32_t i = 0; i < size; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
     int lo = 0, hi = (int)GLASS_UV1_BUFFERS - 1;
@@ -2514,8 +2893,8 @@ void mat_glass_frame(void) {
     char entries[160] = ""; size_t eu = 0;
     for (int i = 0; i < 16; ++i) if (glass_entry[i][0] || glass_entry[i][1])
         eu += snprintf(entries + eu, sizeof entries - eu, " rt%d=%u/%u", i, glass_entry[i][0], glass_entry[i][1]);
-    diag_event("glass: dt %.2f mode %s uv_source draws x360uv1 %u uv0half %u vertices uv1 %u uv0half %u seen %u (views accepted/not%s) replaced %u blended %u fallback %s compile_failed %u pipeline_failed %u",
-        (now - last) * 1e-9, mat_glass_enabled() ? "x360" : "pc", glass_uv_draws[1], glass_uv_draws[0], glass_uv_vertices[0], glass_uv_vertices[1],
+    diag_event("glass: dt %.2f provider %s mode %s uv_source draws x360uv1 %u uv0half %u vertices uv1 %u uv0half %u seen %u (views accepted/not%s) replaced %u blended %u fallback %s compile_failed %u pipeline_failed %u",
+        (now - last) * 1e-9, glass_provider_get() == 2 ? "port" : "console", mat_glass_enabled() ? "x360" : "pc", glass_uv_draws[1], glass_uv_draws[0], glass_uv_vertices[0], glass_uv_vertices[1],
         glass_seen, eu ? entries : " none", glass_replaced, glass_blended, skipped,
         __atomic_exchange_n(&glass_shader_fail, 0, __ATOMIC_RELAXED), __atomic_exchange_n(&glass_pipeline_fail, 0, __ATOMIC_RELAXED));
     glass_seen = glass_replaced = glass_blended = 0; memset(glass_skips, 0, sizeof glass_skips); memset(glass_entry, 0, sizeof glass_entry);
@@ -2527,6 +2906,11 @@ void mat_glass_frame(void) {
 int mat_glass_constants(const SmResult *pcvs, const SmResult *pcps, const float (*vsc)[4], const float (*psc)[4], float out[32][4]) {
     if (!mat_glass_draw.mesh) return 0;
     memset(out, 0, 32 * 16);
+    if (glass_provider_get() == 2) {     // the PC shaders keep their own constants; 27.w: BOOT_DIAG_LOOK_AB .5*UV0.y control
+        int postfx_look_variant(const char *v);
+        out[27][3] = postfx_look_variant("glassuv0half");
+        return 1;
+    }
     static const struct { const char *name; int dst, count; } copy[] = {
         {"WorldViewProj",0,4}, {"Fog_Br_Plus_Bm",5,1}, {"Fog_One_Over_BrBm",6,1}, {"Fog_Const_1",7,1}, {"Fog_Const_2",8,1},
         {"Fog_Const_3",9,1}, {"FogValue",11,1}, {"DiffuseColour",15,1}, {"LocalEyePos",16,1}, {"LocalLightVec",17,1},
@@ -2611,6 +2995,7 @@ char *mat_glass_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
     if (stage == SM_VERTEX) {
         // t0 / t1 (also t4, t5) vs_1_1, t2 (also t3) vs_3_0 (host/shaders/testdata/glossywindow)
         if (h != 0xEAA7AABC9BAF0607ull && h != 0x3B7041897590C529ull && h != 0x74E7D294D4B2ECD6ull) return NULL;
+        if (glass_provider_get() == 2) return glass_port_vs(pc->msl, MAT_GLASS_VS_BUF);
         int reg[4] = {-1, -1, -1, -1};
         const int usage[4] = {SM_USAGE_POSITION, SM_USAGE_NORMAL, SM_USAGE_COLOR, SM_USAGE_TEXCOORD};
         char attr[1024] = "struct GlassAttr {\n";
@@ -2622,7 +3007,7 @@ char *mat_glass_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
             at += snprintf(attr + at, sizeof attr - at, "%s a%d [[attribute(%d)]];\n", ty, in->reg, in->reg);
         }
         for (int i = 0; i < 4; ++i) if (reg[i] < 0) return NULL;
-        snprintf(attr + at, sizeof attr - at, "float uv1y [[attribute(%d)]];\n};\nstruct GlassAux { float4 fixup; float point_size; float3 pad; };\n", MAT_GLASS_UV1_SLOT);
+        snprintf(attr + at, sizeof attr - at, "float uv1y [[attribute(%d)]];\n};\nstruct GlassAux { float4 fixup; float point_size; float pad[3]; };\n", MAT_GLASS_UV1_SLOT);
         char entry[640];
         // UV1.y: the recovered X360 value per vertex (render.m binds glass_uv1.inc's row at MAT_GLASS_UV1_SLOT), or the
         // GLASS_UV1_NONE sentinel where none corresponds (no row, no unique X360 vertex): there PC's .5*UV0.y.
@@ -2637,6 +3022,7 @@ char *mat_glass_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
         int t = -1;
         for (int k = 0; k < 6; ++k) if (techs[k] == h) t = k;
         if (t < 0) return NULL;
+        if (glass_provider_get() == 2) return strdup(pc->msl);   // port: the PC pixel shader as translated
         int hw = 0, refl = t ? 2 : 1;            // WINDOWREFLECTION: t0 s1, t1..t5 s2; shadow_sampler s1
         for (int s = 0; s < pc->n_samplers; ++s) if (pc->samplers[s].reg == 1) hw = pc->samplers[s].shadow;
         char head[1800];
@@ -2818,7 +3204,7 @@ char *mat_trees_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, i
             at += snprintf(attr + at, sizeof attr - at, "%s a%d [[attribute(%d)]];\n", ty, in->reg, in->reg);
         }
         for (int i = 0; i < 2; ++i) if (reg[i] < 0) return NULL;
-        snprintf(attr + at, sizeof attr - at, "};\nstruct TreesAux { float4 fixup; float point_size; float3 pad; };\n");
+        snprintf(attr + at, sizeof attr - at, "};\nstruct TreesAux { float4 fixup; float point_size; float pad[3]; };\n");
         char entry[512];
         snprintf(entry, sizeof entry, "vertex TreesOut sm_main(TreesAttr i [[stage_in]], constant TreesConstants &g [[buffer(20)]], constant TreesAux &aux [[buffer(19)]]) {\n"
             "float4 iPosition0=float4(i.a%d), iTexCoord0=float4(i.a%d);\n", reg[0], reg[1]);
@@ -2860,6 +3246,7 @@ static unsigned bone_seen, bone_nmap, bone_replaced, bone_skips[BONE_SKIP_COUNT]
 void f_006C7420_orig(Cpu *c);
 void f_006C7420(Cpu *c) {                 // (light context *p, matrix): p+0x10 LocalColourMatrix, p+0x50 LocalDirectionMatrix
     uint32_t p = arg(c, 0);
+    if (car_locallight_enabled()) car_locallight_select(p && !M32(p) ? p : 0);
     if (p && !M32(p)) memcpy(bone_ldm, G + p + 0x50, sizeof bone_ldm);   // p+0x50..0x8f
     f_006C7420_orig(c);
 }
@@ -3018,7 +3405,7 @@ char *mat_bone_shader(const uint32_t *tokens, uint32_t n, const SmResult *pc, in
             at += snprintf(attr + at, sizeof attr - at, "%s a%d [[attribute(%d)]];\n", ty, in->reg, in->reg);
         }
         for (int i = 0; i < 5; ++i) if (reg[i] < 0) return NULL;
-        snprintf(attr + at, sizeof attr - at, "};\nstruct BoneAux { float4 fixup; float point_size; float3 pad; };\n");
+        snprintf(attr + at, sizeof attr - at, "};\nstruct BoneAux { float4 fixup; float point_size; float pad[3]; };\n");
         char entry[640];
         snprintf(entry, sizeof entry, "vertex BoneOut sm_main(BoneAttr i [[stage_in]], constant BoneConstants &g [[buffer(20)]], constant BoneAux &aux [[buffer(19)]]) {\n"
             "float4 iPosition0=float4(i.a%d), iNormal0=float4(i.a%d), iTexCoord0=float4(i.a%d), iBlendWeight0=float4(i.a%d), iBlendIndices0=float4(i.a%d);\n",

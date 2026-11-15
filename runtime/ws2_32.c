@@ -1,3 +1,4 @@
+#include "game_select.h"
 // ws2_32.c - WS2_32 (winsock 2) and NETAPI32 (Netbios) for the game's own network code (DirtySock's winsock layer,
 // speed.exe 0084A8B0..0084BA10, and NetConnMAC 0083CBF0). LAN discovery uses limited broadcast;
 // outbound policy still refuses internet destinations by default.
@@ -876,26 +877,35 @@ static void log_state(const char *who, const char *const *names, uint32_t old, u
     fflush(stdout);
     if (diag_on) diag_event("online %s state %u -> %u", who, old, now);
 }
+#if NFS_GAME == NFS_GAME_MW
 void f_007A0060(Cpu *c) {             // Server::SetState(state), cdecl
     if (ws2_online || lan_diag_on()) log_state("server", server_states, M32(0x009B4220), arg(c, 0));
     f_007A0060_orig(c);
 }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_00792230(Cpu *c) {             // client SetState(state), cdecl
     if (ws2_online || lan_diag_on()) log_state("client", client_states, M32(0x009B41FC), arg(c, 0));
     f_00792230_orig(c);
 }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_00797450(Cpu *c) {             // client: R_BI_DRIVERFINISH received
     if (ws2_online || lan_diag_on()) { printf("online: client received DRIVERFINISH\n"); fflush(stdout); }
     f_00797450_orig(c);
 }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_0079FF50(Cpu *c) {             // Server::SendMessageToAllClients(type, bits, reliable)
     if ((ws2_online || lan_diag_on()) && arg(c, 0) == 7) { printf("online: server sends DRIVERFINISH\n"); fflush(stdout); }
     f_0079FF50_orig(c);
 }
+#endif
 // GRaceStatus::SetRoaming (from the GRaceStatus constructor) tells ICopMgr about each AI vehicle without a pursuit,
 // but an online race creates no AICopManager (ICopMgr::mInstance 0x92C67C stays 0: indirect call to 0 at 005FE510).
 // For that call only, a stand-in whose methods do nothing (slot 0x2C takes one argument).
 static int copmgr_stub(Cpu *c) { RET(0, 1); }
+#if NFS_GAME == NFS_GAME_MW
 void f_005FE3E0(Cpu *c) {
     if (!ws2_online || M32(0x0092C67C)) { f_005FE3E0_orig(c); return; }
     static uint32_t obj;
@@ -909,6 +919,7 @@ void f_005FE3E0(Cpu *c) {
     f_005FE3E0_orig(c);
     if (M32(0x0092C67C) == obj) M32(0x0092C67C) = 0;
 }
+#endif
 // Milestones of the online race (BOOT_ONLINE): each logged with its guest caller.
 static void online_mark(Cpu *c, const char *what, int once) {
     static const char *seen[16];
@@ -924,8 +935,13 @@ static void online_mark(Cpu *c, const char *what, int once) {
     printf("online: %s (from %08X %s+0x%X)\n", what, ra, sym ? sym : "?", off);
     fflush(stdout);
 }
+#if NFS_GAME == NFS_GAME_MW
 void f_00761140(Cpu *c) { online_mark(c, "OnlineManager::Disconnect", 0); f_00761140_orig(c); }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_006F2850(Cpu *c) { online_mark(c, "OnlineGame::CreatePlayersAndCars", 0); f_006F2850_orig(c); }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_007356A0(Cpu *c) {
     online_mark(c, "OnlineManager::UpdateOutgoing (first)", 1);
     static uint64_t next;
@@ -938,6 +954,7 @@ void f_007356A0(Cpu *c) {
     }
     f_007356A0_orig(c);
 }
+#endif
 static int online_event(void) {
     static int on = -1;
     if (on < 0) on = getenv("BOOT_ONLINE_EVENT") && atoi(getenv("BOOT_ONLINE_EVENT"));
@@ -948,6 +965,7 @@ static int online_event(void) {
 // host runs SetupOnlineRace itself (the client gets it through ImportRaceParams 00761A31). SetupRaceParams' lobby
 // clock (LobbyCore 'stim') is skipped: FEDatabase+0x194 (time of day) keeps its value and the client imports it.
 static int building_local_racer;           // f_00760B20: the racer being built is this copy's own
+#if NFS_GAME == NFS_GAME_MW
 void f_007617D0(Cpu *c) {
     online_mark(c, "OnlineManager::StartOnlineRace", 0);
     building_local_racer = 1;                 // its CreateOnlineRacer(slot 0, persona) builds the local racer
@@ -959,11 +977,13 @@ void f_007617D0(Cpu *c) {
         c->eax = eax;
     }
 }
+#endif
 // Game_InitRacers (0061DBE0) adds 1 - racers + GetNumOpponents() AI racers (0061DCA9..0061DCBC, unsigned loop). An
 // online race sets 0 opponents (SetupOnlineRace's custom race) and has 2 human racers, so the count wraps to
 // 0xFFFFFFFF and the loop never ends (run 12: client hang in GetOpponentChar/AddRacer). Split screen avoids it by
 // counting the second human as an opponent (SetNumOpponents(1), 007A2940/007B4020). Online, for that call only, the
 // same: at least racers - 1.
+#if NFS_GAME == NFS_GAME_MW
 void f_005FACD0(Cpu *c) {
     uint32_t ra = M32(c->esp);
     f_005FACD0_orig(c);
@@ -976,11 +996,15 @@ void f_005FACD0(Cpu *c) {
         }
     }
 }
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void f_006F9BB0(Cpu *c) { online_mark(c, "OnlineGame::OnlineGame", 0); f_006F9BB0_orig(c); }
+#endif
 // NetConnStartup ('open') clears the 'conn'/'onln' status (009C3624/009C3628); only the LAN screen (UI_PC_LAN_ServerSelect
 // ctor 00560470) and 00533650 call NetConnConnect (0083CD10) to set them. The SkipFE-online route calls neither, so once
 // racing, NetworkCore::__unk (0078B260) reads 'onln' 0, FUN_007361E0 closes the session and the race shows "Connection to
 // other players has been lost". Online: connect right after startup, as the LAN screen does.
+#if NFS_GAME == NFS_GAME_MW
 void f_0083CCC0(Cpu *c) {
     f_0083CCC0_orig(c);
     if (ws2_online && c->eax == 0) {
@@ -991,11 +1015,13 @@ void f_0083CCC0(Cpu *c) {
         fflush(stdout);
     }
 }
+#endif
 // RaceStarter::SetupOnlineRace (005A3590) builds the online race from the event the lobby/LAN screen chose
 // (FEDatabase+0x18C, a race-ID hash; +0x168 type, 1 = laps from byte +0x190). The SkipFE-online route sets none, so
 // both cars free-roam with no finish (run 11: no lap HUD). BOOT_ONLINE_EVENT=1 (experimental): the BOOT_RACE event and
 // laps. Run 12: the client (which imports the host's params) then hangs at frame 119 in Game_InitRacers ->
 // GRaceParameters::GetOpponentChar -> Attrib::Collection::GetNode; the host never calls SetupOnlineRace on this route.
+#if NFS_GAME == NFS_GAME_MW
 void f_005A3590(Cpu *c) {
     uint32_t fe = M32(0x0091CF90);                    // FEDatabase
     if (ws2_online && online_event() && fe) {
@@ -1027,6 +1053,7 @@ void f_005A3590(Cpu *c) {
     }
     f_005A3590_orig(c);
 }
+#endif
 // OnlineRacer constructor (00760B20, thiscall: slot index, ..., name): with SkipFE set it names every racer "SkipFE"
 // (0x70696B53 0x4546 at +0x1156) instead of the lobby name, so both racers on both copies are "SkipFE" [V oc_d1; the
 // lobby persona, FEDatabase+0x134+0x84, is never used for it]. OnlineManager::FinishDriver (00755140) finds a driver's
@@ -1036,6 +1063,7 @@ void f_005A3590(Cpu *c) {
 // (CreateOnlineRacer(0, .., persona)); remote racers are built later, also in slot 0 on the host (oc_g1), so the slot
 // can't tell them apart. The host's racer name reaches the client in the join data (oc_f1, oc_g1). So the local racer
 // is named BOOT_ONLINE_NAME (default "Host" / "Client") and every other one "SkipFE<slot>": different names on each copy.
+#if NFS_GAME == NFS_GAME_MW
 void f_00760B20(Cpu *c) {
     uint32_t self = c->ecx, slot = arg(c, 0) & 0xFF;
     f_00760B20_orig(c);
@@ -1052,8 +1080,10 @@ void f_00760B20(Cpu *c) {
         fflush(stdout);
     }
 }
+#endif
 // OnlineManager::FinishDriver(driver, ..., reason) (00755140, from Game_NotifyRaceFinished 00611B0C when the race
 // context GRaceStatus+0x1964 is 1): logs the driver, the racer its name finds and that racer's state (+0x1144).
+#if NFS_GAME == NFS_GAME_MW
 void f_00755140(Cpu *c) {
     if (ws2_online) {
         uint32_t rs = M32(0x0091E000), om = c->ecx, idx = arg(c, 0);
@@ -1073,3 +1103,4 @@ void f_00755140(Cpu *c) {
     f_00755140_orig(c);
     if (ws2_online) { printf("online: FinishDriver -> %u\n", c->eax & 0xFF); fflush(stdout); }
 }
+#endif

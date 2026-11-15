@@ -16,6 +16,8 @@ No conversion or recognized input is an appearance approval.
 --assets exits 3 without inputs.
 Texture-namespace dependency: omitting the shared helper fails 1/1 identity
 test; including it passes the PC/X360 dependency assertions.
+GRIP policy: SHA-pinned original (--original-grip-policy) fails 1/1 dependency
+test (exit 1); current passes 14/14 tests (exit 0), including both platforms.
 """
 import copy
 import hashlib
@@ -39,6 +41,38 @@ import test_car_convert as pc
 import test_car_x360 as xenon
 import test_car_x360_inputs as deps
 import test_car_lighting as lighting_fixture
+
+ORIGINAL_GRIP_POLICY = r'''def _converter_policy(platform, lighting, tracked, mac_audio=False):
+    """Hash executable policy dependencies separately from local asset inputs."""
+    from . import car_lighting, car_paint, car_physics, car_sources, x360, xdvdfs
+    require(lighting is None or isinstance(lighting, Mapping), 'lighting options must be a mapping')
+    options = dict(lighting or {})
+    require(set(options) <= {'amplitudes', 'lamps', 'gains'}, 'unknown lighting policy option')
+    settings = dict(amplitudes=options.get('amplitudes', False), lamps=options.get('lamps', False))
+    gains = options.get('gains')
+    if gains is not None:
+        require(isinstance(gains, car_lighting.Gains), 'invalid lighting gains')
+        gains.validate()
+        settings['gains'] = vars(gains)
+    modules = [Path(__file__), Path(huff.__file__), Path(car_texture_namespace.__file__), Path(car_lighting.__file__),
+               Path(car_paint.__file__), Path(car_physics.__file__),
+               Path(car_sources.__file__), Path(x360.__file__), Path(xdvdfs.__file__)]
+    if mac_audio:
+        from . import car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank
+        modules += [Path(m.__file__) for m in (car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank)]
+    if platform == 'x360':
+        from . import car_x360, car_x360_inputs
+        modules += [Path(m.__file__) for m in (car_x360, car_x360_inputs)]
+        codec = Path(car_x360._pixels().__file__)
+        modules += [codec, codec.with_name('texture_compare.py')]
+    fingerprints = {p.name: hashlib.sha256(tracked.read(p)).hexdigest() for p in modules}
+    identity = dict(revision=2, platform=platform, lighting=settings, numpy=np.__version__,
+                    textures='top mip; source sampler state; BC5 positive Z/opaque alpha; BC5/BGRA lossy DXT5',
+                    modules=fingerprints)
+    identity['sha256'] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return identity, options
+'''
+ORIGINAL_GRIP_POLICY_SHA = '8df6b59d8a48d300435f0740d3a77f8ab3931988d7ebcde38e7f0a3dc8bcc8eb'
 
 BASELINE_REJECTION = 'Carbon mesh header must be 52 aligned bytes'
 
@@ -506,7 +540,7 @@ class PlatformConversion(unittest.TestCase):
                 lighting={'amplitudes':True,'gains':cl.Gains(.25,1,1)})
             self.assertTrue(result['lighting']['rows'])
             expected = {'car_convert.py','car_texture_namespace.py','huff.py','car_lighting.py','car_paint.py',
-                        'car_physics.py','car_sources.py','x360.py','xdvdfs.py'}
+                        'car_physics.py','car_grip.py','car_sources.py','x360.py','xdvdfs.py'}
             if platform == 'x360': expected |= {'car_x360.py','car_x360_inputs.py','x360_tex.py','texture_compare.py'}
             self.assertEqual(set(result['converter_policy']['modules']),expected)
             self.assertEqual(len(result['dependencies']),len(result['inputs']))
@@ -653,4 +687,13 @@ def asset_main():
 if __name__ == '__main__':
     if '--assets' in sys.argv:
         raise SystemExit(asset_main())
+    if '--original-grip-policy' in sys.argv:
+        sys.argv.remove('--original-grip-policy')
+        assert digest(ORIGINAL_GRIP_POLICY.encode()) == ORIGINAL_GRIP_POLICY_SHA
+        original = {}
+        exec(compile(ORIGINAL_GRIP_POLICY, '<original-grip-policy>', 'exec'), vars(cc), original)
+        with mock.patch.object(cc, '_converter_policy', original['_converter_policy']):
+            suite = unittest.TestSuite([PlatformConversion('test_amplitude_policy_and_dependency_identity')])
+            result = unittest.TextTestRunner().run(suite)
+            raise SystemExit(not result.wasSuccessful())
     unittest.main()

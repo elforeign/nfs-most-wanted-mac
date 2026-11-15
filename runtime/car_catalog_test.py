@@ -260,7 +260,7 @@ class NativeCatalogTests(unittest.TestCase):
         args = ['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-g', '-fsanitize=address,undefined', '-I', str(ROOT / 'runtime')]
         if policy:
             args += ['-DCAR_CATALOG_APPROVAL_HEADER="' + str(d / 'approval.h') + '"']
-        p = subprocess.run(args + [str(c), '-o', str(exe)], capture_output=True, text=True)
+        p = subprocess.run(args + [str(ROOT / 'runtime/car_grip.c'), str(c), '-o', str(exe)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr[-5000:])
         return exe
 

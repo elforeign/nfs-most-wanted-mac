@@ -320,7 +320,7 @@ def main():
             (root/'metadata.c').write_text(saves.GUARD+actual)
             (root/'test.c').write_text(file_source)
             exe=root/variant
-            build=subprocess.run(['clang',str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address','-I'+str(ROOT/'runtime'),
+            build=subprocess.run(['clang',str(ROOT/'runtime/car_grip.c'),str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address','-I'+str(ROOT/'runtime'),
                                   str(root/'test.c'),str(root/'metadata.c'),'-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3500:]
             user=root/('user-'+variant); user.mkdir()

@@ -6,8 +6,27 @@
 # gate instead of failing silently until someone runs it. With names: only those (e.g. `offline_tests.sh x360music_test aa_setting`).
 #
 # What runs (autodiscovered, so a new test joins by existing):
+#   runtime/lens_drops_test.py + lens_drops_test.m: generated upload and production drop shader, suppressed-generation control
+#   runtime/diag_capture_test.py: slow PNG capture vs original watchdog and post-capture stall control
+#   runtime/daynight_test.py: live block endpoints, full orbit, hook ABI/Off and broken ambient/swing controls
+#   runtime/daynight_clock_test.py: clock policies, persistence, horizon bounds and broken controls
+#   runtime/daynight_sky_test.py: sky lookup, orbit fade, Metal blend and broken controls
 #   inputs_paths_test.py: legacy private-path scan; inputs_preflight_test.py: bounded startup opens + runtime resolver
+#   runtime/underglow_fit_test.py: roster silhouette <=0.05 m, original mounts control, zero emitter quads
+#   runtime/underglow_ground_test.py: ground depth-pass share, broken horizontal receiver
+#   headlights_test.py / headlights_test.m: production beam shaders, shadow casters, draw admission and Off counters
+#   runtime/paint_flake_test.py: generated resource/upload/paint pixels and missing-volume control
+#   runtime/glass_port_test.py: port glass V = UV0.y on the GPU (two broken controls) and, with console files, V error vs console
+#   runtime/car_normals_port_test.py: port TREAD/TREADR/DOORLINE/DAMAGE0 binding + content, recipe deletion, GPU vs flat normal
 #   runtime/*_test.py (including roam_online_test.py codecs/loopback relay and roam_session_test.py lifecycle)
+#   temporal_state_test.py drives temporal_state_test.c: view/cut/lifetime state and disabled-invalidation control
+#   temporal_render_test.py + temporal_render_test.m: depth reprojection, 1x object motion replay and broken controls
+#   shared_depth_test.py: shared_depth_test.m Metal normals/min-max/reset/AO equality and three broken controls
+#   atmosphere_test.py: physical LUT references, live fog snapshot and swapped Rayleigh/Mie control
+#   pre_treatment_test.py: dependency/off-path contracts and 4K separate/fused Metal measurement
+#   car_grip_assist_test.py: dormant six-field source equations, modes, authored samples and omitted-term controls
+#   car_grip_ordinary_test.py: ordinary demand, launch cap, surface/angle correction and wheel feedback goldens/mutants
+#   car_grip_wheel_test.py: dormant four-field overlay, prepared-wheel seam and G2/G3 oracle comparisons
 #   car85_language_test.py: public packed_display with translated language loader/decoder and old-pointer failure control
 #   car_style_fallback_test.py: installed additions' HOOD/ROOF targets plus synthetic STYLE controls (exit 3 without packs)
 #   lasterror_test.py: production import/GIL handovers and ReadFile errors, with pinned original control
@@ -21,8 +40,22 @@
 #   runtime/threadhandles_test.py: real pthread close/exit lifetimes and pinned slot-exhaustion control
 #   library_libmode_test.py: isolated host archives without recomp/out, with target/early-exit controls
 #   library_archive_test.py: exact inventory/arm64/14.5, extra guest-named member and 27.0 controls
+#   rain_ripples_test.py: authored generation, production provider/array/shader proof and suppressed-frame control
+#   water_port_test.py: authored water generation, production shader patch on a checker reflection, suppressed-wave control
 #   materials_stub_test.py: every X360 material source with --stub includes, Metal compile and three-source broken control
-#   recomp/*_test.py  tools_snapshot/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
+#   clearcoat_test.py + clearcoat_test.m: production paint variants, exact Off source, Metal layer and broken controls
+# Private layout coverage: private_pad_layout_test (auto-discovered) and private_padbind_test.
+# Xbox fallback: recomp/private_carbon_xboxart_test.py is auto-discovered (24 on / 0 off).
+# Private session unlock coverage: recomp/private_unlock_test.py (auto-discovered).
+# B2 road position: recomp/private_road_headlight_test.py (auto-discovered),
+# captured 8190 m / zero attenuation -> <4 m / >.96; disabled-transform control.
+# B2 material transport: recomp/private_worldreflect_test.py (auto-discovered),
+# quarter-grey 74.2047; missing x2/ambient reject the full-road scene fixture.
+#   recomp/private_skydome_test.py: B2 sky selection and native ownership; auto-discovered
+#   recomp/private_daynight_cars_test.py: B2 car rig by day, key dot sun .9848; kind-2 control; auto-discovered
+# Private region coverage: private_world_test, private_files_test and test_worldmerge.
+#   recomp/private_build_inputs_test.py: tracked starts, recreated witnesses and missing-row control.
+#   recomp/*_test.py  tools_snapshot/test_*.py  tools_snapshot/worldmerge/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
 #   recomp/windows_host_test.py: synthetic guest VM/PE/import/TLS/Lua/GIL/thread proof, plus broken controls
 #   recomp/windows_hooks_test.py: SDK-free COFF symbols/relocations and hook-removed control (exit 3 without COFF clang)
 #   runtime/taskdelay_test.py: production SimTask hook + translated constructor/Run; pinned predecessor must fail
@@ -31,13 +64,12 @@
 #   msaa_resolve_test.m, rectangle_clear_test.m (via rectangle_clear_test.py), dsound_dup_test.sh, wfx_cb_test.sh, defaults_check.py)
 #   host/audio/build.sh (builds + runs leveltest, limitertest, limiter_guest_test with their broken controls), dstest (headless)
 #   and ctest; host/shaders/build.sh (translator vs reference, Metal compile, GPU vs CPU) last, alone (heavy).
-# Tiers (2026-11-03): a whole-suite run is the FAST tier unless OFFLINE_TIER=full: the integration suites listed in
-# runtime/offline_tier2.txt (15 names, each 47-289 s; 1,120 of the parallel phase's 2,950 test-seconds in the 711 s reference run)
-# are deferred and the PASS line ends with "TIER2 deferred (N)". The full tier is the authority: gate.sh and
-                                                                                                                          
-# in-job run_tests and hand runs get the fast tier. Named runs ignore the tier. A tier-2 name that is not a registered
-# test fails the run (list rot). Proof: runtime/offline_tier_test.py (plan-mode fast vs full differ by exactly the 15 names;
-# an unknown tier-2 name -> OFFLINE FAIL: tier2; the two authorities grep as full).
+# Tiers: a whole-suite run is the FAST tier unless OFFLINE_TIER=full. The rows in runtime/offline_tier2.txt
+# are deferred by the fast tier. Nightly runs full; gate/job runs use impact_tests.py's named selections.
+# Rows tagged nightly are excluded by that selector even when their sources change. Other tier-2 tests may run
+# when impacted. Named invocations ignore the whole-suite tier filter; explicit full overrides run everything.
+# Unknown tier-2 names fail the run. Proof: runtime/offline_tier_test.py (full minus fast equals the tier rows;
+# an unknown row fails) and impact_tests_test.py (nightly exclusions).
 # Run through host_audio: dsound_dup_test.c (via dsound_dup_test.sh), ctest.c, dstest.cpp, leveltest.cpp, limitertest.cpp,
 # limiter_guest_test.c. Run through host_shaders: host/shaders/tests/*. Not run: media/mediatest.cpp (needs a movie argument;
 # it is a diagnostic tool). Asset-bound tests (X360 extract, game folder) print SKIP when the
@@ -63,6 +95,16 @@
 . "$(dirname "$0")/env.sh"; nfs_need_py
 cd "$(dirname "$0")/.." || exit 2
 here=$PWD; self=$here/runtime/${0##*/}
+# The authored-drop proof must never discover console artwork through a legacy
+# machine layout. Isolate a standalone proof only: exporting this for a mixed
+# batch changes the settings defaults and invalidates unrelated retail checks.
+case " $* " in
+    " lens_drops_test ")
+        mkdir -p "$here/.metal-cache"
+        printf 'pc_root=%s\n' "$NFS_GAME" > "$here/.metal-cache/lens-drops-roots.txt"
+        export NFS_ROOTS="$here/.metal-cache/lens-drops-roots.txt"
+        ;;
+esac
 # Bound private-source access before tests, builds or cached gate results.
 if [ -f tools/inputs.py ] && [ "${OFFLINE_TESTS_PLAN:-0}" != 1 ] && [ "${1:-}" != --one ]; then
     "$TOOLS_PY" -I tools/inputs.py
@@ -90,7 +132,7 @@ run_one() {
     settings_look|settings_look_test) clang $CF -I recomp runtime/settings_look_test.c runtime/settings.c -o "$d/t" && exec "$d/t" ;;
     note_len|note_len_test) clang $CF -I recomp -I runtime runtime/note_len_test.c runtime/text_fit.c -o "$d/t" && exec "$d/t" ;;
     *_test|test_*|defaults_check)       # Python-driven tests
-        for f in runtime/$n.py recomp/$n.py tools_snapshot/$n.py tools/publish/$n.py tests/setup/$n.py; do [ -f "$f" ] && break; done
+        for f in runtime/$n.py recomp/$n.py tools_snapshot/$n.py tools_snapshot/worldmerge/$n.py tools/publish/$n.py tests/setup/$n.py; do [ -f "$f" ] && break; done
         case $f in tests/setup/*)
             # Swift's default module cache is outside the suite's scratch dir.
             export CLANG_MODULE_CACHE_PATH="$d/modules" SWIFT_MODULECACHE_PATH="$d/modules" ;;
@@ -308,13 +350,13 @@ fi
 # ---- the list
 # live_picture_sweep_test is discovered below: production table inventory, batching,
 # diagnostic driver and refs-tolerance undo comparison, including a skipped-undo seed.
-pyfiles() { for f in runtime/*_test.py recomp/*_test.py tools_snapshot/test_*.py tools/publish/test_*.py tests/setup/test_*.py runtime/defaults_check.py; do [ -f "$f" ] && echo "$f"; done; }
+pyfiles() { for f in runtime/*_test.py recomp/*_test.py tools_snapshot/test_*.py tools_snapshot/worldmerge/test_*.py tools/publish/test_*.py tests/setup/test_*.py runtime/defaults_check.py; do [ -f "$f" ] && echo "$f"; done; }
 pylist() { pyfiles | sed 's|.*/||; s|\.py$||'; }
 standalone="cliprec note_len aa_setting settings_live feedback padfx padlink ws2_policy settings_look heap rumble framecap looppace pacewait framelate jdlz x360abk lampbatch soft_smoke_half msaa_resolve dsound_dup wfx_cb host_audio"
 # Timing-sensitive tests: audio requires zero wall-clock underruns; short-deadline public tests are here,
 # private tool tests in runtime/offline_serial.txt (absent in public trees).
 # Live encoder mutation builds exceeded the suite watchdog under parallel load.
-deadline_tests="live_encode_test host_audio pub_update_flow_test pacewait test_backend report_lock_test roam_loopback_fixture_test roam_admission_test windows_sync_test replay_capture_test livestream_test stream_live_test $(cat runtime/offline_serial.txt 2>/dev/null | tr '\n' ' ')"
+deadline_tests="diag_capture_test live_encode_test host_audio pub_update_flow_test pacewait test_backend report_lock_test roam_loopback_fixture_test roam_admission_test windows_sync_test replay_capture_test livestream_test stream_live_test $(cat runtime/offline_serial.txt 2>/dev/null | tr '\n' ' ')"
 serial=${OFFLINE_SERIAL_TESTS:-$deadline_tests}
 duplicates=$({ pylist; printf '%s\n' $standalone host_shaders; } | sort | uniq -d)
 [ -z "$duplicates" ] || { echo "OFFLINE FAIL: duplicate test names: $duplicates"; exit 1; }

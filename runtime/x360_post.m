@@ -15,15 +15,17 @@
 #include <math.h>
 
 #include "x360_internal.h"
+#include "lens_drops.h"
 #include "settings.h"
 #include "sign_diag.h"
+#include "rain_cover.h"
 // The renderer supplies strong definitions; isolated CPU post fixtures retain
 // these no-op definitions (weak imports alone do not link their C snapshots).
 __attribute__((weak,noinline)) void render_float_scene_final(int preserve) { (void)preserve; }
 __attribute__((weak,noinline)) void render_float_scene_begin(void) {}
 __attribute__((weak,noinline)) void render_float_scene_post_target(uint32_t surface) { (void)surface; }
-#include "gen/x360_shader_lits.inc"   // X360_SHADER_LITS: 0 without the X360 shaders' constants (render_post.m fs_vt): PC chain
-#include "gen/x360_engine.inc"       // X360E_*: the X360 engine's post constants from the player's default.xex (0: PC chain)
+#include "gen/x360_shader_lits.inc"   // X360S_VT_* (render_post.m fs_vt): the player's X360 shader constants, else this port's own values
+#include "gen/x360_engine.inc"       // X360E_*: the post constants from the player's default.xex, else this port's own values (X360_ENGINE_CONSTS 0)
 
 #define VT_PLAT          0x00982AF0u   // pVisualTreatmentPlat (IVisualTreatment fields, layout shared with X360)
 #define VT_TECHNIQUE     0x0093DEB8u   // the VT effect wrapper; [10] = technique (1 = the two-pass ps_1_1 fallback)
@@ -104,6 +106,7 @@ static int tone_curve_x360(void) {
 // c<pct> (colour filter), both (b50c0), or `old` (the chain before 2026-10-20's fixes: X360 bloom mask, X360 curve,
 // bloom and colour 100), `x360look` (NFS_VISUALLOOK=x360), `raw` (the chain's input, untreated).
 // `lampglow` / `lampglowoff`: selective police lamp emission On / Off, retaining the current Natural/Glow mode.
+// `headlightoff` / `headlighton`: player low-beam projection Off / On; naming `headlighton` runs it for the whole run.
 // BOOT_DIAG_LOOK_AB=1: old,b0,b25,b50,b100,c0,c50,c100.
 static char look_vars[16][16];
 static int look_nvars = -1, look_state, look_var;   // state 1 base shot taken, 2 the held pass draws variant look_var, 3 its shot set
@@ -149,6 +152,12 @@ int x360_post_ssao_enabled(void) {
     return on;
 }
 int postfx_look_variant(const char *v) { return look_var_is(v); }   // lighting.c: `wlorig` / `wlneutral`
+// headlights.m: a feature named in the list runs for the whole diagnostic run, so its held variant is ready
+int postfx_look_listed(const char *v) {
+    if (!look_ab()) return 0;
+    for (int i = 0; i < look_nvars; ++i) if (!strcmp(look_vars[i], v)) return 1;
+    return 0;
+}
 static const char *var_num(const char *v, char key) {   // the digits after `key` in a variant ("b50c0"), or NULL
     for (; *v; ++v) if (*v == key && v[1] >= '0' && v[1] <= '9') return v + 1;
     return NULL;
@@ -297,12 +306,12 @@ static float deband_thresh(void) {
     if (look_state == 2) { const char *d = var_num(look_vars[look_var], 'd'); if (d) return (float)atoi(d) / 255.0f; }
     return deband == 0 ? DEBAND_LSB / 255.0f : 0.0f;
 }
-void x360_post_set_chain(int x360) { postfx = x360 && !postfx_ab() && X360_SHADER_LITS && X360_ENGINE_CONSTS; if (diag_on) diag_event("x360: post-processing now %s", postfx ? "x360" : "pc"); }   // the F10 menu (portmenu.m): from the next frame
+void x360_post_set_chain(int x360) { postfx = x360 && !postfx_ab(); if (diag_on) diag_event("x360: post-processing now %s", postfx ? "x360" : "pc"); }   // the F10 menu (portmenu.m): from the next frame
 static int postfx_x360(void) {
     if (postfx < 0) {
         const char *e = getenv("NFS_POSTFX");
-        postfx = !(e && !strcmp(e, "pc")) && !postfx_ab() && X360_SHADER_LITS && X360_ENGINE_CONSTS;
-        if (diag_on) diag_event("x360: post-processing %s", postfx ? "x360" : postfx_ab() ? "pc, x360 alongside (BOOT_DIAG_POSTFX_AB)" : "pc");
+        postfx = !(e && !strcmp(e, "pc")) && !postfx_ab();   // no console files: the same chain on this port's own constants
+        if (diag_on) diag_event("x360: post-processing %s (%s constants)", postfx ? "x360" : postfx_ab() ? "pc, x360 alongside (BOOT_DIAG_POSTFX_AB)" : "pc", X360_ENGINE_CONSTS && X360_SHADER_LITS ? "console" : "port");
     }
     return postfx || (ab_state == 2 && ab != 2) || ab_state == 4;   // BOOT_DIAG_POSTFX_AB=2: the held pass stays PC (checks the hold)
 }
@@ -483,7 +492,7 @@ void f_006E6E40(Cpu *c) {                                  // FE / HUD pass (cde
 // (render_x360_raindrops: its 32x32 displacement ONSCREENRAINDROP and 4-variant ONSCREENRAINDROPALPHA from
 // GLOBALB.BUN, round on any aspect), =pc the game's own pass (PC look, 4:3 drops) after the composite, =pc_before the
 // game's pass where PC draws it (blurred and graded: the port before this change, for comparisons). Without the X360
-// textures x360 falls back to pc. NFS_POSTFX=pc: nothing changes.
+// textures x360 uses the authored optics (lens_drops.c); if their creation fails it falls back to pc. NFS_POSTFX=pc: nothing changes.
 // The drops: the Rain object (eViews[1] + 0x68, 009196B8) holds the count at +0, drop i's record at +i*0x1C: +4 x,
 // +8 y (screen uv), +0xC life left / +0x10 life, +0x14 size, +0x1C variant (FUN_0073CFA0; FUN_0073CD30 makes 20,
 // variant i & 3; FUN_0073CDB0 shows 20 in view modes < 3, 10 from 3 up, none in tunnels or without rain).
@@ -498,12 +507,12 @@ void f_006E6E40(Cpu *c) {                                  // FE / HUD pass (cde
 #define FN_GET_TEXTURE   0x00503400u   // GetTextureInfo(hash, 1, 0)
 static int drops_mode = -1;            // 0 pc_before, 1 pc, 2 x360
 void x360_post_set_raindrops(int mode) { drops_mode = mode; if (diag_on) diag_event("x360: raindrops mode now %d", mode); }   // the F10 menu (portmenu.m): from the next frame
-static int drops_replaying, drops_have_tex = -1;
+static int drops_replaying, drops_have_tex = -1, drops_authored;
 static uint32_t drops_tex[2];          // D3D textures: ONSCREENRAINDROP, ONSCREENRAINDROPALPHA
 static int raindrops_mode(void) {
     if (drops_mode < 0) {
         const char *e = getenv("NFS_RAINDROPS");
-        drops_mode = e && !strcmp(e, "pc_before") ? 0 : e && !strcmp(e, "pc") ? 1 : 2;
+        drops_mode = lens_drops_mode(e);
     }
     return drops_mode;
 }
@@ -512,13 +521,15 @@ uint32_t x360_texture_load(Cpu *c, const char *file, uint32_t hash, uint32_t as_
 void raindrops_textures(Cpu *c) {      // x360_textures.m, at the first texture Init (start-up)
     if (raindrops_mode() != 2) return;
     static const char *const names[2] = {"ONSCREENRAINDROP", "ONSCREENRAINDROPALPHA"};
-    int n = 0;
     for (int i = 0; i < 2; ++i) {
         uint32_t h = name_hash(names[i]), ti = x360_texture_load(c, "GLOBAL/GLOBALB.BUN", h, h);
         drops_tex[i] = ti && M32(ti) ? M32(M32(ti) + 0x18) : 0;             // platform record +0x18: the D3D texture
-        n += drops_tex[i] != 0;
     }
-    drops_have_tex = n == 2;
+    const char *opt = getenv("NFS_RAINDROPS");
+    int provider = lens_drops_provider(c, M32(D3D_DEVICE), drops_tex, lens_drops_mode(opt) == 2);
+    drops_authored = provider == 2;
+    drops_have_tex = provider != 0;
+    if (diag_on && provider) diag_event("raindrops: texture provider %s", drops_authored ? "authored" : "console");
     if (!drops_have_tex) fprintf(stderr, "boot: lens raindrops: no X360 drop textures, the PC drops after the composite\n");
 }
 static void restore_rt(Cpu *c) {       // the RT table's current entry: colour, depth, viewport (as FUN_006e2f50 leaves it)
@@ -549,6 +560,7 @@ void f_006D4620(Cpu *c) {                                  // rain on the lens (
     if (drops_deferred && diag_on) { static int n; if (n++ < 3) diag_event("raindrops: last frame's deferred drops were not drawn (no X360 composite)"); }
     drops_deferred = 0;
     uint32_t rain = M32(post_view ? post_view->source_view+0x68 : RAIN_PTR), vtw = M32(VT_TECHNIQUE), count = rain ? M32(rain) : 0;
+    if (rain_cover_enabled && rain_cover_lens(rain)) { ndrops = 0; c->esp += 4; return; }
     if (diag_on && !drops_replaying) {
         static uint32_t last = ~0u;
         if (count != last) { last = count; diag_event("raindrops: %u drops (intensity %.3f, override %.3f, to_bb %u)", count, rain ? F32(rain + 0x28C) : 0.0f, F32(RAIN_OVERRIDE), M8(c->esp + 4)); }
@@ -575,7 +587,7 @@ static void raindrops_after(Cpu *c, int composited) {
     int sig = (probe_sig & PROBE_RAINDROPS) != 0;
     static int logged;
     if (raindrops_mode() == 2 && drops_have_tex == 1) {
-        int n = render_x360_raindrops_view(post_view ? post_view->source_surface : M32(BACKBUFFER_SURF), drops, ndrops, drops_tex[0], drops_tex[1], sig, post_view);
+        int n = render_lens_drops_view(post_view ? post_view->source_surface : M32(BACKBUFFER_SURF), drops, ndrops, drops_tex[0], drops_tex[1], sig, drops_authored, post_view);
         if (n > 0) {
             probe_applied(PROBE_RAINDROPS, n);
             if (diag_on && !logged++) diag_event("raindrops: x360 pass, %d drops, first x %.3f y %.3f life %.3f size %.3f variant %u", n, drops[0].x, drops[0].y, drops[0].life, drops[0].size, drops[0].variant);
@@ -872,8 +884,8 @@ static int split_pc_scope(Cpu *c,const X360PostView *view,int treatment) {
         if (raindrops_mode()==2 && drops_have_tex==1) {
             X360PostView local=*view;
             uint32_t r[4]={0,0,s->pc_width,s->pc_height};memcpy(local.destination,r,16);
-            int drawn=render_x360_raindrops_view(s->pc_surf[2],s->drop_list,s->drop_count,drops_tex[0],drops_tex[1],
-                (probe_sig&PROBE_RAINDROPS)!=0,&local);
+            int drawn=render_lens_drops_view(s->pc_surf[2],s->drop_list,s->drop_count,drops_tex[0],drops_tex[1],
+                (probe_sig&PROBE_RAINDROPS)!=0,drops_authored,&local);
             if (drawn>0) probe_applied(PROBE_RAINDROPS,drawn);
         } else {
             // PC replay samples only a local composited screen copy, with local window aspect.

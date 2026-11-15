@@ -6,6 +6,11 @@
 // Serial-cache control On and Off: 1 preparation / 5 failures / exit 1;
 // the prior direct-preparation harness passed that mutation (exit 0).
 // Split/partial: all channels identical; nonempty reuse/proof retain stores.
+// New cuts: ten 3440x2160 2x held SDR/EDR frames, 74,304,000 pixels,
+// changed=0/max=0. Wrong >0.25 blur threshold: eight equality failures,
+// SDR frame 1 changed=1,250,528/max=53; EDR changed=1,423,804/max=14,006
+// stored half-bit codes (exit 1). Fourteen kernels + twelve quad copies exact;
+// four mip/array-slice/partial/view cases retain every other subresource.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <math.h>
@@ -67,15 +72,25 @@ static id<MTLTexture> curve(id<MTLLibrary> l,id<MTLTexture> src) {
     [e setFragmentTexture:src atIndex:0];[e setFragmentSamplerState:sampler atIndex:0];[e setFragmentBytes:k length:sizeof k atIndex:0];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];finish(cb);return dst;
 }
 typedef struct {float coeffs[4][4],b[4],blur[4],dof[4],misc[4],zr[4],tp[4],rx[4];} VT;
+static unsigned held_width=3840,held_height=2160;
+static int held_case=-1;
 static id<MTLTexture> treatment(id<MTLLibrary> l,id<MTLTexture> scene,id<MTLTexture> tone,id<MTLTexture> vig,id<MTLTexture> zero,id<MTLTexture> depth,unsigned samples,int on) {
-    MTLPixelFormat f=scene.pixelFormat;id<MTLTexture> dst=texture(f,3840,2160,1),ms=samples>1?texture(f,3840,2160,samples):nil;
+    MTLPixelFormat f=scene.pixelFormat;id<MTLTexture> dst=texture(f,held_width,held_height,1),ms=samples>1?texture(f,held_width,held_height,samples):nil;
     fill(dst,3);
     id<MTLCommandBuffer> cb=[queue commandBuffer];
     // Seed all MS samples too: the Off load has a valid, unrelated prior target.
     if(ms){MTLRenderPassDescriptor *seed=[MTLRenderPassDescriptor renderPassDescriptor];seed.colorAttachments[0].texture=ms;seed.colorAttachments[0].loadAction=MTLLoadActionClear;seed.colorAttachments[0].clearColor=MTLClearColorMake(.19,.37,.61,.83);seed.colorAttachments[0].storeAction=MTLStoreActionStore;[[cb renderCommandEncoderWithDescriptor:seed] endEncoding];}
-    MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=ms?:dst;rp.colorAttachments[0].loadAction=on?final_load(0,0,0,3840,2160,ms?:dst):MTLLoadActionLoad;rp.colorAttachments[0].storeAction=ms?MTLStoreActionMultisampleResolve:MTLStoreActionStore;if(ms)rp.colorAttachments[0].resolveTexture=dst;
+    MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=ms?:dst;rp.colorAttachments[0].loadAction=on?final_load(0,0,0,held_width,held_height,ms?:dst):MTLLoadActionLoad;rp.colorAttachments[0].storeAction=ms?MTLStoreActionMultisampleResolve:MTLStoreActionStore;if(ms)rp.colorAttachments[0].resolveTexture=dst;
     id<MTLRenderCommandEncoder> e=[cb renderCommandEncoderWithDescriptor:rp];[e setRenderPipelineState:pipeline(l,@"vs_full",@"fs_vt",f,samples)];
     VT k={0};k.coeffs[0][0]=.72f;k.coeffs[1][0]=.25f;k.coeffs[2][0]=.10f;k.coeffs[3][0]=.03f;k.misc[0]=.87f;k.misc[1]=.1f;k.misc[2]=1.13f;k.misc[3]=1;k.dof[3]=21;k.zr[0]=.5;k.zr[1]=1000;k.tp[3]=4;
+    if(held_case>=0){
+        k.b[0]=-.005f;k.b[1]=-.003f;k.b[2]=.005f;k.b[3]=.003f;
+        // Stopped, slow, fast, DOF and deband: mixed exact-zero/nonzero masks.
+        k.blur[0]=held_case==0?-1:held_case==1?-.3f:.05f;
+        k.blur[1]=held_case==0?0:.1f;k.zr[2]=held_case==3;
+        k.dof[0]=3;k.dof[1]=1;k.dof[2]=.1f;
+        k.rx[2]=held_case==4?.015f:0;k.rx[3]=24;
+    }
     [e setFragmentBytes:&k length:sizeof k atIndex:0];
     [e setFragmentTexture:scene atIndex:0];[e setFragmentTexture:tone atIndex:1];[e setFragmentTexture:vig atIndex:2];[e setFragmentTexture:zero atIndex:3];[e setFragmentTexture:zero atIndex:4];[e setFragmentTexture:depth atIndex:5];[e setFragmentTexture:zero atIndex:6];
     [e setFragmentSamplerState:sampler atIndex:0];[e setFragmentSamplerState:sampler atIndex:1];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];finish(cb);return dst;
@@ -198,9 +213,130 @@ static int coverage_proof(const char *path){
     printf("AO coverage: %u bytes, depth_cuts=%u ms_cuts=%u depth_prepares=%u calls=6 failures=%d\n",6*64*36,observed_depth_cuts,observed_ms_cuts,depth_prepares,failures);return failures?1:0;
 }
 
+// The complete production quad submission, with only cache/diagnostic fixtures.
+static int float_scene_on=1,diag_on,blit_pipelines;
+static id<MTLLibrary> blit_lib;
+static id<MTLRenderPipelineState> blit_pso;
+static id<MTLSamplerState> blit_linear,blit_point;
+static MTLLoadAction quad_expected;
+static void observe_quad(MTLRenderPassDescriptor *rp){CHECK(rp.colorAttachments[0].loadAction==quad_expected);CHECK(rp.colorAttachments[0].storeAction==MTLStoreActionStore);}
+static void *map_get(int *m,uint64_t key){return NULL;}
+static void map_put(int *m,uint64_t key,id p){}
+static uint32_t mipdim(uint32_t v,uint32_t n){return v>>n?v>>n:1;}
+static void diag_event(const char *f,...){}
+#include "quad.inc"
+
+static unsigned exact_compare(id<MTLTexture> a,id<MTLTexture> b,const char *label,int expect_difference){
+    unsigned w=(unsigned)a.width,h=(unsigned)a.height,bp=bytes(a.pixelFormat),changed=0,max=0;
+    uint8_t *av=malloc(w*h*bp),*bv=malloc(w*h*bp);
+    [a getBytes:av bytesPerRow:w*bp fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
+    [b getBytes:bv bytesPerRow:w*bp fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0];
+    for(unsigned i=0;i<w*h;++i){int different=0;for(unsigned c=0;c<4;++c){unsigned j=i*4+c;int x=bp==8?((uint16_t*)av)[j]:av[j],y=bp==8?((uint16_t*)bv)[j]:bv[j];unsigned d=abs(x-y);different|=d!=0;if(d>max)max=d;}changed+=different;}
+    printf("%s byte_equal=%s changed_pixels=%u max_code=%u pixels=%u\n",label,changed?"no":"yes",changed,max,w*h);
+    if(expect_difference)CHECK(changed>0);CHECK(changed==0);
+    free(av);free(bv);return changed;
+}
+static void quad_proof(void){
+    mtl=device;blit_lib=library([NSString stringWithUTF8String:blit_src]);blit_linear=blit_point=sampler;
+    blit_pso=pipeline(blit_lib,@"blit_vs",@"blit_fs",MTLPixelFormatBGRA8Unorm,1);
+    for(unsigned hdr=0;hdr<2;++hdr)for(unsigned samples=1;samples<=4;samples*=2)for(unsigned partial=0;partial<2;++partial){@autoreleasepool{
+        MTLPixelFormat f=hdr?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
+        id<MTLTexture> src=texture(f,160,96,1);fill(src,1);id<MTLTexture> results[2];
+        for(unsigned on=0;on<2;++on){
+            id<MTLTexture> dst=texture(f,160,96,samples),resolved=results[on]=samples>1?texture(f,160,96,1):dst;
+            id<MTLCommandBuffer> cb=[queue commandBuffer];MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture=dst;rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].clearColor=MTLClearColorMake(.19,.37,.61,.83);rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+            MTLRegion sr=MTLRegionMake2D(0,0,160,96),dr=partial?MTLRegionMake2D(8,4,144,88):sr;
+            quad_expected=on&&!partial?MTLLoadActionDontCare:MTLLoadActionLoad;
+            if(on)quad_into(cb,src,sr,dst,0,0,dr,1);else quad_legacy(cb,src,sr,dst,0,0,dr,1);
+            if(samples>1){rp.colorAttachments[0].loadAction=MTLLoadActionLoad;rp.colorAttachments[0].resolveTexture=resolved;rp.colorAttachments[0].storeAction=MTLStoreActionMultisampleResolve;[[cb renderCommandEncoderWithDescriptor:rp] endEncoding];}
+            finish(cb);
+        }
+        char label[100];snprintf(label,sizeof label,"quad %s %ux partial=%u",hdr?"RGBA16F":"BGRA8",samples,partial);exact_compare(results[0],results[1],label,0);
+    }}
+}
+static void quad_subresources(void){
+    for(unsigned mode=0;mode<4;++mode){@autoreleasepool{
+        id<MTLTexture> src=texture(MTLPixelFormatBGRA8Unorm,64,48,1);fill(src,0);
+        id<MTLTexture> outputs[2];
+        for(unsigned on=0;on<2;++on){
+            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:128 height:96 mipmapped:YES];
+            d.textureType=MTLTextureType2DArray;d.arrayLength=2;d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget|MTLTextureUsagePixelFormatView;
+            id<MTLTexture> target=outputs[on]=[device newTextureWithDescriptor:d];
+            id<MTLCommandBuffer> cb=[queue commandBuffer];
+            for(unsigned slice=0;slice<2;++slice)for(unsigned level=0;level<target.mipmapLevelCount;++level){
+                MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=target;rp.colorAttachments[0].level=level;rp.colorAttachments[0].slice=slice;
+                rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].clearColor=MTLClearColorMake(.1+.05*level,.2+.1*slice,.6,.8);rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+                [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+            }
+            unsigned level=1,slice=mode?1:0;
+            if(mode==3){target=[target newTextureViewWithPixelFormat:target.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(1,1) slices:NSMakeRange(1,1)];level=slice=0;}
+            MTLRegion sr=MTLRegionMake2D(0,0,64,48),dr=mode==2?MTLRegionMake2D(4,2,56,44):sr;
+            quad_expected=on&&mode<2?MTLLoadActionDontCare:MTLLoadActionLoad;
+            if(on)quad_into(cb,src,sr,target,level,slice,dr,1);else quad_legacy(cb,src,sr,target,level,slice,dr,1);
+            finish(cb);
+        }
+        unsigned changed=0,max=0,pixels=0;
+        for(unsigned slice=0;slice<2;++slice)for(unsigned level=0;level<outputs[0].mipmapLevelCount;++level){
+            unsigned w=mipdim(128,level),h=mipdim(96,level);uint8_t *values[2]={malloc(w*h*4),malloc(w*h*4)};
+            for(unsigned on=0;on<2;++on)[outputs[on] getBytes:values[on] bytesPerRow:w*4 bytesPerImage:w*h*4 fromRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:level slice:slice];
+            for(unsigned i=0;i<w*h;++i){int different=0;for(unsigned c=0;c<4;++c){unsigned diff=abs(values[0][i*4+c]-values[1][i*4+c]);different|=diff!=0;if(diff>max)max=diff;}changed+=different;}
+            pixels+=w*h;free(values[0]);free(values[1]);
+        }
+        CHECK(changed==0);printf("quad mip/slice/view case=%u changed_pixels=%u max_code=%u pixels=%u\n",mode,changed,max,pixels);
+    }}
+}
+static id<MTLTexture> kernel_pass(id<MTLLibrary> lib,NSString *fs,id<MTLTexture> src,const XK *k,int second){
+    id<MTLTexture> dst=texture(src.pixelFormat,860,540,1),other=second?texture(src.pixelFormat,860,540,1):nil;
+    id<MTLCommandBuffer> cb=[queue commandBuffer];MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture=dst;rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+    if(other){rp.colorAttachments[1].texture=other;rp.colorAttachments[1].loadAction=MTLLoadActionDontCare;rp.colorAttachments[1].storeAction=MTLStoreActionStore;}
+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[lib newFunctionWithName:@"vs_full"];pd.fragmentFunction=[lib newFunctionWithName:fs];pd.colorAttachments[0].pixelFormat=src.pixelFormat;if(other)pd.colorAttachments[1].pixelFormat=src.pixelFormat;
+    id<MTLRenderCommandEncoder> e=[cb renderCommandEncoderWithDescriptor:rp];[e setRenderPipelineState:[device newRenderPipelineStateWithDescriptor:pd error:NULL]];
+    [e setFragmentTexture:src atIndex:0];[e setFragmentSamplerState:sampler atIndex:0];[e setFragmentBytes:k length:sizeof *k atIndex:0];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];finish(cb);return second==2?other:dst;
+}
+static int exact_proof(int broken){
+    held_width=3440;held_height=2160;
+    CHECK(post_cuts_full_target(0,0,0,3440,2160,3440,2160));CHECK(!post_cuts_curve(3440,2160,0));
+    for(unsigned i=0;i<2;++i){unsigned w=i?3440:1920,h=i?2160:1080;
+        CHECK(post_cuts_quad(0,0,0,w,h,1,w,h));CHECK(!post_cuts_quad(1,0,0,w,h,1,w,h));CHECK(!post_cuts_quad(0,1,0,w,h,1,w,h));CHECK(!post_cuts_quad(0,0,1,w,h,1,w,h));CHECK(!post_cuts_quad(0,0,0,w-1,h,1,w,h));CHECK(!post_cuts_quad(0,0,0,w,h,2,w,h));}
+    if(!broken){quad_proof();quad_subresources();}
+    for(unsigned hdr=0;hdr<2;++hdr){@autoreleasepool{
+        MTLPixelFormat f=hdr?MTLPixelFormatRGBA16Float:MTLPixelFormatRGBA8Unorm;
+        NSString *off=[NSString stringWithUTF8String:x360_src],*on=x_cuts_source(off);
+        if(broken)on=[on stringByReplacingOccurrencesOfString:@"if (amt != 0.0)" withString:@"if (amt > 0.25)"];
+        id<MTLLibrary> legacy=library(hdr?x_edr_source(off):off),cuts=library(hdr?x_edr_source(on):on);
+        id<MTLTexture> scene=texture(f,3440,2160,1),tone=texture(f,287,180,1),vig=texture(f,64,64,1),zero=texture(f,8,8,1),depth=texture(MTLPixelFormatDepth32Float,8,8,1);
+        fill(scene,1);fill(tone,0);fill(zero,3);fill(vig,2);
+        // Positive vignette channels varying spatially: some pixels saturate to
+        // zero; others keep small and large contributions in the same draw.
+        unsigned bp=bytes(f);void *v=calloc(64*64,bp);
+        for(unsigned i=0;i<64*64;++i)for(unsigned c=0;c<4;++c){float x=c==0?(i%64)/63.f:c==2?1:0;if(bp==8)((__fp16*)v)[i*4+c]=x;else ((uint8_t*)v)[i*4+c]=lroundf(x*255);}
+        [vig replaceRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0 withBytes:v bytesPerRow:64*bp];free(v);
+        float zs[64];for(int i=0;i<64;++i)zs[i]=i%8/8.f;[depth replaceRegion:MTLRegionMake2D(0,0,8,8) mipmapLevel:0 withBytes:zs bytesPerRow:32];
+        if(!broken)for(unsigned mode=0;mode<7;++mode){@autoreleasepool{
+            XK k={0};NSString *fs=mode<4?@"fs_downscale":@"fs_taps";
+            if(mode<4){for(unsigned n=0;n<16;++n){k.off[n][0]=(n%4-1.5f)/860;k.off[n][1]=(n/4-1.5f)/540;}k.p0[2]=1;k.p0[3]=mode>=2;}
+            else if(mode==4)x_gauss5(860,540,&k);else x_bloomk(mode==5?430:270,mode==5,&k,mode==6);
+            char label[100];snprintf(label,sizeof label,"kernel %s case=%u",hdr?"RGBA16F":"RGBA8",mode);
+            exact_compare(kernel_pass(legacy,fs,scene,&k,mode<4?(mode%2?2:1):0),kernel_pass(cuts,fs,scene,&k,mode<4?(mode%2?2:1):0),label,0);
+        }}
+        for(held_case=0;held_case<5;++held_case){@autoreleasepool{
+            char label[100];snprintf(label,sizeof label,"held frame %d %s 3440x2160 2x%s",held_case,hdr?"EDR":"SDR",broken?" broken":"");
+            id<MTLTexture> a=treatment(legacy,scene,tone,vig,zero,depth,2,0),b=treatment(cuts,scene,tone,vig,zero,depth,2,1);
+            exact_compare(a,b,label,broken&&held_case>0);
+        }}
+    }}
+    printf("exact post cuts failures=%d\n",failures);return failures?1:0;
+}
+
 int main(int argc,char **argv){@autoreleasepool{
     if(argc>1&&!strcmp(argv[1],"--off")) {
-        CHECK(!post_cuts_enabled());CHECK(!post_cuts_curve(3840,2160,0));CHECK(!post_cuts_full_target(0,0,0,3840,2160,3840,2160));return failures?1:0;
+        CHECK(!post_cuts_enabled());CHECK(!post_cuts_curve(3840,2160,0));CHECK(!post_cuts_full_target(0,0,0,3840,2160,3840,2160));CHECK(!post_cuts_quad(0,0,0,3440,2160,1,3440,2160));CHECK([x_cuts_source([NSString stringWithUTF8String:x360_src]) isEqualToString:[NSString stringWithUTF8String:x360_src]]);return failures?1:0;
+    }
+    if(argc>1&&!strcmp(argv[1],"--on")) {
+        CHECK(post_cuts_enabled());CHECK(post_cuts_curve(3840,2160,0));CHECK(post_cuts_full_target(0,0,0,3840,2160,3840,2160));return failures?1:0;
     }
     int broken=argc>1&&!strcmp(argv[1],"--broken");
     // Eligibility checks execute the production functions, including Off/invalid sizes.
@@ -213,6 +349,7 @@ int main(int argc,char **argv){@autoreleasepool{
     device=MTLCreateSystemDefaultDevice();if(!device){puts("SKIP: native Metal device unavailable");return 3;}queue=[device newCommandQueue];
     MTLSamplerDescriptor *sd=[MTLSamplerDescriptor new];sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterLinear;sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;sampler=[device newSamplerStateWithDescriptor:sd];
     if(argc>2&&!strcmp(argv[1],"--coverage"))return coverage_proof(argv[2]);
+    if(argc>1&&!strncmp(argv[1],"--exact",7))return exact_proof(strstr(argv[1],"broken")!=NULL);
     NSString *cut=[NSString stringWithUTF8String:post_cuts_curve_source()];if(broken)cut=[cut stringByReplacingOccurrencesOfString:@"w[5]={2,2,2,2,1}" withString:@"w[5]={1,1,1,1,1}"];
     id<MTLLibrary> cuts=library(cut);
     for(unsigned hdr=0;hdr<2;hdr++){@autoreleasepool{

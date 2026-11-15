@@ -22,6 +22,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT=Path(__file__).resolve().parent
 BASELINE='int texdump_frame(void) { return diag_on && diag_frame_wanted(dev.frames, "BOOT_DIAG_DRAWS"); }'
 BASELINE_SHA='173a860f82a60d8066beb28bc8570c8cf9d4c24d7bb5fab0fc9cbb7699f04b3b'
@@ -90,7 +94,7 @@ int main(int argc,char **argv){
 
 def main():
     assert hashlib.sha256(BASELINE.encode()).hexdigest()==BASELINE_SHA
-    render=(RT/'render.m').read_text();diag=(RT/'diag.c').read_text()
+    render=mw_source(RT/'render.m');diag=(RT/'diag.c').read_text()
     parser=function(diag,'diag_frame_wanted').replace('int diag_frame_wanted(', 'static int parsed_frame_wanted(')
     counter='\nstatic int diag_frame_wanted(uint64_t frame,const char *name){++parser_calls;return parsed_frame_wanted(frame,name);}\n'
     selector=function(diag,'diag_draw_frame_wanted')
@@ -302,4 +306,4 @@ int main(int argc,char **argv){@autoreleasepool{
 if __name__=='__main__':
     main()
     with tempfile.TemporaryDirectory(prefix='ssao-clock-') as scratch:
-        clock_check((RT/'render.m').read_text(),Path(scratch))
+        clock_check(mw_source(RT/'render.m'),Path(scratch))

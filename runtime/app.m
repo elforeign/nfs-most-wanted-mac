@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // app.m - the Mac app around the game: logs, the game folder, the menu bar and Quit.
 //
 // Run as NFSMW.app (runtime/bundle.sh), the runtime behaves like a Mac game: output goes to
@@ -28,6 +29,12 @@
 extern const char speed_exe_sha256[];   // recomp/out/table.c: the speed.exe the game code was translated from
 int app_bundled;
 extern char **environ;
+// Window behind, never active, App Nap held: BOOT_BACKGROUND set to anything but 0 (run_guarded.sh always sets it; 0 asks
+// for a front window). Restart and exit guards elsewhere stay keyed on the variable being present at all.
+int app_background_run(void) {
+    const char *e = getenv("BOOT_BACKGROUND");
+    return e && strcmp(e, "0") != 0;
+}
 
 // BEGIN offline fullscreen policy: nativefs_test.py uses a fake window, without NSApp.
 int app_screen_is_builtin(void);   // app.m below; the offline test supplies a stub
@@ -311,17 +318,16 @@ static void log_setup(void) {
 }
 
 // ---------------- the game folder ----------------
-// The supported exe is the PC v1.3 *code*, not one file: SHA-256 over the .text/.rdata/.data bytes and the PE layout
+// The supported exe is the translated *code*, not one file: SHA-256 over the .text/.rdata/.data bytes and the PE layout
 // the port reads (recomp/exe_fingerprint.py has the definition and why; keep the two in step). The owner's
 // whole-file hash is accepted too.
 extern const char speed_exe_fingerprint[], speed_exe_region_sha256[4][65];
-static const struct { const char *name; uint32_t rva, size; } fp_regions[3] = {
-    {".text", 0x1000, 0x48E2A5}, {".rdata", 0x490000, 0x5971D}, {".data", 0x4EA000, 0xDCE10}};
+extern const struct ExeRegion { const char *name; uint32_t rva, size; } speed_exe_regions[3];
 static void hex32(const uint8_t *md, char *out) {
     for (int i = 0; i < 32; ++i) snprintf(out + 2 * i, 3, "%02x", md[i]);
 }
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
-// Digests (layout, .text, .rdata, .data) of a speed.exe image, as hex; 0 when it isn't a 32-bit PE. A region the
+// Digests (layout, .text, .rdata, .data) of a game image, as hex; 0 when it isn't a 32-bit PE. A region the
 // file doesn't contain gets an all-zero digest, as in the Python.
 static int exe_digests(const uint8_t *d, size_t len, char parts[4][65], char fp[65]) {
     if (len < 0x40 || d[0] != 'M' || d[1] != 'Z') return 0;
@@ -335,11 +341,11 @@ static int exe_digests(const uint8_t *d, size_t len, char parts[4][65], char fp[
     memcpy(lay, d + opt + 28, 4);                   // image base
     memcpy(lay + 4, d + opt + 16, 4);               // entry point
     memcpy(lay + 8, d + opt + 96 + 8, 8);           // import directory rva, size
-    for (int i = 0; i < 3; ++i) { memcpy(lay + 16 + 8 * i, &fp_regions[i].rva, 4); memcpy(lay + 20 + 8 * i, &fp_regions[i].size, 4); }
+    for (int i = 0; i < 3; ++i) { memcpy(lay + 16 + 8 * i, &speed_exe_regions[i].rva, 4); memcpy(lay + 20 + 8 * i, &speed_exe_regions[i].size, 4); }
     CC_SHA256(lay, sizeof lay, md);
     hex32(md, parts[0]); memcpy(all, md, 32);
     for (int r = 0; r < 3; ++r) {
-        uint32_t rva = fp_regions[r].rva, size = fp_regions[r].size;
+        uint32_t rva = speed_exe_regions[r].rva, size = speed_exe_regions[r].size;
         int found = 0;
         for (uint32_t i = 0; i < n && !found; ++i) {
             const uint8_t *s = d + s0 + i * 40;
@@ -373,19 +379,31 @@ static int exe_digests(const uint8_t *d, size_t len, char parts[4][65], char fp[
     return 1;
 }
 
-// 0 when `dir` has a speed.exe with the code the game was translated from; otherwise why not, for the alert.
+// 0 when `dir` has an executable with the code the game was translated from; otherwise why not, for the alert.
 static int check_game_dir(const char *dir, char *why, size_t n) {
     char path[1100];
+#if NFS_GAME == NFS_GAME_MW
     snprintf(path, sizeof path, "%s/speed.exe", dir);
+#else
+    snprintf(path, sizeof path, "%s/" GAME_EXECUTABLE, dir);
+#endif
     struct stat st;
     if (stat(dir, &st) || !S_ISDIR(st.st_mode)) { snprintf(why, n, "The folder %s can't be found.", dir); return 1; }
     FILE *f = fopen(path, "rb");
+#if NFS_GAME == NFS_GAME_MW
     if (!f) { snprintf(why, n, "%s doesn't contain speed.exe.", dir); return 1; }
+#else
+    if (!f) { snprintf(why, n, "%s doesn't contain " GAME_EXECUTABLE ".", dir); return 1; }
+#endif
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *d = len > 0 && len < (200l << 20) ? malloc((size_t)len) : NULL;
+#if NFS_GAME == NFS_GAME_MW
     if (!d || fread(d, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(d); snprintf(why, n, "speed.exe in %s can't be read.", dir); return 1; }
+#else
+    if (!d || fread(d, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(d); snprintf(why, n, GAME_EXECUTABLE " in %s can't be read.", dir); return 1; }
+#endif
     fclose(f);
     uint8_t md[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(d, (CC_LONG)len, md);
@@ -394,14 +412,23 @@ static int check_game_dir(const char *dir, char *why, size_t n) {
     if (!strcmp(whole, speed_exe_sha256)) { free(d); return 0; }
     int ok = exe_digests(d, (size_t)len, parts, fp);
     free(d);
+#if NFS_GAME == NFS_GAME_MW
     if (!ok) { snprintf(why, n, "speed.exe in %s isn't a 32-bit Windows program; this port supports the Need for Speed Most Wanted PC v1.3 speed.exe.", dir); return 1; }
+#else
+    if (!ok) { snprintf(why, n, GAME_EXECUTABLE " in %s isn't a 32-bit Windows program; this port supports the Need for Speed Carbon " GAME_EXECUTABLE ".", dir); return 1; }
+#endif
     if (strcmp(fp, speed_exe_fingerprint)) {
-        static const char *const names[4] = {"PE layout", ".text", ".rdata", ".data"};
+        const char *names[4] = {"PE layout", speed_exe_regions[0].name, speed_exe_regions[1].name, speed_exe_regions[2].name};
         char bad[200] = "";
         for (int i = 0; i < 4; ++i)
             if (strcmp(parts[i], speed_exe_region_sha256[i])) snprintf(bad + strlen(bad), sizeof bad - strlen(bad), "%s%s", *bad ? ", " : "", names[i]);
+#if NFS_GAME == NFS_GAME_MW
         snprintf(why, n, "speed.exe in %s: %s differs: a different game version or a protected exe; this port supports "
                  "the Need for Speed Most Wanted PC v1.3 code.", dir, bad);
+#else
+        snprintf(why, n, GAME_EXECUTABLE " in %s: %s differs: a different game version or a protected exe; this port supports "
+                 "the Need for Speed Carbon code.", dir, bad);
+#endif
         return 1;
     }
     return 0;
@@ -415,7 +442,11 @@ static NSString *pick_folder(void) {
     p.canChooseFiles = NO;
     p.allowsMultipleSelection = NO;
     p.title = @"Choose the Game Folder";
+#if NFS_GAME == NFS_GAME_MW
     p.message = @"Choose your Need for Speed Most Wanted folder: the one with speed.exe (version 1.3) in it.";
+#else
+    p.message = @"Choose your Need for Speed Carbon folder: the one with " GAME_EXECUTABLE " in it.";
+#endif
     p.prompt = @"Choose";
     [NSApp activateIgnoringOtherApps:YES];
     return [p runModal] == NSModalResponseOK ? p.URL.path : nil;
@@ -426,7 +457,11 @@ static NSString *ask_game_dir(const char *why) {
     for (;;) {
         if (why) {
             NSAlert *a = [NSAlert new];
+#if NFS_GAME == NFS_GAME_MW
             a.messageText = @"NFSMW needs the game folder";
+#else
+            a.messageText = @"Need for Speed Carbon needs the game folder";
+#endif
             a.informativeText = ns(why);
             [a addButtonWithTitle:@"Choose Folder…"];
             [a addButtonWithTitle:@"Quit"];
@@ -442,7 +477,11 @@ static NSString *ask_game_dir(const char *why) {
 }
 
 // ---------------- NSApp, the menu bar, Quit ----------------
-static void quit_now(void) { diag_begin_exit(); fflush(NULL); exit(0); }
+static void quit_now(void) { diag_begin_exit();
+    void stream_key_forget(int);
+    stream_key_forget(0);
+    fflush(NULL); exit(0);
+}
 
 // Confirm inside the F10 menu, not with a modal alert: a pad can't answer an NSAlert, and the
 // frozen frame loop behind it tripped the 15 s hang watchdog. 1 on the second press within 4 s.
@@ -504,9 +543,19 @@ void app_restart_game(int unused) {
 // game window exists, or when Quit is chosen again while the game is shutting down, quit at once.
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
     (void)app;
+    // The game exits through ExitProcess after WM_CLOSE, before AppKit can
+    // deliver applicationWillTerminate. Scrub saved/editor storage, then finish
+    // the transport within its shared bound before handing WM_CLOSE to the game.
+    void stream_key_forget(int);
+    stream_key_forget(0);
     if (!quitting++ && user32_request_close()) return NSTerminateCancel;
     quit_now();
     return NSTerminateNow;
+}
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    void stream_key_forget(int);
+    stream_key_forget(0);
 }
 - (void)changeGameFolder:(id)sender {
     (void)sender;
@@ -586,13 +635,17 @@ void app_cocoa_init(void) {
         [NSApplication sharedApplication];
         // BOOT_BACKGROUND=1 (the unattended launchers: run_guarded.sh, probe.sh, soak.sh): no Dock icon and never the
         // active app, so a test run can't take focus from the game the user is playing (which pauses on focus loss)
-        [NSApp setActivationPolicy:getenv("BOOT_BACKGROUND") ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
+        [NSApp setActivationPolicy:app_background_run() ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
         // ...and no App Nap: a background app whose window is covered gets its timers and frame pacing throttled
         // (a background launch dropped to about a third of its frame rate)
-        if (getenv("BOOT_BACKGROUND")) {
+        // NFS_TEST_ACTIVITY_HOLD (diagnostic, test runs only): 0 = no hold at all, nap = only the App Nap part
+        // (no latency-critical request), to tell which part of the hold changes the GPU clock's behaviour.
+        const char *hold = getenv("NFS_TEST_ACTIVITY_HOLD");
+        if (app_background_run() && !(hold && !strcmp(hold, "0"))) {
             static id activity;
-            activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical
-                                                                    reason:@"unattended test run"];
+            NSActivityOptions opts = NSActivityUserInitiatedAllowingIdleSystemSleep;
+            if (!(hold && !strcmp(hold, "nap"))) opts |= NSActivityLatencyCritical;
+            activity = [NSProcessInfo.processInfo beginActivityWithOptions:opts reason:@"unattended test run"];
         }
         static AppDelegate *delegate;
         delegate = [AppDelegate new];

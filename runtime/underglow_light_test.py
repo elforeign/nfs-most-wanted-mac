@@ -1,17 +1,23 @@
 """Production light, actual diag wrapper/counters, independent stock asset inputs.
 Seven cars (BMW, Carrera GT, Punto, Elise, Mustang GT, Clio, 997S), handles
 82/11..16: 410107/410107 diagnostic/forced On, 410109/410109 native On;
-each positive pass strips=4 pool=1. Stock inventory: 66 admitted, 7 rejected
+each positive pass: four logical strips, zero emitter quads, one pool.
+Emitter-count expectations changed 4 -> 0 because only the pool is visible. Stock inventory: 66 admitted, 7 rejected
+Road fixtures now supply a flat cached face; clipping can rotate its first
+vertex, so coverage and texture sampling use the rectangle's bounds.
 (degenerate traffic/trailer axles). Original model/hash/LOD gates reject six
 positive cars and 65 inventory cars (72 failures incl. LOD 2). Pinned original
 switch under native On submits 0/0 and fails 80. Native Off, master Off and
 colour Off: 7/7, 0 allocations/draws/road queries; omitted native gates draw
 4/1 and fail 2. A queued-light gate omission fails 1. Low-bound height fails
 6 on the low-pose 997S; fixed wheel-datum mounts pass all seven cars.
-Independent quadrature checks pool RGB against submitted emitter quads.
-64 unowned registrations retain 4/1; old ring fails 2. Old diag wiring fails
-2 (1 allocation/6 queries vs 0/0). Missing begin/end, strips, tenfold units,
-stale queue and delayed None admission each fail. No game or emulation.
+Independent quadrature checks pool RGB against captured logical strip endpoints.
+64 unowned registrations retain 0 emitters/1 pool; old ring fails 2. Old diag wiring fails
+2 (1 allocation/6 queries vs 0/0). Missing begin/end, pool, tenfold units,
+stale queue and delayed None admission each fail.
+Shop (not racing): the strips sit 0.100 m higher than the car's position; racing 0.000 m. Without the lift the shop
+check reads 0.000 m and fails 1 per run. Quick race (career bit clear): the owned quick-race selection is admitted 1/1; the selection before the fix
+(the career's car in every mode) admits 0/1 and fails 1. No game or emulation.
 """
 from pathlib import Path
 import subprocess
@@ -30,11 +36,19 @@ HARNESS = r'''
 uint8_t *G;int diag_on;const char *diag_dir;Device dev;
 static Obj objects[3];static unsigned next_object,allocs,draws,strips,pools,failures,checks;
 static unsigned saved_preset=2,saved_light=1;static int look_off;
-static unsigned saved_strength;
+static unsigned saved_strength,saved_pulse;
+static uint64_t real_ns;
+uint64_t host_ticks(void){return real_ns;}
+unsigned underglow_pulse(void){return saved_pulse;}
 unsigned underglow_pool_strength(void){return saved_strength;}
 FIXTURES
 static unsigned fixture_index,fixture_handle=82;
 static float emitted[4][16],pool_quad[16];
+static uint32_t pool_colour;
+static void pool_bounds(double b[4]){
+ b[0]=b[1]=INFINITY;b[2]=b[3]=-INFINITY;
+ for(unsigned i=0;i<4;++i){b[0]=fmin(b[0],pool_quad[4*i]);b[1]=fmin(b[1],pool_quad[4*i+1]);b[2]=fmax(b[2],pool_quad[4*i]);b[3]=fmax(b[3],pool_quad[4*i+1]);}
+}
 
 static unsigned diag_allocs,diag_queries,admission_queries,original_calls;
 static uint64_t frame_now;
@@ -74,20 +88,23 @@ uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *a){
   CHECK(p[2]>0 && p[2] <= fixtures[fixture_index].hi[2]+MF32(0x52108));
   CHECK(p[2]>=fixtures[fixture_index].lo[2]-.005+MF32(0x52108)-1e-6);
   float *v=(float *)(G+o->mem[0]);CHECK(v[1]>10&&v[1]>v[0]&&v[1]>v[2]);}
- else{++pools;float *p=(float *)(G+poly);memcpy(pool_quad,p,64);
-  CHECK(p[0]<fixtures[fixture_index].lo[0]-.5 && p[4]>fixtures[fixture_index].hi[0]+.5);
-  CHECK(p[1]<fixtures[fixture_index].lo[1]-.5 && p[13]>fixtures[fixture_index].hi[1]+.5);
+ else{++pools;pool_colour=M32(poly+0x80);float *p=(float *)(G+poly);memcpy(pool_quad,p,64);
+  /* Clipping can rotate the first vertex without changing coverage or UVs. */
+  double b[4];pool_bounds(b);
+  CHECK(b[2]-b[0]>2 && b[0]<0 && b[2]>0);
+  CHECK(b[3]-b[1]>2 && b[1]<0 && b[3]>0);
   float *v=(float *)(G+o->mem[0]);double sum=0;for(unsigned i=0;i<o->w*o->h;++i){CHECK(isfinite(v[4*i+1])&&v[4*i+1]>=0);sum+=v[4*i+1];}CHECK(sum>100);
  }
  return 0;
 }
-/* Independent midpoint quadrature of the submitted emitter quads verifies
- * the pool payload against the geometry actually sent to retail ePoly. */
+/* Independent midpoint quadrature of captured logical strip endpoints
+ * verifies the pool payload without restoring visible emitter quads. */
 static void verify_pool(void) {
  Obj *o=&objects[1];float *v=(float *)(G+o->mem[0]);
  unsigned sx=o->w/2,sy=105;
- double px=pool_quad[0]+(pool_quad[4]-pool_quad[0])*(sx+.5)/o->w;
- double py=pool_quad[1]+(pool_quad[13]-pool_quad[1])*(sy+.5)/o->h,e=0;
+ double b[4];pool_bounds(b);
+ double px=b[0]+(b[2]-b[0])*(sx+.5)/o->w;
+ double py=b[1]+(b[3]-b[1])*(sy+.5)/o->h,e=0;
  for(unsigned j=0;j<4;++j) {
   float *p=emitted[j];double a[3],b[3];
   for(unsigned k=0;k<3;++k){a[k]=(p[k]+p[12+k])*.5;b[k]=(p[4+k]+p[8+k])*.5;}
@@ -114,6 +131,15 @@ static void load_fixture(unsigned index) {
   M32(bind.esp+4)=fixture_handle;M32(bind.esp+12)=bound_ride;f_005910E0(&bind);}
  const struct CarFixture *f=&fixtures[index];
  strcpy((char *)G+0x70000+41*0xd0,f->name);
+ const char *short_name=strchr(f->name,'/');
+ M32(self+0x88)=0x70000+41*0xd0+(short_name?(uint32_t)(short_name-f->name+1):0);
+ /* A single flat collision face clips to the full pool rectangle. Real-road
+  * camber/face boundaries and the old horizontal control live in ground_test. */
+ M32(self+0x44)=0x5b000;M32(0x5b060)=0x5b100;M32(0x5b064)=0x5b104;
+ M32(0x5b100)=0x5b200;M32(0x5b204)=0x5b300;M32(0x5b208)=0x5b330;
+ MF32(0x5b300)=-100;MF32(0x5b304)=0;MF32(0x5b308)=-100;
+ MF32(0x5b310)=100;MF32(0x5b314)=0;MF32(0x5b318)=-100;
+ MF32(0x5b320)=0;MF32(0x5b324)=0;MF32(0x5b328)=100;
  for(unsigned i=0;i<3;++i){MF32(self+0x90+4*i)=f->lo[i];MF32(self+0xa0+4*i)=f->hi[i];}
  M32(self+0x17b4)=0x71000;M16(0x71002)=4;M16(0x710d6)=4;
  for(unsigned i=0;i<16;++i)MF32(0x71010+4*i)=f->wheels[i];
@@ -128,7 +154,29 @@ void f_0074E160_orig(Cpu *c){++original_calls;}
 #define calloc ug_diag_calloc
 #include "diag_car_core.c"
 #undef calloc
+static void observed_begin(const Cpu *c,UGCarCapture *s) {
+ underglow_light_begin(c,s);
+ if(!s->valid)return;
+ for(unsigned j=0;j<4;++j) {
+  UGVec3 a=s->mounts[j].a,b=s->mounts[j].b;
+  float ends[2][3];
+  for(unsigned end=0;end<2;++end) {
+   UGVec3 v=end?b:a;
+   for(unsigned k=0;k<3;++k)
+    ends[end][k]=v.x*s->basis[k]+v.y*s->basis[4+k]+v.z*s->basis[8+k]+s->position[k];
+  }
+  for(unsigned k=0;k<3;++k) {
+   emitted[j][k]=emitted[j][12+k]=ends[0][k];
+   emitted[j][4+k]=emitted[j][8+k]=ends[1][k];
+  }
+  float lift=M32(0x925E90)!=6?.10f:0; /* the shop lift is checked on its own below */
+  CHECK(ends[0][2]-lift>0 && ends[0][2]-lift<=fixtures[fixture_index].hi[2]+MF32(0x52108));
+  CHECK(ends[0][2]-lift>=fixtures[fixture_index].lo[2]-.005+MF32(0x52108)-1e-6);
+ }
+}
+#define underglow_light_begin observed_begin
 PRODUCTION_WRAPPER
+#undef underglow_light_begin
 int main(int argc,char **argv){
  if(argc>1&&!strcmp(argv[1],"saved-off"))saved_preset=0;
  if(argc>1&&(!strcmp(argv[1],"native-off")||!strcmp(argv[1],"forced-on")))saved_light=0;
@@ -146,7 +194,8 @@ int main(int argc,char **argv){
  c.eax=0x12340001;Cpu saved=c;UGCarCapture capture;
  f_0074E160(&c);CHECK(original_calls==1);
  int enabled=argc>1&&strcmp(argv[1],"off")&&strcmp(argv[1],"saved-off")&&strcmp(argv[1],"native-off");
- if(enabled){CHECK(strips==4);CHECK(pools==1);CHECK(allocs>0);if(strips==4&&pools==1)verify_pool();}
+ if(enabled){CHECK(strips==0);CHECK(pools==1);CHECK(allocs>0);if(strips==0&&pools==1)verify_pool();}
+ if(enabled){UGCarCapture shop;underglow_light_begin(&c,&shop);CHECK(shop.valid&&fabs(shop.position[2]-MF32(0x52108)-.10)<1e-4);printf("shop strip lift: %.3f m\n",shop.position[2]-MF32(0x52108));}
  else{CHECK(allocs==0&&draws==0);}
  CHECK(!memcmp(&c,&saved,sizeof c));
  printf("diag-off: allocations=%u queries=%u\n",diag_allocs,diag_queries);
@@ -163,7 +212,7 @@ int main(int argc,char **argv){
   for(unsigned i=0;i<64;++i){traffic.ecx=0xa1000+i*0x400;f_00739A70(&traffic);}
   unsigned before_strips=strips,before_pools=pools;frame_now+=120;f_0074E160(&c);
   printf("traffic-64: strips=%u pool=%u\n",strips-before_strips,pools-before_pools);
-  CHECK(strips-before_strips==4);CHECK(pools-before_pools==1);
+  CHECK(strips-before_strips==0);CHECK(pools-before_pools==1);
  }
  printf("submissions: strips=%u pool=%u allocations=%u checks=%u failures=%u\n",strips,pools,allocs,checks,failures);
  if(enabled){
@@ -171,11 +220,25 @@ int main(int argc,char **argv){
    * this catches a pool cache keyed only by colour/pose instead of geometry. */
   for(unsigned i=1;i<7;++i){
    load_fixture(i);MF32(0x52108)=i==6?.08:.25;unsigned bs=strips,bp=pools;f_0074E160(&c);
-   CHECK(strips-bs==4 && pools-bp==1);
+   CHECK(strips-bs==0 && pools-bp==1);
    printf("car=%s handle=%u strips=%u pool=%u\n",fixtures[i].name,fixture_handle,strips-bs,pools-bp);
-   if(strips-bs==4 && pools-bp==1)verify_pool();
+   if(strips-bs==0 && pools-bp==1)verify_pool();
   }
   MF32(0x52108)=.25;
+  /* Real-time Pulse changes only the ePoly vertex RGB: zero pool uploads. */
+  saved_pulse=1;real_ns=0;f_0074E160(&c);CHECK((pool_colour&255)==255 && (pool_colour>>24)==255);
+  size_t pool_bytes=objects[1].w*objects[1].h*16;
+  void *pulse_pixels=malloc(pool_bytes);memcpy(pulse_pixels,G+objects[1].mem[0],pool_bytes);
+  unsigned pulse_allocs=allocs;
+  for(unsigned second=1;second<=2;++second) {
+   objects[1].dirty=0;real_ns=(uint64_t)second*1000000000ull;f_0074E160(&c);
+   CHECK(fabs((pool_colour&255)/255.-(second==1?.3:1))<=1./255);
+   CHECK(!objects[1].dirty && allocs==pulse_allocs);
+   CHECK(!memcmp(pulse_pixels,G+objects[1].mem[0],pool_bytes));
+  }
+  saved_pulse=0;real_ns=1000000000;objects[1].dirty=0;f_0074E160(&c);
+  CHECK((pool_colour&255)==255 && (pool_colour>>24)==255 && !objects[1].dirty && allocs==pulse_allocs);
+  free(pulse_pixels);
   unsigned supported=0,rejected=0;
   for(unsigned i=0;i<sizeof fixtures/sizeof fixtures[0];++i){
    load_fixture(i);UGCarCapture inventory;underglow_light_begin(&c,&inventory);
@@ -183,11 +246,11 @@ int main(int argc,char **argv){
    if(inventory.valid)++supported;else ++rejected;
   }
   printf("stock admission inventory: %u supported, %u rejected\n",supported,rejected);
-  load_fixture(0);f_0074E160(&c);if(strips&&pools)verify_pool();
+  load_fixture(0);f_0074E160(&c);if(!strips&&pools)verify_pool();
   unsigned a=allocs,d=draws;saved_preset=0;underglow_light_begin(&c,&capture);underglow_light_end(&c,&capture);CHECK(!capture.valid&&allocs==a&&draws==d);
   saved_preset=2;M32(c.esp+36)=1;underglow_light_begin(&c,&capture);CHECK(!capture.valid);M32(c.esp+36)=0;
   c.ecx=M32(self+0x84);f_00739A70(&c);c.ecx=self;underglow_light_begin(&c,&capture);CHECK(!capture.valid);
-  G[self+0x78]=1;M32(0x925E90)=6;M32(0x91CF90)=0x80000;M32(0x80010)=profile;M32(profile+0xa8)=82;
+  G[self+0x78]=1;M32(0x925E90)=6;M32(0x91CF90)=0x80000;M32(0x80010)=profile;M32(profile+0xa8)=82;G[0x8012c]=1;
   uint32_t record=profile+0x414+4000+7*0x198;memset(G+record,0x2a,278);memcpy(G+0x56000,G+record,278);
   M32(0x92D87c)=0x59200;M32(0x92D884)=1;M32(0x59200)=0x59000;M32(0x59000)=0x59100;M32(0x59104)=0x1001;
   M32(0x9B37cc)=0x59300;M32(0x9B37d4)=1;M32(0x59300)=0x57000;M32(0x57044)=self;M32(0x57030)=0x1234;
@@ -195,7 +258,8 @@ int main(int argc,char **argv){
   c.ecx=0x57000;M32(c.esp+16)=0x56000;f_0075D220(&c);c.ecx=self;M32(self+0x84)=0x55000;
   M32(self+0x1628)=1;M32(self+0xb84+0x17*0x14+4)=0x60100;M32(0x60108)=0x8E3052B6;
   underglow_light_begin(&c,&capture);CHECK(capture.valid&&capture.handle==82);
-  unsigned before=draws;underglow_light_end(&c,&capture);CHECK(draws==before);f_00750B00(&c);CHECK(draws==before+5&&allocs==a);
+  CHECK(fabs(capture.position[2]-MF32(0x52108))<1e-6);printf("racing strip lift: %.3f m\n",capture.position[2]-MF32(0x52108));
+  unsigned before=draws;underglow_light_end(&c,&capture);CHECK(draws==before);f_00750B00(&c);CHECK(draws==before+1&&allocs==a);
   before=draws;f_00750B00(&c);CHECK(draws==before);
   underglow_light_end(&c,&capture);++dev.frames;f_00750B00(&c);CHECK(draws==before);
   underglow_light_end(&c,&capture);diag_on=1;look_off=1;f_00750B00(&c);CHECK(draws==before);look_off=0;diag_on=0;
@@ -214,6 +278,12 @@ int main(int argc,char **argv){
   M16(0x71002)=3;underglow_light_begin(&c,&capture);CHECK(!capture.valid);M16(0x71002)=4;
   MF32(self+0x90)=NAN;underglow_light_begin(&c,&capture);CHECK(!capture.valid);load_fixture(0);
   G[0x56000+270]^=1;c.ecx=0x57000;f_0075D220(&c);c.ecx=self;underglow_light_begin(&c,&capture);CHECK(!capture.valid);
+  /* Quick race (database +12C bit 0 clear): the owned car is the quick-race selection of the current type, as
+   * QuickGame::CreateCars reads it, while the career still names another car. */
+  G[0x56000+270]^=1;G[0x8012c]=0;M32(profile+0xa8)=5;M32(0x80018)=4;M32(0x8001c+4*0x18+0x10)=82;
+  c.ecx=0x57000;f_0075D220(&c);c.ecx=self;underglow_light_begin(&c,&capture);
+  CHECK(capture.valid&&capture.handle==82);printf("quick-race owned car admitted: %d\n",capture.valid);
+  M32(0x80018)=11;c.ecx=0x57000;f_0075D220(&c);c.ecx=self;underglow_light_begin(&c,&capture);CHECK(!capture.valid);
 
  }
  printf("total checks=%u failures=%u\n",checks,failures);free(G);return failures?1:0;
@@ -231,6 +301,13 @@ UNOWNED_GUARD = """    /* Unowned ride invalidations must not displace stored pr
     if(!o.profile) return;
 """
 
+
+QUICK_RACE = """        uint32_t type=db?M32(db+0x18):~0u,handle=~0u;
+        if(profile && (G[db+0x12c]&1)) handle=M32(profile+0xa8);
+        else if(profile && type<11) handle=M32(db+0x1c+type*0x18+0x10);
+"""
+# The selection before the quick-race fix: the career's car in every mode.
+OLD_CAREER_ONLY = "        uint32_t handle=profile?M32(profile+0xa8):~0u;\n"
 
 def function_fragment(source, signature):
     start = source.index(signature)
@@ -290,7 +367,9 @@ def main():
     source = (ROOT/'runtime'/'underglow_light.m').read_text()
     diag = (ROOT/'runtime'/'diag.c').read_text()
     wrapper = diag[diag.index('\nunsigned diag_car1[4];')+1:diag.index('void f_007387E0_orig')]
+    wrapper = wrapper.replace('materials_car_diagnostics', 'f_0074E160')
     assert PRODUCTION_PATH in wrapper and UNOWNED_GUARD in source
+    assert QUICK_RACE in source and hashlib.sha256(OLD_CAREER_ONLY.encode()).hexdigest()=='04aeb974dca76cd94aed5be7b855071d4982ce0cdc1470e92c35b184dc4a98a1'
     old_wiring = wrapper.replace(PRODUCTION_PATH, '')
     old_ring = source.replace(UNOWNED_GUARD, '')
     # Pin original function fragments, not repository history or whole files.
@@ -316,10 +395,12 @@ def main():
                 'missing-begin-hook': (source, wrapper.replace('underglow_light_begin(c, &light_capture);', 'memset(&light_capture, 0, sizeof light_capture);')),
                 'missing-end-hook': (source, wrapper.replace('underglow_light_end(c, &light_capture);', '')),
                 'disabled-light': (source.replace('return light_override()!=0;', 'return 0;'), wrapper),
-                'missing-strips': (source.replace('i<UG_STRIPS;++i) {\n        UGVec3 delta', 'i<0;++i) {\n        UGVec3 delta'), wrapper),
+                'missing-pool': (source.replace('    unsigned submitted;', '    return; /* pool removed */\n    unsigned submitted;'), wrapper),
                 'low-bound-mount-height': (source.replace('fmax(lo[2]-.005,fmin(hi[2]-.005,wheel_z-.01))','lo[2]-.005'),wrapper),
+                'no-shop-lift': (source.replace('    if(M32(0x00925E90u)!=6) s->position[2]+=SHOP_STRIP_LIFT;\n',''), wrapper),
                 'pool-units': (source.replace('rgb[k]*.18/(M_PI*100)', 'rgb[k]*.18/(M_PI*10)'), wrapper),
-                'stale-queue': (source.replace('road_frame!=dev.frames || ', ''), wrapper)}
+                'stale-queue': (source.replace('road_frame!=dev.frames || ', ''), wrapper),
+                'career-car-in-quick-race': (source.replace(QUICK_RACE, OLD_CAREER_ONLY), wrapper)}
     with tempfile.TemporaryDirectory(prefix='ug-light-') as td:
         tmp = Path(td)
         diagnostic = (ROOT/'runtime'/'diag_car.c').read_text().split('// BOOT_DIAG cartex:')[0]

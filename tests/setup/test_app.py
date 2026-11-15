@@ -17,6 +17,12 @@ skip, cancellation and retry controls each fail their state oracle. Actual
 F-T events decode at one-byte boundaries, including measured per-car approval.
 Install and extras cancellation both wait for the backend's transaction boundary.
 
+Carbon product (SetupProduct=carbon): 15 checks of its backend commands (check, check with its Xbox 360 copy,
+build: --game carbon --carbon, never --pc, disc or --x360-extras), the backend accepting all three, its app name,
+its page order (Xbox 360 copy -> Review, no Most Wanted extras page) and Most Wanted's unchanged command: 0 violations.
+The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 6 of 15
+(the three commands and their Most Wanted inputs); the words test fails on the old source (no Carbon label).
+
 Run: python3 -I tests/setup/test_app.py        (needs swiftc; no network, no window, no game files)
 
 The app's pure logic is compiled from tools/installer/SetupApp.swift and driven through its headless modes
@@ -249,6 +255,56 @@ def refresh_failures(source):
     return [key for key in ('recognition', 'plan', 'import', 'installed', 'newCheckClears') if not got.get(key)]
 
 
+CARBON_TAIL = ['--dest', '/dest', '--work', '/work', '--events']
+MW_BUILD = ['--build', '--pc', '/pc', '--pc-update', '/patch', '--pc-disc', '/disc2', '--x360', '/x360',
+            '--x360-extras', 'arrest,textures,ui'] + CARBON_TAIL
+
+
+def backend_accepts(command, tmp):
+    """The real backend parses the app's Carbon command and reaches its build step (stubbed): '' or the refusal."""
+    sys.path.insert(0, str(ROOT / 'tools'))
+    import io
+    from contextlib import redirect_stdout
+    from unittest import mock
+    from setup_kit import backend
+    base = Path(tmp)
+    places = {name: base / name[1:] for name in ('/carbon', '/x360', '/dest', '/work', '/pc')}
+    for name in ('/carbon', '/x360', '/dest', '/pc'):
+        places[name].mkdir()
+    argv = [str(places.get(a, a)) for a in command[2:]]   # after "-I tools/setup.py"
+    out = io.StringIO()
+    with mock.patch.dict(os.environ, {'NFSMW_SETUP_HOME': str(base / 'home')}), \
+            mock.patch.object(backend, 'build', side_effect=backend.SetupError('reached build')), redirect_stdout(out):
+        backend.main(argv)
+    return '' if 'reached build' in out.getvalue() else out.getvalue()[-300:]
+
+
+def carbon_product_failures(binary):
+    result = subprocess.run([str(binary), '--carbon-product-test'], capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        return ['carbon product test failed to run']
+    got = json.loads(result.stdout)
+    bad = []
+
+    def want(name, ok):
+        if not ok:
+            bad.append(name)
+    for key, mode, x360 in (('check', '--check', []), ('checkX360', '--check', ['--x360', '/x360']),
+                            ('build', '--build', ['--x360', '/x360'])):
+        args = got[key]
+        want(key + ' command', args[2:] == [mode, '--game', 'carbon', '--carbon', '/carbon'] + x360 + CARBON_TAIL)
+        want(key + ' has no Most Wanted inputs', not any(a.startswith('--pc') or a == '--x360-extras' for a in args))
+        with tempfile.TemporaryDirectory(prefix='setup-carbon-', dir='/private/tmp') as tmp:   # outside the source tree
+            want(key + ' accepted by the backend', backend_accepts(args, tmp) == '')
+    want('Most Wanted command unchanged', got['mwBuild'][2:] == MW_BUILD)
+    want('Carbon app name', got['app'] == '/dest/NFS Carbon Native.app')
+    want('Most Wanted app name', got['mwApp'] == '/dest/NFS Most Wanted Native.app')
+    want('Carbon skips the Most Wanted extras page', got['afterX360'] == 4)   # Page.review
+    want('Most Wanted keeps its extras page', got['mwAfterX360'] == 3)       # Page.extras
+    want('an unmarked bundle is Most Wanted', got['bundled'] == 'mw')
+    return bad
+
+
 def extras_flow_failures(binary):
     result = subprocess.run([str(binary), '--extras-flow-test'], capture_output=True, text=True, timeout=20)
     if result.returncode:
@@ -385,6 +441,9 @@ class AppTests(unittest.TestCase):
             self.assertEqual(got['defaults'], [])
             self.assertIn('Chrysler 300C', got['names'])
             self.assertIn('Porsche 911 GT3 RS', got['names'])
+            for name in ('Nissan 240SX', 'Porsche 911 Turbo', 'Chevrolet Camaro Concept',
+                         'Infiniti G35', 'Mazdaspeed3', 'Shelby GT500'):
+                self.assertEqual(got['names'].count(name), 1 if name == 'Shelby GT500' else 2)
             for ticks, source in (([], recognition), (selected, dict(recognition, cars=[])),
                                   (selected, dict(recognition, platform='x360'))):
                 result, got = call(self.real, ticks, source=source)
@@ -431,6 +490,38 @@ class AppTests(unittest.TestCase):
         self.assertIn('x360Extras: x360Extras)', text)
         pick = text.split('    func chooseX360() {', 1)[1].split('    func chooseCarbon()', 1)[0]
         self.assertNotIn('runCheck(', pick, 'conversion must wait until the extras have been selected')
+
+    def test_carbon_product_commands_pages_and_original_control(self):
+        self.assertEqual(carbon_product_failures(self.real), [])
+        # The original: every check or build got Most Wanted's --pc, whatever the product.
+        original = ('    var a = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,\n'
+                    '             mode == .check ? "--check" : "--build", "--pc", pc.path]')
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         '0b76db77a49cb62ba3340bc737e399c40b6569556bb6ccb9392a339f8d40455a')
+        self.assertIn(original, SWIFT.read_text())   # still Most Wanted's command
+        broken = compile_app(mutate('    if carbon {\n        // Carbon reads', '    if false {\n        // Carbon reads'))
+        bad = carbon_product_failures(broken)
+        print('Original Setup command for Carbon: %d of 15 violated' % len(bad))
+        self.assertEqual(len(bad), 6)
+
+    def test_carbon_product_words_and_hidden_extras(self):
+        text = SWIFT.read_text()
+        self.assertIn('"Your Carbon Xbox 360 copy (optional)"', text)
+        self.assertIn('row("Carbon Xbox 360"', text)
+        # Only what Carbon reads from its console copy today: the button art and the two controller diagrams.
+        benefit = text.split('? "If you own Need for Speed Carbon for Xbox 360', 1)[1].split('"', 1)[0]
+        self.assertIn('button art and its two controller diagrams', benefit)
+        for word in ('arrest', 'texture', 'menu art', 'world', 'audio', 'music', 'movie', 'cars'):
+            self.assertNotIn(word, benefit.lower())
+        # Most Wanted's extras sit behind the product: its feature list, both extras/export pairs, its review rows.
+        self.assertIn('if !s.carbonProduct { featureList }', text)
+        self.assertEqual(text.count('Button("Manage installed extras…")'), 2)
+        self.assertEqual(text.count('if !s.carbonProduct {  // Most Wanted\'s car extras and its all-in-one export\n'
+                                    '                Button("Manage installed extras…")')
+                         + text.count('            if !s.carbonProduct {\n                Button("Manage installed extras…")'), 2)
+        self.assertIn('                    } else {\n                        row("Xbox 360 copy"', text)
+        choose = text.split('    func chooseCarbonX360() {', 1)[1].split('\n    }\n', 1)[0]
+        self.assertIn('runCheck(forX360: true)', choose, 'the console copy is validated when chosen')
 
     # -- the app compiles (arm64, floor 14.5) and behaves on the protocol --
     def test_protocol_real(self):

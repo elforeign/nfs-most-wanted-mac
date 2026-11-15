@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // heap.c - freeable guest heaps: the Win32 process heap (HeapAlloc/HeapFree/HeapReAlloc/HeapSize, GlobalAlloc)
 // and the runtime's resource heap (gmalloc/gfree: D3D resources, DirectSound buffers).
 //
@@ -523,4 +524,8 @@ int win32_heap(Cpu *c, const char *fn) {
     if (!strcmp(fn, "GlobalFree")) { heap_free(proc_heap, arg(c, 0)); RET(0, 1); }
     return 0;
 }
+#endif
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+uint32_t gmalloc_size(uint32_t a) { heaps_init(); return heap_size(res_heap, a); }
 #endif

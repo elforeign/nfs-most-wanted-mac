@@ -4,6 +4,7 @@
 // Included by d3d9.m to keep the module and its test independent of build lists.
 #import <Metal/Metal.h>
 #include "pipeline_cache.h"
+#include "game_select.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,6 +129,7 @@ static unsigned envcube_max_difference(const uint8_t *a, const uint8_t *b, NSUIn
 #include "render_internal.h"
 static int envcube_sharp, envcube_broken, envcube_blitmips;
 static float envcube_test_phase=-1;
+#if NFS_GAME == NFS_GAME_MW
 static int envcube_ab_state;
 static char envcube_ab_path[512];
 typedef struct {
@@ -187,6 +189,8 @@ static void envcube_forget(Obj *o) {
     EnvCubeState *d = envcube_find(o->guest);
     if (d) *d = (EnvCubeState){0};
 }
+
+#endif
 static void envcube_configure(void) {
     envcube_sharp = envcube_option(getenv("NFS_CAR_REFLECTION"));
     envcube_broken = diag_on && getenv("NFS_TEST_ENVCUBE_NO_MIPS") != NULL;
@@ -194,6 +198,7 @@ static void envcube_configure(void) {
     envcube_blitmips=envcube_blit_option(blitmips);
     const char *phase=diag_on ? getenv("NFS_TEST_CUBEMIPS_PHASE"):NULL;
     envcube_test_phase=phase ? strtof(phase,NULL):-1;
+#if NFS_GAME == NFS_GAME_MW
     // Re-entrant (live_picture.c): the retail edge is kept the first time it is replaced and put back for Standard.
     static uint32_t retail_edge; static int retail_saved;
     if (envcube_sharp) {
@@ -201,7 +206,9 @@ static void envcube_configure(void) {
         M32(0x008F8FF4u) = 1024;
     } else if (retail_saved) M32(0x008F8FF4u) = retail_edge;
     if (diag_on) diag_event("envcube: option=%s edge_constant=%u blitmips=%d", envcube_sharp ? "sharp" : "pc", M32(0x008F8FF4u), envcube_blitmips);
+#endif
 }
+#if NFS_GAME == NFS_GAME_MW
 void envcube_live_reconfigure(void) { envcube_configure(); }   // live_picture.c, inside a device Reset
 static uint32_t envcube_creation_levels(uint32_t edge, uint32_t levels, uint32_t usage, uint32_t fmt) {
     return envcube_sharp && edge == 1024 && usage == 1 && fmt == 21 ? envcube_level_count(edge) : levels;
@@ -344,4 +351,22 @@ static void envcube_frame(void) {
         memset(d->draws, 0, sizeof d->draws);
     }
 }
+#else
+/* Capture allocation, receiver layout and guest state belong to the selected image. */
+void envcube_live_reconfigure(void) { envcube_configure(); }
+int envcube_ab_shot(char *path, size_t n) { (void)path; (void)n; return 0; }
+int envcube_ab_hold(void) { return 0; }
+static void envcube_forget(Obj *o) { (void)o; }
+static uint32_t envcube_creation_levels(uint32_t edge, uint32_t levels, uint32_t usage, uint32_t fmt) {
+    (void)edge; (void)usage; (void)fmt; return levels;
+}
+static uint32_t envcube_creation_edge(uint32_t edge, uint32_t usage, uint32_t fmt, uint32_t pool, uint32_t caller) {
+    (void)usage; (void)fmt; (void)pool; (void)caller; return edge;
+}
+static void envcube_created(Obj *t, uint32_t caller, uint32_t output) { (void)t; (void)caller; (void)output; }
+static void envcube_target_change(uint32_t old, uint32_t next) { (void)old; (void)next; }
+static void envcube_draw(void) {}
+static void envcube_draw_end(void) {}
+static void envcube_frame(void) {}
+#endif
 #endif

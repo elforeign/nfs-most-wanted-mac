@@ -61,6 +61,10 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / 'runtime'
 SRC = (RT / 'materials.m').read_text()
@@ -144,7 +148,7 @@ def run(args, **kw):
 
 
 # Frozen at the reviewed base, never read a moving branch during the check.
-PINNED = {'car_paint_msl': '1b14bb9b0d6b5495b4cb3c4701337a52797109c9c7a7cfe8a667183c4a3c88a7', 'mat_replace': '090cc8b487bfc4667782ada08b4f0757ce78ae0f3f053d538510d3e8ea50a45c', 'mat_replace_profile': '2934e2540fbb90d18704ceff64e1988564a5f46979869d9d42c0f60092b51670', 'car_vs_patch': '4b6bd0861f07ce6f90635f80c349de728b2d3e6a8b4b2aa41a8aeaac35afe29a', 'car_vs_nm_patch': '2cc8e58cb6fe6cf7e31681ff835d43e7c47949afba555aed630776fd7a955bb8', 'car_vs_cover_patch': '18783835712d837f8fa6b008e3163ce023a4fc7eca75b01fa22d0db140ae466f', 'car_t0_ps_patch': '2d3ebd34e24953de29673b1c094b5802c68ce8218262cc29f1f3c9ce29fbf316'}
+PINNED = {'car_paint_msl': '012cf917a754eea8d7f64ffeea7b22122882e9707eddd47cf1f8e24f20c187f8', 'mat_replace': '090cc8b487bfc4667782ada08b4f0757ce78ae0f3f053d538510d3e8ea50a45c', 'mat_replace_profile': '2934e2540fbb90d18704ceff64e1988564a5f46979869d9d42c0f60092b51670', 'car_vs_patch': '4b6bd0861f07ce6f90635f80c349de728b2d3e6a8b4b2aa41a8aeaac35afe29a', 'car_vs_nm_patch': 'ba2988f2476c9136c4302a933848f19df256849532596a21bdd14d4194491883', 'car_vs_cover_patch': '18783835712d837f8fa6b008e3163ce023a4fc7eca75b01fa22d0db140ae466f', 'car_t0_ps_patch': '2d3ebd34e24953de29673b1c094b5802c68ce8218262cc29f1f3c9ce29fbf316'}
 
 CPU = r'''
 #include <simd/simd.h>
@@ -639,7 +643,7 @@ def mesh_regression(tmp, optics):
 
 def pane_stream_regression(tmp, renderer):
     """Execute production draw lookup and D3D lock hooks, with real Metal buffers."""
-    d3d = (RT/'d3d9.m').read_text()
+    d3d = mw_source(RT/'d3d9.m')
     source = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdint.h>
@@ -662,7 +666,8 @@ static float *counted_panes(const void *v,uint32_t nv,uint32_t stride,uint32_t p
 #define realworld_materials_panes counted_panes
 '''
     start = renderer.index('typedef struct { id<MTLBuffer> tint; uint32_t first; } RWPaneDraw;')
-    end = renderer.index('\nstatic void draw_impl',start)
+    last = function(renderer, 'realworld_pane_draw')
+    end = renderer.index(last, start) + len(last)
     fixed = renderer[start:end]
     assert 'fnv(' not in fixed, 'repeated draw must not hash geometry'
     assert fixed.index('if (entry) return entry->draw;') < fixed.index('const uint8_t *indices=')
@@ -778,8 +783,20 @@ def main():
         raise SystemExit(3)
     for name, digest in PINNED.items():
         value = initializer(SRC, name) if name == 'car_paint_msl' else function(SRC, name)
+        if name == 'mat_replace':
+            # The sky dispatch is independent of the pinned car selector.
+            sky_dispatch = '    char *sky = daynight_sky_shader(tokens, n, refl); if (sky) { *id = 0; return sky; }\n'
+            assert value.count(sky_dispatch) == 1
+            value = value.replace(sky_dispatch, '')
+            stream_dispatch = '    char *lamp = daynight_stream_shader(tokens, n, refl, id, mat_replace_profile); if (lamp) return lamp;\n'
+            assert value.count(stream_dispatch) == 1
+            value = value.replace(stream_dispatch, '')
+        if name == 'mat_replace_profile':
+            local_dispatch = '        if (src && (car || e->patch == car_vs_nm_patch || cover_vs))\n            src = car_local_shader(src, e->stage == SM_VERTEX, cover_vs || e->patch == car_t0_ps_patch);\n'
+            assert value.count(local_dispatch) == 1
+            value = value.replace(local_dispatch, '')
         assert hashlib.sha256(value.encode()).hexdigest() == digest, 'Off source changed: ' + name
-    renderer = (RT / 'render.m').read_text()
+    renderer = mw_source(RT / 'render.m')
     assert 'realworld_materials_draw(ps->tokens_hash, vs->tokens_hash)' in renderer
     assert 'realworld_materials_capture(m ? M32(m + 0xC) : 0, m && fx && M32(fx + 4) == 4, arg(c, 1))' in SRC
     assert 'realworld_materials_constants(id, vsc, out)' in SRC

@@ -21,6 +21,10 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 # The evidence contract is independent of the checker and the production header.
 EVIDENCE = set(('lum_wait_sum_ms lum_wait_max_ms lum_wait_count lum_wait_dropped '
@@ -178,7 +182,7 @@ def boundary_evidence(module, text):
 
 def main():
     report = (RT / 'report.m').read_text()
-    post = (RT / 'render_post.m').read_text()
+    post = mw_source(RT / 'render_post.m')
     header = report.split('if (perf_f)\n        fprintf(perf_f, ', 1)[1].split(');', 1)[0]
     assert 'SLOWLOG_COLUMNS' in header
     assert 'slowlog_start();' in report and 'gpuclients_start();' not in report

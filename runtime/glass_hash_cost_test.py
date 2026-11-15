@@ -12,6 +12,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 BASELINE = 'static GlassUV1 *glass_uv1_for(Obj *vb) {\n    if (!vb || !vb->size || vb->size % 36) return nil;\n    const uint8_t *b = G + vb->mem[0];\n    uint32_t edge = vb->size < 64 ? vb->size : 64;\n    uint64_t check = fnv(b + vb->size - edge, edge, fnv(b, edge, vb->size));\n    GlassUV1 *u = (__bridge GlassUV1 *)map_get(&glass_uv1_cache, vb->guest);\n    uint64_t full = diag_on ? fnv(b, vb->size, 1469598103934665603ull) : 0;\n    if (u && u->check == check) { if (diag_on && u->full != full) ++ad1.glass_stale_mid; return u; }\n    u = [GlassUV1 new];\n    u->check = check; u->full = full; u->n = vb->size / 36;\n    const float *y = NULL;\n    u->row = mat_glass_uv1(b, vb->size, &y, &u->matched);\n    u->buf = [mtl newBufferWithLength:u->n * sizeof(float) options:MTLResourceStorageModeShared];\n    float *f = u->buf.contents;\n    for (uint32_t i = 0; i < u->n; ++i) f[i] = y ? y[i] : GLASS_UV1_NONE;\n    map_put(&glass_uv1_cache, vb->guest, u);\n    return u;\n}'
 BASELINE_SHA = 'eae98edcbb4c95404b4c48083fedd506b54b4060fc18953d96ddd23bff2cdaee'
@@ -96,7 +100,7 @@ int main(int argc,char **argv){@autoreleasepool{
 
 def main():
     assert hashlib.sha256(BASELINE.encode()).hexdigest()==BASELINE_SHA
-    render=(RT/'render.m').read_text()
+    render=mw_source(RT/'render.m')
     interface=render[render.index('@interface GlassUV1'):render.index('static struct { __unsafe_unretained',render.index('@interface GlassUV1'))]
     with tempfile.TemporaryDirectory(prefix='glass-hash-') as td:
         td=Path(td)

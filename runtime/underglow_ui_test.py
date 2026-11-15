@@ -2,8 +2,8 @@
 Bounded diagnostic fixture executes production C; owned:<car> creates the named stock car (any case).
 Good 30/30; career-guard omission fails 10/30 and deadline omission fails 13/30; matching a fixed is300 instead of
 the requested name fails 7/30; owned:<car> not waiting out the closing bonus Dialog.fng fails 1/30. Extracted input seam 6/6; omitted stop fails 3/6.
-Selected-car shop step: good 9/9; owned-bits omission fails 2, missing dialog
-wait 1, and starting only at elapsed zero 2.
+Selected-car shop step: good 10/10 (the shop names the fixture car as the shown ride's owner); owned-bits omission fails 2, missing dialog
+wait 1, and starting only at elapsed zero 3.
 Native menu: underglow_menu_test.py."""
 from pathlib import Path
 import subprocess
@@ -23,6 +23,8 @@ uint32_t galloc(uint32_t n) { return 0xB00000; }
 uint32_t gstr(const char *s) { strcpy((char *)G+0xA00000,s);return 0xA00000; }
 void diag_event(const char *fmt,...) {}
 int underglow_render_scene_step(const char *name,uint64_t elapsed) { return -1; }
+static uint32_t owner_profile, owner_row; static int owner_calls;
+void underglow_light_fixture_owner(uint32_t profile,uint32_t row) { ++owner_calls;owner_profile=profile;owner_row=row; }
 uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *a) {
  switch(fn) {
  case 0x0050E310: return career;
@@ -50,6 +52,7 @@ int main(int argc,char **argv) {
  CHECK(underglow_ui_step("shop",0,"Dialog.fng",&key)==0);CHECK(!shops);
  M32(0x1434)=0;CHECK(underglow_ui_step("shop",0,"MainMenu_Sub.fng",&key)==-1);CHECK(!shops);M32(0x1434)=2;
  CHECK(underglow_ui_step("shop",1,"MainMenu_Sub.fng",&key)==0);CHECK(shops==1);
+ CHECK(owner_calls==1&&owner_profile==0x1000&&owner_row==0x1428);   /* the shop car is named as the front-end ride's owner */
  CHECK(underglow_ui_step("shop",1,"CustomizeMain.fng",&key)==1);
  printf("selected-car shop: %d checks, %d failures\n",checks,failures);return failures?1:0;
 }

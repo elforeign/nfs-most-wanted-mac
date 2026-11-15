@@ -39,7 +39,9 @@ verbatim; a part number (`render-2.md`) continues the file before it. To find a 
 - `docs/perf.md`: frame rate and timing (`pacing.c`), CPU cost of a frame, shader compiles.
 - `docs/input.md`, `docs/input-2.md`: game controller (PlayStation pads, button prompts, rumble, adaptive triggers, chase camera, `BOOT_PAD` simulation).
 - `docs/audio.md`: audio mode, engine sound and soundstage, positional audio, audio-loop watchdog, Extra EA Trax.
-- `docs/render.md` to `docs/render-6.md`: X360 renderer features in order (shadows, HD textures, X360 sound mix and music, car types, arrest scenes, post-processing, mirror, water, glass, lights, rain, bloom, HDR, look defaults), then widescreen, antialiasing and display changes mid-run (render-6).
+- `docs/render.md` to `docs/render-7.md`: X360 renderer features in order (shadows, HD textures, X360 sound mix and music, car types, arrest scenes, post-processing, mirror, water, glass, lights, rain, bloom, HDR, look defaults), then widescreen, antialiasing and display changes mid-run (render-6), post groundwork: atmosphere tables and the pass graph (render-7).
+- `docs/temporal-motion.md`: dormant per-sample screen motion, depth-matched resolve, storage and offline proof.
+- `docs/rain-cover.md`: optional roof shelter for rain particles, curtains, lens drops and ripples.
 - `docs/replay.md`: replay retention and bindings; local live encoder diagnostic; secure, memory-only stream key and explicit Go live/Stop.
 - `docs/switches.md`: the switch registry (`runtime/switches.tsv`, its test) and the switches documented there.
 - `docs/diagnostics.md`, `-2`, `-3`: starting a race directly, save commits and offline regression checks, game slots and the launch ledger, Diagnostic mode (`BOOT_DIAG`, probes, reference frames, audio and pad smoke, the single-launch gate), the CarLoader startup-hang notes.

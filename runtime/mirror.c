@@ -52,11 +52,13 @@
 // mirror texture and its depth without multisampling. on: both get the back buffer's sample count (the game's
 // Antialiasing option; none when that is off), render.m draws the mirror into a multisampled texture and resolves it
 // into the mirror texture at the end of each pass (render_target_msaa).
+#include "headlights.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "host.h"
+#include "daynight_lamps.h"
 
 #define MIRROR_W 0x008F9008u            // static: the mirror texture's width and height (256, 256)
 #define MIRROR_H 0x008F900Cu
@@ -162,6 +164,7 @@ void mirror_projection(uint32_t view, uint32_t proj) {
 
 void f_004FAE40_orig(Cpu *c);
 void f_004FAE40(Cpu *c) {               // (view, cull info, flags): sets the cull info's flags (+0x84)
+    if (diag_on) daynight_lamps_frame(perf_nframes+1);
     mirror_options();
     uint32_t view = arg(c, 0), ci = arg(c, 1);
     f_004FAE40_orig(c);
@@ -174,6 +177,7 @@ void f_004FAE40(Cpu *c) {               // (view, cull info, flags): sets the cu
 static int mirror_stuffed;              // the mirror's scenery is queued and not drawn yet (see the flare order below)
 void f_00723FA0_orig(Cpu *c);
 void f_00723FA0(Cpu *c) {               // GrandSceneryCullInfo::StuffScenery (this, view, flags)
+    headlights_prepare(c,arg(c,0),arg(c,1));
     if (arg(c, 0) == VIEW_MIRROR) mirror_stuffed = 1;
     if (detail_full && arg(c, 0) == VIEW_MIRROR && arg(c, 1) == 1) M32(c->esp + 8) = 0;
     f_00723FA0_orig(c);
@@ -262,7 +266,9 @@ void f_006BE8F0(Cpu *c) {               // eViewPlatInterface::GetVisibleStateSB
 
 void f_00505380_orig(Cpu *c);
 void particles_physical_lamp(Cpu *c);
+int daynight_carlamps_flare(Cpu *c);
 void f_00505380(Cpu *c) {               // eRenderLightFlare (view, flare, matrix, intensity, reflexion, type, ...)
+    if (daynight_carlamps_flare(c)) { c->eax = 0; c->esp += 4; return; }   // car lamp off by day (cdecl)
     particles_physical_lamp(c);
     uint32_t view = arg(c, 0), flare = arg(c, 1);
     lampglow_begin(c);
@@ -273,9 +279,9 @@ void f_00505380(Cpu *c) {               // eRenderLightFlare (view, flare, matri
         int t = (int8_t)M8(flare + 0x2c), id = (int)M32(view + 4);
         if ((t == 5 || t == 6) && (id == 1 || id == 3)) st = id == 3;
     }
-    if (st < 0) { f_00505380_orig(c); lampglow_end(); fl_view_mirror = 0; return; }
+    if (st < 0) { if (diag_on) daynight_lamps_render(c, f_00505380_orig); else f_00505380_orig(c); lampglow_end(); fl_view_mirror = 0; return; }
     fl_in = st; fl_plane = -1;
-    f_00505380_orig(c);
+    if (diag_on) daynight_lamps_render(c, f_00505380_orig); else f_00505380_orig(c);
     lampglow_end();
     fl_in = -1; fl_view_mirror = 0;
     FlareStat *s = &fl_stat[st];

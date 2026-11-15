@@ -14,9 +14,11 @@
 #include <string.h>
 #include <stdatomic.h>
 
+#include "game_select.h"
 #include "host.h"
 #include "gen/x360_engine.inc"   // X360E_FB_*: the console's envelope and collision numbers (the player's default.xex)
 
+#if NFS_GAME == NFS_GAME_MW
 #define FEEDBACK_VTABLE 0x008A7BD4u      // IFeedback sub-object vtable of the PC input device's feedback object
 #define FN_GET_ATTRIBUTE 0x00454810u     // Attrib::Instance::GetAttributePointer(this, key, index), thiscall
 #define SIMABLES 0x0092FEB4u             // keyed table (handle -> ISimable): nodes {handle, ISimable *}, count at 0x0092FEBC
@@ -25,6 +27,9 @@
 #define FN_QUERY_VEHICLE 0x0040E040u     // UTL::COM::IUnknown::QueryInterface<IVehicle>(this, IVehicle **), thiscall
 #define SIMABLE_LINEAR_VELOCITY 0x68     // ISimable::GetLinearVelocity(UMath::Vector3 &) const (PhysicsObject 00669590)
 
+#else
+#include "carbon_feedback_bindings.inc"
+#endif
 typedef struct { float phase, amp, freq, offset; } Osc;
 typedef struct { float time, dur, start, end; } Env;
 static struct {
@@ -69,11 +74,15 @@ void feedback_suppress(unsigned reason, int on) {
         on ? "suppress" : "resume", reason == FEEDBACK_MENU ? "menu" : reason == FEEDBACK_PAUSE ? "pause" :
         reason == FEEDBACK_FOCUS ? "focus" : "app", suppressed);
 }
+#if NFS_GAME == NFS_GAME_MW
 void feedback_poll_pause(void) {
     uint32_t sim = G ? M32(0x009885E0u) : 0;  // Sim::_mSystem; Sim::GetState (006E8D20), 4 = paused
     feedback_suppress(FEEDBACK_PAUSE, sim && M32(sim + 0x2C) == 4);
     padfx_poll();
 }
+#else
+#include "carbon_feedback_pause.inc"
+#endif
 void feedback_trigger_state(float slip[2], float hz[2], int *nos) {
     if (!effects_valid) { memset(slip, 0, sizeof slip_pub); memset(hz, 0, sizeof hz_pub); *nos = 0; return; }
     memcpy(slip, slip_pub, sizeof slip_pub); memcpy(hz, hz_pub, sizeof hz_pub); *nos = nos_on;
@@ -81,7 +90,11 @@ void feedback_trigger_state(float slip[2], float hz[2], int *nos) {
 void feedback_road_state(float *speed, float *surface) {
     *speed = effects_valid ? road_speed_pub : 0; *surface = effects_valid ? road_surface_pub : 0;
 }
+#if NFS_GAME == NFS_GAME_MW
 static unsigned ncalls[16];                    // diag: calls per slot (slot / 4) since the last summary
+#else
+#include "carbon_feedback_counts.inc"
+#endif
 static float peak_l, peak_r;
 static float peak_x[3][2];                     // diag: largest x per channel (speed, skid, slip) and rear / front
 static float peak_src[8][2];
@@ -96,7 +109,11 @@ static int tyre_now[4];
 static float speed_now;
 static FILE *trace;
 static int surf_index(uint32_t surf) {
+#if NFS_GAME == NFS_GAME_MW
     uint32_t coll = surf ? M32(surf + 4) : 0;
+#else
+#include "carbon_feedback_surface.inc"
+#endif
     for (int i = 0; i < nsnames; ++i) if (snames[i].coll == coll) return i;
     return 96;
 }
@@ -166,10 +183,18 @@ void feedback_levels(float *heavy, float *light) {
         peak_l = fmaxf(peak_l, *heavy); peak_r = fmaxf(peak_r, *light);
         if (now >= next) {
             next = now + 1000000000ull;
+#if NFS_GAME == NFS_GAME_MW
             static const char *nm[16] = {"-", "Stop", "Resume", "Reset", "BeginFrame", "End", "Speed", "Skid", "Slip",
                                          "EngineRPM", "ShiftKick", "Nos", "EngineDamage", "GearChange", "Collision", "-"};
+#else
+#include "carbon_feedback_names.inc"
+#endif
             char b[400]; int n = 0;
+#if NFS_GAME == NFS_GAME_MW
             for (int i = 1; i < 15; ++i) if (ncalls[i]) n += snprintf(b + n, sizeof b - n, " %s %u", nm[i], ncalls[i]);
+#else
+#include "carbon_feedback_summary.inc"
+#endif
             diag_event("feedback: second active %d peak heavy %.2f light %.2f calls%s", S.active, peak_l, peak_r, n ? b : " none");
             if (S.active) {                 // two lines: one would pass the event ring's line length and lose the last sources
                 diag_event("feedback: collision %.2f x speed %.2f/%.2f skid %.2f/%.2f slip %.2f/%.2f (rear/front)",
@@ -253,6 +278,7 @@ static int props_on(void) { if (props_sw < 0) props_sw = sw_on("NFS_RUMBLE_PROPS
 static int vehicles_on(void) { if (vehicles_sw < 0) vehicles_sw = sw_on("NFS_RUMBLE_VEHICLES"); return vehicles_sw; }
 void feedback_set_surfaces(int on) { rough_sw = on != 0; if (diag_on) diag_event("feedback: rough surfaces %s", on ? "on" : "x360"); }
 void feedback_set_props(int on) { props_sw = on != 0; if (diag_on) diag_event("feedback: prop hits %s", on ? "by strength" : "x360"); }
+#if NFS_GAME == NFS_GAME_MW
 #define SURFACE_CLASS 0x00988E0Cu        // _TheSurfaceClass (Attrib::Class *)
 static uint32_t thiscall1(Cpu *c, uint32_t self, uint32_t fn, uint32_t a0);
 static uint32_t collection_of(Cpu *c, uint32_t key) {   // Attrib::Class::GetCollection (00455960)
@@ -285,6 +311,9 @@ static uint32_t test_surface(Cpu *c, uint32_t surf) {
     return state ? fake : surf;
 }
 
+#else
+#include "carbon_feedback_surfaces.inc"
+#endif
 // The surface's rumble curve j for `key`: {f0, a0, o0, x0, f1, a1, o1, x1}, interpolated at x.
 static void surface_curves(Cpu *c, uint32_t surf, uint32_t key, float x, int first) {
     if (!surf) return;
@@ -405,6 +434,7 @@ static uint32_t thiscall1(Cpu *c, uint32_t self, uint32_t fn, uint32_t a0) {
     c->esp = esp; c->ecx = ecx;
     return r;
 }
+#if NFS_GAME == NFS_GAME_MW
 static uint32_t simable(Cpu *c, uint32_t handle) {       // as LocalPlayer::OnCollision finds a body
     if (!handle) return 0;
     uint32_t begin = M32(SIMABLES), a[3] = {begin, begin + 8 * M32(SIMABLE_COUNT), handle}, esp = c->esp;
@@ -412,6 +442,9 @@ static uint32_t simable(Cpu *c, uint32_t handle) {       // as LocalPlayer::OnCo
     c->esp = esp;
     return node ? M32(node + 4) : 0;
 }
+#else
+#include "carbon_feedback_lookup.inc"
+#endif
 static void velocity_now(Cpu *c, uint32_t sim, float v[3]) {
     thiscall1(c, sim, M32(M32(sim) + SIMABLE_LINEAR_VELOCITY), scratch());
     vec(scratch(), v);
@@ -420,7 +453,11 @@ static void velocity_now(Cpu *c, uint32_t sim, float v[3]) {
 // +0x1C type (x86 bitfield, low 3 bits: 1 car/object, 2 world, 3 ground), +0x3C / +0x4C the bodies' handles, +0x50 /
 // +0x60 their velocities before the contact. The strength is how much the contact changed my velocity.
 static int fb_collision(Cpu *c) {
+#if NFS_GAME == NFS_GAME_MW
     COUNT(0x38);
+#else
+#include "carbon_feedback_collision.inc"
+#endif
     uint32_t info = arg(c, 0);
     int me_a = (int)(arg(c, 1) & 0xFF);
     if (!S.active || !info) RET(0, 2);
@@ -503,6 +540,7 @@ static uint32_t thiscall0(Cpu *c, uint32_t self, uint32_t fn) {
     c->esp = esp; c->ecx = ecx;
     return r;
 }
+#if NFS_GAME == NFS_GAME_MW
 static void dump_surfaces(Cpu *c) {
     static int done;
     uint32_t cls = M32(SURFACE_CLASS);
@@ -568,6 +606,10 @@ static void dump_surfaces(Cpu *c) {
     diag_event("feedback: %d surfaces written to surfaces.txt (%d names hashed)", count, nn);
 }
 
+#else
+#include "carbon_feedback_dump.inc"
+#endif
+#if NFS_GAME == NFS_GAME_MW
 void feedback_setup(void) {                               // boot: fill the PC vtable's empty slots
     static const struct { uint32_t slot; HostFn fn; const char *name; } m[] = {
         {0x04, fb_stop, "Stop"}, {0x08, fb_resume, "Resume"}, {0x0C, fb_reset, "Reset"}, {0x10, fb_begin_frame, "BeginFrame"},
@@ -605,3 +647,6 @@ void f_006EE400(Cpu *c) {
     f_006EE400_orig(c);
     if (force && !(c->eax & 0xFF) && M32(0x008F86E0u)   /* bRumbleEnabled */) c->eax = (c->eax & ~0xFFu) | 1;
 }
+#else
+#include "carbon_feedback_provider.inc"
+#endif

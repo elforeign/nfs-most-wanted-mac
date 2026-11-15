@@ -3,7 +3,7 @@
 Old DualSense registry: 3 failures vs production 0; restored-row mutant: 1 vs 0.
 SSAO default-Off mutant: 3/6 vs 0/6.
 Retail hidden overrides: 0/6 failures; filter-omission mutant: 8 failures.
-My picks snapshot/override-restore mutants: 26/3 failures vs production 0.
+My picks snapshot/override-restore mutants: 31/3 failures vs production 0.
 No game or GPU; compiles the real settings loader and production selectors.
 """
 import os
@@ -11,6 +11,10 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 
 RT = Path(__file__).resolve().parent
 IDS = ('graphics.car_reflection', 'graphics.carbon_lampglass', 'graphics.contact_shadows', 'controls.pad_triggers',
@@ -90,7 +94,7 @@ int main(void) {
 
     # Compile the actual hidden rows with the production selectors: obsolete keys
     # remain ignored, while the look's own keys export Off before renderer startup.
-    smoke_source = (RT / 'render.m').read_text()
+    smoke_source = mw_source(RT / 'render.m')
     smoke_cache = smoke_source[smoke_source.index('static int soft_smoke_cached ='):smoke_source.index('static int soft_smoke_on(')]
     smoke = smoke_cache + re.search(r'static int soft_smoke_on\(void\) \{.*?\n\}', smoke_source, re.S)[0]
     physical = re.search(r'int particles_physical_enabled\(void\) \{.*?\n\}',

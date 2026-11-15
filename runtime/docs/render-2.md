@@ -1,4 +1,4 @@
-# X360 renderer features, widescreen, antialiasing, display changes (part 2 of 6)
+# X360 renderer features, widescreen, antialiasing, display changes (part 2 of 7)
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 

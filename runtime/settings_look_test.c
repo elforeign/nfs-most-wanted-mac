@@ -3,7 +3,7 @@
 // PASS: 0 failures, including fresh-process preference reload, every affected extra,
 // My picks beyond 1 KB, Port defaults, legacy spellings, locked overrides and menu order.
 // Broken controls: missing Colour filter in preset FAIL (8 checks); missing automatic
-// My picks snapshot FAIL (26 checks); suppressed restore under an override FAIL
+// My picks snapshot FAIL (31 checks); suppressed restore under an override FAIL
 // (3 checks), versus production 0. builtin_features_test.py runs all three mutants.
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +45,8 @@ ROW(r_tone, "graphics.tone_curve", kPcX, kPcXV, 2, 0, 0);
 ROW(r_paint, "graphics.car_paint", kXPc, kXPcV, 2, 0, 0);
 ROW(r_cglass, "graphics.car_glass", kPcX, kPcXV, 2, 0, 1);
 ROW(r_normals, "graphics.car_normals", kPcX, kPcXV, 2, 0, 1);
-ROW(r_flake, "graphics.car_flake", kPcX, kPcXV, 2, 0, 1);
+static const char *const kFlake[] = {"PC", "X360", "Generated"}, *const kFlakeV[] = {"pc", "x360", "generated"};
+ROW(r_flake, "graphics.car_flake", kFlake, kFlakeV, 3, 0, 1);
 ROW(r_grass, "graphics.grass", kPcX, kPcXV, 2, 0, 1);
 ROW(r_trees, "graphics.trees", kPcX, kPcXV, 2, 0, 1);
 ROW(r_water, "graphics.water", kPcX, kPcXV, 2, 0, 1);
@@ -113,6 +114,7 @@ static Setting extras[] = {
     EXTRA("cars.later_games", .type=SET_TOGGLE, .def=1, .restart=1),
     EXTRA("cars.traffic_pilot", CH2("off","on"), .restart=1),
     EXTRA("graphics.look_later_textures", .type=SET_TOGGLE, .def=1, .restart=1, .hidden=1),
+    EXTRA("graphics.rain_cover", CH2("off","on"), .def=1),
 };
 #define NEXTRAS (int)(sizeof extras / sizeof *extras)
 static Setting a_music = {.id = "audio.x360_music", .category = SET_AUDIO, .order = 70, .label = "Music", .type = SET_TOGGLE,

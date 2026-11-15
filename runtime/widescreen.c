@@ -37,6 +37,7 @@
 
 #include "host.h"
 #include "materials.h"
+#include "temporal_state.h"
 
 #define RESOLUTION_INDEX 0x90181Cu      // __resolution_index (g_RacingResolution)
 #define MODE_WIDTHS 0x8F9414u           // int[6], matched against the adapter's modes at start-up
@@ -163,6 +164,7 @@ void split_views_restore(void) {
 
 void split_views_reset(void) {
     split_views_restore();
+    if (temporal_state_requested) temporal_invalidate(TEMPORAL_RESET_TARGET);
     // Retain the tiny allocation, but no surface references across a reset.
     if (split_desc) memset(G + split_desc, 0, 56);
     memset(split_rects, 0, sizeof split_rects);
@@ -206,7 +208,9 @@ void f_006CF400_orig(Cpu *c);
 void f_006CF400(Cpu *c) {                // (thiscall) builds a view's matrices and frustum; arg 0 is the view
     uint32_t saved = cur_view;
     cur_view = arg(c, 0);
+    uint32_t platform = c->ecx;
     f_006CF400_orig(c);
+    if (temporal_state_requested) temporal_guest_capture(cur_view, platform);
     cur_view = saved;
 }
 // A full-screen view is one whose viewport is the back buffer. (Not the selected slot's size: on a first run the
@@ -357,6 +361,10 @@ static void split_hud_scissor(Cpu *c, const uint32_t rect[4], uint32_t saved[5],
 static uint32_t matrix_ra;              // diagnostics: who set the WorldViewProj the next FE quads draw under
 void f_006C8000_orig(Cpu *c);
 void f_006C8000(Cpu *c) {                // (bMatrix4 *world, int view): sets the current effect's WorldViewProj
+    if (temporal_state_requested) {
+        if (M32(c->esp) == 0x006E03F9u || M32(c->esp) == 0x006D7685u) temporal_guest_pose_record(c->esi);
+        else temporal_pose_clear();
+    }
     if (M32(c->esp) == 0x006E03F9u) {
         materials_grass_record(c->esi);
         materials_aux_record(c->esi); // sorted queue's inlined 006D7660

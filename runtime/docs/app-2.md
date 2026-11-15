@@ -2,6 +2,13 @@
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
+Carbon speaker layout: `NFS_CARBON_POS_LAYOUT=itu` opts into home 5.1 angles (0, +/-30, +/-110 degrees, constant power, LFE 0, fixed stream defaults remapped) for positional sound. Unset or `game` retains the game's own 0, +/-45, +/-135. Read at start; restart required.
+Carbon F10 Diagnostics: **Unlock everything (testing)** unlocks cars, parts, paint and vinyls live through the native developer flag; Off each launch, never saved (`NFS_CARBON_UNLOCKALL=1` for tests). Purchases remain in the save; re-enter shops to refresh lists. Story progression, crew and reward cards remain separate.
+
+Carbon car reflection: `NFS_CARBON_ENVCUBE=1` opts into a 1024-square capture with eleven levels, generated after capture before car draws and sampled trilinearly. Unset or `0` retains the retail 256-square, one-level cube; Off by default, restart required. The visual choice awaits the owner's Off/On comparison; matched bonnet stills remain pending.
+
+Carbon contact shading: Depth ambient occlusion before the native post treatment is On by default; `NFS_CARBON_AO=off` disables it (retail output), restart required. Its own depth kernel (eight directions by six steps to a 0.7 m world reach, at most 0.15 of the frame height; strongest occluder per direction, faded to zero at the reach) with the shared bilateral filter and a composition that follows the occlusion down to 0.4 without a hard floor, so the shade ends softly; a road pixel beside the car's outline is shaded up to the outline; RGB only, preserves scene alpha and native treatment. Off returns before target access or GPU work. The final composition exempts native car paint/normal-map materials and blended overlays, preserving their lighting and lamp emission; the native prelit shadow decal leaves road eligible for AO; additive world decals (lit windows, event rings) are exempt only where they have alpha, so their transparent texels leave the surface eligible, and car depth still shades nearby ground. The shading belongs to the player's car: full within 3 m of it, none beyond 4.5 m, so distant buildings are untouched; other cars get none. Screen-space depth cannot shade hidden surfaces. Visual comparison and acceptance are tracked in VERSIONS.md.
+
 Car reflections (`envcube.m`, included by `d3d9.m`): the receiver diagnostic confirmed the live cube created
 at `006BD54B` (`00982A30`), 256², one mip; its sampler already requests linear min/mip filtering, but has no
 lower mip to read. Sharp sets the shared edge `008F8FF4` before target creation, so the guest's cube
@@ -34,7 +41,7 @@ mode 3 drew six faces and generated one complete chain per frame; mode 2 kept it
                                                                                                             
                                                                                                           
                                                                                                 
-                                                                                                          
+                                                                                                               
                  
 
 Car paint and rain ripples already have conditional restart semantics (`live_from_default`), rather than the 11

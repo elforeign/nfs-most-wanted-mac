@@ -698,7 +698,7 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
             (root/'car85.c').write_text(car_source)
             (root/'test.c').write_text(actual)
             exe=root/variant
-            build=subprocess.run(['clang',str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address',
+            build=subprocess.run(['clang',str(ROOT/'runtime/car_grip.c'),str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address',
                 '-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                 str(root/'test.c'),str(root/'files.c'),'-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3000:]

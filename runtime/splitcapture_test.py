@@ -23,6 +23,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,6 +41,7 @@ def translated(file, name):
 
 PRE = r'''
 #include "host.h"
+#include "temporal_state_fixture.h"
 #include "funcs.h"
 #include <stdlib.h>
 #include <stdarg.h>
@@ -64,6 +69,7 @@ static uint32_t refl_w=640,refl_h=360;
 #define RA_PROJ_MULTIPLY 0x6CF62Fu
 #define GAMEFLOW_STATE 0x925E90u
 #define X360_SHADER_LITS 1
+#define roots_x360_has(f) 1
 #define CUR_VIEW 0x982A20u
 #define DEVFN 0xD0000000u
 #define RESFN 0xD1000000u
@@ -552,7 +558,7 @@ def main():
             assert src.count(old)==1,(label,src.count(old))
             r=run('mutant '+label,src.replace(old,new))
             if r.returncode!=1 or 'failures' not in r.stdout:raise SystemExit('mutant not rejected: '+label)
-        renderer=(ROOT/'runtime/render.m').read_text()
+        renderer=mw_source(ROOT/'runtime/render.m')
         surface='id<MTLTexture> surface_target('+renderer.split('id<MTLTexture> surface_target(',1)[1].split('// ---------------- setup',1)[0]
         (d/'splitcapture_surface.inc').write_text(surface)
         gpu=d/'gpu'

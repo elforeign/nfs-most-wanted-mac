@@ -203,7 +203,7 @@ void soft_smoke_half_ab(NSArray *draws, id<MTLTexture> layer, int half) {
     half_replay(draws, other, &o, 1, half ? "soft smoke A/B full" : "soft smoke A/B half");
     if (half) half_depth_now(layer.width, layer.height);
     RTListScale n = {half ? 2 : 1, (uint32_t)layer.width, (uint32_t)layer.height, half ? (__bridge void *)ad_rt.tex : NULL,
-        half ? (__bridge void *)half_z : NULL, MAT_PS_BUF, sizeof(MatConsts), offsetof(MatConsts, k[1][3]), 1.0f};
+        half ? (__bridge void *)half_z : NULL, MAT_PS_BUF, MAT_CONST_BASE_BYTES, offsetof(MatConsts, k[1][3]), 1.0f};
     half_replay(draws, layer, &n, 1, half ? "soft smoke A/B nofade half" : "soft smoke A/B nofade full");
 }
 #endif

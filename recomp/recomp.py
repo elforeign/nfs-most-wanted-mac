@@ -89,11 +89,16 @@ class Unsupported(Exception):
 
 
 class PE:
-    def __init__(self, path=None):
+    def __init__(self, path=None, *, expected_sha256=None):
         path = path or EXE
         self.data = open(path, "rb").read()
         self.sha256 = hashlib.sha256(self.data).hexdigest()
-        self.fingerprint = exe_fingerprint.check(self.data, path)
+        if expected_sha256 is None:
+            self.fingerprint = exe_fingerprint.check(self.data, path)
+        else:
+            if self.sha256 != expected_sha256:
+                raise ValueError(f"{path}: private image SHA-256 mismatch")
+            self.fingerprint = self.sha256
         off = struct.unpack_from("<I", self.data, 0x3C)[0]
         n = struct.unpack_from("<H", self.data, off + 6)[0]
         s0 = off + 24 + struct.unpack_from("<H", self.data, off + 20)[0]
@@ -145,12 +150,14 @@ STR_A = {1: "(uint8_t)c->eax", 2: "(uint16_t)c->eax", 4: "c->eax"}
 
 
 class Recompiler:
-    def __init__(self, pe=None, functions=None):
+    def __init__(self, pe=None, functions=None, *, mw_patches=True, import_thunks=False):
         self.pe = pe or PE()
         self.md = Cs(CS_ARCH_X86, CS_MODE_32)
         self.md.detail = True
         self.functions = functions or {}      # guest address -> limit (for direct-call targets)
         self.calls = False                    # True: translate calls/tail jumps (needs the callees' C too)
+        self.mw_patches = mw_patches
+        self.import_thunks = import_thunks    # private manifests may omit Ghidra's import-thunk starts
         self.seen = {}
         self.ft_exits = {}
         self.int3_stops = set()               # int3s with nothing after them (padding): translated as a return
@@ -209,18 +216,18 @@ class Recompiler:
         if op.type == CS_OP_MEM:
             # Only StartLicensedMusic's explicit-event search grows with Extra EA Trax.
             # The career/default loops must keep reading the real g_MaxSongs (26).
-            if self.calls and insn.address in (0x004F6D65, 0x004F6DC9):
+            if self.mw_patches and self.calls and insn.address in (0x004F6D65, 0x004F6DC9):
                 assert size == 4 and op.mem.disp == 0x008F42C4 and not op.mem.base and not op.mem.index, "licensed-song bound changed"
                 return "extratrax_licensed_song_count()"
             # Port 5.1 correctness: only these traced AudioSettings+0x24 reads,
             # never profile serialization or the setting's memory. See posaudio.c.
-            if self.calls and size == 4 and insn.address in POSITIONAL_MODE_READS:
+            if self.mw_patches and self.calls and size == 4 and insn.address in POSITIONAL_MODE_READS:
                 return f"posaudio_mode_read({self.ea(insn, op)})"
             return self.mem_ref(size, self.ea(insn, op))
         raise Unsupported("operand")
 
     def wr(self, insn, op, v):
-        if self.calls and insn.address in POSITIONAL_DEFAULT_STORES:
+        if self.mw_patches and self.calls and insn.address in POSITIONAL_DEFAULT_STORES:
             v = f"posaudio_default_angle({v})"
         if op.type == CS_OP_REG:
             return self.reg_write(insn.reg_name(op.reg), v)
@@ -438,7 +445,7 @@ class Recompiler:
                          else "uint8_t cf = 0, pf = 0, af = 0, zf = 0, sf = 0, of = 0;") + " (void)cf; (void)pf; (void)af; (void)zf; (void)sf; (void)of;",
                 "    ABI_SAVE();"]
         code = "\n".join(head + body + ["}"])
-        if self.calls and addr == 0x006069C0:
+        if self.mw_patches and self.calls and addr == 0x006069C0:
             assert insn_fingerprint(self.pe.read(addr, 6)) == "2aab9ffc288165d6", "Lua protected frame changed"
             callees = self.callees.copy()
             resume, why = self.translate(0x006069E8, limit, name="lua_protected_resume")
@@ -451,6 +458,11 @@ class Recompiler:
         return code, None
 
     def insn(self, i, fstart, fend):
+        if not self.mw_patches:
+            from simd import emit
+            code = emit(self, i)
+            if code is not None:
+                return code
         m = i.mnemonic
         ops = i.operands
         # Asset-only name operands. Identity scans and ecar registration keep
@@ -464,7 +476,7 @@ class Recompiler:
             0x00756F72: ("5c62e091b8c0565f", "push"), # damage KIT prefix
             0x007570E4: ("5c62e091b8c0565f", "push"), # rear KIT prefix
         }
-        if self.calls and i.address in car85_names:
+        if self.mw_patches and self.calls and i.address in car85_names:
             fingerprint, mnemonic = car85_names[i.address]
             assert insn_fingerprint(i.bytes) == fingerprint and m == mnemonic, "car85 asset operand changed"
             if m == "lea":
@@ -485,7 +497,7 @@ class Recompiler:
             0x0075E7B4: ("fa1ca4c2ee59ade2", "cmp", "0x54u"),
             0x007B3877: ("110d70ee83ab00d8", "cmp", "0x4440u"),
         }
-        if self.calls and i.address in car85_sites:
+        if self.mw_patches and self.calls and i.address in car85_sites:
             fingerprint, mnemonic, literal = car85_sites[i.address]
             assert insn_fingerprint(i.bytes) == fingerprint and m == mnemonic, "car85 bound instruction changed"
             if m == "cmp":
@@ -506,18 +518,18 @@ class Recompiler:
         # Like the address-specific positional-audio read/store overrides, alter
         # only this guest instruction in the runtime build. Raw X360 flare alpha
         # must bypass PC's extra x2; no data-side half-alpha compensation.
-        if self.calls and i.address == 0x00505B4C:
+        if self.mw_patches and self.calls and i.address == 0x00505B4C:
             assert insn_fingerprint(i.bytes) == "8db598bd71d9d6f8" and m == "fadd", "flare alpha instruction changed"
             return ["if (!attrib_x360_light_data()) { " + " ".join(self.farith(i, m)) + " }"]
         # CAnimPlayer::Load refuses a NIS needing over 3,000,000 bytes; the X360 arrest characters
         # (NFS_X360_ARREST=x360) make ~4.3 MB bundles, so the cap comes from the runtime.
-        if self.calls and i.address == 0x0044CD0A:
+        if self.mw_patches and self.calls and i.address == 0x0044CD0A:
             assert insn_fingerprint(i.bytes) == "a0f21a2231e812ca" and m == "cmp", "NIS size cap instruction changed"
             return [l.replace("0x2DC6C0u", "x360_arrest_nis_cap()") for l in self.arith(i, m)]
         # InitializeSoundDriver sizes the Audio Memory Pool 0x567000 (0x563000 + 0x4000). EAXAemsManager::InitiateLoad
         # (004CFFA0) refuses a bank that does not fit it (-4); the X360 sound mix serves 48 kHz PCM16 banks several times
         # the PC's EA-XA size, so the pool size comes from the runtime (x360audio.c: larger with the mix on).
-        if self.calls and i.address == 0x004CC3A9:
+        if self.mw_patches and self.calls and i.address == 0x004CC3A9:
             assert insn_fingerprint(i.bytes) == "450dfbe2ef758e55" and m == "and", "audio pool size instruction changed"
             return [f"{{ uint32_t r = (uint32_t)(c->eax & x360audio_pool_size()); cf = 0; of = 0; {self.szp('r', 4)}",
                     "  c->eax = r;", "}"]
@@ -766,6 +778,12 @@ class Recompiler:
             if op.type == CS_OP_IMM:
                 t = op.imm
                 if t not in self.functions:
+                    if self.import_thunks:
+                        thunk = self.pe.read(t, 6)
+                        if thunk and len(thunk) == 6 and thunk[:2] == b"\xff\x25":
+                            slot = int.from_bytes(thunk[2:6], "little")
+                            if slot in self.pe.imports:
+                                return [f"{push} host_import(c, 0x{slot:08X}u); /* import thunk: {self.pe.imports[slot]} */"]
                     raise Unsupported("call to unknown target")
                 self.callees.add(t)
                 return [f"{push} f_{t:08X}(c);"]
@@ -964,6 +982,9 @@ class Recompiler:
         return self._x87(i, m)
 
     def _x87(self, i, m):
+        # Capstone spells the popping compare FCOMPI/FUCOMPI; Intel also uses
+        # FCOMIP/FUCOMIP. Both names encode the same compare followed by one pop.
+        m = {"fcompi": "fcomip", "fucompi": "fucomip"}.get(m, m)
         ops = i.operands
         R = "x87_round(c, {})".format
         if m == "fld":
@@ -1024,7 +1045,7 @@ class Recompiler:
         if m in ("fcompp", "fucompp"):
             return [f"x87_compare(c, ST(0), ST(1), {int(m.startswith('fu'))}); x87_pop(c); x87_pop(c);"]
         if m in ("fcomi", "fcomip", "fucomi", "fucomip"):
-            k = self.streg(i, ops[1]) if len(ops) > 1 else 1
+            k = self.streg(i, ops[-1]) if ops else 1
             pop = " x87_pop(c);" if m.endswith("p") else ""
             return [f"{{ double a = ST(0), b = ST({k}); int un = isnan(a) || isnan(b); "
                     f"zf = un || a == b; pf = un; cf = un || a < b; of = sf = af = 0; }}{pop}"]

@@ -12,6 +12,7 @@
 #include "materials.h"
 #include "d3d9_internal.h"
 #include "pipeline_cache.h"
+#include "temporal_render.h"
 
 // ---------------- GPU-side objects ----------------
 typedef struct {
@@ -90,6 +91,9 @@ extern int resolve_magenta;
 void msaa_forget(RenderTex *r);
 void msaa_resolve(RenderTex *r);
 void ms_attach(MTLRenderPassAttachmentDescriptor *a, RenderTex *r, int slot);
+// Future consumer: end the scene, resolve motion against borrowed full raw depth,
+// then commit queued poses once this accepted view was actually encoded.
+id<MTLTexture> render_temporal_motion(TemporalViewId view, id<MTLTexture> resolved_depth);
 int render_soft_depth_store(void); // 0 original; 1 nearest resolve on store; 2 sampled resolved depth (no resolve attachment)
 id<MTLTexture> render_soft_smoke_layer(void);
 id<MTLTexture> render_soft_smoke_half_depth(void);   // non-nil: the layer is half size (soft_smoke_half.m)

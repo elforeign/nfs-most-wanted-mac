@@ -61,6 +61,8 @@ extern const char *diag_dir;
 void diag_init(void);
 void diag_begin_exit(void);             // stand down watchdogs before exit/atexit work
 int diag_is_idle(void);
+void diag_capture_begin(void);
+void diag_capture_end(void);
 void breaker_diag_load(Cpu *c);
 void diag_event(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void diag_event_ring(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

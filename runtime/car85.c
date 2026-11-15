@@ -18,6 +18,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include "funcs.h"
 #include "host.h"
+#include "temporal_state.h"
 #include "private_cars.h"
 #include "traffic_pilot.h"
 #include "car_kit_fallback.h"
@@ -47,6 +48,8 @@ typedef struct {
     uint32_t frontend_key, ecar_key, folder_key, display_string, brand_logo;
     uint32_t key, model_key, record, type, hash, pv, fe, menu_fe, donor_model, string, logo, brand_string;
     int wheel_fit;
+    CarGrip grip;
+    CarGripBinding grip_binding;
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     CarPhysics physics;
     uint32_t contact_vault;
@@ -124,10 +127,48 @@ const CarPhysics *car85_contact_physics(uint32_t key) {
 }
 #endif
 
+/* No gameplay hook calls these yet. The bridge derives the key and vault from
+ * the local player's live pvehicle, and supplies current upgrade/part data. */
+static const CarGripBinding *live_grip_binding(uint32_t key, uint32_t vault) {
+    if (!catalog_mode || !enabled || !key || !vault) return NULL;
+    for (unsigned i=0;i<nadditions;++i) {
+        const Addition *a=additions+i;
+        if (!a->catalog_id || a->key!=key || !a->grip.present) continue;
+        const CarGripBinding *b=&a->grip_binding;
+        VaultLife *v=life(b->vault);
+        if (v && v->ready && v->generation==b->generation && vault==b->vault) return b;
+    }
+    return NULL;
+}
+
+int car85_grip_owner(uint32_t key, uint32_t vault, uint32_t simable,
+                     uint32_t local_simable, CarGripOwner *out) {
+    if (!out) return 0;
+    memset(out,0,sizeof *out);
+    if (!simable || simable!=local_simable) return 0;
+    const CarGripBinding *b=live_grip_binding(key,vault);
+    if (!b) return 0;
+    *out=(CarGripOwner){CAR_GRIP_SELECTION_VERSION,key,vault,simable,local_simable,b->generation};
+    return 1;
+}
+
+int car85_grip_select(const CarGripOwner *owner, const CarGripLive *live, CarGripSelected *out) {
+    if (!out) return 0;
+    memset(out,0,sizeof *out);
+    if (!owner || owner->version!=CAR_GRIP_SELECTION_VERSION ||
+        !owner->simable || owner->simable!=owner->local_simable) return 0;
+    const CarGripBinding *b=live_grip_binding(owner->key,owner->vault);
+    if (!b || owner->generation!=b->generation) return 0;
+    return car_grip_select(b,owner,live,out);
+}
+
 void car85_vault_unloaded(uint32_t vault) {
     VaultLife *v = life(vault);
     if (!v) return;
     uint64_t generation = v->generation;
+    for (unsigned i=0;i<nadditions;++i)
+        if (additions[i].grip_binding.generation==generation)
+            memset(&additions[i].grip_binding,0,sizeof additions[i].grip_binding);
     for (unsigned i = 0; i < 2; ++i)
         if (traffic_generation[i] == generation) {
             traffic_generation[i] = 0; traffic_vault[i] = 0;
@@ -475,6 +516,7 @@ static int on(void) {
             if (a->render_fit) load_collision(a,NULL);
 #endif
             if (car->physics[0]) load_physics(a,car->physics);
+            a->grip=car->grip;
             if (car->solid_map[0]) load_solid_map(a,car->solid_map);
             if (car->paint[0]) load_default_paint(a,car->paint);
         }
@@ -1110,6 +1152,7 @@ static __attribute__((noinline)) void model_0075F5D0(Cpu *c) {
     f_0075F5D0_orig(c); model_namespace=saved;
 }
 void f_0075F5D0(Cpu *c) {
+    if (temporal_state_requested) temporal_car_construct(c->ecx);
     if (!nadditions && !traffic_active) { f_0075F5D0_orig(c); return; }
     model_0075F5D0(c);
 }
@@ -1381,6 +1424,8 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
     M32(e) = coll; M32(e + 4) = 0; M32(e + 8) = tidx; M32(e + 12) = 0;
     M32(keys + (nd + n) * 4) = key;
     M32(vault + 0x34) = n + 1;
+    if (vehicle && cls == PVEHICLE && a!=&traffic_addition && a->catalog_id)
+        car_grip_bind(&a->grip_binding,&a->grip,a->key,vault,v->generation);
     if (diag_on) diag_event("car85: collection class=%08X donor=%08X new=%08X vault=%08X generation=%llu exports=%u->%u",
                             cls, M32(src), key, vault, (unsigned long long)v->generation, n, n + 1);
 }

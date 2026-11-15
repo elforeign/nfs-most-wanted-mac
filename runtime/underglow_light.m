@@ -2,11 +2,15 @@
  * headlight ePoly submission path. Dry diffuse receiver assumption: rho=.18. */
 #include "underglow_light.h"
 #include "underglow.h"
+#include "underglow_ui.h"
 #include "underglow_pool.h"
 #include "d3d9_internal.h"
 #include <math.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
+
+FILE *dump_file(void);
 
 static uint32_t ug_arg(const Cpu *c, unsigned i) { return M32(c->esp+4+4*i); }
 static uint32_t hash(const char *s) { uint32_t h=~0u; while (*s) h=h*33+(uint8_t)*s++; return h; }
@@ -26,7 +30,7 @@ static int light_on(uint32_t profile,uint32_t handle) {
  * The ecar instance at +17AC owns the live layout pointer at +17B4:
  * TireOffsets four XYZR values at +10; TireSkidWidth at +DC.
  * UpdateWheelYRenderOffset (0074D780) applies kit offsets into +110 (four lateral centres).
- * No name, owned handle, body hash or LOD fixture participates in mounting. */
+ * The mixer truck's narrower frame has one decoded inset below. */
 static int car_mounts(uint32_t self,UGStrip out[UG_STRIPS]) {
     uint32_t layout=M32(self+0x17b4);
     if(!layout || M16(layout+2)<4 || M16(layout+0xd6)<4) return 0;
@@ -35,7 +39,8 @@ static int car_mounts(uint32_t self,UGStrip out[UG_STRIPS]) {
         lo[k]=MF32(self+0x90+4*k);hi[k]=MF32(self+0xa0+4*k);
         if(!isfinite(lo[k])||!isfinite(hi[k])||hi[k]<=lo[k]||fabs(lo[k])>20||fabs(hi[k])>20) return 0;
     }
-    double rear=-INFINITY,front=INFINITY,cross=INFINITY,wheel_z=0;
+    double rear=-INFINITY,front=INFINITY,side=INFINITY,wheel_z=0;
+    double front_cross=INFINITY,rear_cross=-INFINITY;
     double xmin=INFINITY,xmax=-INFINITY,ymin=INFINITY,ymax=-INFINITY,rmax=0;
     for(unsigned i=0;i<4;++i) {
         double x=MF32(layout+0x10+16*i),y=MF32(self+0x110+4*i);
@@ -45,7 +50,9 @@ static int car_mounts(uint32_t self,UGStrip out[UG_STRIPS]) {
         wheel_z+=z*.25;
         xmin=fmin(xmin,x);xmax=fmax(xmax,x);ymin=fmin(ymin,y);ymax=fmax(ymax,y);rmax=fmax(rmax,radius);
         if(i<2) front=fmin(front,x-radius-.05); else rear=fmax(rear,x+radius+.05);
-        cross=fmin(cross,fabs(y)-width*.5-.05);
+        side=fmin(side,fabs(y)-width*.5-.03);
+        if(i<2) front_cross=fmin(front_cross,x+radius+.10);
+        else rear_cross=fmax(rear_cross,x-radius-.10);
     }
     /* Body overhang may extend half an axle spacing past the tyre envelope.
      * This generous envelope admits wide kits, but not corrupt added-car
@@ -60,15 +67,20 @@ static int car_mounts(uint32_t self,UGStrip out[UG_STRIPS]) {
         return 0;
     }
     rear=fmax(rear,lo[0]+.1);front=fmin(front,hi[0]-.1);
+    /* CEMTR BODY_A narrows to 0.698085 m inside its tyres; retain 3 cm inset. */
+    uint32_t type=M32(self+0x88);
+    if(type && !strcasecmp((char *)G+type,"cemtr")) side=fmin(side,.668085);
     /* A global minimum can be an exhaust/bumper vertex below the sill.
      * Use the wheel-centre plane as the underside datum, bounded by this
      * chassis. This remains chassis-local, independent of the road plane. */
-    double left=hi[1]-.05,right=lo[1]+.05;
+    double left=side,right=-side;
+    front_cross=fmin(front_cross,hi[0]-.10);
+    rear_cross=fmax(rear_cross,lo[0]+.10);
     double z=fmax(lo[2]-.005,fmin(hi[2]-.005,wheel_z-.01));
-    cross=fmin(cross,fmin(left,-right));
+    double cross=side-.05;
     if(front-rear<.2 || left-right<.2 || cross<.1 || hi[0]-lo[0]<1) return 0;
-    UGVec3 a[4]={{rear,right,z},{rear,left,z},{hi[0]-.1,-cross,z},{lo[0]+.1,-cross,z}};
-    UGVec3 b[4]={{front,right,z},{front,left,z},{hi[0]-.1,cross,z},{lo[0]+.1,cross,z}};
+    UGVec3 a[4]={{rear,right,z},{rear,left,z},{front_cross,-cross,z},{rear_cross,-cross,z}};
+    UGVec3 b[4]={{front,right,z},{front,left,z},{front_cross,cross,z},{rear_cross,cross,z}};
     for(unsigned i=0;i<UG_STRIPS;++i)
         out[i]=(UGStrip){a[i],b[i],{0,0,-1},hypot(b[i].x-a[i].x,b[i].y-a[i].y),.01};
     return 1;
@@ -126,6 +138,11 @@ static void remember(UGOwner o) {
     if(!o.profile) return;
     owners[owner_next++%32]=o;
 }
+/* Diagnostic fixture only (underglow_ui.c, shop): its BeginCarCustomize call copies the built ride into
+ * TopOrFullScreenRide without CarViewer::SetRideInfo, so name the car the fixture customizes as its owner. */
+void underglow_light_fixture_owner(uint32_t profile,uint32_t row) {
+    remember((UGOwner){.ride=0x009BA6B0u,.profile=profile,.handle=M32(row),.keys={M32(row+4),M32(row+8)},.custom=G[row+16]});
+}
 void f_00739A70_orig(Cpu *c);
 void f_00739A70(Cpu *c) {
     uint32_t ride=c->ecx;
@@ -171,7 +188,11 @@ void f_0075D220(Cpu *c) {
     UGOwner o={0};
     if(underglow_light_enabled() && record) {
         uint32_t db=M32(0x0091CF90u),profile=db?M32(db+0x10):0;
-        uint32_t handle=profile?M32(profile+0xa8):~0u;
+        /* QuickGame::CreateCars (006F47A0): the career's car in career mode (database +12C bit 0), otherwise the
+         * car picked for the current quick-race type (GetQuickRaceSettings 0056DBE0, selection at +10). */
+        uint32_t type=db?M32(db+0x18):~0u,handle=~0u;
+        if(profile && (G[db+0x12c]&1)) handle=M32(profile+0xa8);
+        else if(profile && type<11) handle=M32(db+0x1c+type*0x18+0x10);
         if(underglow_owned(profile,handle)) {
             uint32_t row=profile+0x414+handle*20;uint8_t custom=G[row+16];
             if(custom<76 && !memcmp(G+record,G+profile+0x414+4000+custom*0x198,139*2))
@@ -207,6 +228,7 @@ static int primary_car(const Cpu *input,uint32_t self,uint32_t ride) {
     return call_guest(&c,M32(M32(sim)+0x70),0,NULL)==id;
 
 }
+#define SHOP_STRIP_LIFT .10f   /* metres, outside racing */
 void underglow_light_begin(const Cpu *c, UGCarCapture *s) {
     memset(s,0,sizeof *s);
     if(!underglow_light_enabled()) return;
@@ -226,6 +248,9 @@ void underglow_light_begin(const Cpu *c, UGCarCapture *s) {
     uint32_t basis=ug_arg(c,2),position=ug_arg(c,1);
     if(!basis||!position) return;
     memcpy(s->basis,G+basis,64);memcpy(s->position,G+position,12);
+    /* The shop's strips hang 6.5 cm over the pool plane, which leaves a thin line under the body that one
+     * side's camera barely sees; outside racing they sit 10 cm higher so the light reaches all four sides. */
+    if(M32(0x00925E90u)!=6) s->position[2]+=SHOP_STRIP_LIFT;
     UGStrip strips[UG_STRIPS];
     if(!ug_strips_transform(s->mounts,s->basis,s->position,strips)) return;
     s->self=self;s->view=view;s->view_id=1;s->profile=o.profile;s->handle=o.handle;s->preset=preset;s->valid=1;
@@ -255,16 +280,92 @@ static int texture(Cpu *c,unsigned slot,unsigned w,unsigned h,uint32_t white) {
     }
     return 1;
 }
-static void quad(Cpu *c,uint32_t view,const UGVec3 p[4],uint32_t ti) {
+/* Modulate RGB without refreshing the pool. Keep alpha opaque: the retail
+ * road shader doubles alpha, which clamps and plateaus on an UNORM target. */
+static double pulse_factor(unsigned on,double seconds) {
+    return on ? 1-.7*(1-cos(M_PI*seconds))/2 : 1;
+}
+static void quad(Cpu *c,uint32_t view,const UGVec3 p[4],uint32_t ti,const UGVec3 *rectangle) {
+    unsigned on=underglow_pulse();
+    double seconds=on ? (host_ticks()%2000000000ull)*1e-9 : 0;
+    uint32_t level=(uint32_t)lround(255*pulse_factor(on,seconds));
+    uint32_t colour=0xFF000000u|level*0x010101u;
     uint32_t poly=scratch+0x500;
     c->ecx=poly;call_guest(c,0x006C0A30u,0,NULL);
     for(unsigned i=0;i<4;++i) {
         MF32(poly+16*i)=p[i].x;MF32(poly+16*i+4)=p[i].y;MF32(poly+16*i+8)=p[i].z;
-        M32(poly+0x80+4*i)=0xFFFFFFFFu;
+        M32(poly+0x80+4*i)=colour;
+        if(rectangle) {
+            MF32(poly+0x40+8*i)=(p[i].x-rectangle[0].x)/(rectangle[2].x-rectangle[0].x);
+            MF32(poly+0x44+8*i)=(p[i].y-rectangle[0].y)/(rectangle[2].y-rectangle[0].y);
+        }
     }
     c->ecx=view;
     uint32_t args[]={poly,ti,0,0,0};
     call_guest(c,0x006BE750u,5,args);
+}
+/* Clip a road triangle to the existing texture rectangle. XYZ interpolation
+ * keeps the receiver on that exact face, including road camber and kerbs. */
+static unsigned pool_clip(const UGVec3 triangle[3],const UGVec3 rectangle[4],UGVec3 out[8]) {
+    UGVec3 a[8],b[8];memcpy(a,triangle,3*sizeof *a);unsigned count=3;
+    for(unsigned edge=0;edge<4 && count;++edge) {
+        unsigned axis=edge/2,n=0;double bound=axis?(edge%2?rectangle[2].y:rectangle[0].y):(edge%2?rectangle[2].x:rectangle[0].x);
+        for(unsigned i=0;i<count;++i) {
+            UGVec3 p=a[i],q=a[(i+1)%count];
+            double pv=axis?p.y:p.x,qv=axis?q.y:q.x;
+            int pi=edge%2?pv<=bound:pv>=bound,qi=edge%2?qv<=bound:qv>=bound;
+            if(pi)b[n++]=p;
+            if(pi!=qi) {
+                double t=(bound-pv)/(qv-pv);
+                b[n++]=(UGVec3){p.x+t*(q.x-p.x),p.y+t*(q.y-p.y),p.z+t*(q.z-p.z)};
+            }
+        }
+        count=n;memcpy(a,b,n*sizeof *a);
+    }
+    memcpy(out,a,count*sizeof *out);return count;
+}
+static unsigned ground_pool(Cpu *c,const UGCarCapture *s,const UGVec3 rectangle[4],uint32_t ti) {
+    uint32_t collider=M32(s->self+0x44);if(!collider)return 0;
+    /* Same cache/axes as WWorldPos::FindClosestFace (00779170): physics
+     * (-render Y, render Z, render X), three 16-byte vertices per triangle. */
+    uint32_t first=M32(collider+0x60),last=M32(collider+0x64);
+    if(!first || last<first || (last-first)%4 || last-first>16384)return 0;
+    unsigned draws=0;FILE *df=diag_on?dump_file():NULL;
+    for(uint32_t at=first;at<last;at+=4) {
+        uint32_t block=M32(at);if(!block)continue;
+        uint32_t begin=M32(block+4),end=M32(block+8);
+        if(!begin || end<begin || (end-begin)%48 || end-begin>48*4096)continue;
+        for(uint32_t t=begin;t<end;t+=48) {
+            UGVec3 triangle[3],polygon[8];int finite=1;
+            for(unsigned i=0;i<3;++i) {
+                triangle[i]=(UGVec3){MF32(t+16*i+8),-MF32(t+16*i),MF32(t+16*i+4)};
+                finite &= isfinite(triangle[i].x)&&isfinite(triangle[i].y)&&isfinite(triangle[i].z);
+            }
+            if(!finite)continue;
+            UGVec3 a={triangle[1].x-triangle[0].x,triangle[1].y-triangle[0].y,triangle[1].z-triangle[0].z};
+            UGVec3 b={triangle[2].x-triangle[0].x,triangle[2].y-triangle[0].y,triangle[2].z-triangle[0].z};
+            double nx=a.y*b.z-a.z*b.y,ny=a.z*b.x-a.x*b.z,nz=a.x*b.y-a.y*b.x;
+            if(nz*nz<=nx*nx+ny*ny || fabs(nz)<1e-8)continue;
+            unsigned n=pool_clip(triangle,rectangle,polygon);if(n<3)continue;
+            int receiver=1;
+            for(unsigned i=0;i<n;++i)receiver &= polygon[i].z<=s->position[2]+.1 && polygon[i].z>=s->position[2]-1;
+            if(!receiver)continue;
+            if(df) {
+                fprintf(df,"underglow ground polygon %u:",n);
+                for(unsigned i=0;i<n;++i)fprintf(df," %.9g %.9g %.9g",polygon[i].x,polygon[i].y,polygon[i].z);
+                fputc('\n',df);
+            }
+            for(unsigned i=0;i<n;++i)polygon[i].z+=.002;
+            if(n<=4) {
+                UGVec3 p[4];for(unsigned i=0;i<4;++i)p[i]=polygon[i<n?i:n-1];
+                quad(c,s->view,p,ti,rectangle);++draws;
+            } else for(unsigned i=1;i+1<n;++i) {
+                UGVec3 p[4]={polygon[0],polygon[i],polygon[i+1],polygon[i+1]};
+                quad(c,s->view,p,ti,rectangle);++draws;
+            }
+        }
+    }
+    return draws;
 }
 static const double *preset_duties(unsigned preset) {
     static double values[8][3];
@@ -345,29 +446,22 @@ static void ug_draw(const Cpu *result,const UGCarCapture *s) {
         }
         pool->dirty=1;prior_strength=strength;prior_preset=s->preset;prior_height=local[2];memcpy(prior_basis,s->basis,64);memcpy(prior_mounts,s->mounts,sizeof prior_mounts);
     }
-    /* Submit before the queued opaque chassis: normal depth testing covers
-     * the bounded ground plane. No body/wheel visibility masks are added. */
+    /* Keep the original texture rectangle and photometry. Road receivers use
+     * their cached collision faces; normal depth still covers walls/body. */
     UGVec3 p[4]={{s->position[0]+x0,s->position[1]+y0,ground+.002},
         {s->position[0]+x1,s->position[1]+y0,ground+.002},
         {s->position[0]+x1,s->position[1]+y1,ground+.002},
         {s->position[0]+x0,s->position[1]+y1,ground+.002}};
-    quad(&c,s->view,p,scratch+0x300);++pool_draws;
-    for(unsigned i=0;i<UG_STRIPS;++i) {
-        UGVec3 delta={strips[i].b.x-strips[i].a.x,strips[i].b.y-strips[i].a.y,strips[i].b.z-strips[i].a.z};
-        UGVec3 n=strips[i].normal;
-        UGVec3 w={delta.y*n.z-delta.z*n.y,delta.z*n.x-delta.x*n.z,delta.x*n.y-delta.y*n.x};
-        double l=sqrt(w.x*w.x+w.y*w.y+w.z*w.z);
-        w.x*=.005/l;w.y*=.005/l;w.z*=.005/l;
-        UGVec3 q[4];
-        for(int j=0;j<4;++j) { UGVec3 v=(j==0||j==3)?strips[i].a:strips[i].b;double sign=j<2?-1:1;
-            q[j]=(UGVec3){v.x+s->position[0]+sign*w.x,v.y+s->position[1]+sign*w.y,v.z+ground+sign*w.z}; }
-        quad(&c,s->view,q,scratch+0x200);++strip_draws;
-    }
+    unsigned submitted;
+    if(M32(0x00925E90u)==6) submitted=ground_pool(&c,s,p,scratch+0x300);
+    else {quad(&c,s->view,p,scratch+0x300,NULL);submitted=1;}
+    if(!submitted)return;
+    ++pool_draws;
     static int road_logged;
     if(diag_on && M32(0x00925E90u)==6 && !road_logged) {
         road_logged=1;
         uint32_t rain=M32(s->view+0x68);
-        diag_event("underglow road draw: handle=%u preset=%u strips=4 pool=1 ground=%.6f car_z=%.6f face=%u wetness=%.6f local_slot=0 parts=139",
+        diag_event("underglow road draw: handle=%u preset=%u strips=4 emitters=0 pool=1 ground=%.6f car_z=%.6f face=%u wetness=%.6f local_slot=0 parts=139",
             s->handle,s->preset,ground,s->position[2],G[s->self+0x78]&1,rain?MF32(rain+0x36a0):-1);
     }
     static unsigned logs;

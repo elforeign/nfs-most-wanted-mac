@@ -1,9 +1,11 @@
-// Background replay of observed Metal descriptors. No binary persistence.
+// Background replay of observed Metal descriptors and of a per-user history of demand builds.
 #pragma once
 #import <Metal/Metal.h>
 #include <stdint.h>
 
 void pipeline_register_shader(uint64_t key, id<MTLFunction> function);
+// USERDATA directory of the demand-build history; call before pipeline_prewarm. Never called: no history.
+void pipeline_history_open(const char *dir);
 // Call after shader publication; only enqueues work and must not be joined by frames.
 void pipeline_prewarm(dispatch_queue_t __strong queues[4], NSUInteger scene_samples);
 void pipeline_frame_stats(unsigned long long *count, unsigned long long *ns);

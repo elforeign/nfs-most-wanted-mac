@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #include "host.h"
+#include "game_select.h"
 
 #define D3D_OK 0
 #define D3DERR_INVALIDCALL 0x8876086Cu
@@ -709,6 +710,9 @@ static void upload_ctab(Cpu *c, Effect *fx, State *st, int ps, uint64_t since) {
             if (q->cls == PC_MATRIX_ROWS || q->cls == PC_MATRIX_COLUMNS) {
                 float m[16];
                 get_matrix(q, m, 0);
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_frontend_matrix.inc"
+#endif
                 int as_cols = ccls == PC_MATRIX_COLUMNS || (ccls != PC_MATRIX_ROWS && q->cls == PC_MATRIX_COLUMNS);
                 uint32_t nr = as_cols ? q->cols : q->rows, per = as_cols ? q->rows : q->cols;
                 for (uint32_t r = 0; r < nr && nreg < nmax; ++r, ++nreg)
@@ -722,6 +726,9 @@ static void upload_ctab(Cpu *c, Effect *fx, State *st, int ps, uint64_t since) {
             ++nreg;
         }
         if (!nreg) continue;
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_effect_evidence.inc"
+#endif
         uint32_t buf = scratch(16 * nreg);
         if (rs == 2) {
             memcpy(G + buf, regs, 16 * nreg);
@@ -1192,6 +1199,9 @@ static int e_BeginPass(Cpu *c) {
     if (!fx->cur || i >= (uint32_t)fx->cur->npasses) RET(D3DERR_INVALIDCALL, 2);
     fx->pass = &fx->cur->passes[i];
     fx->in_pass = 1;
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_frontend_begin.inc"
+#endif
     snprintf(diag_fx_pass, sizeof diag_fx_pass, "%s/%s/%s", fx->name, fx->cur->name, fx->pass->name);
     uint32_t esp = c->esp;
     apply_pass(c, fx, fx->pass, 0);
@@ -1203,7 +1213,11 @@ static int e_CommitChanges(Cpu *c) {
     if (fx->in_pass && fx->pass) { uint32_t esp = c->esp; apply_pass(c, fx, fx->pass, 1); c->esp = esp; }
     RET(D3D_OK, 1);
 }
+#if NFS_GAME == NFS_GAME_MW
 static int e_EndPass(Cpu *c) { Effect *fx = FX; fx->in_pass = 0; snprintf(diag_fx_pass, sizeof diag_fx_pass, "(no effect pass)"); RET(D3D_OK, 1); }
+#else
+#include "game_frontend_end.inc"
+#endif
 static int e_End(Cpu *c) {
     Effect *fx = FX;
     uint32_t esp = c->esp;

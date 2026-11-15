@@ -153,6 +153,10 @@ def main():
     if not clang:
         return 3
     boot = (ROOT / 'runtime/boot.c').read_text()
+    selected = subprocess.run(['unifdef', '-DNFS_GAME=1', '-DNFS_GAME_MW=1',
+                               '-DNFS_GAME_PRIVATE=2'], input=boot, capture_output=True, text=True)
+    assert selected.returncode in (0, 1), selected.stderr
+    boot = selected.stdout
     start = boot.index('    G = mmap(', boot.index('// ---------------- loader'))
     end = boot.index('    for (unsigned i = 0; i < speed_import_count;', start)
     block = boot[start:end]

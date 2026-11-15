@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Explicit Go -> Metal/H.264 + synthetic AAC -> TS -> loopback HTTPS only.
+Clean Stop/Forget/initial quit/immediate quit/will-terminate/both exit fallbacks:
+reviewed abort in each held-response case cancels >=1, final ACKs=0 (FAIL);
+fixed cancels=fails=0, final ACKs=1 (PASS), including both diagnostic tokens.
+Quit combined timeout 5.663 s <=6.25 s, full poster residue=0/512; no false EOS.
+Delayed diagnostic quit log fails its before-termination assertion.
+Erasing/fixed Stop: 1/0 failures on Go without re-entry; fresh poster required.
 Original/fixed: encoder status and capture session reason each fail/pass (1/0).
-ASan/UBSan good: live-only 333 checks/0 failures, attached 323/0, simultaneous
+ASan/UBSan good: live-only 333 checks/0 failures, attached 324/0, simultaneous
 Stop 314/0; each posts
 2 TS segments + 2 media playlists with 0 key/session matches. Independent clip: 5 decoded frames/0 bad,
 0.150000 s. Fresh Go begins with IDR; stale callbacks admit 0 segments.
 Setup/encoder-failure/transfer create 0 sessions; restart/diagnostic: 0 sessions/sockets;
 in-flight Stop cancels >=1 task and releases all retained bytes. HTTP, disconnect,
 deadline and response-cap failures preserve recording/replay, with no reconnect.
-Fourteen compiled controls exit 1 on their named assertion (good exit 0): result-after-
+Fifteen compiled controls exit 1 on their named assertion (good exit 0): result-after-
 cancel, premature AAC close (2240/7200 decoded samples), missing file IDR, old file timeline, lost replay request, removed live start,
 coupled Stop, missing detach, missing live hold, unnamed encoder reason (code=0, as 5012), late generation and omitted poster Stop.
 Result-after-cancel writes 0 files versus fixed 1; both outcomes reproduced.
 Focus loss (focus-gap: 12.6 s without presented frames while audio runs, as after a Space swipe):
 fixed posts 10 segments with 365 held frames and no error; the no-hold control (original
 behaviour) stops after 2 posts with "live: error kind=encoder reason=no-idr-5s".
+Under 2x-core CPU load the missing-detach control passed (rc=0) in 4/25 runs while Stop raced the capture pump; held queue: 60/60 named failures, good 40/40.
 Reuses the reviewed TLS fixture and synthetic presentation fixture, without games.
 """
 from pathlib import Path
@@ -22,6 +29,7 @@ import importlib.util
 import os
 import hashlib
 import secrets
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,9 +59,19 @@ def main():
     poster=poster.replace(marker,'++createdSessions; '+marker)
     capture=(RT/'cliprec.mm').read_text()
     key_source=(RT/'stream_key.m').read_text()
-    wrapper='\nint proof_key(const char *bytes) { return replaceKey([NSString stringWithUTF8String:bytes]); }\n'
+    wrapper=('\nint proof_key(const char *bytes) { return replaceKey([NSString stringWithUTF8String:bytes]); }\n'
+             'void proof_quit_fallback(void) { quitKey(); }\n'
+             'unsigned proof_saved_residue(void) { unsigned n=0; for(size_t i=0;i<sizeof keyBytes;++i) n|=keyBytes[i]; return n; }\n')
     with tempfile.TemporaryDirectory(prefix='proof-',dir=CACHE) as scratch:
         d=Path(scratch); fixture_module.certificate(d); fixture_module.socket_probe(d)
+        (d/'quit.inc').write_text(privacy.quit_source((RT/'app.m').read_text()))
+        script=(RT/'user32.m').read_text()
+        start=script.index('    } else if (!strcmp(tok, "livestop") || !strcmp(tok, "livequit")) {')
+        start=script.index('{',start)+1
+        end=script.index('    } else if (!strcmp(tok, "replayarm")',start)
+        script=script[start:end]
+        (d/'script.inc').write_text('static void proof_script_action(const char *tok,int diag_on=1) {\n'
+            'unsigned step=0,step_start=1;\n'+script+'(void)step; (void)step_start;\n}\n')
         (d/'poster.mm').write_text(poster)
         keypath=d/'key.m'; keypath.write_text(key_source+wrapper)
         keyobject=d/'key.o'
@@ -72,7 +90,7 @@ def main():
             (CACHE/(source.stem+'-build.log')).write_text(built.stdout+built.stderr)
             assert not built.returncode,built.stderr[-4000:]
             objects.append(str(obj))
-        command=['clang++',*flags,'-DSTREAM_POSTER_SOURCE="'+str(d/'poster.mm')+'"',str(RT/'stream_live_test.mm'),str(keyobject),
+        command=['clang++',*flags,'-DSTREAM_SCRIPT_SOURCE="'+str(d/'script.inc')+'"','-DSTREAM_QUIT_SOURCE="'+str(d/'quit.inc')+'"','-DSTREAM_POSTER_SOURCE="'+str(d/'poster.mm')+'"',str(RT/'stream_live_test.mm'),str(keyobject),
                  *objects,str(d/'socket-probe.dylib')]
         for library in ('avformat','avcodec','swscale','swresample','avutil'):
             command.append(str(ROOT/'third_party/ffmpeg/lib'/('lib'+library+'.a')))
@@ -86,10 +104,13 @@ def main():
         sentinel='sk_'+secrets.token_hex(60)+'+&=/%?#é'
         libraries=':'.join(filter(None,(str(d/'socket-probe.dylib'),os.environ.get('DYLD_INSERT_LIBRARIES'))))
         def run(binary,mode,server_mode='segments',broken=False,expected=None):
-            fixture=fixture_module.Fixture(d/'cert.pem',d/'key.pem',sentinel,server_mode)
+            for name in ('finish-held','finish-release'): (d/name).unlink(missing_ok=True)
+            abort_control=broken and binary.name=='finish-abort-original'
+            fixture=fixture_module.Fixture(d/'cert.pem',d/'key.pem',sentinel,server_mode,abort_control)
+            abort_env={'NFS_TEST_ABORT_FD':str(fixture.abort_child.fileno())} if abort_control else {}
             try:
                 result=subprocess.run([str(binary),mode,fixture.base,str(d/'cert.der'),str(d/'profile'/'clips'/(binary.name+'-'+mode+'-'+server_mode))],input=sentinel+'\n',
-                    capture_output=True,text=True,timeout=60,env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',DYLD_INSERT_LIBRARIES=libraries,CFFIXED_USER_HOME=str(d/'profile'),USERDATA=str(d/'profile')))
+                    capture_output=True,text=True,timeout=60,pass_fds=(fixture.abort_child.fileno(),) if abort_control else (),env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',DYLD_INSERT_LIBRARIES=libraries,CFFIXED_USER_HOME=str(d/'profile'),USERDATA=str(d/'profile'),**abort_env))
             finally: fixture.close()
             profile=d/'profile'/'clips'/(binary.name+'-'+mode+'-'+server_mode)
             session_path=Path(str(profile)+'.session.txt')
@@ -108,13 +129,43 @@ def main():
                 valid=valid and 'live: first playlist accepted code=200' in session_text and 'live: Stop accepted=' in session_text
             if mode=='inflight-stop': valid=valid and len(fixture.received)>=1
             if mode=='focus-gap': valid=valid and len(fixture.received)>=9 and 'live: error' not in session_text
-            if broken and expected: assert result.returncode==1 and expected in output, 'wrong failure assertion: '+binary.name
+            # Print before the oracle so a wrong-assertion failure shows its rc and output.
             print(f'{binary.name}/{mode}: rc={result.returncode} posts={len(fixture.received)} invalid={fixture.invalid} '
                   f'playlists={len(fixture.playlists)} key_matches={matches} session_key_matches={session_matches}; '+safe.strip().replace('\n','; '),flush=True)
+            if broken and binary.name=='finish-abort-original':
+                assert re.search(r'cancelled=[1-9]\d*.*finals=0',output), 'abort must cancel and acknowledge zero EOS'
+                assert 'abort control: stopped=1' in output, 'abort control must stop without deadline'
+            if broken and expected: assert result.returncode==1 and expected in output, 'wrong failure assertion: '+binary.name
             assert valid!=broken,'lifecycle oracle result: '+mode
         for mode in ('only','stop-both','attached','setup-stop','restart','diagnostic-off','encoder-failure','capture-transfer','capture-failure'):
             run(exe,mode)
         run(exe,'inflight-stop','stall')
+        for mode in ('finish-stop','finish-forget','finish-quit','finish-immediate','finish-willterminate','finish-fallback','finish-script-stop','finish-script-quit'):
+            run(exe,mode,'finish-segment')
+        run(exe,'finish-quit-stall','finish-total-stall')
+        # Production diagnostics must log before invoking termination, since it
+        # may exit without returning to the script dispatcher.
+        (d/'script.inc').write_text('static void proof_script_action(const char *tok,int diag_on=1) {\n'
+            'unsigned step=0,step_start=1;\n'+script.replace('            diag_event("script: %s",tok); // quit can exit before returning\n','')
+            .replace('            else [NSApp terminate:nil];','            else [NSApp terminate:nil];\n            diag_event("script: %s",tok);')+
+            '(void)step; (void)step_start;\n}\n')
+        binary=d/'late-quit-log'
+        built=subprocess.run(command+['-o',str(binary)],capture_output=True,text=True,timeout=90)
+        assert not built.returncode,built.stderr[-4000:]
+        run(binary,'finish-script-quit','finish-segment',broken=True,expected='diagnostic quit logs before termination')
+        (d/'script.inc').write_text('static void proof_script_action(const char *tok,int diag_on=1) {\n'
+            'unsigned step=0,step_start=1;\n'+script+'(void)step; (void)step_start;\n}\n')
+        abort=poster.replace(privacy.function(poster,'void Poster::finish()'),'void Poster::finish() { stop(); }')
+        for name,fragment in fixture_module.FINAL_ABORT_FRAGMENTS.items():
+            assert hashlib.sha256(fragment.encode()).hexdigest()==fixture_module.FINAL_ABORT_DIGESTS[name]
+            abort=abort.replace(privacy.function(abort,name),fragment)
+        (d/'poster.mm').write_text(abort)
+        binary=d/'finish-abort-original'
+        built=subprocess.run(command+['-o',str(binary)],capture_output=True,text=True,timeout=90)
+        assert not built.returncode,built.stderr[-4000:]
+        for mode in ('finish-stop','finish-forget','finish-quit','finish-immediate','finish-willterminate','finish-fallback','finish-script-stop','finish-script-quit'):
+            run(binary,mode,'finish-segment',broken=True)
+        (d/'poster.mm').write_text(poster)
         run(exe,'focus-gap')
         for mode,server_mode in [('failure-http','http'),('failure-network','disconnect'),('failure-deadline','stall'),
                                  ('failure-network','large-body'),('failure-401','unauthorized'),('failure-401','playlist401')]:
@@ -177,18 +228,29 @@ def main():
         built=subprocess.run(command+['-o',str(binary)],capture_output=True,text=True,timeout=90)
         assert not built.returncode,built.stderr[-4000:]
         run(binary,'attached',broken=True,expected='stale generation cannot admit work after Stop')
+        # Reintroduce the rejected Stop erasure: Go must retain the saved key.
+        (d/'poster.mm').write_text(poster)
+        before='    notice="Stopped";'
+        assert key_source.count(before)==1
+        keypath.write_text(key_source.replace(before,'    erase(keyBytes,sizeof keyBytes); keySize=0; notice="Stopped";')+wrapper)
+        result=subprocess.run(['clang','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fobjc-arc','-I'+str(RT),'-c',str(keypath),'-o',str(keyobject)],capture_output=True,text=True)
+        assert not result.returncode,result.stderr[-3000:]
+        binary=d/'erase-stop-key'
+        built=subprocess.run(command+['-o',str(binary)],capture_output=True,text=True,timeout=90)
+        assert not built.returncode,built.stderr[-4000:]
+        run(binary,'attached',broken=True,expected='Go after Stop uses the saved key')
         # The UI Stop bridge must cancel the transport as well as detach capture.
         (d/'poster.mm').write_text(poster)
-        before='livestream_stop(); cliprec_live_stop(); notice="Stopped";'
+        before='cliprec_live_stop(); livestream_stop();'
         assert key_source.count(before)==1
-        keypath.write_text(key_source.replace(before,'cliprec_live_stop(); notice="Stopped";')+wrapper)
+        keypath.write_text(key_source.replace(before,'cliprec_live_stop();')+wrapper)
         result=subprocess.run(['clang','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fobjc-arc','-I'+str(RT),'-c',str(keypath),'-o',str(keyobject)],capture_output=True,text=True)
         assert not result.returncode,result.stderr[-3000:]
         binary=d/'stop-poster'
         built=subprocess.run(command+['-o',str(binary)],capture_output=True,text=True,timeout=90)
         assert not built.returncode,built.stderr[-4000:]
         run(binary,'inflight-stop','stall',broken=True,expected='Stop cancels the in-flight generation')
-    print('stream_live_test PASS: 12 lifecycle faults rejected; focus loss posts>=9; restart broadcasts=0')
+    print('stream_live_test PASS: 15 compiled controls rejected; focus loss posts>=9; restart broadcasts=0')
     return 0
 
 if __name__=='__main__': raise SystemExit(main())

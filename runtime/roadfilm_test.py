@@ -35,6 +35,10 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'runtime'
 
@@ -248,12 +252,23 @@ int main(int argc,char**argv){if(argc>1&&!strcmp(argv[1],"--production"))return 
 def main():
     src = (RUNTIME / 'roadfilm.m').read_text()
     materials = (RUNTIME / 'materials.m').read_text()
+    # Pin and execute the original ripple selector below the independent sky
+    # dispatch; keep all existing frozen hashes and broken-selector controls.
+    sky_dispatch = '    char *sky = daynight_sky_shader(tokens, n, refl); if (sky) { *id = 0; return sky; }\n'
+    assert materials.count(sky_dispatch) == 1
+    materials = materials.replace(sky_dispatch, '')
+    stream_dispatch = '    char *lamp = daynight_stream_shader(tokens, n, refl, id, mat_replace_profile); if (lamp) return lamp;\n'
+    assert materials.count(stream_dispatch) == 1
+    materials = materials.replace(stream_dispatch, '')
+    local_dispatch = '        if (src && (car || e->patch == car_vs_nm_patch || cover_vs))\n            src = car_local_shader(src, e->stage == SM_VERTEX, cover_vs || e->patch == car_t0_ps_patch);\n'
+    assert materials.count(local_dispatch) == 1
+    materials = materials.replace(local_dispatch, '')
     # Frozen independently of branch/HEAD; update only after reviewing Retail changes.
     retail_hashes = {
         'mat_replace': '090cc8b487bfc4667782ada08b4f0757ce78ae0f3f053d538510d3e8ea50a45c',
         'mat_replace_profile': '2934e2540fbb90d18704ceff64e1988564a5f46979869d9d42c0f60092b51670',
-        'ripple_ps_patch': 'aaed5f07aa5cf298598839e094296b4da4377c314a7a1836dfec6456ccdff449',
-        'ripple_vs_patch': 'd399c18ee439d26af2470358a2ff0646401914f34734641fe5d4af54ef3bce9f',
+        'ripple_ps_patch': 'fbbf76c726eb97bc62f15ab1346cf4515b2ef73ffc7277e5519db56cc1dbb7c9',
+        'ripple_vs_patch': 'cd797d941897840f75e188cf90858039412f77930a326fd424b7231386635c29',
     }
     def retail_failures(source):
         return [name for name, digest in retail_hashes.items()
@@ -263,7 +278,7 @@ def main():
         'return mat_replace_profile(tokens, n, refl, id, 0);', 'return NULL;')
     null_materials = materials.replace(function(materials, 'mat_replace'), null_replace)
     assert retail_failures(null_materials) == ['mat_replace'], 'NULL replacement identity control escaped'
-    renderer = (RUNTIME / 'render.m').read_text()
+    renderer = mw_source(RUNTIME / 'render.m')
     all_ids = (RUNTIME / 'materials.h').read_text() + (RUNTIME / 'roadfilm.h').read_text()
     ids = re.findall(r'MAT_VARIANT_\w+\s*=\s*(0x[0-9a-fA-F]+)', all_ids)
     assert len(ids) == len(set(ids)), 'shader variant IDs overlap'
@@ -323,6 +338,9 @@ int main(void){double angles[]={0,60,80},want[]={.020059,.059126,.346916};int fa
 #include "roadfilm.m"
 static const char *variant="filmon";
 int postfx_look_variant(const char*v){return !strcmp(v,variant);}
+enum {MAT_VARIANT_CLEARCOAT=0x10c};
+static int clearcoat_shader_hash(uint64_t hash){(void)hash;return 0;}
+static int clearcoat_enabled(void){return 0;}
 typedef struct {volatile int pending;int ok;} ShaderEntry;
 typedef struct {uint64_t tokens_hash;} Obj;
 static ShaderEntry native={0,1},water={0,1};
@@ -331,7 +349,8 @@ static struct {float psc[2][4];} dev;
 static int lookups;
 static ShaderEntry *get_shader(Obj*s,int*o){(void)s;(void)o;return &native;}
 static ShaderEntry *get_shader_variant(Obj*s,int*o,int v){(void)s;(void)o;if(v!=MAT_VARIANT_ROAD_FILM)abort();lookups++;return &water;}
-static ShaderEntry *select_draw(void){Obj*ps=&object;int po=0;
+static ShaderEntry *select_draw(void){Obj*ps=&object,*vs=&object;int po=0,vo=0;
+ShaderEntry *vse=&native;(void)vse;
 DRAW
 }
 int main(void){
@@ -362,6 +381,8 @@ int main(void){
         helpers = materials.split('static const char ripple_ps_helpers[] =', 1)[1].split('// Edits *s', 1)[0]
         emit = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include "roadfilm.m"\n#include "materials.h"\n#include "gen/x360_shader_lits.inc"\n'
         emit += 'int postfx_look_variant(const char*v){(void)v;return 0;}\n'
+        emit += '\nstatic int ripple_provider = 1;\n'
+        emit += '\n'.join('#define PORTS_RIPPLE_' + key + ' X360S_RIPPLE_' + key for key in ('GLINT_T', 'GLINT', 'REFL_T', 'REFL', 'SCALE2', 'TILE')) + '\n'
         emit += 'static const char ripple_ps_helpers[] =' + helpers
         emit += '\n'.join(function(materials, name) for name in ('edit', 'count', 'ripple_ps_patch'))
         # Use the production selector with its real ripple rows and bytecode hashes.

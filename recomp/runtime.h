@@ -24,6 +24,7 @@ typedef struct Cpu {
     uint32_t eflags_ext; // EFLAGS bits kept only for pushfd/popfd: AC (0x40000) and ID (0x200000), which the game
                          // toggles to detect CPUID before it measures the CPU clock
     uint32_t eflags;  // arithmetic flags handed to the next function at fall-through / tail jumps (audit 3 #1)
+    uint32_t xmm[8][4]; // SSE register bits; appended so existing CPU field offsets stay stable
 } Cpu;
 
 extern uint8_t *G;    // guest memory base

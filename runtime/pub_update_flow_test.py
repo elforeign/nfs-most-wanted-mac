@@ -4,8 +4,8 @@ Core proof: 27 good checks (12 UI, 15 preparation/launch); 17 broken controls re
 Launch fixture: inherited BOOT_BACKGROUND=1 skipped the normal-launch guard
 (broken rc=0); clear launch-mode flags in this stub child (good rc=0, broken rc=99).
 No network, game, or desktop app is started. The normal offline discovery runs this file.
-Transport compilation: production UI good=1 has the fixed release URL and no
-fixture environment; the fixture-enabled build fails that same release oracle (1/1).
+Transport compilation: production UI good=2 has the fixed release URL and no
+fixture environment; the fixture-enabled build fails that same release oracle (2/2).
 Detach proof: first-phase order good=2 (fresh/existing marker), original-order
 broken=2 rejected; retained detach good=6, broken retry policy=2 rejected.
 Mounted interpreter proof: good=1 detached before build (rc=0) / original-order
@@ -498,17 +498,23 @@ void settings_add(Setting *setting) { (void)setting; }
 const char *userdata_dir(void) { return "/unused"; }
 int main(void) { return 0; }
 ''')
-    release_ok = []
-    for enabled in (False, True):
-        exe = root / ('fixture-enabled' if enabled else 'production')
-        flags = ['-DPUB_UPDATE_REHEARSAL=1',
-                 '-DPUB_UPDATE_REHEARSAL_FEED_URL="http://127.0.0.1:1/rehearsal"'] if enabled else []
-        run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags,
-             path, '-framework', 'Cocoa', '-o', exe])
-        data = run(['/usr/bin/strings', exe]).stdout
-        release_ok.append('https://api.github.com/repos/' in data and 'PUB_UPDATE_REHEARSAL_BASE_URL' not in data)
-    assert release_ok == [True, False], release_ok
-    print('Production transport good=1 fixed feed/no fixture config; broken=1 fixture-enabled build detected')
+    for product, repository, asset in (('mw', 'elforeign/nfs-most-wanted-mac', 'NFS-Most-Wanted-Native-Setup'),
+                                       ('carbon', 'elforeign/nfs-carbon-mac', 'NFS-Carbon-Native-Setup')):
+        release_ok = []
+        for enabled in (False, True):
+            exe = root / (product + ('-fixture-enabled' if enabled else '-production'))
+            flags = ['-DPUB_UPDATE_REHEARSAL=1',
+                     '-DPUB_UPDATE_REHEARSAL_FEED_URL="http://127.0.0.1:1/rehearsal"'] if enabled else []
+            if product == 'carbon':
+                flags += ['-DNFS_GAME=2']
+            run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags,
+                 path, '-framework', 'Cocoa', '-o', exe])
+            data = run(['/usr/bin/strings', exe]).stdout
+            release_ok.append('https://api.github.com/repos/' in data and
+                              'PUB_UPDATE_REHEARSAL_BASE_URL' not in data)
+            assert repository in data and asset in data, product
+        assert release_ok == [True, False], (product, release_ok)
+    print('Production transports good=2 fixed product feeds/assets; broken=2 fixture-enabled builds detected')
 
 
 def main():

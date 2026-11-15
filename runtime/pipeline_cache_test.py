@@ -24,6 +24,10 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -39,13 +43,13 @@ def catalogue_check(source):
 
 
 def diagnostic(path):
-    if catalogue_check((ROOT / 'pipeline_cache.m').read_text()):
+    if catalogue_check(mw_source(ROOT / 'pipeline_cache.m')):
         return 1
     text = (path / 'events.log').read_text()
     counts = [int(n) for n in re.findall(r'pipeline_frame:.*?known_total=(\d+)', text)]
     misses = len(re.findall(r'pipeline_known_miss:', text))
     failures = len(re.findall(r'pipeline_prewarm: (?:missing_shader|failed)=', text))
-    catalogue = (ROOT / 'pipeline_cache.m').read_text().split('static const PipelineRecipe recipes[] = {', 1)[1].split('\n};', 1)[0]
+    catalogue = mw_source(ROOT / 'pipeline_cache.m').split('static const PipelineRecipe recipes[] = {', 1)[1].split('\n};', 1)[0]
     listed = [re.sub(r'\s+', '', line.split('//')[0]) for line in catalogue.splitlines() if '.vertex=' in line]
     recorded = re.findall(r'pipeline_recipe: \w+ (.*)', text)
     observed = 0
@@ -238,7 +242,9 @@ enum { MAT_VARIANT_AUX=512, MAT_VARIANT_WATER, MAT_VARIANT_ROAD_FILM,
        MAT_VARIANT_REAL_GLASS, MAT_VARIANT_REAL_CHROME, MAT_VARIANT_CARBON_LAMP,
        MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
-       MAT_VARIANT_SOFT_SMOKE_LATE };
+       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CLEARCOAT };
+enum { HL_RECEIVER=0x10000, HL_CASTER=0x20000 };
+static int headlights_enabled(void) { return 0; }
 static int aux_count;
 static size_t sm_token_count(const uint32_t *t, size_t n) { return n>=2?2:0; }
 static uint64_t fnv(const void *p,size_t n,uint64_t seed) { return seed; }
@@ -249,6 +255,7 @@ static void shader_preload_variant(Obj *s,const SmOptions *o,uint32_t v) { aux_c
 static int roadfilm_shader_hash(uint64_t h) { return 0; }
 static int roadfilm_enabled(void) { return 0; }
 static int realworld_materials_mode(void) { return 0; }
+static int clearcoat_shader_hash(uint64_t h) { return 0; }
 """
     main = r"""
 int main(void) {
@@ -280,13 +287,13 @@ int main(void) {
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == '--diag':
         return diagnostic(Path(sys.argv[2]))
-    source = (ROOT / 'pipeline_cache.m').read_text()
+    source = mw_source(ROOT / 'pipeline_cache.m')
     assert catalogue_check(source) == 0
     # Removing a newly added recipe must fail independently of GPU support.
     new_row = source.split("// Scene-AA, reflection and AO variants", 1)[1].split("\n};", 1)[0].splitlines()[-1]
     missing = source.replace(new_row + "\n", "", 1)
     assert missing != source and catalogue_check(missing) == 1
-    render = (ROOT / 'render.m').read_text()
+    render = mw_source(ROOT / 'render.m')
     def post_prewarm_joins(text):
         tail = text.split('    pipeline_prewarm(shader_workers,', 1)[1].split('    pipeline_loading_done();', 1)[0]
         return tail.count('dispatch_sync(')

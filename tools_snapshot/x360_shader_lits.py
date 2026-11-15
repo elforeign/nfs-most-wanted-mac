@@ -13,7 +13,8 @@ with the literal VALUES and the parameter DEFAULT values zeroed, so a changed nu
 changed program (another build, a mod, garbage) is refused.
 
 Input: the full ZZDATA0.BIN (base 0), or a slice of it named zzdata0_<hex base>.bin (the owner's extract). Without one:
---stub writes the same macros as zeros with X360_SHADER_LITS 0 (the runtime keeps those features PC).
+--stub writes zeros with X360_SHADER_LITS 0 except the post chain and car paint/normal lighting scalars, which take
+this port's own values (PORT_SCALARS). Metallic flake and texture-dependent shader families still need the file.
 
 Macros (C string literals, spliced into the MSL source by concatenation so the shader text is byte for byte what it
 was): X360L_<shader>_C<reg> "float4(a, b, c, d)", X360LC_<shader>_C<reg> "float4(a,b,c,d)" (compact), named scalars
@@ -339,6 +340,42 @@ def read_all(path):
     return {name: hit[1] for name, hit in got.items()}
 
 
+# What the post composite and car lighting use without the player's ZZDATA0.BIN: this port's own values,
+# authored here from the reasoning beside them, none read from or fitted to the console's shader.
+# Authored ripple effect channels (not normal-map RGB), independent of console data.
+RIPPLE_SCALARS = {
+    "X360S_RIPPLE_TILE": "2.0",          # 0.5 m tile covers the 0.390 m packet support
+    "X360S_RIPPLE_SCALE2": "1.41421356", # sqrt(2): nearby scale with reduced alignment
+    "X360S_RIPPLE_GLINT": "0.01003",    # water F0=((1.33-1)/(1.33+1))^2, half per layer
+    "X360S_RIPPLE_GLINT_T": "0.01003",
+    "X360S_RIPPLE_REFL": "0.0",        # direction changes do not imply uniform darkening
+    "X360S_RIPPLE_REFL_T": "0.0",
+}
+PORT_SCALARS = {
+    **RIPPLE_SCALARS,
+    # Keep each material's PC SpecularPower and SpecularHotSpot. The PC shader's peak is 2; a hotspot of 1 adds
+    # that same peak above the unit broad lobe. Multiplying the exponent by 4 halves the small-angle lobe width
+    # (cos(theta)^n ~= exp(-n theta^2/2)), giving polished paint a narrower highlight without a noise texture.
+    "X360S_CAR_HOT_SCALE": "2.0", "X360S_CAR_HOT_POWER": "4.0",
+    # Normal maps retain their authored unit strength (normalise(2 rgb - 1)); no console texture is substituted.
+    # Use the same half-width hotspot on mapped surfaces. A half-strength broad specular keeps tyre rubber's
+    # diffuse detail visible; the material's own SpecularPower still determines its roughness.
+    "X360S_CARNM_SPEC_POWER": "4.0", "X360S_CARNM_SPEC": "0.5",
+    # Match the PC car vertex lighting's +0.1 wrap (materials.m's sky-fill share): a small soft terminator,
+    # not a change to the encoded normal's slope. Both spellings are spliced into the shader's source.
+    "X360S_CARNM_WRAP": "0.1", "X360S_CARNM_WRAP_T": "0.1",
+    # A 1/50 floor keeps log2(N.V) finite at grazing angles; it changes only the last 1.15 degrees from tangent.
+    "X360S_CARNM_NV_MIN": "0.02", "X360S_CARNM_NV_MIN_T": ".02",
+    # Speed blur weights of the pixel and its seven taps along the streak, in the shader's four groups (2, 3, 2, 1
+    # samples): a tent, 4 : 3 : 2 : 1, so the farthest tap's ghost is a quarter of the nearest's and eight discrete
+    # samples do not read as eight copies. 2 x 4 + 3 x 3 + 2 x 2 + 1 = 22, so the weights sum to 1.
+    "X360S_VT_W0": "0.18181819", "X360S_VT_W1": "0.13636364", "X360S_VT_W2": "0.09090909", "X360S_VT_W3": "0.045454547",
+    # The blur's share by depth, fade = A - B x (depth in half metres): a streak shrinks with distance (1 / Z), so the
+    # road and roadside keep the full blur to 13.5 m (fade 1) and the far scenery and sky none from 149 m (fade 0).
+    "X360S_VT_FADE_A": "1.1", "X360S_VT_FADE_B": "0.0037",
+}
+
+
 def finite(v, what):
     if not math.isfinite(v):
         raise SystemExit("x360_shader_lits: refused: %s is not a finite number (%r); the file is not the retail "
@@ -358,8 +395,8 @@ def text(have, source):
             out.append('#define X360L%s_%s_C%d "float4(%s)"' % ("C" if style == "c" else "", name.upper(), r,
                                                                  sep.join(g9(v, style == "c") for v in vals)))
     for macro, name, reg, comp, how, scale in SCALARS:
-        if not have:                       # valid MSL wherever it is spliced ("0.0f"); the features are off anyway
-            out.append('#define %s "0.0"' % macro)
+        if not have:                       # valid MSL wherever spliced; only PORT_SCALARS features can run
+            out.append('#define %s "%s"' % (macro, PORT_SCALARS.get(macro, "0.0")))
             continue
         v = finite(struct.unpack("<f", struct.pack("<f", f32(have[name][0][reg][comp]) * scale))[0], "%s c%d" % (name, reg))
         out.append('#define %s "%s"' % (macro, spell(v, how)))
@@ -385,7 +422,7 @@ def main():
             print(name, by_off.get(name, "MISSING"))
         return
     if a.stub:
-        t = text(None, "files with no X360 NFS/ZZDATA0.BIN: zeros, the X360 shader features stay PC")
+        t = text(None, "files with no X360 NFS/ZZDATA0.BIN: zeros, the X360 shader features stay PC (X360S_VT_*: this port's own values)")
     else:
         t = text(read_all(a.zzdata0), "X360 NFS/ZZDATA0.BIN")
     a.out.write_text(t)

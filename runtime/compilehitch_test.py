@@ -2,11 +2,14 @@
 """Shader frame-path regression, without Metal or a game launch.
 
 Production lookup/scheduling: normal frame-thread compile_entry calls 0; broken 1.
-Cache round-trip: normal 10 records; broken AUX whitelist 1 record;
+Headlight cache: On 12 / Off 11 records; removing the Off skip restores 12 and fails.
+Cache round-trip: normal 11 records; broken AUX whitelist 1 record;
 broken Clear-lamp whitelist 6 records; broken film whitelist 7 records;
-broken material whitelist Glass/Chrome 8/9 records.
+broken material whitelist Glass/Chrome 8/9 records; broken coat whitelist 10.
 Readiness after publication: normal pending 0; broken 1.
 Concurrent identical-source requests: normal 1 compile; broken cache 4.
+Cached shelter Off launch: fixed 0 compiles / 0 allocations; unconditional
+warming 2 compiles / 8 allocations FAIL. On launch/live toggle: 2 compiles each.
 Cold profile (2026-10-28): source compiles before/after 13/0, hangs 0/0,
 stalls 0/0, deferred draws 635515/0 (game_run runs 1 and 5).
 MSL identity: normal 1744 comparisons / 0 differences; broken shadow mask
@@ -23,8 +26,12 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent.parent
-SRC = (ROOT / "runtime/render.m").read_text()
+SRC = mw_source(ROOT / "runtime/render.m")
 
 
 def between(start, end):
@@ -57,9 +64,11 @@ PRELUDE = r'''
 #include <time.h>
 #include <unistd.h>
 #include "host/shaders/sm_translate.h"
+enum { HL_RECEIVER=0x10000, HL_CASTER=0x20000, HL_VARIANTS=0x30000 };
 enum { MAT_VARIANT_WATER=0x100, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
-       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_REAL_GLASS, MAT_VARIANT_REAL_CHROME, MAT_VARIANT_AUX=0x200 };
+       MAT_VARIANT_SOFT_SMOKE_LATE, MAT_VARIANT_CARBON_LAMP, MAT_VARIANT_HEADLAMP_CLEAR, MAT_VARIANT_ROAD_FILM, MAT_VARIANT_REAL_GLASS, MAT_VARIANT_REAL_CHROME, MAT_VARIANT_CLEARCOAT,
+       MAT_VARIANT_RAIN_COVER=0x110, MAT_VARIANT_RAIN_COVER_FILM, MAT_VARIANT_AUX=0x200 };
 typedef struct {
  uint64_t key; SmResult refl; volatile int pending; int ok; dispatch_semaphore_t ready;
  uint32_t *tokens, ntokens; SmOptions opt; uint32_t variant;
@@ -75,6 +84,8 @@ static dispatch_queue_t shader_q, shader_workers[4];
 static unsigned shader_worker_next;
 static dispatch_semaphore_t allow_compile, started;
 static int frame_sync, compiled;
+static int rain_cover_enabled;
+static int rain_cover_on(void) { return rain_cover_enabled; }
 static const char *scratch;
 static const char *userdata_dir(void) { return scratch; }
 static int diag_on;
@@ -83,6 +94,8 @@ static unsigned long long stat_sync_shader;
 static void diag_event(const char *fmt, ...) { (void)fmt; }
 @protocol MTLLibrary @end
 @class MTLCompileOptions;
+static int headlight_mode;
+static int headlights_enabled(void) {return headlight_mode;}
 static int library_requests;
 @interface CompileHitchDevice : NSObject
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error;
@@ -119,6 +132,65 @@ static int check(int good, const char *why) {
 }
 '''
 
+COVER_ALLOCATIONS = r'''
+static int allocations;
+static void *tracked_malloc(size_t n) { ++allocations; return malloc(n); }
+static void *tracked_calloc(size_t n, size_t s) { ++allocations; return calloc(n,s); }
+static void *tracked_realloc(void *p, size_t n) { ++allocations; return realloc(p,n); }
+'''
+
+COVER_MAIN = r'''
+static void finish_cover_compiles(void) {
+ for(int i=0;i<nshaders;i++)dispatch_semaphore_signal(allow_compile);
+ for(int i=0;i<4;i++)dispatch_sync(shader_workers[i], ^{});
+}
+int main(int argc, char **argv) { @autoreleasepool {
+ (void)argc; scratch=argv[1];
+ allow_compile=dispatch_semaphore_create(0); started=dispatch_semaphore_create(0);
+ FILE *fixture=fopen(argv[2],"rb"); if(!fixture)return 2;
+ fseek(fixture,0,SEEK_END);long bytes=ftell(fixture);rewind(fixture);
+ if(bytes<=0 || bytes%4)return 2;
+ uint32_t *tokens=malloc(bytes);
+ if(fread(tokens,1,bytes,fixture)!=(size_t)bytes)return 2;fclose(fixture);
+ SmOptions opt;sm_default_options(&opt);
+ const uint32_t variants[]={MAT_VARIANT_RAIN_COVER,MAT_VARIANT_RAIN_COVER_FILM};
+ for(int i=0;i<2;i++) {
+   ShaderEntry seed={.tokens=tokens,.ntokens=bytes/4,.opt=opt,.variant=variants[i]};
+   cache_append(&seed);
+ }
+ char path[1024];cache_path(path,sizeof path);
+ FILE *f=fopen(path,"rb");if(!f)return 2;
+ fseek(f,0,SEEK_END);long cache_bytes=ftell(f);fclose(f);
+ allocations=0;
+ shader_cache_warm();finish_cover_compiles();
+ printf("cached shelter Off: compiles=%d allocations=%d entries=%d\n",compiled,allocations,nshaders);
+ if(check(!compiled && !allocations && !nshaders,"Off cache performs no variant work"))return 1;
+ f=fopen(path,"rb");if(!f)return 2;fseek(f,0,SEEK_END);
+ long after=ftell(f);fclose(f);
+ if(check(after==cache_bytes,"Off launch preserves optional cache records"))return 1;
+ if(check(shader_cache_variant_valid(0x110) && shader_cache_variant_valid(0x111),"both shelter variants remain valid"))return 1;
+ rain_cover_enabled=1;shader_cache_warm();finish_cover_compiles();
+ printf("cached shelter On: compiles=%d entries=%d\n",compiled,nshaders);
+ if(check(compiled==2 && nshaders==2,"On launch warms both cached variants"))return 1;
+ // Recreate an Off launch, then request both variants at the live On toggle.
+ nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
+ compiled=allocations=0;rain_cover_enabled=0;
+ shader_cache_warm();
+ if(check(!nshaders && !allocations,"second Off launch still skips records"))return 1;
+ rain_cover_enabled=1;
+ Obj s={.tokens=tokens,.ntokens=bytes/4};
+ ShaderEntry *cover[2];
+ for(int i=0;i<2;i++)cover[i]=get_shader_variant(&s,&opt,variants[i]);
+ if(check(!frame_sync && !compiled && nshaders==2 && shader_pending(cover[0]) && shader_pending(cover[1]),
+          "live On returns pending without a frame-thread compile or wait"))return 1;
+ finish_cover_compiles();
+ printf("live shelter On: compiles=%d frame_sync=%d\n",compiled,frame_sync);
+ if(check(compiled==2 && cover[0]->ok && cover[1]->ok,"live On publishes both variants"))return 1;
+ for(int i=0;i<2;i++)if(check(get_shader_variant(&s,&opt,variants[i])==cover[i],"ready shelter variant reused"))return 1;
+ return 0;
+}}
+'''
+
 MAIN = r'''
 int main(int argc, char **argv) { @autoreleasepool {
  scratch=argv[1];
@@ -144,9 +216,11 @@ int main(int argc, char **argv) { @autoreleasepool {
  if (check(get_shader_variant(&s,&irrelevant,0)==e && get_shader_variant(&s,&irrelevant,0)==e,
            "unread texture options share the pending shader")) return 1;
  uint32_t variants[]={MAT_VARIANT_AUX,MAT_VARIANT_SOFT_SMOKE,
-    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP,MAT_VARIANT_HEADLAMP_CLEAR,MAT_VARIANT_ROAD_FILM,MAT_VARIANT_REAL_GLASS,MAT_VARIANT_REAL_CHROME};
- for (int i=0;i<9;i++) get_shader_variant(&s,&o,variants[i]);
- for (int i=0;i<10;i++) dispatch_semaphore_signal(allow_compile);
+    MAT_VARIANT_SOFT_SMOKE_RESOLVED,MAT_VARIANT_SOFT_SMOKE_LATE,MAT_VARIANT_CARBON_LAMP,MAT_VARIANT_HEADLAMP_CLEAR,MAT_VARIANT_ROAD_FILM,MAT_VARIANT_REAL_GLASS,MAT_VARIANT_REAL_CHROME,MAT_VARIANT_CLEARCOAT};
+ int profiles=sizeof variants/sizeof *variants;
+ for (int i=0;i<profiles;i++) get_shader_variant(&s,&o,variants[i]);
+ headlight_mode=1;get_shader_variant(&s,&o,HL_RECEIVER);headlight_mode=0;
+ for (int i=0;i<profiles+2;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
  mtl=[CompileHitchDevice new];diag_on=1;
  id results[4];
@@ -167,16 +241,22 @@ int main(int argc, char **argv) { @autoreleasepool {
    if(one||two||a.code!=7||b.code!=7)abort();
  }});
  if(check(library_requests==2,"failed compile publishes error and wakes followers"))return 1;
- if (check(!e->pending && e->ok && compiled==10,"release/acquire publication")) return 1;
+ if (check(!e->pending && e->ok && compiled==profiles+2,"release/acquire publication")) return 1;
  if (check(!shader_pending(e),"ready shader no longer pending")) return 1;
  if (check(get_shader_variant(&s,&o,0)==e,"ready lookup reused")) return 1;
  // Keep shape metadata, but rebuild the shader/cache index exactly as a new launch does.
  nshaders=capshaders=0; shaders=NULL; memset(vcache,0,sizeof vcache);
  shader_cache_warm();
  printf("cache records=%d frame_sync=%d\n",nshaders,frame_sync);
- if (check(nshaders==10,"cache accepts AUX, soft smoke, lamp, film and material profiles")) return 1;
- for (int i=0;i<10;i++) dispatch_semaphore_signal(allow_compile);
+ if (check(nshaders==profiles+1,"cache accepts AUX, soft smoke, lamp, film, materials and coat")) return 1;
+ for (int i=0;i<profiles+1;i++) dispatch_semaphore_signal(allow_compile);
  for (int i=0;i<4;i++) dispatch_sync(shader_workers[i], ^{});
+ headlight_mode=1;nshaders=capshaders=0;shaders=NULL;memset(vcache,0,sizeof vcache);
+ shader_cache_warm();
+ if(check(nshaders==profiles+2,"On restores the additional headlight record"))return 1;
+ for(int i=0;i<profiles+2;i++)dispatch_semaphore_signal(allow_compile);
+ for(int i=0;i<4;i++)dispatch_sync(shader_workers[i], ^{});
+ headlight_mode=0;
  int comparisons=0;
  for (int a=2;a<argc;a++) {
    FILE *f=fopen(argv[a],"rb"); if(!f)return 2;
@@ -336,7 +416,7 @@ OLD_CONTACT = r'''static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scen
 assert hashlib.sha256(OLD_CONTACT.encode()).hexdigest() == '416372ce18268fe2ee157b0a60f01f28f126e453f3186926a627d5413a25c886', 'pinned baseline changed'
 
 def contact_off_frame():
-    post = (ROOT / "runtime/render_post.m").read_text()
+    post = mw_source(ROOT / "runtime/render_post.m")
     normal = contact_sync_compiles(post)
     assert normal == 0, f"contact shadows compile on the frame: {normal}"
     # Literal frame-path call sites retained from the original initializer.
@@ -378,18 +458,37 @@ def offline():
             profile = tmp / (name + "-profile"); profile.mkdir()
             return [str(exe), str(profile), str(synthetic)]
         print(run(build("normal", code) + [str(p) for p in fixtures]).strip())
+        # Count allocations in the actual cache/shape/lookup code, including
+        # token reads, shader entries and index growth, rather than a model.
+        cover_body = fnv + shape + new + submit + ready + cache + lookup
+        cover_body = re.sub(r'\b(malloc|calloc|realloc)\(', r'tracked_\1(', cover_body)
+        cover_code = PRELUDE + COVER_ALLOCATIONS + cover_body + COVER_MAIN
+        cover_result = run(build('cover-cache', cover_code)).strip()
+        assert 'cached shelter Off: compiles=0 allocations=0 entries=0' in cover_result
+        print(cover_result)
+        cover_broken = cover_code.replace('&& !rain_cover_on()', '&& 0')
+        assert cover_broken != cover_code
+        broken_result = run(build('cover-cache-broken', cover_broken), 1).strip()
+        assert 'cached shelter Off: compiles=2 allocations=8 entries=2' in broken_result
+        print('broken unconditional shelter warm: ' + broken_result)
         broken = code.replace("    shader_submit(e);\n    cache_append(e);", "    compile_entry(e);\n    cache_append(e);")
         assert broken != code
         print("broken scheduling: " + run(build("broken", broken), 1).strip())
         broken_cache = code.replace(" && variant != MAT_VARIANT_AUX", "")
         assert broken_cache != code
         print("broken cache: " + run(build("broken-cache", broken_cache), 1).strip())
+        broken_headlight = code.replace('if((variant & HL_VARIANTS) && !headlights_enabled())', 'if(0)')
+        assert broken_headlight != code
+        print('broken headlight Off cache: ' + run(build('broken-headlight-cache', broken_headlight), 1).strip())
         broken_clear = code.replace(" && variant != MAT_VARIANT_HEADLAMP_CLEAR", "")
         assert broken_clear != code
         print("broken Clear cache: " + run(build("broken-clear-cache", broken_clear), 1).strip())
         broken_film = code.replace(" && variant != MAT_VARIANT_ROAD_FILM", "")
         assert broken_film != code
         print("broken film cache: " + run(build("broken-film-cache", broken_film), 1).strip())
+        broken_coat = code.replace(" && variant != MAT_VARIANT_CLEARCOAT", "")
+        assert broken_coat != code
+        print("broken coat cache: " + run(build("broken-coat-cache", broken_coat), 1).strip())
         for material in ('GLASS', 'CHROME'):
             broken_material = code.replace(' && variant != MAT_VARIANT_REAL_' + material, '')
             assert broken_material != code

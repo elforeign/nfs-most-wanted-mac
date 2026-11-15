@@ -40,6 +40,7 @@ int private_cars_init(const char *root, int enabled, const char *const *original
         COPY(collision,s->outputs[CAR_CATALOG_COLLISION].path);
         COPY(paint,s->outputs[CAR_CATALOG_PAINT].path);
         COPY(physics,s->outputs[CAR_CATALOG_PHYSICS].path);
+        d->grip=s->grip;
 #undef COPY
         if (d->selected && !d->swap) selected[nselected++]=(unsigned)i;
     }

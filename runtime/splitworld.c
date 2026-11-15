@@ -23,6 +23,7 @@
 
 #include "host.h"
 #include "sign_diag.h"
+#include "temporal_state.h"
 
 #define VIEW_P1 0x00919650u
 #define VIEW_P2 0x009196C0u
@@ -374,6 +375,7 @@ void f_006DE300_orig(Cpu *c);
 void f_006DE300(Cpu *c) {                // ___eDisplayFrame: the world body
     if (diag_on && sign_diag_on) sign_diag_world(c);
     uint32_t r[2][4];
+    if (temporal_state_requested) temporal_guest_scene_mode(shadow_split());
     if (!split_view_rect(VIEW_P1, r[0]) || !split_view_rect(VIEW_P2, r[1])) {
         Cpu saved = *c; sun_mode(c, 0); *c = saved;
         split_post_mode(0);

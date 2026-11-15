@@ -1,10 +1,18 @@
+// Clean Stop/Forget/initial quit/immediate quit/will-terminate/both exit fallbacks:
+// reviewed abort in each held-response case cancels >=1, final ACKs=0 (FAIL);
+// abort's socket handshake holds the response through Stop/quit's return (or
+// drops it on an intentional early assertion); deadline cannot stand in for Stop.
+// fixed cancels=fails=0, final ACKs=1 (PASS), including both diagnostic tokens.
+// Quit combined timeout 5.663 s <=6.25 s, full poster residue=0/512; no false EOS.
+// Delayed diagnostic quit log fails its before-termination assertion.
 // Production Go/Stop, capture queues, Metal/VT, AAC, TS and HTTPS loopback.
+// Erasing/fixed Stop prevents/permits Go without re-entry (1/0 failures); new poster.
 // Original/fixed: encoder status and capture session reason fail/pass, 1/0 each.
-// ASan/UBSan: only 333/0 checks/failures, attached 323/0, simultaneous Stop 314/0.
+// ASan/UBSan: only 333/0 checks/failures, attached 324/0, simultaneous Stop 314/0.
 // Each posts 2 segments + 2 playlists, key/session matches=0; both independent file-stop cases retain 7200 AAC samples.
 // Attached file: 5 decoded frames, 0.150000 s; AAC tail original/fixed: 2240/7200 samples.
 // Result-after-cancel fault: 0 files vs 1.
-// Fourteen compiled controls exit 1 on their intended assertion; good exit 0.
+// Fifteen compiled controls exit 1 on their intended assertion; good exit 0.
 // Restart/diagnostic: 0 sessions/sockets; setup: 0 sessions. Stop: 0 retained upload bytes.
 // Focus loss (12.6 s with no presented frame, audio running): fixed posts 10 segments, 365 held frames, no error;
 // without the live hold (original) it stops after 2 posts with "live: error kind=encoder reason=no-idr-5s".
@@ -26,7 +34,52 @@ static std::atomic<unsigned> createdSessions{0};
 #include <iostream>
 #include <chrono>
 #include <thread>
+#include <cstdlib>
+#include <poll.h>
 extern "C" int proof_key(const char *);
+extern "C" unsigned proof_saved_residue();
+extern "C" void proof_quit_fallback();
+static std::shared_ptr<live::Poster> quittingPoster;
+static bool scriptedQuit=false;
+static void diag_begin_exit(void) {}
+static int user32_request_close(void) {
+    if(scriptedQuit) {
+        std::lock_guard<std::mutex> guard(sessionNotesLock);
+        require(std::find(sessionNotes.begin(),sessionNotes.end(),"script: livequit")!=sessionNotes.end(),"diagnostic quit logs before termination");
+    }
+    require(!proof_saved_residue(),"saved key erased before WM_CLOSE");
+    if(quittingPoster) {
+        auto s=quittingPoster->stats();
+        printf("quit close proof: accepted=%llu posted=%llu cancelled=%llu failed=%llu finals=%llu finalized=%d bytes=%zu\n",
+            (unsigned long long)s.accepted,(unsigned long long)s.posted,(unsigned long long)s.cancelled,
+            (unsigned long long)s.failed,(unsigned long long)s.finalPlaylists,s.finalized,s.bytes);
+        if(std::getenv("NFS_TEST_ABORT_FD")) {
+            require(s.error==live::StreamError::stopped,"abort control must stop without deadline");
+            printf("abort control: stopped=1\n");
+        }
+    }
+    require(!quittingPoster || !quittingPoster->stats().bytes,"quit finishes before WM_CLOSE");
+    return 1;
+}
+#define exit(code) ((void)(code))
+#include STREAM_QUIT_SOURCE
+#undef exit
+@interface StreamQuitApplication : NSObject
+- (void)terminate:(id)sender;
+@end
+@implementation StreamQuitApplication
+- (void)terminate:(id)sender {
+    (void)sender;
+    KeyQuitDelegate *quit=[KeyQuitDelegate new];
+    [quit applicationShouldTerminate:nil];
+}
+@end
+#undef NSApp
+#define NSApp ([StreamQuitApplication new])
+#define diag_event report_note
+#include STREAM_SCRIPT_SOURCE
+#undef diag_event
+#undef NSApp
 extern "C" unsigned livestream_test_socket_count();
 template<class F> static bool awaitLive(F predicate,double seconds=8) {
     auto until=std::chrono::steady_clock::now()+std::chrono::duration<double>(seconds);
@@ -54,6 +107,9 @@ static void feed(ClipSession *s,unsigned first,unsigned end,clip::AACEncoder &aa
     }
 }
 int main(int argc,char **argv) { @autoreleasepool {
+    // Retire transport before the fixture's log mutex/vector destructors,
+    // including paths that deliberately fail before capture can own cleanup.
+    atexit(livestream_stop);
     require(argc==5,"mode/base/anchor/profile arguments");
     std::string mode=argv[1],key; std::getline(std::cin,key);
     proofOptions.baseURL=argv[2];
@@ -140,6 +196,68 @@ int main(int argc,char **argv) { @autoreleasepool {
     auto original=live::currentStream;
     auto stale=live::streamOutput();
     clip::AACEncoder aac;
+    if(mode.rfind("finish-",0)==0) {
+        const char *abortFD=std::getenv("NFS_TEST_ABORT_FD");
+        int responseFD=abortFD?std::atoi(abortFD):-1;
+        feed(s,0,80,aac);
+        std::string directory=std::string(argv[3]).substr(0,std::string(argv[3]).find_last_of('/')+1);
+        if(abortFD) {
+            pollfd ready={responseFD,POLLIN,0}; char held=0;
+            require(poll(&ready,1,8000)==1 && read(responseFD,&held,1)==1 && held=='H',"abort quit/Stop response held");
+        } else require(awaitLive([&]{return std::ifstream(directory+"finish-held").good();}),"quit/Stop response held");
+        quittingPoster=original;
+        std::thread release;
+        if(!abortFD) release=std::thread([&]{
+            require(awaitLive([&]{return !original->stats().running;}),"quit closes admission");
+            if(mode=="finish-quit-stall")
+                std::this_thread::sleep_for(std::chrono::milliseconds(2650));
+            std::ofstream(directory+"finish-release")<<"release";
+        });
+        auto began=std::chrono::steady_clock::now();
+        if(mode=="finish-script-stop" || mode=="finish-script-quit") {
+            unsetenv("NFS_TEST_LIVE_FAKE");
+            proof_script_action("livestop");
+            require(original->stats().running,"diagnostic stop requires fake ingest");
+            setenv("NFS_TEST_LIVE_FAKE","1",1);
+            proof_script_action("livestop",0);
+            require(original->stats().running,"diagnostic stop requires diag mode");
+            scriptedQuit=mode=="finish-script-quit";
+            proof_script_action(scriptedQuit?"livequit":"livestop");
+            unsetenv("NFS_TEST_LIVE_FAKE");
+        }
+        else if(mode=="finish-stop") stream_key_stop(0);
+        else if(mode=="finish-forget") stream_key_forget(0);
+        else if(mode=="finish-fallback") { cliprec_shutdown(); proof_quit_fallback(); proof_quit_fallback(); cliprec_shutdown(); }
+        else if(mode=="finish-immediate") quit_now();
+        else {
+            KeyQuitDelegate *quit=[KeyQuitDelegate new];
+            if(mode=="finish-willterminate") [quit applicationWillTerminate:nil];
+            else { [quit applicationShouldTerminate:nil]; [quit applicationShouldTerminate:nil]; }
+        }
+        double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
+        if(abortFD) require(write(responseFD,"R",1)==1,"abort releases held response after quit/Stop");
+        else release.join();
+        syncWork(s);
+        auto result=original->stats();
+        __block unsigned residue=0;
+        auto retained=original->testState();
+        dispatch_sync(retained->work,^{ for(unsigned char byte:retained->keyBytes) residue|=byte; });
+        require(!residue,"quit/Stop erases full retained poster key allocation");
+        printf("lifecycle finish: mode=%s accepted=%llu posted=%llu cancelled=%llu failed=%llu finals=%llu finalized=%d seconds=%.3f\n",
+            mode.c_str(),(unsigned long long)result.accepted,(unsigned long long)result.posted,
+            (unsigned long long)result.cancelled,(unsigned long long)result.failed,(unsigned long long)result.finalPlaylists,result.finalized,elapsed);
+        if(abortFD) {
+            require(result.error==live::StreamError::stopped,"abort control must stop without deadline");
+            printf("abort control: stopped=1\n");
+        }
+        require(elapsed<=6.25 && !result.bytes && !result.ticks,"quit/Stop bounded completion");
+        if(result.error!=live::StreamError::deadline)
+            require(result.accepted==result.posted && result.finalPlaylists==1 && result.finalized && !result.cancelled && !result.failed,"quit/Stop acknowledges EOS without cancellation");
+        else require(!result.finalized && !result.finalPlaylists,"quit timeout reports incomplete EOS");
+        require((mode=="finish-stop" || mode=="finish-script-stop")?proof_saved_residue()!=0:proof_saved_residue()==0,"saved key lifetime through quit/Stop wait");
+        require(!s->liveSegments && !s->liveEncoder,"quit/Stop drops incomplete GOP");
+        stream_key_forget(0); cliprec_shutdown(); quittingPoster.reset(); return 0;
+    }
     if(mode=="inflight-stop") {
         feed(s,0,80,aac);
         require(awaitLive([&]{return original->stats().accepted>0 && original->stats().bytes>0;}),"fixture has an in-flight POST");
@@ -213,7 +331,11 @@ int main(int argc,char **argv) { @autoreleasepool {
         replay_arm_action(0); syncWork(s); require(active && s->broadcast,"Disarm replay preserves live");
         replay_arm_action(0); syncWork(s);
     }
-    stream_key_stop(0); syncWork(s);
+    // Hold capture across the Stop bridge so a missing explicit detach cannot
+    // pass because the capture pump independently observes the closed transport. Hold the work queue (no block in flight) across the bridge so
+    // only Stop's own path can release live resources.
+    dispatch_sync(s->work,^{ dispatch_suspend(s->work); });
+    stream_key_stop(0); dispatch_resume(s->work); syncWork(s);
     require(!s->liveEncoder && !s->liveSegments,"Stop releases live encoders and segment queues");
     auto sent=original->stats().accepted;
     auto late=std::make_shared<live::Segment>(); late->bytes.resize(188); late->end90k=180000;
@@ -229,6 +351,7 @@ int main(int argc,char **argv) { @autoreleasepool {
             return clip::Result::consumed;
         });
         stream_key_go(0); syncWork(s);
+        require(live::currentStream!=nullptr,"Go after Stop uses the saved key");
         auto next=live::currentStream;
         require(next && next!=original && !next->stats().accepted,"explicit next Go has fresh poster state");
         require(!stale(late) && !next->stats().accepted,"stale callback cannot feed a newer generation");

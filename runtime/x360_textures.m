@@ -491,15 +491,22 @@ uint8_t *x360_texture_rgba(const char *file, uint32_t hash, uint32_t *w, uint32_
     free(top);
     return img;
 }
-static void extra_textures(Cpu *c) {
-    extra_done = 1;
+void x360_texture_configure(void) {                        // before material shader warming; idempotent
+    static int configured;
+    if (configured) return;
+    configured = 1;
     const char *e = getenv("NFS_X360_EXTRA_TEXTURES");
     if (e && (!strcmp(e, "off") || !strcmp(e, "0"))) return;
     if (!e && roots_active() && !roots_get("x360_root")) return;     // no X360 copy: nothing to look for
-    char *dir = extra_dir;
     if (e && strcmp(e, "on") && strcmp(e, "1")) snprintf(extra_dir, sizeof extra_dir, "%s", e);
     else if (roots_active()) snprintf(extra_dir, sizeof extra_dir, "%s", roots_get("x360_root") ? roots_get("x360_root") : ROOTS_NONE);
     else snprintf(extra_dir, sizeof extra_dir, "%s/../x360/files", game_dir);
+}
+static void extra_textures(Cpu *c) {
+    extra_done = 1;
+    x360_texture_configure();
+    if (!extra_dir[0]) return;
+    char *dir = extra_dir;
     int n = 0;
     for (unsigned i = 0; i < sizeof extra_list / sizeof *extra_list; ++i)
         n += (extra_ti[i] = x360_extra_texture(c, dir, extra_list[i].file, extra_list[i].hash)) != 0;

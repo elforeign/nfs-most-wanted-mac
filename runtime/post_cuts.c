@@ -3,7 +3,7 @@
 #include <string.h>
 int post_cuts_enabled(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NFS_POST_CUTS"); on = e && !strcmp(e, "1"); }
+    if (on < 0) { const char *e = getenv("NFS_POST_CUTS"); on = !(e && !strcmp(e, "0")); }
     return on;
 }
 int post_cuts_full_target(int split, unsigned level, unsigned slice,
@@ -12,6 +12,10 @@ int post_cuts_full_target(int split, unsigned level, unsigned slice,
 }
 int post_cuts_curve(uint32_t w, uint32_t h, int split) {
     return post_cuts_enabled() && !split && w == 3840 && h == 2160;
+}
+int post_cuts_quad(uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h,
+                   uint32_t depth, uint32_t ow, uint32_t oh) {
+    return post_cuts_enabled() && !x && !y && !z && depth == 1 && w && h && w == ow && h == oh;
 }
 unsigned post_cuts_ao(int proof, int ordinary_depth, int reuse, int empty) {
     if (!post_cuts_enabled() || proof || reuse || !ordinary_depth) return 0;

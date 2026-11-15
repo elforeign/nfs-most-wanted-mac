@@ -81,10 +81,28 @@ PINS = {
 }
 
 
+def lamp_selector(name):
+    body = function(SRC, name)
+    if name == 'mat_replace':
+        # Keep every reviewed lamp selector byte pinned, excluding the separate
+        # opt-in sky dispatch, whose shader identities are tested independently.
+        dispatch = '    char *sky = daynight_sky_shader(tokens, n, refl); if (sky) { *id = 0; return sky; }\n'
+        assert body.count(dispatch) == 1
+        body = body.replace(dispatch, '')
+        stream = '    char *lamp = daynight_stream_shader(tokens, n, refl, id, mat_replace_profile); if (lamp) return lamp;\n'
+        assert body.count(stream) == 1
+        body = body.replace(stream, '')
+    if name == 'mat_replace_profile':
+        local = "        if (src && (car || e->patch == car_vs_nm_patch || cover_vs))\n            src = car_local_shader(src, e->stage == SM_VERTEX, cover_vs || e->patch == car_t0_ps_patch);\n"
+        assert body.count(local) == 1
+        body = body.replace(local, '')
+    return body
+
+
 def switches_and_namespace(tmp):
     for name, digest in PINS.items():
-        assert hashlib.sha256(function(SRC, name).encode()).hexdigest() == digest, name
-    assert hashlib.sha256(function(SRC, 'mat_replace').replace(', 0);', ', 1);').encode()).hexdigest() != PINS['mat_replace']
+        assert hashlib.sha256(lamp_selector(name).encode()).hexdigest() == digest, name
+    assert hashlib.sha256(lamp_selector('mat_replace').replace(', 0);', ', 1);').encode()).hexdigest() != PINS['mat_replace']
     for label, body, expected in (('actual', function(SRC, 'carbon_lampglass_on'), 0),
                                   ('original', OLD_SWITCH, 3)):
         path = tmp / f'{label}.c'

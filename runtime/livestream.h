@@ -7,6 +7,7 @@ extern "C" {
 int livestream_start_bytes(const void *bytes, size_t size);
 // Test only (diag runs): Go with a fixed internal key to http://127.0.0.1:<port>/http_upload_hls.
 int livestream_start_fake(int port);
+// Bounded best effort: drain accepted work <=3 s, then final acknowledgement <=3 s.
 void livestream_stop(void);
 // 0 Off, 1 running, 2 terminal error. No request objects cross this boundary.
 int livestream_status(void);
@@ -27,7 +28,8 @@ struct StreamStats {
     size_t bytes=0, peakBytes=0;
     int64_t ticks=0, peakTicks=0;
     uint64_t accepted=0, posted=0, cancelled=0, dropped=0, failed=0;
-    uint64_t playlists=0, retries=0;
+    uint64_t playlists=0, retries=0, finalPlaylists=0;
+    bool finalized=false;
     int httpCode=0;
     const char *reason=nullptr; // static token naming a capture-side failure
     bool running=false;
@@ -56,9 +58,13 @@ public:
     );
     ~Poster();
     bool post(OwnedSegment); // false only when stopped; drops count without retiring the producer
-    void stop();            // asynchronous cancellation, no automatic restart
+    void stop();            // immediate abort; erases owned key synchronously
+    void finish();          // stop admission, drain <=3 s, acknowledge ENDLIST <=3 s
     void fail(StreamError,int code=0,const char *reason=nullptr);
     StreamStats stats() const;
+#ifdef LIVESTREAM_TESTING
+    std::shared_ptr<StreamState> testState() const { return state; }
+#endif
 };
 // Explicit start/stop. Each output callback belongs to one poster generation.
 bool startStream(const std::string& key);

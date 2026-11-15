@@ -5,8 +5,12 @@ ASan/UBSan hooks: 785 checks / 0 failures. Encoder: 1,313 checks / 0 failures;
 zero split readback waits / eight SP waits. 36/36 mutants rejected (including forced rain).
 Luminance opt-in: 1,425 recording checks / 0 failures, 12 startup waits across three
 epochs; writable storage through 16 delayed-completion frames, safe saturation/resume.
+Live toggles: Off/unset 1,377 / 0 failures, On 1,489 / 0; broken setter / mode snapshot
+fail 4 / 1 checks. Startup/black/epoch assertions remain active in both directions.
 Forced wait/oldest/pending read/overwrite mutants fail 49/1/22/44 checks;
 missing startup wait/black readiness/stale epoch readiness fail 32/13/8.
+Unset equals NFS_LUM_NOWAIT=1 output (FAILs on main's waiting default with
+'unset is not wait-free On', passes here); explicit 0 keeps the pinned Off digest.
 Pinned Off/empty snapshot digest passes all four modes; omitted-wait control fails all four.
 New controls: missing PC parent 2 failures; omitted SP wait 24; missing PC probe accounting 2.
 Restart-history-stale/readback-stale 7/1; current-serial-wait 91 (50 attempted waits),
@@ -31,9 +35,18 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT=Path(__file__).resolve().parents[1]
+_source_sys.path.insert(0, str(ROOT/'tools_snapshot'))
+import pubtables_gen as _tables
+import x360_shader_lits as _literals
+ENGINE_STUB = _tables.ENGINE_STUB
+SHADER_STUB = _literals.text(None, 'synthetic fixture')
 SRC=(ROOT/'runtime/x360_post.m').read_text()
-RENDER=(ROOT/'runtime/render_post.m').read_text()
+RENDER=mw_source(ROOT/'runtime/render_post.m')
 
 def run(cmd):
     p=subprocess.run([str(x) for x in cmd],text=True,capture_output=True)
@@ -47,6 +60,8 @@ PRE=r'''
 #include <stdlib.h>
 #include <math.h>
 #include <stdarg.h>
+int rain_cover_enabled;
+int rain_cover_lens(uint32_t rain){(void)rain;return 0;}
 int sign_diag_on;
 void sign_diag_freeze(const char *name, void *p, size_t n) { (void)name; (void)p; (void)n; abort(); }
 uint8_t *G;
@@ -90,9 +105,10 @@ float render_x360_post_view(uint32_t src,uint32_t dst,uint32_t vig,const X360Pos
  params[b]=*p;contexts[b]=*v;++renders;return readings[b];
 }
 float render_x360_post(uint32_t src,uint32_t dst,uint32_t vig,const X360PostParams *p){(void)src;(void)dst;(void)vig;params[0]=*p;return .25f;}
+int lens_drops_mode(const char *e){return e&&!strcmp(e,"pc_before")?0:e&&!strcmp(e,"pc")?1:2;}
 void render_x360_raindrops_warm(uint32_t a,uint32_t b,uint32_t c){(void)a;(void)b;(void)c;}
-int render_x360_raindrops_view(uint32_t dst,const RainDrop *d,int n,uint32_t tx,uint32_t al,int sig,const X360PostView *v){
- (void)tx;(void)al;(void)sig;if(pc_testing){CHECK(v&&v->destination[1]==0&&v->destination[3]==(bank?361:360));CHECK(dst!=0x600000);CHECK(n==(bank?2:1));CHECK(d[0].x==(bank?.8f:.2f));++pc_lens;return n;}CHECK(v!=NULL);CHECK(dst==0x600000);CHECK(renders==rains+1);
+int render_lens_drops_view(uint32_t dst,const RainDrop *d,int n,uint32_t tx,uint32_t al,int sig,int authored,const X360PostView *v){
+ (void)tx;(void)al;(void)sig;(void)authored;if(pc_testing){CHECK(v&&v->destination[1]==0&&v->destination[3]==(bank?361:360));CHECK(dst!=0x600000);CHECK(n==(bank?2:1));CHECK(d[0].x==(bank?.8f:.2f));++pc_lens;return n;}CHECK(v!=NULL);CHECK(dst==0x600000);CHECK(renders==rains+1);
  CHECK(n==(bank?2:1));CHECK(d[0].x==(bank?.8f:.2f));CHECK(d[0].variant==(bank?3:1));
  memcpy(lists[bank],d,n*sizeof *d);++rains;return n;
 }
@@ -215,10 +231,15 @@ int main(void){
 
 with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     tmp=Path(tmp)
-    # Compile the actual parameter builder and scope in a C fixture, replacing only the ObjC-only header.
+    # Compile the actual parameter builder and scope with generated no-console constants.
     source=SRC.replace('#include "x360_internal.h"','')
     source=source.replace('#include "settings.h"','')
-    constants=(ROOT/'runtime/gen/x360_engine.inc').read_text()
+    # The hook fixture must use the same synthetic values as PRE. Otherwise
+    # generated retail includes redefine them halfway through the translation
+    # unit: its initial-luminance assertions compare two different constants.
+    source=source.replace('#include "gen/x360_engine.inc"', ENGINE_STUB+'\n')
+    source=source.replace('#include "gen/x360_shader_lits.inc"', SHADER_STUB+'\n')
+    constants=ENGINE_STUB
     fixture=PRE.replace('float x360_post_alpha',constants+'\nfloat x360_post_alpha')+source+MAIN
     def hook(label,text,forced_rain=False):
         f=tmp/(label+'.c');f.write_text(text);exe=tmp/label
@@ -254,15 +275,18 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         assert hook(label,fixture.replace(old,new,1))!=0,label+' survived'
     # Include the production encoder implementation with lightweight recording Metal objects.
     renderer=RENDER.replace('#include "render_internal.h"','')
+    (tmp/'gen').mkdir(exist_ok=True)
+    (tmp/'gen/x360_engine.inc').write_text(ENGINE_STUB)
+    (tmp/'gen/x360_shader_lits.inc').write_text(SHADER_STUB)
     (tmp/'post_render.inc').write_text(renderer)
     msrc=(ROOT/'runtime/splitpost_test.m').read_text()
-    rt=(ROOT/'runtime/render.m').read_text().split('RenderTex *surface_rt(',1)[1].split('// Render-target view',1)[0]
+    rt=mw_source(ROOT/'runtime/render.m').split('RenderTex *surface_rt(',1)[1].split('// Render-target view',1)[0]
     msrc=msrc.replace('SURFACE_RT_PRODUCTION','RenderTex *surface_rt('+rt)
     (tmp/'splitpost_test.m').write_text(msrc)
     def encoder(label,text,nowait='0',negative=False):
         (tmp/'post_render.inc').write_text(text)
         exe=tmp/label
-        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'splitpost_test.m',ROOT/'runtime/post_cuts.c','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
+        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'splitpost_test.m',ROOT/'runtime/post_cuts.c',ROOT/'runtime/shared_depth.m',ROOT/'runtime/pre_treatment.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
         env={**os.environ}
         if nowait is None:env.pop('NFS_LUM_NOWAIT',None)
         else:env['NFS_LUM_NOWAIT']=nowait
@@ -275,6 +299,8 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     assert encoder('encoder-positive',renderer)==0
     assert encoder('encoder-nowait-positive',renderer,'1')==0
     assert encoder('encoder-nowait-unset',renderer,None)==0
+    assert encoder('live-setter-broken',renderer.replace('x_lum_nowait_on = !!on;', '(void)on;',1),'1',negative=True)!=0
+    assert encoder('snapshot-stale-mode',renderer.replace('r->lum_ready && r->mode_generation == x_mode_generation', 'r->lum_ready',1),'1',negative=True)!=0
     for label,old,new in [
         ('nowait-still-waits','!view && (!x_lum_nowait() || !xr->lum_ready)','!view'),
         ('nowait-no-startup-wait','!view && (!x_lum_nowait() || !xr->lum_ready)','!view && !x_lum_nowait()'),
@@ -329,29 +355,33 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
     for name,body in [('current',renderer),('missing-Off-wait',broken)]:
         (tmp/'post_render.inc').write_text(body)
         exe=tmp/('post-snapshot-'+name)
-        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'post_snapshot.m',ROOT/'runtime/post_cuts.c','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
+        run(['clang','-O1','-g','-w','-fobjc-arc','-I',tmp,'-I',ROOT/'runtime','-I',ROOT/'recomp','-I',ROOT/'recomp/out',tmp/'post_snapshot.m',ROOT/'runtime/post_cuts.c',ROOT/'runtime/shared_depth.m',ROOT/'runtime/pre_treatment.m','-framework','Foundation','-framework','Metal','-framework','QuartzCore','-framework','ImageIO','-framework','CoreServices','-Wl,-dead_strip','-o',exe])
         for mode in range(2):
-            for switch in ('','0'):
-                path=tmp/(name+str(mode)+switch+'.post-snapshot')
-                p=subprocess.run([str(exe),str(mode),str(path)],text=True,capture_output=True,env={**os.environ,'NFS_LUM_NOWAIT':switch})
+            for switch in ('1',None,'0'):
+                path=tmp/(name+str(mode)+str(switch)+'.post-snapshot')
+                env={**os.environ,'NFS_POST_CUTS':'0'}
+                if switch is None:env.pop('NFS_LUM_NOWAIT',None)
+                else:env['NFS_LUM_NOWAIT']=switch
+                p=subprocess.run([str(exe),str(mode),str(path)],text=True,capture_output=True,env=env)
                 assert p.returncode==0,(p.stdout+p.stderr)[-1800:]
-                if switch=='0':assert path.read_bytes()==(tmp/(name+str(mode)+'.post-snapshot')).read_bytes(),'explicit Off changed output/waits'
+                if switch is None and name=='current':assert path.read_bytes()==(tmp/(name+str(mode)+'1.post-snapshot')).read_bytes(),'unset is not wait-free On'
+                if switch!='0':continue
                 matches=hashlib.sha256(path.read_bytes()).hexdigest()==off_digest
                 assert matches==(name=='current'),f'{name}: pinned Off command/readback/wait snapshot {mode} differs'
     for mode in range(2):
-        after=(tmp/('current'+str(mode)+'.post-snapshot')).read_bytes()
+        after=(tmp/('current'+str(mode)+'0.post-snapshot')).read_bytes()
         snapshot_bytes+=len(after)
     print(f'single-player renderer: 2 pinned Off snapshots identical ({snapshot_bytes} command/constants/readback bytes; 6 frames each); omitted-wait control rejected in all 4 modes')
     # Compile original and view-specialized MSL offline; no Metal device is requested.
-    macros=dict(re.findall(r'#define (\w+) "(.*)"',(ROOT/'runtime/gen/x360_shader_lits.inc').read_text()))
-    macros.update(dict(re.findall(r'#define (\w+) "(.*)"',(ROOT/'runtime/gen/x360_engine.inc').read_text())))
+    macros=dict(re.findall(r'#define (\w+) "(.*)"',SHADER_STUB))
+    macros.update(dict(re.findall(r'#define (\w+) "(.*)"',ENGINE_STUB)))
     def shader(src,name):
         body=src.split('static const char *'+name+' =',1)[1].split(';\n',1)[0]
         return ''.join(ast.literal_eval(x[0]) if x[0].startswith('"') else macros[x[0]] for x in re.finditer(r'"(?:[^"\\]|\\.)*"|\bX360\w+\b',body))
     base=shader(RENDER,'x360_src')
-    # Exact output fingerprint of the previously compared 11,905-byte shader.
-    shader_digest='0727607df247f88c2f86c94efd433e0716a6596d4fd280540408127909578dee'
-    assert len(base)==11905 and hashlib.sha256(base.encode()).hexdigest()==shader_digest,'single-player shader changed'
+    # Port-stub specialization of the unchanged shader; no console table is opened.
+    shader_digest='d420bdd2dd62c30177708bc2ed3a65d80f661dd1be13716a7df4671fe7266354'
+    assert len(base)==11949 and hashlib.sha256(base.encode()).hexdigest()==shader_digest,'single-player shader changed'
     variants={'base':base,'view':base.replace('float4 tp; float4 rx; };','float4 tp; float4 rx; float4 depth_uv; float4 depth_bounds; };').replace('float d = depth.sample(lin, uv);','float d = depth.sample(lin, clamp(k.depth_uv.xy + uv * k.depth_uv.zw, k.depth_bounds.xy, k.depth_bounds.zw));'),'drops':shader(RENDER,'drops_src')}
     extra=shader((ROOT/'runtime/lampglow_shader.h').read_text(),'lampglow_src')
     for name in ('base','view'):
@@ -362,12 +392,17 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         run([metal,'-fmodules-cache-path='+str(tmp/'modules'),'-c',f,'-o',tmp/(name+'.air')])
     print(f'MSL: {len(variants)} compiled; single-player shader identical ({len(base)} bytes)')
 
-    # Exact single-player memory, CPU and submitted parameters from the existing
+    # Port-stub specialization: mode 0 parameters use the authored chain values;
+    # PC/fallback modes retain their prior digests. Exact memory, CPU and parameters from the existing
+    # baseline harness. The CPU record is written up to its appended SSE registers
+    # (a later field this path must leave zero: exit 3 otherwise), rounded up to
+    # the record's 8-byte alignment as before the field existed, so the pinned
+    # digests keep their original layout.
     # baseline harness, captured before replacing the history read. Keep these
     # behavioral controls alongside the earlier six-frame renderer fingerprints.
-    single_main=r'\nint main(int argc,char **argv){G=calloc(1,16*1024*1024);Cpu c={0};c.esp=0xF00000;c.eax=123;c.ecx=456;frame=1;bank=0;postfx=1;M32(VT_PLAT)=0x400000;M32(VT_TECHNIQUE)=0x430000;M32(SCREEN_TEXTURES)=11;M32(BACKBUFFER_SURF)=12;M32(CAMERA_PTR)=0x450000;M32(GAMEFLOW_STATE)=6;M32(MOTION_BLUR_ON)=1;MF32(REAL_TIME_ELAPSED)=1.f/30;for(int j=0;j<14;j++)MF32(0x400000+LOOK_OFFS[j])=1;MF32(0x450000+0xBC)=.5f;MF32(0x450000+0xC0)=10000;MF32(0x450000+0xB4)=20;MF32(0x450000+0xB8)=2;MF32(0x450000+0x200)=50;MF32(PLAYER_VIEW)=1;M32(c.esp+4)=1;int mode=atoi(argv[1]);if(mode==1)postfx=0;if(mode==2)M32(VT_TECHNIQUE)=0;f_006D53D0(&c);FILE*f=fopen(argv[2],"wb");fwrite(G,1,16*1024*1024,f);fwrite(&c,1,sizeof c,f);fwrite(params,1,sizeof params,f);fclose(f);free(G);return 0;}'
+    single_main=r'\nint main(int argc,char **argv){G=calloc(1,16*1024*1024);Cpu c={0};c.esp=0xF00000;c.eax=123;c.ecx=456;frame=1;bank=0;postfx=1;M32(VT_PLAT)=0x400000;M32(VT_TECHNIQUE)=0x430000;M32(SCREEN_TEXTURES)=11;M32(BACKBUFFER_SURF)=12;M32(CAMERA_PTR)=0x450000;M32(GAMEFLOW_STATE)=6;M32(MOTION_BLUR_ON)=1;MF32(REAL_TIME_ELAPSED)=1.f/30;for(int j=0;j<14;j++)MF32(0x400000+LOOK_OFFS[j])=1;MF32(0x450000+0xBC)=.5f;MF32(0x450000+0xC0)=10000;MF32(0x450000+0xB4)=20;MF32(0x450000+0xB8)=2;MF32(0x450000+0x200)=50;MF32(PLAYER_VIEW)=1;M32(c.esp+4)=1;int mode=atoi(argv[1]);if(mode==1)postfx=0;if(mode==2)M32(VT_TECHNIQUE)=0;f_006D53D0(&c);FILE*f=fopen(argv[2],"wb");fwrite(G,1,16*1024*1024,f);for(int j=0;j<32;j++)if(((uint32_t*)c.xmm)[j])return 3;fwrite(&c,1,((size_t)((char*)c.xmm-(char*)&c)+7)&~(size_t)7,f);fwrite(params,1,sizeof params,f);fclose(f);free(G);return 0;}'
     single_main=single_main.replace(r'\n','\n',1)
-    snapshot_digests=('deb1bc0295347404a6d758564a33bf6402d89c3098383a87173b478a46835f9d',
+    snapshot_digests=('f11b468f1d34d9c2b61eb3a0c27b63ff12653e8877576dc6f7a636a6f83b51b5',
                       '9ef3665e5495c1262356fcfb2c037baff20f68e24a661ecf643d4e99aad0bc97',
                       'df2139e92bfb4b1995ba450ed56a4ce809f480d2243a164dd8fabda28c64aea4')
     prefix=PRE.replace('float x360_post_alpha',constants+'\nfloat x360_post_alpha')
@@ -377,5 +412,5 @@ with tempfile.TemporaryDirectory(prefix='splitpost-') as tmp:
         for mode in range(3):run([tmp/(name+'-single'),mode,tmp/(name+str(mode)+'.snapshot')])
     for mode,digest in enumerate(snapshot_digests):
         snapshot=(tmp/('current'+str(mode)+'.snapshot')).read_bytes()
-        assert len(snapshot)==16777776 and hashlib.sha256(snapshot).hexdigest()==digest,f'single {mode} changed'
+        assert len(snapshot)==16777776 and hashlib.sha256(snapshot).hexdigest()==digest,f'port single {mode} changed ({len(snapshot)} bytes)'
     print('single-player: 3 exact 16 MiB memory + CPU + parameter snapshots identical (50,331,648 guest bytes)')

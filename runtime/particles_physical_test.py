@@ -13,6 +13,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / 'runtime'
 
@@ -26,7 +30,7 @@ def run(args, **kw):
 def main():
     source = (RT / 'particles_physical.c').read_text()
     material = (RT / 'materials.m').read_text()
-    render = (RT / 'render.m').read_text()
+    render = mw_source(RT / 'render.m')
     settings = (RT / 'settings_port.c').read_text()
     assert 's = particles_physical_shader(s);' in material
     assert 'return particles_physical_enabled() && on;' in render

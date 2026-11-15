@@ -17,29 +17,21 @@ static const struct { const char *id, *feature; } kNeedsX360[] = {
     {"audio.x360_mix", "audio"}, {"audio.x360_music", "music"}, {"audio.x360_reverb", "reverb"},
     {"audio.x360_copspeech", "police"}, {"audio.x360_nisaudio", "nis"},
     {"graphics.x360_arrest", "arrest"}, {"graphics.hd_textures", "textures"}, {"graphics.ui_textures", "ui"},
-    {"graphics.car_glass", "world"}, {"graphics.car_normals", "world"}, {"graphics.car_flake", "world"},
-    {"graphics.trees", "world"}, {"graphics.scenery_lights", "world"}, {"graphics.water", "world"},
-    {"graphics.building_glass", "world"}, {"graphics.grass", "world"}, {"graphics.rain_ripples", "world"},
-    {"graphics.raindrops", "world"}, {"graphics.lighting_data", "world"}, {"gameplay.x360_data", "world"},
-    {"controls.control_type", "world"},   // the X360 Control Types (controltype_buttons.inc): Type 1, the PC bindings
+    {"graphics.trees", "world"}, {"graphics.scenery_lights", "world"},
+    {"graphics.grass", "world"},
+    {"graphics.lighting_data", "world"}, {"gameplay.x360_data", "world"},
     // X360 options built on the X360 shaders' constants (ZZDATA0.BIN) or the X360 engine's (default.xex): without them
     // the option would silently render PC, so the row is hidden
-    {"graphics.car_paint", "shaders"}, {"graphics.car_normals", "shaders"}, {"graphics.car_flake", "shaders"},
-    {"graphics.trees", "shaders"}, {"graphics.scenery_lights", "shaders"}, {"graphics.water", "shaders"},
-    {"graphics.building_glass", "shaders"}, {"graphics.grass", "shaders"}, {"graphics.rain_ripples", "shaders"},
+    {"graphics.trees", "shaders"}, {"graphics.scenery_lights", "shaders"},
+    {"graphics.grass", "shaders"},
     {"graphics.parallax", "shaders"}, {"graphics.x360_arrest", "shaders"},
-    {"graphics.postfx", "shaders"}, {"graphics.tone_curve", "shaders"}, {"graphics.speed_blur", "shaders"},
-    {"graphics.curve_glow", "shaders"},
-    {"graphics.postfx", "engine"}, {"graphics.tone_curve", "engine"}, {"graphics.speed_blur", "engine"},
-    {"graphics.curve_glow", "engine"},
-    {"graphics.building_glass", "engine"}, {"graphics.x360_arrest", "engine"},
-    {"graphics.rain_ripples", "engine"}, {"graphics.raindrops", "shaders"}, {"graphics.raindrops", "engine"},
+    // (the post chain's rows, Post-processing, Tone curve, Speed blur and Tone curve glow, need neither: without the
+    // files the chain runs on this port's own constants, tools_snapshot/pubtables_gen.py POST_FALLBACK)
+    {"graphics.x360_arrest", "engine"},
     {"graphics.shadow_fit", "engine"},
-    // The half-screen road reflection is listed as an X360 choice: without X360 files the PC's 320x240 is in effect and
-    // the row is not shown (M4 F6).
-    {"graphics.road_reflection", "world"},
     {"graphics.look_data", "look"},
 };
+// Car paint, PC-pack normal maps and glass use port-authored fallback values without console files.
 static int x360_unavailable(Setting *s) {
     for (unsigned i = 0; i < sizeof kNeedsX360 / sizeof *kNeedsX360; ++i)
         if (!strcmp(s->id, kNeedsX360[i].id) && !roots_x360_has(kNeedsX360[i].feature)) return 1;   // any missing: hidden
@@ -48,6 +40,24 @@ static int x360_unavailable(Setting *s) {
 static int parse(const Setting *s, const char *str);
 static void value_str(const Setting *s, int v, char *buf, int n);
 static void x360_gate(Setting *s) {
+    if (!strcmp(s->id, "graphics.car_flake") && s->value == 1 &&
+        (!roots_x360_has("world") || !roots_x360_has("shaders"))) {
+        s->value = s->boot_value = 2;               // no console files: the generated flake
+        value_str(s, 2, s->env_text, sizeof s->env_text);
+        if (s->env) setenv(s->env, s->env_text, 1);
+    }
+    // Building glass: Port (glass_port.m) needs no console files, so the row stays; X360 without them is Port.
+    if (!strcmp(s->id, "graphics.building_glass") && s->value == 1 &&
+        (!roots_x360_has("world") || !roots_x360_has("shaders") || !roots_x360_has("engine"))) {
+        s->value = s->boot_value = 2;
+        value_str(s, 2, s->env_text, sizeof s->env_text);
+        if (s->env) setenv(s->env, s->env_text, 1);
+    }
+    // Generated optics remain opt-in; preserve the PC default without console art.
+    if (!strcmp(s->id, "graphics.raindrops") && !roots_x360_has("world")) {
+        s->def = 1;
+        if (!s->saved && !s->locked) s->value = s->boot_value = s->def;
+    }
     if (!x360_unavailable(s)) return;
     int v = parse(s, "pc");
     if (v < 0) v = parse(s, "off");
@@ -143,7 +153,11 @@ void settings_add(Setting *s) {
 void settings_init(void) {
     if (inited) return;
     inited = 1;
-    for (int i = 0; i < nall; ++i) { load(all[i]); x360_gate(all[i]); }
+    for (int i = 0; i < nall; ++i) {
+        // Without console files the sea defaults to the port's own (Port); materials.m reads the same rule when the switch is unset.
+        if (!strcmp(all[i]->id, "graphics.water") && !roots_x360_has("shaders")) all[i]->def = 2;
+        load(all[i]); x360_gate(all[i]);
+    }
 }
 Setting *settings_find(const char *id) {
     for (int i = 0; i < nall; ++i) if (!strcmp(all[i]->id, id)) return all[i];
@@ -268,6 +282,7 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.car_glass", "pc", "x360"},
     {"graphics.headlamp_glass", "retail", "retail"},
     {"graphics.realworld_materials", "off", "off"},
+    {"graphics.rain_cover", "off", "off"},
     {"graphics.traffic_detail", "off", "off"},
     {"graphics.car_normals", "pc", "x360"},
     {"graphics.car_flake", "pc", "x360"},

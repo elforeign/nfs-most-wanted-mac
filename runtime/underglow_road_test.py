@@ -20,6 +20,10 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'runtime'))
 import underglow_light_test as light
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 OLD_POOL = '    x0-=1;y0-=1;x1+=1;y1+=1;\n    static UGStrip prior_mounts[UG_STRIPS];\n    static float prior_basis[16],prior_height=-100;static unsigned prior_preset;\n    int basis_changed=0;\n    for(int i=0;i<12;++i) basis_changed |= fabsf(prior_basis[i]-s->basis[i])>1e-4f;\n    if(prior_preset!=s->preset||fabsf(prior_height-local[2])>.002||basis_changed||memcmp(prior_mounts,s->mounts,sizeof prior_mounts)) {\n        float *pixels=(float *)(G+pool->mem[0]);\n        for(int y=0;y<POOL_H;++y)for(int x=0;x<POOL_W;++x) {\n            UGVec3 p={x0+(x1-x0)*(x+.5)/POOL_W,y0+(y1-y0)*(y+.5)/POOL_H,0};\n            rgb_lux(duties,strips,p,rgb);\n            double edge=fmin(fmin(fmin(p.x-x0,x1-p.x),fmin(p.y-y0,y1-p.y))/.25,1);\n            float *v=pixels+4*(y*POOL_W+x);\n            for(int k=0;k<3;++k)v[k]=rgb[k]*.18/(M_PI*100)*fmax(0,edge);v[3]=1;\n        }\n        pool->dirty=1;prior_preset=s->preset;prior_height=local[2];memcpy(prior_basis,s->basis,64);memcpy(prior_mounts,s->mounts,sizeof prior_mounts);\n    }\n'
 OLD_POOL_SHA = '6652ba90cfd85bdbd1f80cf993d36a5c6a63138a7d6a505c4d7e754c82676343'
 
@@ -36,8 +40,9 @@ static void digest(const void *bytes,size_t n,char out[65]) {
 }
 static double luminance(double x,double y) {
  Obj *o=&objects[1];float *v=(float *)(G+o->mem[0]);
- double u=(x-pool_quad[0])/(pool_quad[4]-pool_quad[0])*o->w-.5;
- double w=(y-pool_quad[1])/(pool_quad[13]-pool_quad[1])*o->h-.5;
+ double b[4];pool_bounds(b);
+ double u=(x-b[0])/(b[2]-b[0])*o->w-.5;
+ double w=(y-b[1])/(b[3]-b[1])*o->h-.5;
  int ix=(int)floor(u),iy=(int)floor(w);
  if(ix<0||iy<0||ix+1>=(int)o->w||iy+1>=(int)o->h)return 0;
  double L=0,weights[3]={.2126729,.7151522,.0721750};
@@ -205,7 +210,7 @@ int main(int argc,char **argv){@autoreleasepool {
 
 
 def depth_check(tmp):
-    source=(ROOT/'runtime/render.m').read_text()
+    source=mw_source(ROOT/'runtime/render.m')
     fragment=light.function_fragment(source,'static MTLCompareFunction cmp_fn(')+'\n'+light.function_fragment(source,'static MTLStencilOperation stencil_op(')+'\n'+light.function_fragment(source,'static id<MTLDepthStencilState> depth_state_for(')
     evidence=[]
     for name,functions in [('depth',fragment),('depth-disabled',fragment.replace('zen ? cmp_fn(rs[23]) : MTLCompareFunctionAlways','MTLCompareFunctionAlways'))]:
@@ -232,10 +237,11 @@ def main():
     assert hashlib.sha256(OLD_POOL.encode()).hexdigest()==OLD_POOL_SHA
     source=(ROOT/'runtime/underglow_light.m').read_text()
     begin=source.index('    unsigned strength=underglow_pool_strength();')
-    end=source.index('    /* Submit before the queued opaque chassis:',begin)
+    end=source.index('    /* Keep the original texture rectangle and photometry.',begin)
     baseline=source[:begin]+OLD_POOL+source[end:]
     diag=(ROOT/'runtime/diag.c').read_text()
     wrapper=diag[diag.index('\nunsigned diag_car1[4];')+1:diag.index('void f_007387E0_orig')]
+    wrapper = wrapper.replace('materials_car_diagnostics', 'f_0074E160')
     prefix=light.HARNESS.split('int main(int argc,char **argv)')[0]
     # This driver covers every preset; the original harness is Green-only.
     prefix=prefix.replace('CHECK(v[1]>10&&v[1]>v[0]&&v[1]>v[2]);','CHECK(v[0]+v[1]+v[2]>0);')

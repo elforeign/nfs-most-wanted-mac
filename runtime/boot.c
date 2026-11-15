@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // boot.c - first native boot of the recompiled speed.exe (port/recomp/out/speed.a).
 //
 // Loads the PE image into guest memory at its own addresses, builds a TEB (fs:) and a stack, points every IAT slot
@@ -229,7 +230,9 @@ void boot_write_call_counts(FILE *f) {
 }
 void dispatch(Cpu *c, uint32_t t) {
     if (car_audio_dispatch(c, t)) return;
+#if NFS_GAME == NFS_GAME_MW
     if (t == 0x006069E8u) host_lua_resume(c, t);   // Lua protected-error resume (audit 3 #2); dispatch is hot, so test inline
+#endif
     if ((t >= SERVER_BASE && t < SERVER_RESERVED_END) || (t >= SERVER_THUNK_BASE && t < SERVER_THUNK_BASE + 4096)) {
         if (server_dispatch(c, t)) return;
         die("call to unavailable server target %08X", t);
@@ -254,10 +257,16 @@ void dispatch(Cpu *c, uint32_t t) {
             // COM calls run at millions per second: ring only, unless BOOT_DIAG_EVENTS=all
             static int all = -1;
             if (all < 0) all = getenv("BOOT_DIAG_EVENTS") && !strcmp(getenv("BOOT_DIAG_EVENTS"), "all");
-            static int8_t logged_of[4096];                 // per method: 1 ring only, 2 events.log (creations, resets)
+            static int8_t logged_of[4096];                 // per method: 1 HRESULT, 2 events.log, 3 handle getter
             int8_t *lg = &logged_of[(t - HOSTFN_BASE) / 4];
-            if (!*lg) *lg = strstr(hn, "Create") || strstr(hn, "Reset") ? 2 : 1;
-            if (all || *lg == 2 || c->eax >= 0x80000000u)
+            if (!*lg) *lg = strstr(hn, "Create") || strstr(hn, "Reset") ? 2 :
+                (!strcmp(hn, "ID3DXEffect::GetParameter") || !strcmp(hn, "ID3DXEffect::GetParameterByName") ||
+                 !strcmp(hn, "ID3DXEffect::GetParameterBySemantic") || !strcmp(hn, "ID3DXEffect::GetParameterElement") ||
+                 !strcmp(hn, "ID3DXEffect::GetTechnique") || !strcmp(hn, "ID3DXEffect::GetTechniqueByName") ||
+                 !strcmp(hn, "ID3DXEffect::GetPass") || !strcmp(hn, "ID3DXEffect::GetPassByName") ||
+                 !strcmp(hn, "ID3DXEffect::GetAnnotation") || !strcmp(hn, "ID3DXEffect::GetAnnotationByName") ||
+                 !strcmp(hn, "ID3DXEffect::GetCurrentTechnique")) ? 3 : 1;
+            if (all || *lg == 2 || (*lg != 3 && c->eax >= 0x80000000u))
                 diag_event("%s(%X, %X, %X, %X, %X, %X) -> %X @%08X", hn, a[0], a[1], a[2], a[3], a[4], a[5], c->eax, ra);
             else
                 diag_call_ring(hn, 6, a, c->eax, ra);
@@ -305,8 +314,13 @@ const char *userdata_dir(void) {
     static char dir[1024];
     if (!dir[0]) {
         const char *e = getenv("BOOT_USERDATA");
+#if NFS_GAME == NFS_GAME_PRIVATE
+        if (e && *e) snprintf(dir, sizeof dir, "%s/Carbon", e);
+        else snprintf(dir, sizeof dir, "%s/Library/Application Support/NFSMW-port/Carbon", getenv("HOME") ? getenv("HOME") : "/tmp");
+#else
         if (e && *e) snprintf(dir, sizeof dir, "%s", e);
         else snprintf(dir, sizeof dir, "%s/Library/Application Support/NFSMW-port", getenv("HOME") ? getenv("HOME") : "/tmp");
+#endif
         // with its parents: a missing parent made every save and registry write fail silently (a "first run" each time)
         for (char *p = dir + 1; *p; ++p) if (*p == '/') { *p = 0; mkdir(dir, 0755); *p = '/'; }
         mkdir(dir, 0755);
@@ -593,6 +607,7 @@ bad:;
     free(s); errno = err;
     return NULL;
 }
+#if NFS_GAME == NFS_GAME_MW
 // Full builds supply strong admission barriers; isolated file-layer tests use these fallbacks.
 __attribute__((weak)) int private_cars_save_allowed(void) { return 1; }
 __attribute__((weak)) int private_cars_save_prepare(const char *path) { (void)path; return 1; }
@@ -600,8 +615,15 @@ __attribute__((weak)) void private_cars_save_complete(int committed) { (void)com
 __attribute__((weak)) int private_cars_backup_before_write(const char *destination, const char *staged) {
     (void)destination; (void)staged; return 1;
 }
+#else
+#include "game_save.inc"
+#endif
 static int profile_write_denied(const char *path) {
+#if NFS_GAME == NFS_GAME_MW
     return !private_cars_save_allowed() && (file_is_save(path) || !strcmp(path, userdata_dir()));
+#else
+    return !game_save_allowed() && (file_is_save(path) || !strcmp(path, userdata_dir()));
+#endif
 }
 __attribute__((weak)) int car_audio_open(const char *name) { (void)name; return -1; }
 static uint32_t file_open(const char *win, const char *host, uint32_t access, uint32_t share, uint32_t disp, uint32_t flags) {
@@ -611,6 +633,12 @@ static uint32_t file_open(const char *win, const char *host, uint32_t access, ui
     }
     for (; k < 256 && fds[k]; ++k) {}
     if (k == 256) { errno = EMFILE; goto bad; }
+#if NFS_GAME == NFS_GAME_PRIVATE
+    /* Game assets are read-only; save staging remains under USERDATA. */
+    if (!file_is_save(host) && (fl & (O_ACCMODE | O_CREAT | O_TRUNC | O_EXCL))) {
+        errno = EACCES; goto bad;
+    }
+#endif
     SaveFile *s = NULL;
     char *path = NULL;
     if (file_is_save(host)) {
@@ -629,9 +657,14 @@ static uint32_t file_open(const char *win, const char *host, uint32_t access, ui
         path = strdup(host);
         if (!path) goto cleanup;
     }
+#if NFS_GAME == NFS_GAME_MW
     fd = !s && fl == O_RDONLY ? car_audio_open(win) : -1;
     if (fd < 0) fd = !s && fl == O_RDONLY ? x360audio_open(win, host) : -1;
     if (fd < 0) fd = open(s ? s->temp : host, s ? fl & ~(O_CREAT | O_EXCL) : fl, 0644);
+#else
+    /* Private assets use native files, never MW audio substitutions. */
+    fd = open(s ? s->temp : host, s ? fl & ~(O_CREAT | O_EXCL) : fl, 0644);
+#endif
     if (fd < 0) goto cleanup;
     struct stat st;
     if (!(flags & 0x02000000) && !fstat(fd, &st) && S_ISDIR(st.st_mode)) { errno = EISDIR; goto cleanup; }
@@ -748,8 +781,13 @@ static int file_close(uint32_t h) {
     int commit = s && (file_info[k].access & 0x40000000) && !--s->writers;
     if (s && profile_write_denied(file_info[k].path)) s->failed = 1;
     int ok = 1;
+#if NFS_GAME == NFS_GAME_MW
     if (commit && !s->failed && !SAVE_TIME("provenance.prepare", private_cars_save_prepare(s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
     if (commit && !s->failed && !SAVE_TIME("provenance.backup", private_cars_backup_before_write(s->dest,s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+#else
+    if (commit && !s->failed && !SAVE_TIME("provenance.prepare", game_save_prepare(s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+    if (commit && !s->failed && !SAVE_TIME("provenance.backup", game_backup_before_write(s->dest,s->temp))) { errno = EIO; s->failed = 1; ok = 0; file_error(); }
+#endif
     if (commit && !s->failed && durable_sync(fd)) { s->failed = 1; ok = 0; file_error(); }
     if (SAVE_TIME("close", close(fd))) { if (s) s->failed = 1; ok = 0; file_error(); }
     if (commit) {
@@ -776,13 +814,18 @@ static void save_sidecars_complete(uint32_t self, uint32_t state_before, unsigne
     SAVE_VOID("trax.publication", { extratrax_save_complete(ok); });
     SAVE_VOID("sidecar.padbind", { padbind_save_complete(ok); });
     SAVE_VOID("sidecar.underglow", { underglow_save_complete(ok); });
+#if NFS_GAME == NFS_GAME_MW
     SAVE_VOID("sidecar.provenance", { private_cars_save_complete(ok); });
+#else
+    SAVE_VOID("sidecar.provenance", { game_save_complete(ok); });
+#endif
 }
 static void save_task_fixup(uint32_t self, uint32_t state_before, unsigned seq_before) {
     if (state_before != 0xb || !M32(self + 0x300) || save_fail_seq == seq_before) return;
     M32(self + 0x2f4) = 1; M32(self + 0x2f8) = 7;
 }
 // END offline file layer
+#if NFS_GAME == NFS_GAME_MW
 void f_007F4F11(Cpu *c) {                       // the career save task (see save_task_fixup)
     uint32_t self = c->ecx, state = M32(self + 0x70);
     unsigned seq = save_fail_seq, commits = save_commit_seq;
@@ -799,6 +842,9 @@ void f_007F4F11(Cpu *c) {                       // the career save task (see sav
     save_task_fixup(self, state, seq);
     save_sidecars_complete(self, state, seq, commits);
 }
+#else
+
+#endif
 // -1 reserves a handle for X360 music or police-radio buffers (no temporary file on disk).
 static X360MusicHandle music_handles[256];
 static X360MusicHandle *handle_music(uint32_t h) {
@@ -911,6 +957,7 @@ int boot_reg_override(const char *name) {
 // d3d9.m, after a first run's hardware detection: the game's own settings loader (FUN_006c1c00, which a first run
 // skips) reads the registry again with only the BOOT_REG values answering, so they win over what detection picked.
 static int reg_boot_only;
+#if NFS_GAME == NFS_GAME_MW
 void boot_reg_reapply(Cpu *c) {
     if (!getenv("BOOT_REG")) return;
     Cpu s = *c;
@@ -919,6 +966,9 @@ void boot_reg_reapply(Cpu *c) {
     reg_boot_only = 0;
     *c = s;
 }
+#else
+void boot_reg_reapply(Cpu *c) {  }
+#endif
 static int reg_open(uint32_t root, const char *sub, int create) {
     char path[512];
     snprintf(path, sizeof path, "%s\\%s", root == 0x80000002 ? "HKLM" : root == 0x80000001 ? "HKCU" : "HK?", sub ? sub : "");
@@ -984,6 +1034,10 @@ int code_region_of(uint32_t t) {
     return -1;
 }
 
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_files.inc"
+#include "game_world.inc"
+#endif
 static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "GetVersionExA")) {
         uint32_t p = arg(c, 0);
@@ -1042,13 +1096,21 @@ static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "SetHandleCount")) RET(arg(c, 0), 1);
     if (!strcmp(fn, "GetCommandLineA")) {
         static uint32_t cl;
+#if NFS_GAME == NFS_GAME_MW
         if (!cl) cl = gstr("speed.exe");
+#else
+        if (!cl) cl = gstr("" GAME_EXECUTABLE "");
+#endif
         RET(cl, 0);
     }
     if (!strcmp(fn, "GetEnvironmentStringsW") || !strcmp(fn, "GetEnvironmentStrings")) RET(galloc(8), 0);
     if (!strcmp(fn, "FreeEnvironmentStringsA") || !strcmp(fn, "FreeEnvironmentStringsW")) RET(1, 1);
     if (!strcmp(fn, "GetModuleFileNameA")) {
+#if NFS_GAME == NFS_GAME_MW
         const char *s = arg(c, 0) && arg(c, 0) == server_handle() ? "C:\\NFSMW\\server.dll" : "C:\\NFSMW\\speed.exe";
+#else
+        const char *s = arg(c, 0) && arg(c, 0) == server_handle() ? "C:\\NFSMW\\server.dll" : "C:\\NFSMW\\" GAME_EXECUTABLE "";
+#endif
         uint32_t n = arg(c, 2);
         strncpy((char *)G + arg(c, 1), s, n);
         RET(strlen(s), 3);
@@ -1220,6 +1282,7 @@ static int win32(Cpu *c, const char *fn) {
         char host[4096];
         resolve((char *)G + arg(c, 0), host, sizeof host);
         uint32_t acc = arg(c, 1), disp = arg(c, 4);
+#if NFS_GAME == NFS_GAME_MW
         X360MusicHandle music;
         if (file_flags(acc, disp) == O_RDONLY && (x360music_open((char *)G + arg(c, 0), &music) ||
             x360copspeech_open((char *)G + arg(c, 0), &music) ||
@@ -1233,7 +1296,16 @@ static int win32(Cpu *c, const char *fn) {
             x360_arrest_path((char *)G + arg(c, 0), host, sizeof host);
             private_car_path((char *)G + arg(c, 0), host, sizeof host);
         }
+#else
+                                                
+        int private_overlay = private_track_overlay_path(host, sizeof host, acc, disp);
+        if (private_overlay < 0) RET(0xFFFFFFFFu, 7);
+#endif
         uint32_t h = file_open((char *)G + arg(c, 0), host, acc, arg(c, 2), disp, arg(c, 5));
+#if NFS_GAME == NFS_GAME_PRIVATE
+        if (diag_on && private_overlay > 0 && h != 0xFFFFFFFFu)
+            diag_event("PRIVATE TRACK OPEN %s status=ok -> %s", private_track_names[private_overlay-1], host);
+#endif
         if (boot_trace) fprintf(stderr, "      CreateFileA(%s) -> %s\n", (char *)G + arg(c, 0), h != 0xFFFFFFFF ? host : "not found");
         if (diag_on) diag_event("CreateFileA(%s, %X, disp %u) -> %s", (char *)G + arg(c, 0), acc, disp, h != 0xFFFFFFFF ? "ok" : strerror(errno));
         RET(h, 7);
@@ -1458,6 +1530,13 @@ static int win32(Cpu *c, const char *fn) {
     return 0;
 }
 
+#if NFS_GAME == NFS_GAME_PRIVATE
+extern int private_d3dx_textures(Cpu *, const char *);
+extern int private_win32_extra(Cpu *, const char *);
+#include "game_ws2.inc"
+int private_win32(Cpu *c, const char *fn) { return private_win32_extra(c, fn) || win32(c, fn); }
+
+#endif
 void host_import(Cpu *c, uint32_t slot) {
     int lo = 0, hi = (int)speed_import_count - 1;
     const char *name = NULL;
@@ -1503,6 +1582,7 @@ void host_import(Cpu *c, uint32_t slot) {
     gil_maybe_yield(c);
     GilRec *gr = diag_on ? gil_rec_self() : NULL;   // BOOT_DIAG: the import this thread is in, for gilwait.log
     if (gr) { gr->ra = ret_addr; gr->imp_t0 = host_ticks(); gr->imp = name; }
+#if NFS_GAME == NFS_GAME_MW
     int ok = !strncmp(name, "d3dx9", 5) ? d3dx(c, fn) || d3dx_effect(c, fn)
            : !strncmp(name, "d3d9", 4) ? win32_d3d9(c, fn)
            : !strncmp(name, "DSOUND", 6) ? win32_dsound(c, fn)
@@ -1512,13 +1592,31 @@ void host_import(Cpu *c, uint32_t slot) {
            : win32_threads(c, fn) || win32_heap(c, fn) || win32(c, fn);
     if (!ok)
         die("not implemented yet: %s (call %u, return address %08X)", name, import_calls, ret_addr);
+#else
+    extern int private_crt(Cpu *, const char *);
+    int is_crt = !strncasecmp(name, "msvcr", 5) || !strncasecmp(name, "msvcp", 5);
+    int ok = is_crt ? private_crt(c, fn) : !strncasecmp(name, "d3dx9", 5) ? private_d3dx_textures(c, fn) || d3dx(c, fn) || d3dx_effect(c, fn)
+           : !strncasecmp(name, "d3d9", 4) ? win32_d3d9(c, fn)
+           : !strncasecmp(name, "DSOUND", 6) ? win32_dsound(c, fn)
+           : !strncasecmp(name, "DINPUT8", 7) ? win32_dinput(c, fn)
+           : !strncasecmp(name, "WS2_32", 6) || !strncasecmp(name, "NETAPI32", 8) ? private_ws2(c, fn)
+           : !strncasecmp(name, "USER32", 6) || !strncasecmp(name, "GDI32", 5) ? win32_user32(c, fn)
+           : private_win32_extra(c, fn) || win32_threads(c, fn) || win32_heap(c, fn) || win32(c, fn);
+    if (!ok) {
+        fprintf(stderr, "PRIVATE STUB %s\n", name);
+        if (diag_on) diag_event("PRIVATE STUB %s", name);
+        die("PRIVATE STUB %s (call %u, return address %08X)", name, import_calls, ret_addr);
+    }
+#endif
     if (gr) { gr->imp = NULL; gr->imp_t0 = host_ticks(); }   // imp_t0 now: when guest code resumed
     if (diag_on) {
         // high-frequency calls go to the in-memory ring only (they'd swamp events.log)
+        static int all = -1;
+        if (all < 0) all = getenv("BOOT_DIAG_EVENTS") && !strcmp(getenv("BOOT_DIAG_EVENTS"), "all");
         static const char *const noisy[] = {"CriticalSection", "TlsGetValue", "TlsSetValue", "LastError", "QueryPerformance", "timeGetTime",
                                             "Interlocked", "HeapAlloc", "HeapFree", "HeapReAlloc", "HeapValidate", "IsBadReadPtr", "GetCurrentThreadId", "GetTickCount",
                                             "D3DXMatrix", "D3DXVec", "D3DXQuaternion", "D3DXPlane", "WaitForSingleObject", "ReleaseMutex",
-                                            "SetWaitableTimer", "ReleaseSemaphore", "PeekMessage", "Sleep"};
+                                            "SetWaitableTimer", "ReleaseSemaphore", "PeekMessage", "Sleep", "_CIpow", "floor"};
         static int8_t quiet_of[4096];                      // per import: 0 unknown, 1 ring only, 2 events.log
         int8_t *qc = import_index >= 0 && import_index < 4096 ? &quiet_of[import_index] : NULL;
         if (!qc || !*qc) {
@@ -1527,7 +1625,7 @@ void host_import(Cpu *c, uint32_t slot) {
             if (qc) *qc = quiet ? 1 : 2;
             else if (!quiet) qc = NULL;
         }
-        if (qc && *qc == 1) { uint32_t av[4] = {a0, a1, a2, a3}; diag_call_ring(name, 4, av, c->eax, ret_addr); }
+        if (!all && qc && *qc == 1) { uint32_t av[4] = {a0, a1, a2, a3}; diag_call_ring(name, 4, av, c->eax, ret_addr); }
         else diag_event("%s(%X, %X, %X, %X) -> %X @%08X", name, a0, a1, a2, a3, c->eax, ret_addr);
     }
     if (boot_trace && (!strncmp(fn, "Heap", 4) || !strncmp(fn, "Virtual", 7)))
@@ -1539,17 +1637,22 @@ void host_import(Cpu *c, uint32_t slot) {
 // Split-screen car memory pool (NFS_PADS=2). PC's CarLoaderPoolSizes (008F7EF0) holds 50,000 KiB for one player and
 // 1 KiB for split (word 008F7EF4: PC never ran two player cars in one pool); the X360 uses 55,000 KiB for either
 // player count (828FD46C/70). RaceStarter picks 008F7EF4 only for the split race, so the one-player size is untouched.
+#if NFS_GAME == NFS_GAME_MW
 static void split_car_pool(void) {
     if (pad_count() != 2) return;
     const char *t = getenv("NFS_TEST_SPLITPOOL");                                // test only: =pc keeps PC's 1 KiB (before/after proof)
     if ((t && !strcmp(t, "pc")) || M32(0x008F7EF4) != 1) return;               // not the PC table: leave it
     M32(0x008F7EF4) = 55000;
 }
+#else
+static void split_car_pool(void) {  }
+#endif
 
 // developer switches: main() calls RaceStarter::StartSkipFERace instead of LoadFrontend when SkipFE is set, and
 // QuickGame::HandleSkipFEOptions builds the startup race from SkipFERaceID. Retail never reads online.cfg
 // (OnlineCfg::ReadConfigFile has no caller), so the globals are written here, before the entry point runs.
 // BOOT_RACE_CAR (default bmwm3gtre46; "race" = the car the race specifies), BOOT_RACE_LAPS (default 10), BOOT_RACE_AI (opponents, default 3).
+#if NFS_GAME == NFS_GAME_MW
 static void race_setup(void) {
     const char *race = getenv("BOOT_RACE");
     if (!race || !*race || !strcmp(race, "0")) return;
@@ -1586,6 +1689,10 @@ static void race_setup(void) {
     }
     printf("boot: SkipFE race %s, car %s, %u laps, %u opponents\n", race, car, M32(0x008F86BC), M32(0x00926080));
 }
+#else
+#include "game_startup.inc"
+static void race_setup(void) {  }
+#endif
 
 // BOOT_ONLINE=host|client: a 2-player race through the game's own client/server code (stage A1), entered by the
 // developer SkipFE-online route: StartSkipFERace calls RaceStarter::InitSkipFEOnline (0056C3E0) when OnlineEnabled is
@@ -1598,6 +1705,7 @@ extern uint32_t ws2_local_ip;
 extern int ws2_port_shift;
 extern uint8_t ws2_mac_last;
 extern int ws2_online;
+#if NFS_GAME == NFS_GAME_MW
 static void online_setup(void) {
     const char *role = getenv("BOOT_ONLINE");
     if (!role || !*role || !strcmp(role, "0")) return;
@@ -1642,14 +1750,21 @@ static void online_setup(void) {
     printf("boot: online %s, peer %u.%u.%u.%u:%u, local %u.%u.%u.%u, port shift %d\n", role, a, b, cc, d, port,
            local >> 24, local >> 16 & 255, local >> 8 & 255, local & 255, ws2_port_shift);
 }
+#else
+static void online_setup(void) {  }
+#endif
 
 // BOOT_SKIPINTRO=1: a new career skips the prologue (the D-Day races) and starts in the safehouse with the career
 // cars, through the game's own SkipCareerIntro switch (bytes 0 and 1, as EasterEggs::ActivateEasterEgg sets them).
 // BOOT_UNLOCKALL=1 sets UnlockAllThings (every car, part and Challenge Series event). For scripted playability runs.
+#if NFS_GAME == NFS_GAME_MW
 static void dev_switches(void) {
     if (getenv("BOOT_SKIPINTRO")) { G[0x00926125] = 1; G[0x00926126] = 1; printf("boot: SkipCareerIntro\n"); }
     if (getenv("BOOT_UNLOCKALL")) { G[0x00926124] = 1; printf("boot: UnlockAllThings\n"); }
 }
+#else
+static void dev_switches(void) {  }
+#endif
 
 // BOOT_DEADLINE=<seconds>: the run ends by itself, whatever the game threads do (the run scripts set it so a test game
 // can't outlive its caller). After the deadline: a clean exit() (stdio and diag files flushed, code 124), and _exit 5 s
@@ -1679,6 +1794,7 @@ static void deadline_start(void) {
 }
 
 // Restart-only values are pinned before guest registration or file I/O.
+#if NFS_GAME == NFS_GAME_MW
 static void private_cars_boot(void) {
     char root[4096];
 #if defined(NFS_PUBLIC) && NFS_PUBLIC
@@ -1711,15 +1827,32 @@ static void private_cars_boot(void) {
         exit(2);
     }
 }
+#else
+static void private_cars_boot(void) { /* private image: MW car inventory disabled */ }
+#endif
 
 // ---------------- loader ----------------
 int main(int argc, char **argv) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    private_track_overlay_init();
+    private_world_init();
+#endif
     game_dir = app_start(argc, argv);
     void settings_init(void), settings_dump(const char *), report_init(void);
+#if NFS_GAME == NFS_GAME_PRIVATE
+    void private_settings_init(void);
+    private_settings_init();
+#endif
     settings_init();                       // settings.c: the F10 menu's saved values, before anything reads its switch
+    void car_grip_init(void);
+    car_grip_init();                       // saved grip choice, before the first physics scope
     private_cars_boot();
     void settings_language_setup(const char *);
+#if NFS_GAME == NFS_GAME_MW
     settings_language_setup(game_dir);     // settings_port.c: the language packs present; the Language row when > 1
+#else
+    /* private image: no MW language-table setup */     // settings_port.c: the language packs present; the Language row when > 1
+#endif
     if (getenv("BOOT_DIAG")) { char p[1100]; snprintf(p, sizeof p, "%s/settings_rows.txt", getenv("BOOT_DIAG")); settings_dump(p); }
     report_init();                         // report.m: full logging (next launch), the hang watchdog
     movies_check_install();                // ordinary log too: missing PC movies must not silently skip playback
@@ -1727,7 +1860,11 @@ int main(int argc, char **argv) {
     boot_trace = getenv("BOOT_TRACE") != NULL;
     deadline_start();
     char path[4096];
+#if NFS_GAME == NFS_GAME_MW
     snprintf(path, sizeof path, "%s/speed.exe", game_dir);
+#else
+    snprintf(path, sizeof path, "%s/" GAME_EXECUTABLE "", game_dir);
+#endif
     FILE *f = fopen(path, "rb");
     if (!f) die("cannot open %s: %s", path, strerror(errno));
     fseek(f, 0, SEEK_END);
@@ -1747,14 +1884,35 @@ int main(int argc, char **argv) {
         uint32_t va = *(uint32_t *)(s + 12), rs = *(uint32_t *)(s + 16), raw = *(uint32_t *)(s + 20);
         memcpy(G + 0x400000 + va, pe + raw, rs);
     }
+#if NFS_GAME == NFS_GAME_MW
     for (unsigned i = 0; i < speed_import_count; ++i) M32(speed_imports[i].slot) = THUNK_BASE + 4 * i;
     online_setup();
     race_setup();
     split_car_pool();
     dev_switches();
+#else
+    extern uint32_t private_import_data(const char *);
+    for (unsigned i = 0; i < speed_import_count; ++i) {
+        uint32_t data = private_import_data(speed_imports[i].name);
+        M32(speed_imports[i].slot) = data ? data : THUNK_BASE + 4 * i;
+    }
+    /* private image: MW startup disabled: online_setup(); */
+    /* private image: MW startup disabled: race_setup(); */
+    private_carbon_skipfe_setup();
+    private_carbon_resolution_setup();
+    private_carbon_audio_setup();
+    /* private image: MW startup disabled: split_car_pool(); */
+    /* private image: MW startup disabled: dev_switches(); */
+#endif
     reg_load();
+#if NFS_GAME == NFS_GAME_MW
     widescreen_setup();
     feedback_setup();
+#else
+    /* private image: MW startup disabled: widescreen_setup(); */
+    /* private image: MW startup disabled: feedback_setup(); */
+#include "carbon_feedback_startup.inc"
+#endif
 
     Cpu cpu = {0}, *c = &cpu;
     g_cpu = c;
@@ -1772,14 +1930,26 @@ int main(int argc, char **argv) {
     M32(c->esp) = 0xDEADBEEF;              // entry's return address
     diag_init();
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+#if NFS_GAME == NFS_GAME_MW
     if (diag_on && private_cars_error()[0]) diag_event("cars: %s",private_cars_error());
+#else
+    /* private image: MW car-catalog diagnostic disabled */
+#endif
 #endif
     threads_init();
     threads_set_main_cpu(c);
+#if NFS_GAME == NFS_GAME_MW
     x360copspeech_warm();                  // host-only CRC/conversion, before the loading screen needs speech
+#else
+    /* private image: MW startup disabled: x360copspeech_warm(); */                  // host-only CRC/conversion, before the loading screen needs speech
+#endif
     printf("boot: image loaded, %u translated functions, entry %08X\n", guest_func_count, speed_entry);
     dispatch(c, speed_entry);
     printf("boot: entry returned eax=%08X after %u import calls\n", c->eax, import_calls);
     diag_begin_exit();
     return 0;
 }
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+int private_resolve(const char *win, char *out, size_t n) { return resolve(win, out, n); }
+#endif

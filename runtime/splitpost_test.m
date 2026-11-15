@@ -2,6 +2,7 @@
 // Missing-parent / missing-SP-wait controls fail 2 / 24 checks; eight SP waits, zero split waits.
 // Opt-in: 1,425 checks / 0 failures, 12 startup waits; forced wait/oldest/pending read/reuse fail 49/1/22/44.
 // Missing startup wait/black readiness/stale epoch readiness fail 32/13/8 checks.
+// Live toggles: Off/unset 1,377 / 0; On 1,489 / 0. Broken setter / snapshot mode guard: 4 / 1 failures.
 // Two six-frame SP snapshots match pre-split renderer (57,396 shader-consumed command/readback bytes).
 // Recording encoder companion; no GPU/device creation. Production renderer is included by the Python runner.
 #import "render_internal.h"
@@ -20,6 +21,7 @@ void sign_diag_record_history(const char *name, const void *p, size_t n) { (void
 void sign_diag_scene(id<MTLCommandBuffer> cb, id<MTLTexture> scene) { (void)cb; (void)scene; abort(); }
 const char *diag_dir="/tmp";
 int x360_post_ssao_enabled(void){return 0;}
+uint32_t split_capture_player(uint32_t original){(void)original;return owner+1;}
 int postfx_look_variant(const char *s){(void)s;return 0;}
 void render_soft_smoke_proof_finish(void){} // proof is inactive in this recording-only fixture
 void render_soft_smoke_late(id<MTLTexture> scene){(void)scene;}
@@ -37,6 +39,9 @@ Device dev;
 id<MTLDevice> mtl;
 id<MTLRenderPipelineState> pipeline_build(MTLRenderPipelineDescriptor *d, const char *pass, NSError **e) {
     (void)pass; return [mtl newRenderPipelineStateWithDescriptor:d error:e];
+}
+id<MTLRenderPipelineState> pipeline_build_device(id<MTLDevice> device,MTLRenderPipelineDescriptor *d,const char *pass,NSError **e) {
+    (void)device;return pipeline_build(d,pass,e);
 }
 id<MTLRenderPipelineState> pipeline_cached_library(MTLRenderPipelineDescriptor *d, id<MTLLibrary> lib, const char *pass, NSError **e) {
     (void)lib; return pipeline_build(d,pass,e);
@@ -301,6 +306,29 @@ int main(void){@autoreleasepool{ @try {
   memset(&x_resources[0],0,sizeof x_resources[0]);
  }
  }
+ // Live game-thread writes change the same getter cache in both directions.
+ // They must not release a black or stale-epoch startup wait.
+ int baseline=x_lum_nowait();
+ render_lum_set_nowait(1);CHECK(x_lum_nowait()==1);
+ render_x360_post_reset();CHECK(!render_lum_snapshot().ready);
+ memset(&x_resources[0],0,sizeof x_resources[0]);
+ unsigned before=waits;
+ for(unsigned i=0;i<6;++i){
+  frame_serial=200+i;done_serial=frame_serial-2;
+  ((TTexture*)(id)textures[1].tex).tag=i<4?0:25;
+  render_x360_post(1,2,0,&p);
+  CHECK(waits==before+i);
+  CHECK(render_lum_snapshot().ready==(i==5));
+ }
+ CHECK(render_lum_snapshot().single_player);
+ for(unsigned i=0;i<4;++i){
+  int on=(i%2)==0;
+  render_lum_set_nowait(on);CHECK(x_lum_nowait()==on);
+  frame_serial=210+i;done_serial=frame_serial-2;
+  before=waits;render_x360_post(1,2,0,&p);
+  CHECK(waits==before+(on?0:(i==1?1:2)));CHECK(render_lum_snapshot().ready);
+ }
+ render_lum_set_nowait(baseline);CHECK(x_lum_nowait()==baseline);
  printf("encoder: %u checks / %u failures; %u composites, %u lens, %u crops, %u waits\n",checks,failures,composites,lens,copies,waits);
  return failures?1:0;
 } @catch(NSException *e) {printf("recorder exception: %s\n",e.description.UTF8String);return 2;} }}

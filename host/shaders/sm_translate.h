@@ -70,6 +70,22 @@ typedef struct SmVSAux {
     float pad[3];
 } SmVSAux;
 
+/* Optional host motion variant. Row-major D3D matrices are read as transposed
+   column matrices in MSL; multiplying a clip column implements clip * M.
+   Separate buffers leave every existing shader/aux ABI unchanged. */
+enum { SM_VS_BUF_TEMPORAL = 21, SM_PS_BUF_TEMPORAL = 7 };
+typedef struct SmTemporalAux {
+    float clip_to_previous[16], clip_to_previous_view[16];
+    float raster[4];         /* current raster offset in NDC, unjittered motion */
+    float viewport[4];       /* actual width, height, x, y */
+    float sample_positions[8]; /* reserved; motion rasterizes once at pixel centres */
+    float valid, reactive, pad[2]; /* reserved */
+} SmTemporalAux;
+/* Adapts the FINAL translated or custom source; malloc result, NULL on unknown
+   interface. Original discard/alpha paths run; scene depth selects coverage and occlusion.
+   Never called for the ordinary (unrequested) shader variant. */
+char *sm_temporal_variant(const char *source, int stage);
+
 typedef struct SmPSAux {
     uint32_t alpha_func;     /* D3DCMPFUNC (1 NEVER .. 8 ALWAYS); 0 = alpha test off */
     float    alpha_ref;      /* D3DRS_ALPHAREF / 255 */

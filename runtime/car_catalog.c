@@ -38,7 +38,7 @@ static int initialized, result;
 static char generation[67], compatibility[65], problem[512];
 static const char *const output_names[CAR_CATALOG_OUTPUTS] = {
     "GEOMETRY.BIN", "TEXTURES.BIN", "SOLIDMAP.BIN", "WHEELFIT.BIN",
-    "COLLISION.BIN", "PAINT.BIN", "PHYSICS.BIN"
+    "COLLISION.BIN", "PAINT.BIN", "PHYSICS.BIN", "GRIP.BIN"
 };
 static int bad(const char *why) {
     if (!problem[0]) snprintf(problem, sizeof problem, "%s", why);
@@ -498,6 +498,13 @@ static int floats(const unsigned char *p, unsigned n, float maximum) {
 }
 static int sidecar(CarCatalogSlot *car, unsigned kind, int fd) {
     CarCatalogOutput *o=&car->outputs[kind];
+    if (kind==CAR_CATALOG_GRIP) {
+        /* Integrity is still mandatory. Optional handling semantics can refuse
+         * independently without removing an otherwise admitted car. */
+        int rc=car_grip_read(fd,car->folder,car->model_donor,CAR_GRIP_SHARED,&car->grip);
+        o->version=rc==0 && car->grip.present ? 1:0;
+        return 0;
+    }
     if (kind<2) { NEED(o->size>0,"empty geometry or texture pack"); return 0; }
     NEED(o->size>=16 && o->size<=1048596,"invalid sidecar size");
     size_t size=(size_t)o->size; unsigned char *b=malloc(size);
@@ -629,7 +636,9 @@ static int output_verify(int base, unsigned slot, unsigned kind) {
     close(temp);
     if (rc) { if (ro>=0) close(ro); return -1; }
     Retained *r=&retained[slot][kind]; r->fd=ro; r->size=o->size; strcpy(r->hash,o->sha256);
-    snprintf(o->path,sizeof o->path,"/dev/fd/%d",ro); return 0;
+    if (kind!=CAR_CATALOG_GRIP || o->version==1)
+        snprintf(o->path,sizeof o->path,"/dev/fd/%d",ro);
+    return 0;
 }
 /* Exact inventory at each level; no recursive traversal of untrusted trees.
  * Extra empty directories are rejected too. Every leaf has already been read
@@ -777,6 +786,7 @@ const char *car_catalog_compatibility(void) { return compatibility; }
 const char *car_catalog_error(void) { return problem; }
 const char *car_catalog_output_name(CarCatalogOutputKind kind) { return (unsigned)kind<CAR_CATALOG_OUTPUTS ? output_names[kind]:NULL; }
 int car_catalog_open_output(unsigned slot, CarCatalogOutputKind kind) {
-    if (slot>=nslots || (unsigned)kind>=CAR_CATALOG_OUTPUTS || retained[slot][kind].fd<0) { errno=ENOENT; return -1; }
+    if (slot>=nslots || (unsigned)kind>=CAR_CATALOG_OUTPUTS || retained[slot][kind].fd<0 ||
+        (kind==CAR_CATALOG_GRIP && !inventory[slot].grip.present)) { errno=ENOENT; return -1; }
     return readonly_snapshot(retained[slot][kind].fd);
 }

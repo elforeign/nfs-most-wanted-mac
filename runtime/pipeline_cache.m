@@ -1,4 +1,5 @@
-// A descriptor catalogue for known scene passes, replayed after shader readiness.
+#include "game_select.h"
+// A descriptor catalogue for known scene passes and a history of those met on demand, replayed after shader readiness.
 #include "pipeline_cache.h"
 #include "d3d9_internal.h"
 #include <pthread.h>
@@ -21,6 +22,7 @@ _Static_assert(sizeof(PipelineRecipe)==816, "recipe identity must have no implic
 
 // Observed race, pursuit and front-end to free-roam descriptors: shader identities and API state only.
 // samples=0 follows the configured scene AA; samples=1 identifies a single-sample pass.
+#if NFS_GAME == NFS_GAME_MW
 static const PipelineRecipe recipes[] = {
     {.vertex=0x6291D8735225B783ull,.fragment=0xE7F7F28253557CFCull,.samples=0,.a2c=0,.color=80,.depth=260,.stencil=260,.blend=1,.mask=15,.srcRGB=4,.dstRGB=5,.opRGB=0,.srcAlpha=4,.dstAlpha=5,.opAlpha=0,.attributes={[0]={30,0,0},[1]={42,12,0},[2]={29,16,0},},.layouts={[0]={32,1,1},}}, // draw
     {.vertex=0x6291D8735225B783ull,.fragment=0xE7F7F28253557CFCull,.samples=0,.a2c=0,.color=80,.depth=260,.stencil=260,.blend=0,.mask=15,.srcRGB=1,.dstRGB=0,.opRGB=0,.srcAlpha=1,.dstAlpha=0,.opAlpha=0,.attributes={[0]={30,0,0},[1]={42,12,0},[2]={29,16,0},},.layouts={[0]={32,1,1},}}, // draw
@@ -229,6 +231,12 @@ static const PipelineRecipe recipes[] = {
     {.vertex=0xB04ADA7FB6F80A4Full,.fragment=0x4DDD91C1FDECF8A2ull,.samples=0,.a2c=0,.color=80,.depth=260,.stencil=260,.blend=1,.mask=14,.srcRGB=4,.dstRGB=5,.opRGB=0,.srcAlpha=4,.dstAlpha=5,.opAlpha=0,.attributes={[0]={30,0,0},[1]={42,12,0},[2]={29,16,0},},.layouts={[0]={32,1,1},}}, // draw
     {.vertex=0x4F7FA17E9A753F92ull,.fragment=0xD1D251012267C742ull,.samples=0,.a2c=0,.color=80,.depth=260,.stencil=260,.blend=1,.mask=14,.srcRGB=4,.dstRGB=5,.opRGB=0,.srcAlpha=4,.dstAlpha=5,.opAlpha=0,.attributes={[0]={30,0,0},[1]={42,12,0},[2]={29,16,0},},.layouts={[0]={32,1,1},}}, // draw
 };
+#else
+#include "game_pipeline_recipes.inc"
+#endif
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_hdr_recipes.inc"
+#endif
 // Protects functions, states and libraries. Readers: descriptor(), cached(),
 // pipeline_cached_library(), pipeline_loading_done(); writers also include
 // pipeline_register_shader(). Metal compilation never holds this mutex.
@@ -316,6 +324,7 @@ static MTLRenderPipelineDescriptor *descriptor(const PipelineRecipe *r) {
     d.vertexDescriptor=vd;
     return d;
 }
+#include "pipeline_history.h"
 static void record(const PipelineRecipe *r, const char *pass) {
     char text[4096]; int n=snprintf(text,sizeof text,
         "{.vertex=0x%llXull,.fragment=0x%llXull,.samples=%u,.a2c=%u,.color=%u,.depth=%u,.stencil=%u,.blend=%u,.mask=%u,.srcRGB=%u,.dstRGB=%u,.opRGB=%u,.srcAlpha=%u,.dstAlpha=%u,.opAlpha=%u,.attributes={",
@@ -361,7 +370,8 @@ static NSMutableData *cache_key(MTLRenderPipelineDescriptor *d, const PipelineRe
     }
     return key;
 }
-static id<MTLRenderPipelineState> cached(MTLRenderPipelineDescriptor *d, PipelineRecipe r, NSData *key, const char *pass, NSError **error) {
+// persist: the recipe holds stable shader keys (translated shaders), not process pointers.
+static id<MTLRenderPipelineState> cached(MTLRenderPipelineDescriptor *d, PipelineRecipe r, NSData *key, int persist, const char *pass, NSError **error) {
     pthread_mutex_lock(&pipeline_cache_mu);
     id<MTLRenderPipelineState> p=states[key];
     pthread_mutex_unlock(&pipeline_cache_mu);
@@ -374,6 +384,7 @@ static id<MTLRenderPipelineState> cached(MTLRenderPipelineDescriptor *d, Pipelin
             __atomic_add_fetch(&known_builds,1,__ATOMIC_RELAXED);
             diag_event("pipeline_known_miss: recipe=%zu pass=%s",i,pass); break;
         }
+        if(persist && history_known(&r)) diag_event("pipeline_history_miss: pass=%s",pass);
     }
     p=pipeline_build(d,pass,error);
     if(p) {
@@ -384,12 +395,13 @@ static id<MTLRenderPipelineState> cached(MTLRenderPipelineDescriptor *d, Pipelin
         id<MTLRenderPipelineState> published=states[key];
         if (published) p=published; else states[key]=p;
         pthread_mutex_unlock(&pipeline_cache_mu);
+        if(persist && strcmp(pass,"prewarm")) history_note(&r);
     }
     return p;
 }
 id<MTLRenderPipelineState> pipeline_cached(MTLRenderPipelineDescriptor *d, uint64_t v, uint64_t f, const char *pass, NSError **error) {
     PipelineRecipe r=describe(d,v,f);
-    return cached(d,r,[NSData dataWithBytes:&r length:sizeof r],pass,error);
+    return cached(d,r,[NSData dataWithBytes:&r length:sizeof r],1,pass,error);
 }
 id<MTLRenderPipelineState> pipeline_cached_library(MTLRenderPipelineDescriptor *d, id<MTLLibrary> library, const char *pass, NSError **error) {
     if (!library || !d.vertexFunction || !d.fragmentFunction) return nil;
@@ -402,8 +414,9 @@ id<MTLRenderPipelineState> pipeline_cached_library(MTLRenderPipelineDescriptor *
     // Exact names, including terminators: variants of one library cannot alias.
     for (NSString *name in @[d.vertexFunction.name,d.fragmentFunction.name])
         [key appendBytes:name.UTF8String length:strlen(name.UTF8String)+1];
-    return cached(d,r,key,pass,error);
+    return cached(d,r,key,0,pass,error);
 }
+#if NFS_GAME == NFS_GAME_MW
 void pipeline_prewarm(dispatch_queue_t __strong queues[4], NSUInteger scene_samples) {
     scene_sample_count=scene_samples;
     if(!enabled()) return;
@@ -423,7 +436,11 @@ void pipeline_prewarm(dispatch_queue_t __strong queues[4], NSUInteger scene_samp
                 diag_event("pipeline_prewarm: failed=%zu %s",i,error.localizedDescription.UTF8String);
         }});
     }
+    history_replay(queues,scheduled);
 }
+#else
+#include "game_pipeline_prewarm.inc"
+#endif
 void pipeline_loading_done(void) {
     frame_thread=pthread_self();
     __atomic_store_n(&loading,0,__ATOMIC_RELEASE);

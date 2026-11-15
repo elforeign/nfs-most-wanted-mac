@@ -12,6 +12,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -117,7 +121,7 @@ int main(void) {
 
 
 def main():
-    render = (ROOT / 'runtime/render.m').read_text()
+    render = mw_source(ROOT / 'runtime/render.m')
     post = (ROOT / 'runtime/x360_post.m').read_text()
     smoke = render[render.index('static int soft_smoke_cached ='):render.index('int render_soft_depth_store(')]
     ssao = post[post.index('static int ssao_cached ='):post.index('int postfx_look_variant(')]

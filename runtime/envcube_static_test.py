@@ -19,6 +19,10 @@ import subprocess
 import sys
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / 'runtime'
 
@@ -81,7 +85,7 @@ def main():
     env = (RT / 'envcube.m').read_text()
     helpers = '\n'.join(function(env, n) for n in
                         ('envcube_level_count', 'envcube_creation_levels', 'envcube_creation_edge'))
-    fixed = function((RT / 'd3d9.m').read_text(), 'v_CreateCubeTexture')
+    fixed = function(mw_source(RT / 'd3d9.m'), 'v_CreateCubeTexture')
     with tempfile.TemporaryDirectory(prefix='envcube-static-') as td:
         libs = []
         for name, body in (('fixed', fixed), ('original', ORIGINAL)):

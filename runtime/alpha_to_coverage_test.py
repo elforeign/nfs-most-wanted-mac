@@ -3,7 +3,7 @@
 Controls remove the key bit, disable the PSO flag, or restore the old discard.
 The GPU case measures fractional edges, opaque RGB and integrated silhouette
 width; equality/disabled/blended/1x paths retain the original alpha test.
-Observed: 79 CPU checks pass; missing key bit gives 1 failure. GPU: 224
+Observed: 80 CPU checks pass; missing key bit gives 1 failure. GPU: 224
 configurations pass, 79 fractional pixels; disabled PSO gives 94 failures,
 old discard gives 1197. Edge error <=0.251 px; thin-wire error <=0.5 px
 per phase and <=0.125 px averaged over the four subpixel positions.
@@ -12,6 +12,10 @@ from pathlib import Path
 import os
 import subprocess
 import tempfile
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,7 +28,7 @@ def run(args, expected=0):
     return p.stdout
 
 
-src = (ROOT / 'runtime/render.m').read_text()
+src = mw_source(ROOT / 'runtime/render.m')
 key = src.split('    int a2c = alpha_to_coverage_draw(rs,', 1)[1]
 key = '    id<MTLFunction> sign_direct = nil;\n    int a2c = alpha_to_coverage_draw(rs,' + key.split('    static typeof(pk) last_pk;', 1)[0]
 flag = '        pd.alphaToCoverageEnabled = a2c;'

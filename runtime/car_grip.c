@@ -1,13 +1,43 @@
 #include "car_grip.h"
-#include "car_physics.h"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 _Static_assert(sizeof(float) == 4, "GRP1 requires 32-bit float storage");
+
+#define MIX(a,b,c) do { \
+    a-=b; a-=c; a^=c>>13; b-=c; b-=a; b^=a<<8; c-=a; c-=b; c^=b>>13; \
+    a-=b; a-=c; a^=c>>12; b-=c; b-=a; b^=a<<16; c-=a; c-=b; c^=b>>5; \
+    a-=b; a-=c; a^=c>>3; b-=c; b-=a; b^=a<<10; c-=a; c-=b; c^=b>>15; \
+} while (0)
+static uint32_t grip_key(const char *name) {
+    unsigned char text[64]; size_t n=strlen(name);
+    if (!n || n>=sizeof text) return 0;
+    for (size_t i=0;i<n;++i) {
+        unsigned char ch=(unsigned char)name[i];
+        text[i]=ch>='A' && ch<='Z'?ch+32:ch;
+    }
+    uint32_t a=0x9E3779B9u,b=a,c=0xABCDEF00u;
+    size_t i=0;
+    for (;n-i>=12;i+=12) {
+        uint32_t v[3]; memcpy(v,text+i,12); a+=v[0]; b+=v[1]; c+=v[2]; MIX(a,b,c);
+    }
+    c+=(uint32_t)n;
+    for (size_t j=0;j<n-i;++j) {
+        uint32_t v=text[i+j];
+        if (j>=8) c+=v<<(8*(j-7));
+        else if (j>=4) b+=v<<(8*(j-4));
+        else a+=v<<(8*j);
+    }
+    MIX(a,b,c); return c;
+}
+#undef MIX
 
 enum { HEADER = 40, MAX_BYTES = HEADER + CAR_GRIP_MAX_TIERS *
        (8 + CAR_GRIP_FIELDS * (16 + CAR_GRIP_MAX_VALUES * 4)) };
@@ -39,10 +69,11 @@ static int identity(const char *s) {
     if (!s || !*s) return 0;
     size_t n = 0;
     for (; s[n]; ++n) if (n >= 63 || (unsigned char)s[n] > 127) return 0;
-    return car_physics_key(s) != 0;
+    return grip_key(s) != 0;
 }
 
-int car_grip_read(int fd, const char *source, const char *donor, int mode, CarGrip *out) {
+static int read_record(int fd, const char *source, const char *donor, int mode,
+                       const char *sha256, uint64_t size, CarGrip *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
     if (mode == CAR_GRIP_DONOR) return 0;
@@ -60,10 +91,17 @@ int car_grip_read(int fd, const char *source, const char *donor, int mode, CarGr
     }
     if (n != (size_t)st.st_size || n < HEADER || word(bytes) != 0x31505247 ||
         word(bytes+4) != 1 || word(bytes+8) != n ||
-        word(bytes+12) != car_physics_key(source) || word(bytes+16) != car_physics_key(donor) ||
+        word(bytes+12) != grip_key(source) || word(bytes+16) != grip_key(donor) ||
         word(bytes+20) != CAR_GRIP_SHARED || !word(bytes+24) ||
         word(bytes+24) > CAR_GRIP_MAX_TIERS || word(bytes+28) > 8 ||
         word(bytes+32) != CAR_GRIP_FIELDS || word(bytes+36)) return -1;
+    if (sha256) {
+        if (size != n) return -1;
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH]; char actual[65];
+        CC_SHA256(bytes, (CC_LONG)n, digest);
+        for (unsigned i=0;i<sizeof digest;++i) snprintf(actual+2*i,3,"%02x",digest[i]);
+        if (strcmp(actual,sha256)) return -1;
+    }
     CarGrip candidate = {0};
     candidate.source = word(bytes+12); candidate.donor = word(bytes+16);
     candidate.tier_count = word(bytes+24); candidate.upgrade_max = word(bytes+28);
@@ -93,6 +131,19 @@ int car_grip_read(int fd, const char *source, const char *donor, int mode, CarGr
     candidate.present = 1; *out = candidate; return 0;
 }
 
+int car_grip_read(int fd, const char *source, const char *donor, int mode, CarGrip *out) {
+    return read_record(fd,source,donor,mode,NULL,0,out);
+}
+
+int car_grip_read_pinned(int fd, const char *source, const char *donor, int mode,
+                          const char *sha256, uint64_t size, CarGrip *out) {
+    if (!sha256) {
+        if (out) memset(out,0,sizeof *out);
+        return -1;
+    }
+    return read_record(fd,source,donor,mode,sha256,size,out);
+}
+
 int car_grip_load(const char *path, const char *source, const char *donor, int mode, CarGrip *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
@@ -110,5 +161,94 @@ const CarGripField *car_grip_field(const CarGrip *grip, unsigned tier, uint32_t 
         const CarGripField *f = &grip->tiers[tier].fields[i];
         if (f->key == key && f->semantics == CAR_GRIP_SHARED) return f;
     }
+    return NULL;
+}
+
+static int selected_key(uint32_t key) {
+    return key == 0xAAFC01B3 || key == 0xF177BE1B || key == 0xEC096166 ||
+           key == 0x64C43C4B || key == 0xC51EB1A1;
+}
+
+static const CarGripField *reference(const CarGrip *grip, unsigned tier, uint32_t key) {
+    if (tier >= grip->tier_count || tier >= CAR_GRIP_MAX_TIERS) return NULL;
+    for (unsigned i = 0; i < CAR_GRIP_FIELDS; ++i) {
+        const CarGripField *f = &grip->tiers[tier].fields[i];
+        if (f->key == key && shape(key, f->count, f->semantics)) return f;
+    }
+    return NULL;
+}
+
+void car_grip_bind(CarGripBinding *binding, const CarGrip *grip,
+                   uint32_t key, uint32_t vault, uint64_t generation) {
+    if (!binding) return;
+    memset(binding, 0, sizeof *binding);
+    if (!grip || !grip->present || !grip->source || !grip->donor ||
+        !grip->tier_count || grip->tier_count > CAR_GRIP_MAX_TIERS ||
+        !key || !vault || !generation) return;
+    *binding = (CarGripBinding){CAR_GRIP_SELECTION_VERSION, key, vault, generation, grip};
+}
+
+int car_grip_select(const CarGripBinding *binding, const CarGripOwner *owner,
+                    const CarGripLive *live, CarGripSelected *out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (!binding || !owner || !live || binding->version != CAR_GRIP_SELECTION_VERSION ||
+        owner->version != CAR_GRIP_SELECTION_VERSION || !owner->simable ||
+        owner->simable != owner->local_simable || !owner->key || !owner->vault ||
+        !owner->generation || binding->key != owner->key || binding->vault != owner->vault ||
+        binding->generation != owner->generation || !binding->grip) return 0;
+    const CarGrip *g = binding->grip;
+    if (!g->present || !g->tier_count || g->tier_count > CAR_GRIP_MAX_TIERS ||
+        live->max_level < 0 || live->max_level > 8 || live->level < 0 ||
+        live->level > live->max_level || (live->junkman != 0 && live->junkman != 1) ||
+        live->scale_count > CAR_GRIP_FIELDS || ((live->junkman || live->scale_count) && !live->scales) ||
+        (!live->junkman && live->scale_count)) return 0;
+    for (size_t i = 0; i < live->scale_count; ++i) {
+        if (!isfinite(live->scales[i].multiplier) || fabsf(live->scales[i].multiplier) > 1000000)
+            return 0;
+        for (size_t j = 0; j < i; ++j)
+            if (live->scales[i].key == live->scales[j].key) return 0;
+    }
+    unsigned low = 0, high = 0;
+    float blend = 0;
+    if (live->level && g->tier_count > 1) {
+        low = g->tier_count == 3 ? 1 : 0;
+        high = g->tier_count == 3 ? 2 : 1;
+        blend = (float)live->level / (float)live->max_level;
+    }
+    static const uint32_t keys[CAR_GRIP_SELECTED_FIELDS] = {
+        0xAAFC01B3, 0xEC096166, 0xF177BE1B, 0x64C43C4B, 0xC51EB1A1
+    };
+    CarGripSelected candidate = {0};
+    for (unsigned i = 0; i < CAR_GRIP_SELECTED_FIELDS; ++i) {
+        const CarGripField *a = reference(g, low, keys[i]), *b = reference(g, high, keys[i]);
+        if (!a || !b) return 0;
+        CarGripField *f = &candidate.fields[i];
+        f->key = keys[i]; f->semantics = a->semantics;
+        /* Endpoints retain their actual counts; only an interior blend takes
+         * the larger count. Missing elements are native default float zero. */
+        f->count = blend == 0 ? a->count : blend == 1 ? b->count :
+                   a->count > b->count ? a->count : b->count;
+        float multiplier = 1;
+        for (size_t j = 0; j < live->scale_count; ++j)
+            if (live->scales[j].key == f->key) multiplier = live->scales[j].multiplier;
+        for (unsigned j = 0; j < f->count; ++j) {
+            float av = j < a->count ? a->values[j] : 0;
+            float bv = j < b->count ? b->values[j] : 0;
+            float value = blend == 0 ? av : blend == 1 ? bv : bv * blend + (1 - blend) * av;
+            value *= multiplier;
+            if (!isfinite(value)) return 0;
+            f->values[j] = value;
+        }
+    }
+    *out = candidate;
+    return 1;
+}
+
+const CarGripField *car_grip_selected_field(const CarGripSelected *selected, uint32_t key) {
+    if (!selected || !selected_key(key)) return NULL;
+    for (unsigned i = 0; i < CAR_GRIP_SELECTED_FIELDS; ++i)
+        if (selected->fields[i].key == key && selected->fields[i].count &&
+            selected->fields[i].count <= CAR_GRIP_MAX_VALUES) return &selected->fields[i];
     return NULL;
 }

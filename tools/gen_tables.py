@@ -16,20 +16,25 @@ table, the feature has nothing to apply and stays PC (its F10 row is hidden by r
 x360_shader_lits.inc (tools_snapshot/x360_shader_lits.py): the X360 shaders' literal constants the port's Metal shaders
 use, from <x360_root>/NFS/zzdata0_09bb7000.bin (legacy full NFS/ZZDATA0.BIN takes precedence;
 NFS_X360_ZZDATA0 / --zzdata0 override both; development layout: the 2 MB slice
-<x360_root>/../shaders/zzdata0_9B00000.bin); none: zeros with X360_SHADER_LITS 0 (the runtime keeps those features PC).
+<x360_root>/../shaders/zzdata0_9B00000.bin); none: zeros with X360_SHADER_LITS 0 (the runtime keeps those features PC;
+the post chain's six X360S_VT_* scalars take the port's own values).
 It also holds the X360 effect parameter defaults the C code uses (X360F_*). x360_shader_body.inc
 (tools_snapshot/x360_shader_body.py): the bodies of the X360 shader programs materials.m runs, translated from the same
 ZZDATA0.BIN with the vendored XenosRecomp translator (tools_snapshot/xenosrecomp, built with clang++); none: empty
 bodies with X360_SHADER_BODIES 0. x360_engine.inc (pubtables_gen.py): the X360
-post chain's engine constants from default.xex (none: X360_ENGINE_CONSTS 0, the PC chain). roots.h's "shaders" and
-"engine" features hide the F10 rows built on them.
+post chain's engine constants from default.xex (none: X360_ENGINE_CONSTS 0 and the port's own post constants,
+POST_FALLBACK: the chain runs for every player). roots.h's "shaders" and "engine" features hide the F10 rows that still
+need the files.
 
 usage: gen_tables.py [--if-stale] [--pc DIR] [--x360 DIR | --no-x360] [--out DIR] [--jobs N]
+       gen_tables.py --no-pc [--out DIR]   (a program that reads no PC game table, Carbon: only NOPC_TABLES, made
+                                           without a game folder: controller metadata and the no-X360 stubs)
 Proof: controller recipes: 40 binding actions, 85 callout IDs and seven texture fields
 match the former generated semantics (test_pad_metadata.py); an X360
 ATTRIBUTES.BIN copy with one bit flipped (0x7968c) -> trees_params.inc differs in 1 line."""
 import argparse
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -68,6 +73,8 @@ def read_roots(path):
 
 def resolve(args):
     pc = x360 = None
+    if getattr(args, "no_pc", False):   # other tools call resolve() with only --pc/--x360/--no-x360
+        return None, None
     rf = roots_file()
     if rf:
         r = read_roots(rf)
@@ -100,7 +107,10 @@ def find(d, name):
 
 
 def inputs(pc, x360, zz=None):
+    if pc is None:
+        return []
     files = [pc / "speed.exe", pc / "TRACKS/STREAML2RA.BUN", ROOT / "recomp/out/speed_32.c"]
+    files += [pc / "GLOBAL/GLOBALB.BUN", pc / "CARS/997S/GEOMETRY.BIN", pc / "CARS/ELISE/GEOMETRY.BIN"]   # port_car_normals.inc
     if zz:
         files.append(zz)
     files += [find(pc / "GLOBAL", v) for v in VAULTS]
@@ -149,7 +159,7 @@ def content_hash(f):
 def stamp_text(pc, x360, zz=None):
     # Roles, not installation paths: verified tables survive a source-copy move.
     # A slice's basename carries its base offset and therefore is a real input.
-    lines = ["inputs-v2", "x360=%s" % bool(x360), "zzdata0=%s" % (zz.name if zz else "-")]
+    lines = ["inputs-v2", "x360=%s" % bool(x360), "zzdata0=%s" % (zz.name if zz else "-")] + ([] if pc else ["pc=False"])
     for f in inputs(pc, x360, zz):          # content, not size/mtime: a same-size, same-mtime edit still regenerates
         label = next((role + "/" + str(f.relative_to(base)) for role, base in
                       (("source", ROOT), ("pc", pc), ("x360", x360)) if base and f.is_relative_to(base)), f.name)
@@ -167,16 +177,18 @@ def stamp_text(pc, x360, zz=None):
     return "\n".join(lines) + "\n"
 
 
-GENERATORS = ["tools_snapshot/attrib_x360.py", "tools_snapshot/x360audio_attrib.py", "runtime/trees_params.py",
+GENERATORS = ["tools_snapshot/rain_ripples_gen.py", "tools_snapshot/port_water_gen.py", "tools_snapshot/attrib_x360.py", "tools_snapshot/x360audio_attrib.py", "runtime/trees_params.py",
               "tools/setup_kit/huff.py", "runtime/huff.h",
               "recomp/lighting_data.py", "tools_snapshot/x360_auxlights.py", "tools_snapshot/x360_glass_uv1.py",
               "tools_snapshot/texture_compare.py", "tools_snapshot/controltype_gen.py", "tools_snapshot/pad_metadata.py",
               "tools_snapshot/vaults/compare_vaults.py",
               "tools_snapshot/vaults/vaultlib.py", "tools_snapshot/vaults/names.py",
               "tools_snapshot/pubtables_gen.py", "tools_snapshot/xex_read.c", "tools_snapshot/x360_shader_lits.py",
-              "tools_snapshot/x360_shader_body.py"] + sorted(
+              "tools_snapshot/x360_shader_body.py", "tools_snapshot/car_normals_port.py",
+              "tools_snapshot/x360_tex.py"] + sorted(
                   str(p.relative_to(ROOT)) for p in (ROOT / "tools_snapshot/xenosrecomp").rglob("*") if p.suffix in (".cpp", ".h"))
 PADTABLES = ["padprompts_l1.inc", "controltype_buttons.inc", "callout_labels.inc"]
+PORTTABLES = ["port_rain_ripples.inc", "port_water.inc", "port_car_normals.inc"]
 PUBTABLES = ["look_pc.inc", "car_shadow_off.inc", "look_x360.inc", "glass_x360.inc", "grass_x360.inc",
              "x360_shader_lits.inc", "x360_shader_body.inc", "pc_shader_lits.inc", "x360_engine.inc"]
 
@@ -204,10 +216,14 @@ STUBS = {
 }
 
 
+# --no-pc writes these only (the rest read the PC folder); a program that includes another table then fails to compile.
+NOPC_TABLES = list(STUBS) + PADTABLES + PORTTABLES + ["x360_shader_lits.inc", "x360_shader_body.inc", "x360_engine.inc"]
+
+
 def outputs_text(out):
     """The output tables' content hashes (part of the stamp): "up to date" needs every output as this run wrote it."""
     lines = []
-    for name in sorted(list(STUBS) + PUBTABLES + PADTABLES):
+    for name in sorted(list(STUBS) + PUBTABLES + PADTABLES + PORTTABLES):
         f = out / name
         lines.append("out %s\t%s" % (name, hashlib.sha256(f.read_bytes()).hexdigest() if f.exists() else "missing"))
     return "\n".join(lines) + "\n"
@@ -217,6 +233,22 @@ def generate(pc, x360, out, jobs, zz=None):
     py = sys.executable
     tmp = Path(tempfile.mkdtemp(prefix="gen_tables-", dir=out.parent))
     try:
+        # Authored frames are available even without either game folder.
+        r = subprocess.run([py, "-I", "tools_snapshot/rain_ripples_gen.py", "--out", str(tmp / "port_rain_ripples.inc")],
+                           cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode:
+            sys.exit("gen_tables: rain_ripples_gen.py failed:\n" + r.stdout[-3000:])
+        # Authored water wave sets, likewise without game folders.
+        r = subprocess.run([py, "-I", "tools_snapshot/port_water_gen.py", "--out", str(tmp / "port_water.inc")],
+                           cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode:
+            sys.exit("gen_tables: port_water_gen.py failed:\n" + r.stdout[-3000:])
+        # Port car normal maps from the PC diffuses and car geometry alone (an empty table without a PC folder).
+        cmd = [py, "-I", "tools_snapshot/car_normals_port.py", "--out", tmp / "port_car_normals.inc"]
+        cmd += ["--pc", pc] if pc else ["--stub"]
+        r = subprocess.run([str(c) for c in cmd], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode:
+            sys.exit("gen_tables: car_normals_port.py failed:\n" + r.stdout[-3000:])
         # Controller metadata is authored source, including PC-only Setup builds.
         r = subprocess.run([py, "-I", "tools_snapshot/controltype_gen.py", "--out", str(tmp)],
                            cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -241,9 +273,15 @@ def generate(pc, x360, out, jobs, zz=None):
         cmd = [py, "-I", "tools_snapshot/pubtables_gen.py", "--pc", pc, "--out", tmp]
         if x360:
             cmd += ["--x360", x360, "--xex", xex_path(x360)]
-        r = subprocess.run([str(c) for c in cmd], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        if r.returncode:
-            sys.exit("gen_tables: pubtables_gen.py failed:\n" + r.stdout[-3000:])
+        if pc is None:   # no game folder: only its no-X360 engine table, as it writes that with no X360 copy
+            spec = importlib.util.spec_from_file_location("pubtables_gen", ROOT / "tools_snapshot/pubtables_gen.py")
+            pubtables = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(pubtables)
+            (tmp / "x360_engine.inc").write_text(pubtables.ENGINE_STUB + pubtables.steer_text(0))
+        else:
+            r = subprocess.run([str(c) for c in cmd], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if r.returncode:
+                sys.exit("gen_tables: pubtables_gen.py failed:\n" + r.stdout[-3000:])
         if not x360:
             for name, text in STUBS.items():
                 (tmp / name).write_text(text)
@@ -302,8 +340,11 @@ def generate(pc, x360, out, jobs, zz=None):
             (out / STAMP).unlink()
         except FileNotFoundError:
             pass
-        for name in list(STUBS) + PUBTABLES + PADTABLES:
-            os.replace(tmp / name, out / name)
+        for name in list(STUBS) + PUBTABLES + PADTABLES + PORTTABLES:
+            if pc is None and name not in NOPC_TABLES:
+                (out / name).unlink(missing_ok=True)   # never a PC table left from an earlier run
+            else:
+                os.replace(tmp / name, out / name)
         if (tmp / "vaults").is_dir():
             shutil.rmtree(out / "vaults", ignore_errors=True)
             os.replace(tmp / "vaults", out / "vaults")
@@ -319,12 +360,15 @@ def main():
     ap.add_argument("--pc", help="PC game folder (default: roots manifest / legacy layout)")
     ap.add_argument("--x360", help="X360 extracted files folder")
     ap.add_argument("--no-x360", action="store_true", help="generate as if there were no X360 copy")
+    ap.add_argument("--no-pc", action="store_true", help="no game folder (Carbon): write only the tables made without one")
     ap.add_argument("--zzdata0", help="X360 NFS/ZZDATA0.BIN (or a zzdata0_<hex base>.bin slice) for the shader literals")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--jobs", type=int, default=6)
     args = ap.parse_args()
+    if args.no_pc and (args.pc or args.x360 or args.zzdata0):
+        ap.error("--no-pc reads no game files: leave out --pc, --x360 and --zzdata0")
     pc, x360 = resolve(args)
-    zz = None if args.no_x360 else zzdata0_path(x360, args.zzdata0)
+    zz = None if args.no_x360 or args.no_pc else zzdata0_path(x360, args.zzdata0)
     out = args.out.resolve()
     stamp = stamp_text(pc, x360, zz)
     have = out / STAMP
@@ -334,7 +378,10 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     generate(pc, x360, out, args.jobs, zz)
     have.write_text(stamp + outputs_text(out))   # inputs and the outputs they produced: a later edit or partial copy regenerates
-    print("gen_tables: wrote %d tables to %s from %s%s" % (len(STUBS) + len(PUBTABLES) + len(PADTABLES), out, pc, " + %s" % x360 if x360 else " (PC only; controller metadata included)"))
+    if pc is None:
+        print("gen_tables: wrote %d tables to %s without a game folder" % (len(NOPC_TABLES), out))
+        return
+    print("gen_tables: wrote %d tables to %s from %s%s" % (len(STUBS) + len(PUBTABLES) + len(PADTABLES) + len(PORTTABLES), out, pc, " + %s" % x360 if x360 else " (PC only; controller metadata included)"))
 
 
 if __name__ == "__main__":

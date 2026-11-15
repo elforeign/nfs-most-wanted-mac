@@ -23,7 +23,8 @@ typedef struct { uint8_t vk, scan; } KeyMap;
 static const KeyMap mac_keys[128] = { [51]={8,14}, [12]={'Q',16}, [9]={'V',47}, [0]={'A',30} };
 static int checks, failures, editing=1, is_open=1, text_row=1, key_calls, posts, forwarded;
 static char text[64];
-static int command;
+static int command, diag_on;
+static void diag_event(const char *fmt, ...) { (void)fmt; }
 typedef struct { int type; } Setting;
 #define SET_TEXT 1
 static Setting setting;

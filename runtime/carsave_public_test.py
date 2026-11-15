@@ -570,7 +570,7 @@ def main():
         common = ['clang', '-std=c11', '-O1', '-g', '-fsanitize=address,undefined', '-Wno-deprecated-declarations',
                   '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'recomp'), '-I', str(ROOT / 'recomp/out'),
                   '-DCAR_CATALOG_APPROVAL_HEADER="' + str(root / 'approval.h') + '"']
-        sources = [str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'), str(ROOT / 'runtime/car_catalog.c')]
+        sources = [str(ROOT / 'runtime/car_grip.c'), str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'), str(ROOT / 'runtime/car_catalog.c')]
         def compile_native(name, options=()):
             build = subprocess.run(common + list(options) + sources + ['-o', str(root / name)], capture_output=True, text=True)
             assert not build.returncode, build.stderr[-5000:]

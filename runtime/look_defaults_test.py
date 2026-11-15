@@ -1,11 +1,12 @@
-"""Shipped defaults of three look switches and built-in sign layers: Particles Physical,
-Headlamp glass Clear, Traffic detail On. Unset (or empty) switch = the new default; an explicit value
+"""Shipped defaults of five look switches and built-in sign layers: Particles Physical,
+Headlamp glass Clear, Traffic detail On, Clear coat On,
+Rain cover On. Unset (or empty) switch = the new default; an explicit value
 (a saved Retail / Off) still wins.
 Checks per switch: switches.tsv column 3, the F10 row's .def, and the production selector compiled and
 run with the switch unset, empty, set to the other value and set to the default value.
-Production: 0 failures / 12 selector cases + 0 / 6 table cases. Old-defaults control (selectors reverted
-to "only an explicit value turns it on/Clear/Physical", rows .def back): 6 / 12 selector cases (unset and
-empty fail on each of the three) and 6 / 6 table cases.
+Production: 0 failures / 20 selector cases + 0 / 10 table cases. Old-defaults control (selectors reverted
+to "only an explicit value turns it on/Clear/Physical", rows .def back): 10 / 20 selector cases (unset and
+empty fail on each of the five) and 10 / 10 table cases.
 Sign-layer controls: 1/8 failures per case for missing bias or ground exclusion,
 0/8 for production, each under four obsolete switch values.
 Control: --old. Run: tools/.venv/bin/python -I runtime/look_defaults_test.py   (from the checkout root)
@@ -16,6 +17,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 
 RT = Path(__file__).resolve().parent
 # switch, file holding the Setting row, row anchor, selector source, extraction, harness prelude, default, other
@@ -30,6 +35,13 @@ FEATURES = [
     ('NFS_TRAFFIC_DETAIL', 'on', 'off', 'settings_port.c', 'graphics.traffic_detail', 'traffic_detail.c',
      r'int traffic_detail_on\(void\) \{.*?\n\}',
      '#include <stdlib.h>\n#include <string.h>\nstatic int enabled = -1;\n', 'return traffic_detail_on();'),
+    ('NFS_CLEARCOAT', 'on', 'off', 'clearcoat.c', 'graphics.clearcoat', 'clearcoat.c',
+     r'int clearcoat_enabled\(void\) \{.*?\n\}',
+     '#include <stdlib.h>\n#include <string.h>\nstatic int postfx_look_variant(const char *v) {(void)v; return 0;}\nstatic int enabled = -1;\n',
+     'return clearcoat_enabled();'),
+    ('NFS_RAIN_COVER', 'on', 'off', 'settings_port.c', 'graphics.rain_cover', 'rain_cover.m',
+     r'int rain_cover_on\(void\) \{.*?\n\}',
+     '#include <stdlib.h>\n#include <string.h>\nstatic int rain_cover_enabled = -1;\n', 'return rain_cover_on();'),
 ]
 
 
@@ -47,6 +59,8 @@ def row_default(src, ident, old=False):
     d = int(re.search(r'\.def\s*=\s*(\d+)', row)[1])
     if old:
         d = 0         # control: the rows as they were before the decision
+    if re.search(r'\.type\s*=\s*SET_TOGGLE', row):
+        return ('off', 'on')[d]
     v = re.search(r'\.values\s*=\s*(\w+|\(const char \*const\[\]\)\{[^}]*\})', row)[1]
     if not v.startswith('('):
         v = re.search(r'\b%s\[\]\s*=\s*\{([^}]*)\}' % v, src)[1]
@@ -81,7 +95,7 @@ def sign_layers(tmp):
     source = re.sub(r'^#include .*\n', '', source, flags=re.M)
     assert 'NFS_DECAL_DEPTH' not in source
     assert 'NFS_DECAL_DEPTH' not in (RT / 'switches.tsv').read_text()
-    render = (RT / 'render.m').read_text()
+    render = mw_source(RT / 'render.m')
     assert 'eb.decal_back = decal_depth_tagged(dev.tex[0]);' in render
     assert 'decal_depth_ground(dev.tex[0])' in render
     prelude = r'''#include <stdint.h>

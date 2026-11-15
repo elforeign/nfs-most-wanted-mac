@@ -57,6 +57,10 @@ import sys
 import struct
 import numpy as np
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 def dilate(seed,radius):
     h,w=seed.shape
     pad=np.pad(seed,radius)
@@ -221,7 +225,7 @@ assert classify(control_off-4,control_off,control_z)[1]>0
 print('delta counter: identical 0/0; 3 levels excluded; broken flat darkening detected')
 
 ROOT=Path(__file__).resolve().parents[1]
-source=(ROOT/'runtime/render_post.m').read_text()
+source=mw_source(ROOT/'runtime/render_post.m')
 macros={}
 if any(not (ROOT/'runtime/gen'/name).exists() for name in ('x360_shader_lits.inc','x360_engine.inc')):
     print('ssao_test: SKIP (generated private shader tables absent; build first)')
@@ -305,7 +309,7 @@ void eval(const float *n,const float *v,float *out,int count) {
     metal=run(['xcrun','--find','metal']).strip()
     (tmp/'ssao.metal').write_text(shader('x360_src')+ao)
     run([metal,'-fmodules-cache-path='+str(tmp/'modules'),'-c',tmp/'ssao.metal','-o',tmp/'ssao.air'])
-    render=(ROOT/'runtime/render.m').read_text()
+    render=mw_source(ROOT/'runtime/render.m')
     body=render.split('static const char *ssao_depth_src=',1)[1].split(';\n',1)[0]
     depth_shader=''.join(ast.literal_eval(m[0]) for m in re.finditer(r'"(?:[^"\\]|\\.)*"',body))
     (tmp/'coverage-depth.metal').write_text(depth_shader)

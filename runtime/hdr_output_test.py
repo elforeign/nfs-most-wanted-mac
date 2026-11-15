@@ -28,6 +28,9 @@
 
 
 
+
+
+
 """
 from pathlib import Path
 import os
@@ -35,6 +38,10 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
 
 ROOT = Path(__file__).resolve().parent
 # Frozen production baseline, so the comparison remains meaningful after merging.
@@ -269,10 +276,10 @@ def main():
     if not (ROOT / 'gen/x360_shader_lits.inc').is_file():
         print('SKIP: HDR composition proof needs generated shader tables (runtime/build.sh)')
         return 3
-    render = (ROOT / 'render.m').read_text()
+    render = mw_source(ROOT / 'render.m')
     presenter = (ROOT / 'render_present.m').read_text()
-    post = (ROOT / 'render_post.m').read_text()
-    guard = (ROOT / 'hdrclip.m').read_text()
+    post = mw_source(ROOT / 'render_post.m')
+    guard = mw_source(ROOT / 'hdrclip.m')
     legacy_post = section(post, 'static const char *x360_src =', '#include "lampglow_shader.h"')
     assert hashlib.sha256(legacy_post.encode()).hexdigest() == 'a7b0ddc42942bd19ebada259861bd6503c9253474d2a881130c1b3f0fe594146', 'legacy post shader changed'
     print('hdr_output_test: legacy post source 13018/13018 bytes frozen SHA-256 PASS', flush=True)
@@ -294,19 +301,29 @@ def main():
     env.pop('NFS_FLOAT_SCENE', None)
     with tempfile.TemporaryDirectory(prefix='hdr-output-test-') as scratch:
         scratch = Path(scratch)
+        # Private contact shading shares the production loading catalogue.
+        private_ao = ROOT.parent / 'recomp/private_ao_test.py'
+        if private_ao.is_file() and (ROOT.parent / 'recomp/out/carbon-base/image.json').is_file():
+            sys.path.insert(0, str(private_ao.parent))
+            from private_ao_test import prewarm_fixture
+            result = prewarm_fixture(scratch, (ROOT / 'render_post.m').read_text(),
+                                     (private_ao.parent / 'private_runtime/carbon_ao.inc').read_text())
+            if result:
+                return result
         (scratch / 'presenter.inc').write_text(production)
         probe = (ROOT / 'probe.m').read_text()
         probe_capture = section(probe, 'static id<MTLBuffer> capture(', '// BGRA8 pixels:').replace(' capture(', ' probe_capture(')
         (scratch / 'probe.inc').write_text(probe_capture)
         frame_end = section(presenter, '    cmd = nil;\n    render_float_scene_present_end();', '    // One frame in flight:')
         (scratch / 'frame_end.inc').write_text(frame_end)
-        post_code = (section(post, 'static const char *x360_src =', '#include "lampglow_shader.h"') +
+        post_code = ('#include "post_cuts.h"\n' + section(post, 'static const char *x360_src =', '#include "lampglow_shader.h"') +
+                     section(post, 'static NSString *x_cuts_source(', '// Separate curve library:') +
                      section(post, 'static NSString *x_edr_source(', '// END HDR output M post variant') +
                      section(post, 'static const char *ssao_src =', 'typedef struct { float proj[4],size[4],rect[4],bounds[4],tune[4]; } AOParams;') +
                      section(post, 'typedef struct { float off[16][4]', '// The visual treatment into a multisampled back buffer') +
                      section(post, 'static NSString *x_view_source(', '// GaussBlur5x5') +
                      section(post, 'static id<MTLRenderPipelineState> x_contact_smoke_multiply(MTLPixelFormat format) {', 'static struct { id<MTLRenderPipelineState> kernel,blur,apply'))
-        cache = (ROOT / 'pipeline_cache.m').read_text().replace('#include "d3d9_internal.h"', '')
+        cache = mw_source(ROOT / 'pipeline_cache.m').replace('#include "d3d9_internal.h"', '')
         cache = cache.replace('    int measure=on_frame_path();',
                               '    if (!strcmp(pass,"edr")) ++pipeline_edr_builds;\n    int measure=on_frame_path();')
         library_entry = '    if (!library || !d.vertexFunction || !d.fragmentFunction) return nil;'
@@ -314,7 +331,7 @@ def main():
         cache = cache.replace(library_entry, '    ++post_cached_calls;\n' + library_entry)
         (scratch / 'cache.inc').write_text(cache)
         (scratch / 'post.inc').write_text(post_code)
-        (scratch / 'quad.inc').write_text(maps + '\nstatic Map blit_pipelines;\n' + blit + quad)
+        (scratch / 'quad.inc').write_text('#include "post_cuts.h"\n' + maps + '\nstatic Map blit_pipelines;\n' + blit + quad)
         (scratch / 'routing.inc').write_text(
             section(render, 'static MTLTextureDescriptor *texture_descriptor(', 'RenderTex *gpu_tex(') +
             section(render, 'void render_float_scene_begin(void)', '// Only actual pre-post screen-copy destinations'))
@@ -328,7 +345,7 @@ def main():
         (scratch / 'test.m').write_text(harness)
         exe = scratch / 'test'
         build = ['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
-                 '-Wno-unused-variable', '-fobjc-arc', '-I', scratch, '-I', ROOT, scratch / 'test.m',
+                 '-Wno-unused-variable', '-fobjc-arc', '-I', scratch, '-I', ROOT, scratch / 'test.m', ROOT / 'post_cuts.c',
                  '-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal', '-o', exe]
         checked(build)
         checked([exe, '--cpu'], env=env)

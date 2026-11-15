@@ -1,5 +1,7 @@
 # Save commit timings
 
+Carbon stores saves, registry.txt, app.txt and shadercache.bin under `<base>/Carbon`, where base is BOOT_USERDATA or `~/Library/Application Support/NFSMW-port`. Its retail $10,000 old-save bonus only enumerates `<base>/NFS Most Wanted`; `NFS_TEST_CARBON_MW_SAVES=<directory>` replaces that listing for fixtures. No save is opened or written there. The native loop skips its first match, so even an existing empty folder qualifies through its dot entries; a missing folder does not. BOOT_DIAG records the folder, count and actual cash delta.
+
 `BOOT_DIAG` also writes `save_NNNNNN.txt` after each career save-task update in
 state `0xb`. No additional switch is needed. The header identifies the task,
 sequence, thread and presented-frame count (`frames.log` correlation), with total

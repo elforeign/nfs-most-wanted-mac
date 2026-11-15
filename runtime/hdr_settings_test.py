@@ -17,11 +17,15 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 port = (RT / 'settings_port.c').read_text()
 row = port[port.index('static const char *const kHdr[]'):port.index('static void hdr_status(')]
 assert 'REG(s_hdr);' in port
-guard = (RT / 'hdrclip.m').read_text()
+guard = mw_source(RT / 'hdrclip.m')
 selection = guard[guard.index('void hdrclip_init(void) {'):guard.index('    const char *e=diag_on ?')]
 selection = selection.replace('void hdrclip_init(void)', 'static void select_float_scene(void)') + '}\n'
 presenter = (RT / 'render_present.m').read_text()

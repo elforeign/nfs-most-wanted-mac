@@ -3,6 +3,26 @@
 # runtime then takes every call (direct, tail and dispatch()) and can still call f_XXXXXXXX_orig.
 #
 # address   owner: function
+00769360    daynight.c: optional full-orbit clock; Off delegates to original advance
+00769580    daynight.c: optional night record after each fresh weather/low-sun blend
+00502030    car_locallight.c: elRotateLightContext (carry independent lamp through car part clones)
+00502130    daynight.c: elSetupLights (optional in-game car rig strength from the hour)
+004700D0    temporal_state.c: Camera::SetCameraMatrix (observe cut flag before consumption)
+00470A10    temporal_state.c: CameraMover destructor (invalidate attached view)
+00502980    temporal_state.c: eView::AttachCameraMover (invalidate even same-address attachment)
+005029B0    temporal_state.c: eView::UnattachCameraMover (invalidate before unlink)
+006FCA30    temporal_state.c: LocalPlayer constructor (same-address lifetime replacement)
+006FBF20    temporal_state.c: LocalPlayer::OnAttached (player vehicle replacement)
+006F8200    temporal_state.c: LocalPlayer::OnDetached (player vehicle removal)
+007556C0    temporal_state.c: CarRenderInfo destructor (retire constructor epoch)
+0073B9C0    materials.m: WorldModel::RenderModel (queue-owned destructible poses)
+00749BE0    materials.m: WorldModel::RenderNode (stable hierarchy part identity)
+00753650    materials.m: WorldModel destructor (retire pose lifetime)
+0075A130    materials.m: WorldModel constructor (pose lifetime)
+0075A200    materials.m: WorldModel constructor with replacement models (pose lifetime)
+0075A330    materials.m: WorldModel constructor with SpaceNode (pose lifetime)
+0075A400    materials.m: WorldModel constructor with SpaceNode/replacements (pose lifetime)
+0075A520    materials.m: WorldModel hierarchy constructor (pose lifetime)
 004713C0    chasecam.c: CameraAnchor::GetPov (optional player chase targets)
 0046F2B0    chasecam.c: camera parameter table evaluation (scoped direction duration)
 0047CE80    chasecam.c: replace MW chase distance boost while speed-reactive camera is On
@@ -135,8 +155,8 @@
 005DD090    gameplay_opts.c: GRaceBin::EnableBarriers (Open Map: the career's region barriers)
 005FF990    gameplay_opts.c: GRaceStatus::ComputeCatchUpSkill (No Catch-up, default on: no rubber banding)
 00518B40    gameplay_opts.c: MemoryCard::ListOldSaveFilesPC (Starting Bonus: the NFSU2-save $10,000)
-0074E160    diag.c/diag_car.c: CarRenderInfo::Render (BOOT_DIAG: sampled rejection edges; BOOT_DIAG_DRAWS: view, flags, LOD)
-007387E0    diag.c: CarRenderInfo::RenderPart (BOOT_DIAG_DRAWS: part slot, LOD, model per view)
+0074E160    materials.m / diag.c/diag_car.c: CarRenderInfo::Render (scoped queued pose identity; BOOT_DIAG rejection edges, view, flags, LOD)
+007387E0    materials.m / diag.c: CarRenderInfo::RenderPart (queue-owned part poses; BOOT_DIAG_DRAWS part slot, LOD, model)
 00457F90    attrib_x360.c: Attrib::Collection::Collection (X360 data laid over the PC collections as the vaults load)
 00457670    attrib_x360.c: Attrib::Vault::Initialize (the X360-only collections appended to the five drag-race vaults)
 005F3D90    attrib_x360.c: FindInstances (diagnostics: instances found per call)
@@ -176,7 +196,11 @@
 004F0330    x360audio.c: SFXObj_Reverb::UpdateParams (diagnostic line: per-second tunnel reverb state and levels)
 00820DA3    x360audio.c: FX renderer (diagnostics: per-second FX bus input and wet output RMS)
 0081D93A    reverbfade.c: environment Reset retains the old graph for the optional half-second crossfade
+00503830    daynight_sky.c: suppress the type-21 solar producer while night lighting is active
+006D04E0    daynight_sky.c: suppress the separate screen-space SunInfo streaks while night lighting is active
 00505380    mirror.c: eRenderLightFlare: marks mirror-view flare submits (sprite size for the margin) + BOOT_DIAG cop flare counters
+0045D650    daynight_lamps.c: optional scenery loader/unloader wrappers for private section flare packs
+006be750    daynight_sky.c: diagnostic-only solar polygon and GPU draw context
 006BE8F0    mirror.c: GetVisibleStateSB: mirror flares whose sprite overlaps a side plane are drawn (NFS_MIRROR_FLARE=pc: exact PC test) + BOOT_DIAG failing plane
 00750B10    mirror.c: thunk to the cars' queueing (FUN_00744DD0): the mirror's queued world is drawn before its flare pass (NFS_MIRROR_FLARE_ORDER=pc: PC order)
 005AB450    extratrax.c: UserProfile::Default (Extra EA Trax appended to Songs; the port's song list)
@@ -194,6 +218,7 @@
 006CEEE0    materials.m: PlatStartParticleRender (keeps the view id for the R21 particle size clamp)
 006C1160    materials.m: PlatAddParticle (X360 0.65 size clamp on the CPU-built quad, NFS_PARTICLES=x360)
 0074ACC0    materials.m: Rain::Render (its streak draws get the X360 ePoly shading, not the particle PS, NFS_PARTICLES=x360)
+00758100    rain_cover.m: optional local roof cover scope for precipitation submission; simulation and wetness unchanged
 00733710    diag.c: World_DEBUGStartLocation (BOOT_DIAG racestart: QuickGame start location; one-off diagnostic)
 00600AB0    diag.c: GRaceDatabase::SetStartupRace (BOOT_DIAG racestart)
 00611570    diag.c: Game_WarpPlayerToTrigger (BOOT_DIAG racestart)
@@ -340,3 +365,7 @@
 007A9DB0    underglow_light.m: CarViewer::SetRideInfo (owned temporary ride copy)
 0075D220    underglow_light.m: VehicleRenderConn::Load (owned customization to runtime ride)
 00750B00    underglow_light.m: RenderVehicleFlares (flush main-view mounted light after opaque road)
+
+006AA020    car_grip_bridge.c: DoWheelForces (admitted local added-car grip scope)
+0069DA90    car_grip_bridge.c: Tire::UpdateLoaded (ordinary source grip)
+006A9760    car_grip_bridge.c: DoDrifting (C51 source yaw assist after native torque)

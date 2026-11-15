@@ -28,7 +28,8 @@ char *mat_aux_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t
 void materials_set_headlamp_glass(int clear);
 
 enum { MAT_PS_BUF = 4 };
-typedef struct MatConsts { float k[12][4]; } MatConsts;   // car paint reads all 12; the others declare 4 and ignore the rest
+enum { MAT_CONST_BASE_BYTES = 16 * 4 * sizeof(float) };
+typedef struct MatConsts { float k[52][4]; } MatConsts;   // car lamps use 12-51; existing shaders keep their original prefix
 
 // Clear polycarbonate cover: n=1.5848 gives F0=0.0511871368; no diffuse colour.
 // Measured PC reference: n=1.5849 at 587.6 nm, 20 C (Table 1):
@@ -65,19 +66,25 @@ char *mat_headlamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *re
 char *mat_carbon_lamp_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 enum { MAT_VARIANT_SOFT_SMOKE = 0x104, MAT_VARIANT_SOFT_SMOKE_RESOLVED = 0x105, MAT_VARIANT_SOFT_SMOKE_LATE = 0x106 };
 int mat_is_particle(int id);
+// Positive list of rigid retail scenery vertex programs. Cars require a queued
+// part pose; skinning, particles, grass and animated custom programs do not.
+int mat_temporal_static(uint64_t vertex_program);
 int mat_soft_particle_view(void);
 unsigned mat_particle_view(const uint32_t viewport[4]);
 char *mat_soft_smoke_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 char *mat_soft_smoke_resolved_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
 char *mat_soft_smoke_late_shader(const uint32_t *tokens, uint32_t n, const SmResult *refl, int *id);
-// Per draw (game thread): fills a replacement's extra constants. vsc = the device's vertex shader float constants.
-void mat_constants(int id, const float (*vsc)[4], MatConsts *out);
+// Per draw (game thread): fills and returns the upload byte count; only enabled car lamps use the tail.
+// vsc = the device's vertex shader float constants.
+unsigned mat_constants(int id, const float (*vsc)[4], MatConsts *out);
 // An extra texture the replacement samples (MAT_TEX_*, 0 = none): render.m binds it at fragment texture(MAT_TEX_SLOT).
 enum { MAT_TEX_SLOT = 15, MAT_TEX_RIPPLES = 1, MAT_TEX_CARNM = 2 };
-int mat_flake_volume_ok(void);    // R30: the X360 32^3 noise volume (R27's) loads, render.m binds it at fragment texture(14) of the car paint PS
+int mat_flake_volume_ok(void);    // 2: generated flake-only volume; 1: console volume; 0: absent.
 uint32_t mat_carnm_texture(void);   // MAT_TEX_CARNM: this car draw's tangent-space normal map (a guest D3D texture), 0 = none
+int mat_carnm_port(void);           // MAT_TEX_CARNM: this draw's port-authored map (car_normals_port.h family + 1), 0 = none
 int mat_extra_texture(int id);
 const uint8_t *mat_ripple_frame(int i, uint32_t *w, uint32_t *h);   // RAINSPLASH frame i (0-15) as RGBA8, NULL: none
+void materials_ripples_prepare(void);   // freeze frames/constants before any shader warming
 
 // Car paint values the PC setter FUN_006c76e0 drops (captured by the hook in materials.m before each car draw).
 typedef struct MatCarPaint { float spec_power, metallic, hotspot; } MatCarPaint;
@@ -124,6 +131,7 @@ typedef struct MatWaterDraw { uint32_t mesh, view; float world[4][4]; } MatWater
 extern MatWaterDraw mat_water_draw;
 void materials_set_water(int x360);
 int mat_water_enabled(void);
+int mat_water_port(void);         // NFS_WATER=port: the authored provider (water_port.m), fixed for the run
 char *mat_water_shader(const SmResult *pc, int stage, uint16_t input_int, uint16_t input_uint);
 int mat_water_constants(const SmResult *pcvs, const float (*vsc)[4], float out[32][4]);
 const uint8_t *mat_water_normal(uint32_t *w, uint32_t *h);

@@ -16,6 +16,10 @@ import math
 import os
 import sys
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -31,10 +35,10 @@ def shader(text, name):
                    for m in re.finditer(r'"(?:[^"\\]|\\.)*"|\b(?:X360\w+|PCS_\w+)\b', text))
 
 
-current = shader((ROOT / 'runtime/render_post.m').read_text(), 'x360_src')
+current = shader(mw_source(ROOT / 'runtime/render_post.m'), 'x360_src')
 # Pin the authored source fragment before generated, asset-dependent constants
 # are expanded. This baseline works in source archives and shallow checkouts.
-off_fragment = (ROOT / 'runtime/render_post.m').read_text().split(
+off_fragment = mw_source(ROOT / 'runtime/render_post.m').split(
     'static const char *x360_src =', 1)[1].split(';\n', 1)[0]
 assert hashlib.sha256(off_fragment.encode()).hexdigest() == \
     '28a9991888033be96741bd2f93fafdc983b87827cfe0b7d994b5b8b03b55a1bd', 'Off shader changed'

@@ -20,6 +20,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 RT = Path(__file__).resolve().parent
 ORIG_SET = '''static int e_SetTexture(Cpu *c) {              // (this, h, texture)
     Param *p = param_of(FX, arg(c, 1));
@@ -176,7 +180,7 @@ def render_guarded(text):
 def main():
     for s, h in ((ORIG_SET, ORIG_SET_SHA), (ORIG_SAMPLER, ORIG_SAMPLER_SHA), (ORIG_GPU, ORIG_GPU_SHA), (ORIG_GET, ORIG_GET_SHA)):
         assert sha(s) == h, 'pinned original changed'
-    fx = (RT / 'd3dx_effect.c').read_text()
+    fx = mw_source(RT / 'd3dx_effect.c')
     a, b = fx.index('static int e_SetTexture'), fx.index('static int e_GetTexture')
     assert 'set_object' in fx[a:b], 'e_SetTexture no longer holds the texture'
     broken = fx[:a] + ORIG_SET + fx[b:]
@@ -196,7 +200,7 @@ def main():
             print('FAIL: the original rim-mask store must fail'); return 1
         if build_rim(d, 'rim_fixed', rw) != 0:
             return 1
-    r = (RT / 'render.m').read_text()
+    r = mw_source(RT / 'render.m')
     assert render_guarded(r), 'render.m: gpu_tex or the sampler loop lacks the non-texture / 0x0 guard'
     g0, g1 = r.index('RenderTex *gpu_tex(Obj *t) {'), r.index('    RenderTex *g = t->gpu;')
     l0, l1 = r.index('        Obj *t = obj(dev.tex[s]);\n        if (t && t->kind'), r.index('        RenderTex *g = t ? gpu_tex(t) : NULL;\n        id<MTLTexture> tx')

@@ -40,16 +40,23 @@ static StreamKeyController *controller;
 
 void stream_key_close(void) {
     if(!panel) return;
-    NSTextView *editor=(NSTextView *)field.currentEditor;
-    editor.string=@"";
-    [editor.undoManager removeAllActions];
-    field.stringValue=@"";
-    [panel makeFirstResponder:nil];
-    NSWindow *parent=panel.sheetParent;
-    if(parent) [parent endSheet:panel];
-    [panel orderOut:nil];
-    panel.delegate=nil; field.delegate=nil;
-    panel=nil; field=nil; message=nil; controller=nil;
+    @autoreleasepool {
+        NSTextView *editor=(NSTextView *)field.currentEditor;
+        // Overwrite the reachable storage before releasing the editor/cell values.
+        NSUInteger length=editor.textStorage.length;
+        NSString *blank=[@"" stringByPaddingToLength:length withString:@" " startingAtIndex:0];
+        [editor.textStorage replaceCharactersInRange:NSMakeRange(0,length) withString:blank];
+        [editor.textStorage replaceCharactersInRange:NSMakeRange(0,length) withString:@""];
+        [editor.undoManager removeAllActions];
+        field.stringValue=[@"" stringByPaddingToLength:field.stringValue.length withString:@" " startingAtIndex:0];
+        field.stringValue=@"";
+        [panel makeFirstResponder:nil];
+        NSWindow *parent=panel.sheetParent;
+        if(parent) [parent endSheet:panel];
+        [panel orderOut:nil];
+        panel.delegate=nil; field.delegate=nil;
+        panel=nil; field=nil; message=nil; controller=nil;
+    }
 }
 static BOOL replaceKey(NSString *value) {
     // Validate the entire UTF-8 value; never truncate or normalize accepted bytes.
@@ -72,8 +79,10 @@ static BOOL replaceKey(NSString *value) {
 @implementation StreamKeyController
 - (void)save:(id)sender {
     (void)sender;
-    if(replaceKey(field.stringValue)) stream_key_close();
-    else message.stringValue=@"Enter 1–512 UTF-8 bytes without control characters.";
+    @autoreleasepool {
+        if(replaceKey(field.stringValue)) stream_key_close();
+        else message.stringValue=@"Enter 1–512 UTF-8 bytes without control characters.";
+    }
 }
 - (void)cancel:(id)sender { (void)sender; stream_key_close(); }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; stream_key_close(); return NO; }
@@ -145,8 +154,10 @@ int stream_key_route_event(NSEvent *event) {
             if(code==9 && editor) {
                 // Read only the plain string type. Dispatch to the active field
                 // editor directly; the application has no global Paste menu.
-                NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
-                if(text) [editor insertText:text replacementRange:editor.selectedRange];
+                @autoreleasepool {
+                    NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+                    if(text) [editor insertText:text replacementRange:editor.selectedRange];
+                }
             } else if(code==0) [editor selectAll:nil];
             return 1; // copy, cut, undo and services shortcuts stay blocked
         }
@@ -167,18 +178,22 @@ void stream_key_go(int unused) {
 }
 void stream_key_stop(int unused) {
     (void)unused;
-    livestream_stop(); cliprec_live_stop(); notice="Stopped";
+    stream_key_close();
+    cliprec_live_stop(); livestream_stop();
+    notice="Stopped";
 }
 void stream_key_forget(int unused) {
     (void)unused;
-    stream_key_close(); stream_key_stop(0);
-    erase(keyBytes,sizeof keyBytes); keySize=0; notice=NULL;
+    stream_key_close();
+    erase(keyBytes,sizeof keyBytes); keySize=0;
+    stream_key_stop(0); notice=NULL;
 }
 void stream_key_status(char *buf,int size) {
     int state=cliprec_live_state();
     char reason[80]; livestream_error_text(reason,sizeof reason);
     const char *text=state==1?"Starting":state==2?"Live":state==3?"Stopping":
         state==4?(reason[0]?reason:"Error: capture"):notice?notice:keySize?"Ready (Off)":"No key";
+    if(!state && notice && !strcmp(notice,"Stopped") && reason[0]) text=reason;
     if(state==1 || state==2) {
         int transport=livestream_status();
         if(transport!=1) text=reason[0]?reason:"Error: network";

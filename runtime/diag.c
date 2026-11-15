@@ -1,3 +1,7 @@
+#include "game_select.h"
+#include <stdint.h>
+static uint64_t diag_capture_late(uint64_t *from);
+#if NFS_GAME == NFS_GAME_MW
 // diag.c - diagnostic mode: one run records everything needed to diagnose it afterwards.
 //
 //   BOOT_DIAG=<dir> ./boot <game>
@@ -30,6 +34,7 @@
 // <dir>/crash.txt      the same on a crash, a stop on an unimplemented import/method, or a runtime error
 //
 // The last 64k events are always kept in memory (cheap) and written into hang/crash reports.
+#include "temporal_state.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
 #include <ctype.h>
@@ -190,6 +195,7 @@ static void load_symbols(void) {
 // A path ending in .jpg writes an overview: scaled down to at most 960 pixels wide, JPEG quality 0.8 (~50-100 KB
 // instead of several MB at 4K); anything else is a full-size PNG.
 void diag_png(const char *path, const void *bgra, uint32_t w, uint32_t h, uint32_t pitch, int keep_alpha) {
+    diag_capture_begin();
     size_t n = strlen(path);
     int small = n > 4 && !strcmp(path + n - 4, ".jpg");
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -224,6 +230,7 @@ void diag_png(const char *path, const void *bgra, uint32_t w, uint32_t h, uint32
     if (ctx) CGContextRelease(ctx);
     CFRelease(url);
     CGColorSpaceRelease(cs);
+    diag_capture_end();
 }
 
 const char *diag_symbol(uint32_t a, uint32_t *off) {
@@ -239,34 +246,7 @@ const char *diag_symbol(uint32_t a, uint32_t *off) {
 }
 
 // ---------------- reports ----------------
-static FILE *report_f;
-static volatile int bt_done;
-static void write_backtrace(FILE *f) {
-    void *pcs[96];
-    int n = backtrace(pcs, 96);
-    char **s = backtrace_symbols(pcs, n);
-    for (int i = 0; i < n; ++i) {
-        const char *fn = s ? strstr(s[i], "f_00") : NULL;
-        if (fn && strlen(fn) >= 10) {
-            uint32_t a = (uint32_t)strtoul(fn + 2, NULL, 16), off = 0;
-            const char *name = diag_symbol(a, &off);
-            fprintf(f, "  %s   [%s]\n", s[i], name ? name : "?");
-        } else {
-            fprintf(f, "  %s\n", s ? s[i] : "?");
-        }
-    }
-    free(s);
-}
-static volatile int sample_mode;          // SIGUSR2 from the slow-frame profiler: record the stack, write nothing
-static void *sample_pcs[64];
-static volatile int sample_n;
-static void bt_signal(int sig) {
-    (void)sig;
-    if (sample_mode) { sample_n = backtrace(sample_pcs, 64); bt_done = 1; return; }
-    if (report_f) { fprintf(report_f, "\n-- host thread %p --\n", (void *)pthread_self()); write_backtrace(report_f); fflush(report_f); }
-    bt_done = 1;
-}
-int threads_list(pthread_t *ths, Cpu **cpus, uint32_t *tids, int cap);   // threads.c
+#include "diag_threads.h"
 
 void threads_wait_desc(uint32_t tid, char *buf, size_t n);   // threads.c
 static void guest_state(FILE *f, Cpu *c, uint32_t tid) {
@@ -305,17 +285,9 @@ void diag_report(const char *file, const char *why) {
     report_f = f;
     fprintf(f, "\n-- reporting thread --\n");
     write_backtrace(f);
-    pthread_t ths[64];
     Cpu *cpus[64];
     uint32_t tids[64];
-    int n = threads_list(ths, cpus, tids, 64);
-    signal(SIGUSR2, bt_signal);
-    for (int i = 0; i < n; ++i) {
-        if (pthread_equal(ths[i], pthread_self())) continue;
-        bt_done = 0;
-        if (pthread_kill(ths[i], SIGUSR2) == 0)
-            for (int k = 0; k < 200 && !bt_done; ++k) usleep(5000);
-    }
+    int n = report_thread_backtraces(cpus, tids);
     for (int i = 0; i < n; ++i) if (cpus[i]) guest_state(f, cpus[i], tids[i]);
     dump_ring(f, 4000);
     report_f = NULL;
@@ -547,7 +519,7 @@ static void *hang_monitor(void *p) {
     for (unsigned tick = 1;; ++tick) {
         profile_wait_100ms();
         // stall: a frame late by more than BOOT_DIAG_STALL ms (but not yet a hang): one report while it lasts
-        uint64_t last, late = framelate_ns(&last_frame_ns, host_ticks, &last);   // stamp before clock (framelate.h)
+        uint64_t last, late = diag_capture_late(&last);   // stamp before clock (framelate.h)
         if (stall_ms > 0 && !diag_is_idle() && frame_now > 600 && late > (uint64_t)stall_ms * 1000000ull && stall_at != last && stalls < 5) {
             stall_at = last;
             char file[64], why[128];
@@ -565,7 +537,7 @@ static void *hang_monitor(void *p) {
             FILE *f = fopen(tmp, "w");
             if (f) { boot_write_call_counts(f); fclose(f); rename(tmp, path); }
         }
-        late = framelate_ns(&last_frame_ns, host_ticks, &last);
+        late = diag_capture_late(&last);
         uint64_t now = host_ticks();
         // a hang that lasts gets a second and third report 10 s apart: a thread that loops shows a different
         // stack in each, one that's blocked the same
@@ -904,6 +876,7 @@ static void gchar_watch(void) {
     }
 }
 void diag_frame(uint64_t frame, uint64_t draws) {
+    if (temporal_state_requested) temporal_guest_frame(frame);
     diag_idle(0);
     uint64_t now = host_ticks(), prev = last_frame_ns;
     frame_now = frame;
@@ -1352,7 +1325,7 @@ unsigned diag_car1[4];   // this frame: view-1 CarRenderInfo::Render calls, true
 static inline float car_f32(uint32_t a) { float f; memcpy(&f, G + a, 4); return f; }
 FILE *dump_file(void);
 void f_0074E160_orig(Cpu *c);
-void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags, p8, reflection, float, min LOD, max LOD)
+void materials_car_diagnostics(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags, p8, reflection, float, min LOD, max LOD)
     if (!diag_on && !underglow_light_enabled()) { f_0074E160_orig(c); return; }
     UGCarCapture light_capture;
     underglow_light_begin(c, &light_capture);
@@ -1380,7 +1353,7 @@ void f_0074E160(Cpu *c) {   // thiscall bool Render(view, pos, m, m, m, m, flags
     else if (vid == 4) ++diag_car1[3];
 }
 void f_007387E0_orig(Cpu *c);
-void f_007387E0(Cpu *c) {   // thiscall void RenderPart(view, CarPartModel *, bMatrix4 *, eDynamicLightContext *, flags)
+void materials_car_part_diagnostics(Cpu *c) {   // RenderPart diagnostics; materials.m owns the scoped pose hook
     if (diag_on) underglow_render_part(c);
     FILE *df = diag_on ? dump_file() : NULL;
     if (df) {
@@ -1817,4 +1790,36 @@ void f_00753060(Cpu *c) {
     f_00753060_orig(c);
     diag_event("carpack: AllocateSkinLayers count %d room %d pack %s -> %d", (int)n, (int)room, nm ? gptr(nm) : "(null)",
                (int)c->eax);
+}
+
+#else
+#include "game_overlay_diagnostics.inc"
+#endif
+
+
+// Only synchronous diagnostic work on the game thread pauses the watchdog.
+// Background PNG encoding must never excuse a game stall. Nested texture/PNG
+// captures charge their elapsed time once, retaining all non-capture time.
+static unsigned capture_epoch;
+static unsigned capture_depth;          // main thread only
+static uint64_t capture_start;
+void diag_capture_begin(void) {
+    if (!diag_on || !pthread_main_np()) return;
+    if (capture_depth++ == 0) {
+        __atomic_fetch_add(&capture_epoch, 1, __ATOMIC_ACQ_REL);
+        capture_start = host_ticks();
+    }
+}
+void diag_capture_end(void) {
+    if (!diag_on || !pthread_main_np()) return;
+    if (--capture_depth == 0) {
+        __atomic_fetch_add(&last_frame_ns, host_ticks() - capture_start, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&capture_epoch, 1, __ATOMIC_RELEASE);
+    }
+}
+static uint64_t diag_capture_late(uint64_t *from) {
+    unsigned epoch = __atomic_load_n(&capture_epoch, __ATOMIC_ACQUIRE);
+    uint64_t late = framelate_ns(&last_frame_ns, host_ticks, from);
+    // A capture that began or ended during the sample invalidates it too.
+    return (epoch & 1) || epoch != __atomic_load_n(&capture_epoch, __ATOMIC_ACQUIRE) ? 0 : late;
 }

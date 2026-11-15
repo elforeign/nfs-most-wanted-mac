@@ -1,3 +1,5 @@
+#include "game_select.h"
+#if NFS_GAME == NFS_GAME_MW
 // settings_port.c - the port's own settings in the F10 menu (settings.h): the NFS_* switches that make sense to
 // users, live where the code allows it. Other branches register theirs the same way from their own files.
 #include <math.h>
@@ -17,6 +19,7 @@
 #include "realworld_materials.h"
 #include "particles_physical.h"
 #include "traffic_detail.h"
+#include "rain_cover.h"
 #include "roots.h"            // X360_ENGINE_CONSTS / X360E_MIRROR_WORLD (gen/x360_engine.inc)
 #include "posaudio.h"
 #include "../host/audio/dsound_host.h"
@@ -34,8 +37,8 @@ void materials_set_rain_ripples(int x360);
 void materials_set_parallax(int x360);
 void materials_set_car_glass(int x360);
 void materials_set_headlamp_glass(int clear);
-void materials_set_car_normals(int x360);
-void materials_set_car_flake(int x360);
+void materials_set_car_normals(int mode);
+void materials_set_car_flake(int mode);
 void materials_set_grass(int x360);
 void materials_set_water(int x360);
 void materials_set_building_glass(int x360);
@@ -306,20 +309,23 @@ static void headlamp_apply(int v) { materials_set_headlamp_glass(v == 1); }
 static Setting s_headlamp = {.id = "graphics.headlamp_glass", .category = SET_PICTURE, .order = 65, .label = "Headlamp glass",
     .help = "Retail keeps the original lamp shading. Clear makes headlamp covers transparent over their reflectors; native PC glass stays unchanged.",
     .type = SET_CHOICE, .choices = kHeadlamp, .values = kHeadlampV, .nchoices = 2, .def = 1, .env = "NFS_HEADLAMP_GLASS", .apply = headlamp_apply};
-static void carnm_apply(int v) { materials_set_car_normals(v == 1); }
+static void carnm_apply(int v) { materials_set_car_normals(v); }
+static const char *const kCarnm[] = {"PC", "X360", "Port"}, *const kCarnmV[] = {"pc", "x360", "port"};
 static Setting s_carnm = {.id = "graphics.car_normals", .category = SET_CARS, .order = 30, .label = "Tyre and badge detail",
-    .help = "X360 adds the console's bump detail to tyre sidewalls, tread and badges (needs the X360 car paint on); PC keeps them flat.",
-    .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_CAR_NORMALMAPS", .apply = carnm_apply};
-static void flake_apply(int v) { materials_set_car_flake(v == 1); }
+    .help = "X360 adds the console's bump detail to tyre sidewalls, tread and badges (needs the X360 car paint on); PC keeps them flat. Port also adds tread grooves generated from the PC files where the console files are missing.",
+    .type = SET_CHOICE, .choices = kCarnm, .values = kCarnmV, .nchoices = 3, .def = 1, .env = "NFS_CAR_NORMALMAPS", .apply = carnm_apply};
+static const char *const kFlake[] = {"PC", "X360", "Generated"};
+static const char *const kFlakeV[] = {"pc", "x360", "generated"};
+static void flake_apply(int v) { materials_set_car_flake(v); }
 static Setting s_flake = {.id = "graphics.car_flake", .category = SET_CARS, .order = 35, .label = "Paint flake",
-    .help = "X360 adds the console's fine sparkle to metallic and pearl paint, rims and hoses close to the camera (needs the X360 car paint on); PC keeps them smooth.",
-    .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_CAR_FLAKE", .apply = flake_apply};
+    .help = "X360 uses console noise. Generated adds enlarged metallic grains close to the camera without extra files. PC keeps paint smooth; needs enhanced car paint and shadows.",
+    .type = SET_CHOICE, .choices = kFlake, .values = kFlakeV, .nchoices = 3, .def = 1, .env = "NFS_CAR_FLAKE", .apply = flake_apply};
 static void grass_apply(int v) { materials_set_grass(v == 1); }
 static void trees_apply(int v) { materials_set_trees(v == 1); }
 static Setting s_trees = {.id = "graphics.trees", .category = SET_WORLD, .order = 55, .label = "Tree shading",
     .help = "PC lights tree leaves by their flat faces, X360 shades each tree as a soft ball with a lit side and a brighter shade (trees without X360 data keep PC).",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_TREES", .apply = trees_apply};
-static void water_apply(int v) { materials_set_water(v == 1); }
+static void water_apply(int v) { materials_set_water(v != 0); }   // the provider (X360 or Port) is fixed at start
 static void particles_apply(int v) {
     materials_set_particles(v != 2);
     particles_physical_set(v == 1);
@@ -333,13 +339,15 @@ static void aux_apply(int v) { auxlights_set_enabled(v == 1); }
 static Setting s_aux = {.id = "graphics.scenery_lights", .category = SET_WORLD, .order = 45, .label = "Scenery lights",
     .help = "PC keeps the original scenery lighting, while X360 adds tunnel and road lights on exactly matched scenery (unmatched scenery keeps PC lighting).",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_AUX_LIGHTS", .apply = aux_apply};
+static const char *const kWater[] = {"PC", "X360", "Port"}, *const kWaterV[] = {"pc", "x360", "port"};
 static Setting s_water = {.id = "graphics.water", .category = SET_WORLD, .order = 60, .label = "Water",
-    .help = "PC shows animated water, X360 adds wave normals, reflections and sun highlights on sea and ponds at the cost of a reflection pass near water.",
-    .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_WATER", .apply = water_apply};
-static void bglass_apply(int v) { materials_set_building_glass(v == 1); }
+    .help = "PC shows animated water. X360 (complete console files) adds wave normals, reflections and sun highlights; Port adds its own wave normals and reflections and is the default without console files. Both cost a reflection pass near water. Restart after changing provider.",
+    .type = SET_CHOICE, .choices = kWater, .values = kWaterV, .nchoices = 3, .def = 1, .env = "NFS_WATER", .restart = 1, .apply = water_apply};
+static void bglass_apply(int v) { materials_set_building_glass(v != 0); }   // the provider (X360 or Port) is fixed at start
+static const char *const kBglass[] = {"PC", "X360", "Port"}, *const kBglassV[] = {"pc", "x360", "port"};
 static Setting s_bglass = {.id = "graphics.building_glass", .category = SET_WORLD, .order = 70, .label = "Building glass",
-    .help = "PC slides a reflection with the view, X360 reflects by viewing angle with Fresnel edges and sun glints (car glass is separate).",
-    .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_BUILDING_GLASS", .apply = bglass_apply};
+    .help = "PC slides a reflection with the view, X360 (complete console files) reflects by viewing angle with Fresnel edges and sun glints, Port keeps PC glass with the reflection laid over each building's height (the default without console files). Car glass is separate. Restart after changing provider.",
+    .type = SET_CHOICE, .choices = kBglass, .values = kBglassV, .nchoices = 3, .def = 1, .env = "NFS_BUILDING_GLASS", .restart = 1, .apply = bglass_apply};
 static Setting s_grass = {.id = "graphics.grass", .category = SET_WORLD, .order = 50, .label = "Grass",
     .help = "PC draws flat grass, X360 adds five layers on nearby grass and one in the distance, and missing grass assets keep the PC draw.",
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_GRASS", .apply = grass_apply};
@@ -354,10 +362,15 @@ static void reflection_apply(int v) { x360_set_reflection(v == 0); }
 static Setting s_refl = {.id = "graphics.road_reflection", .category = SET_WORLD, .order = 90, .label = "Road reflection",
     .help = "How sharp the reflection on wet roads is, the X360's half-screen resolution or the PC's 320x240.", .type = SET_CHOICE, .choices = kRefl, .values = kX360PcV, .nchoices = 2,
     .env = "NFS_ROAD_REFLECTION", .apply = reflection_apply};
-static void ripples_apply(int v) { materials_set_rain_ripples(v == 0); }
+static void ripples_apply(int v) { materials_set_rain_ripples(v != 1); }
+static Setting s_rain_cover = {.id = "graphics.rain_cover", .category = SET_WORLD, .order = 103,
+    .label = "Rain stays out from under roofs", .help = "Use nearby solid roofs to shelter rain, lens drops and road ripples. Wet roads dry at their usual rate.",
+    .type = SET_TOGGLE, .def = 1, .env = "NFS_RAIN_COVER", .apply = rain_cover_set};
+static const char *const kRipples[] = {"X360", "PC", "Port"};
+static const char *const kRipplesV[] = {"x360", "pc", "port"};
 static Setting s_ripples = {.id = "graphics.rain_ripples", .category = SET_WORLD, .order = 100, .label = "Rain ripples",
-    .help = "X360 ripples wet roads with raindrop rings, while PC leaves a still reflection.",
-    .type = SET_CHOICE, .choices = kX360Pc, .values = kX360PcV, .nchoices = 2, .env = "NFS_RAIN_RIPPLES", .live_from_default = 1,
+    .help = "Wet-road raindrop rings. X360 uses complete console files; Port uses authored frames. PC keeps a still reflection. Restart after changing provider.",
+    .type = SET_CHOICE, .choices = kRipples, .values = kRipplesV, .nchoices = 3, .env = "NFS_RAIN_RIPPLES", .restart = 1,
     .apply = ripples_apply};
 static const char *const kRoadFilm[] = {"Retail", "Water film"};
 static const char *const kRoadFilmV[] = {"0", "1"};
@@ -372,7 +385,7 @@ static Setting s_parallax = {.id = "graphics.parallax", .category = SET_WORLD, .
 static const char *const kDrops[] = {"X360", "PC", "PC, before post"}, *const kDropsV[] = {"x360", "pc", "pc_before"};
 static void drops_apply(int v) { x360_post_set_raindrops(v == 0 ? 2 : v == 1 ? 1 : 0); }
 static Setting s_drops = {.id = "graphics.raindrops", .category = SET_WORLD, .order = 105, .label = "Raindrops on the lens",
-    .help = "Drops on the lens in rain: X360 draws the console's after post-processing, PC the PC's after it, and PC, before post, as the PC drew them.",
+    .help = "Drops on the lens in rain: X360 draws after post-processing, using the port's own optics when no console textures are installed. PC uses the original drops.",
     .type = SET_CHOICE, .choices = kDrops, .values = kDropsV, .nchoices = 3, .env = "NFS_RAINDROPS", .apply = drops_apply};
 static const char *const kSpeedBlur[] = {"Off", "X360", "Strong"}, *const kSpeedBlurV[] = {"off", "x360", "strong"};
 static void speed_blur_apply(int v) { x360_post_set_speed_blur(v); }
@@ -716,7 +729,7 @@ __attribute__((constructor)) static void settings_port_register(void) {
     REG(s_replay_arm); REG(s_replay_save); REG(s_replay_key_enabled); REG(s_replay_key); REG(s_replay_pad);
     REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);
     REG(s_vrr);
-    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_traffic); REG(s_headlamp); REG(s_real_materials); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
+    REG(s_postfx); REG(s_speedblur); REG(s_glow); REG(s_bloomsurf); REG(s_high); REG(s_band); REG(s_tone); REG(s_paint); REG(s_glass); REG(s_traffic); REG(s_headlamp); REG(s_real_materials); REG(s_carnm); REG(s_flake); REG(s_grass); REG(s_trees); REG(s_water); REG(s_bglass); REG(s_aux); REG(s_particles); REG(s_worldlight); REG(s_refl); REG(s_ripples); REG(s_rain_cover); REG(s_roadfilm); REG(s_parallax); REG(s_drops); REG(s_mirror); REG(s_mirrorsize); REG(s_mirrordetail); REG(s_mirrorview); REG(s_mirrorfog); REG(s_mirrormsaa); REG(s_detail); REG(s_stream); REG(s_hdtex); REG(s_uitex); REG(s_fit);
     REG(s_look_data); REG(s_look_contact); REG(s_look_smoke); REG(s_look_fog); REG(s_look_mirror_art);
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     REG(s_look_reflections); REG(s_look_later_textures); REG(s_addcar_weight);
@@ -728,3 +741,6 @@ __attribute__((constructor)) static void settings_port_register(void) {
     REG(h_log); REG(s_full); REG(s_logs); REG(s_quit); REG(s_restart);
     REG(h_cash); REG(s_cash20); REG(s_cash50); REG(s_cash100); REG(s_cash_amount);
 }
+#else
+#include "game_settings.inc"
+#endif

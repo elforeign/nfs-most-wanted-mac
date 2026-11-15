@@ -212,6 +212,7 @@ def main():
     code, stubs = decoder()
     diag = (ROOT / 'runtime/diag.c').read_text()
     wrapper = diag[diag.index('\nunsigned diag_car1[4];') + 1:diag.index('void f_007387E0_orig')]
+    wrapper = wrapper.replace('materials_car_diagnostics', 'f_0074E160')
     assert 'if (!diag_on && !underglow_light_enabled()) { f_0074E160_orig(c); return; }' in wrapper
     source = (ROOT / 'runtime/diag_car.c').read_text()
     cars = (ROOT / 'runtime/car85.c').read_text()

@@ -26,14 +26,16 @@ def _identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
-def preparation_key(content, pc, inventory, toolchain, extras=None):
+def preparation_key(content, pc, inventory, toolchain, extras=None, game="mw"):
     # Snapshot converters import each other, including audit helpers. Include the
     # entire shipped snapshot set so a transitive helper cannot silently change.
     converters = {p: h for p, h in inventory.items() if p.startswith("tools_snapshot/") or
                   p in {"tools/setup_kit/x360.py", "tools/setup_kit/xdvdfs.py", "tools/setup_kit/huff.py",
-                        "tools/setup_kit/x360_cache.py", "tools/setup_kit/x360_extras.py", "runtime/huff.h"}}
+                        "tools/setup_kit/x360_cache.py", "tools/setup_kit/x360_extras.py", "runtime/huff.h",
+                        "tools/setup_kit/carbon_x360.py", "tools/setup_kit/car_sources.py"}}
     return _identity(dict(version=CONVERTER_VERSION, x360=content, pc=pc, converters=converters,
-                          toolchain=toolchain, **x360_extras.identity(extras)))
+                          toolchain=toolchain, **x360_extras.identity(extras),
+                          **({} if game == "mw" else {"game": game})))
 
 
 def _roots(data, relative):

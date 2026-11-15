@@ -1,3 +1,4 @@
+#include "game_bindings.h"
 // render.m - Direct3D 9 draw calls on Metal.
 //
 // Shaders: the game's SM1-3 bytecode is translated to MSL by port/host/shaders (sm_translate) and compiled once
@@ -17,10 +18,19 @@
 #include "lampbatch.h"
 #include "alpha_to_coverage.h"
 #include "roadfilm.h"
+#include "rain_cover.h"
 #include "underglow_render.h"
+#include "headlights.h"
 #include "realworld_materials.h"
+#include "clearcoat.h"
+#include "paint_flake.h"
+#include "car_normals_port.h"
 #include "particles_physical.h"
 #include "soft_smoke_half.h"
+#if NFS_GAME == NFS_GAME_MW
+#include "daynight_sky.h"
+#include "daynight_stream.h"
+#endif
 #define HDRCLIP_COPY_TEST 1
 #include "hdrclip.m" // diagnostic counter module, owned by this translation unit
 #include "gen/x360_shader_lits.inc"   // X360F_KMAXDIST_WORLD (the X360 fog distance, from the player's ZZDATA0.BIN)
@@ -132,11 +142,15 @@ static uint64_t soft_depth_frame;
 static id<MTLTexture> soft_depth;
 static id<MTLTexture> soft_copy_depth;
 static uint64_t soft_late_done;
+#if NFS_GAME == NFS_GAME_MW
 static int soft_smoke_late_on(void) {
     static int early=-1;if(early<0)early=getenv("NFS_TEST_SOFT_SMOKE_EARLY")!=NULL;
     static int split=-1;if(split<0){const char *p=getenv("NFS_PADS");split=p&&!strcmp(p,"2");}
     return !early && !split && x360_post_chain_on() && M32(0x00925E90u)==6 && M32(0x00901828u) && M32(0x00982AF0u) && M8(0x008F9B5Cu);
 }
+#else
+static int soft_smoke_late_on(void) { return (int){0}; }
+#endif
 static int soft_smoke_diag_enabled(void) {
     if (!diag_on) return 0;
     static int on = -1;
@@ -169,11 +183,15 @@ static int soft_smoke_on(void) {
     }
     return particles_physical_enabled() && on;
 }
+#if NFS_GAME == NFS_GAME_MW
 int render_soft_depth_store(void) {
     if(!soft_smoke_on() || M32(0x00925E90u)!=6 || surface_rt(dev.rt[0])!=&bb_rt)return 0;
     if(soft_smoke_late_on())return soft_late_done==frame_serial?0:1;
     return soft_depth_valid && soft_depth_frame==frame_serial ? 2 : 1;
 }
+#else
+int render_soft_depth_store(void) { return (int){0}; }
+#endif
 static int soft_smoke_cost_enabled(void) {
     if(!diag_on)return 0;
     static int enabled=-1;if(enabled<0)enabled=getenv("BOOT_DIAG_SOFT_SMOKE_COST")!=NULL;
@@ -185,8 +203,14 @@ static void soft_smoke_cost_note(int material) {
     if(noted==frame_serial){++draws;return;}
     if(noted)diag_event("particle draw count: frame %llu draws %u",(unsigned long long)noted,draws);
     noted=frame_serial;draws=1;
+#if NFS_GAME == NFS_GAME_MW
     diag_event("soft smoke cost: frame %llu sim %.6f on %d held %d",(unsigned long long)frame_serial,MF32(0x009885D8u),soft_smoke_on(),
         postfx_look_variant("softon")||postfx_look_variant("softoff"));
+#else
+    diag_event("soft smoke cost: frame %llu sim unavailable on %d held %d",
+        (unsigned long long)frame_serial,soft_smoke_on(),
+        postfx_look_variant("softon")||postfx_look_variant("softoff"));
+#endif
 }
 // Separate target: never sample a depth attachment while it is being rendered.
 // MSAA keeps the nearest sample, avoiding sample-0 holes along opaque silhouettes.
@@ -225,10 +249,17 @@ static void ssao_diag_frame(void) {
             draw_ns=draw_ns*ssao_diag_scene_calls/ssao_diag_scene_samples;
             setup_ns=setup_ns*ssao_diag_scene_calls/ssao_diag_scene_samples;
         }
+#if NFS_GAME == NFS_GAME_MW
         fprintf(f,"%llu,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%llu\n",
             (unsigned long long)serial,MF32(0x009885D8u),draw_ns/1e6,
             setup_ns/1e6,ssao_diag_record_ns/1e6,ssao_diag_replay_ns/1e6,
             ssao_diag_post_ns/1e6,(unsigned long long)ssao_diag_draws);
+#else
+        fprintf(f,"%llu,unavailable,%.6f,%.6f,%.6f,%.6f,%.6f,%llu\n",
+            (unsigned long long)serial,draw_ns/1e6,setup_ns/1e6,
+            ssao_diag_record_ns/1e6,ssao_diag_replay_ns/1e6,
+            ssao_diag_post_ns/1e6,(unsigned long long)ssao_diag_draws);
+#endif
         if(serial%120==0)fflush(f);
     }
     serial=frame_serial;
@@ -240,6 +271,9 @@ static RenderTex *ssao_target(void) { return ssao_cpu_reference_record?&ssao_cpu
 static id<MTLTexture> ssao_depth;
 static uint64_t ssao_serial;
 static int ssao_replay;
+#if NFS_GAME == NFS_GAME_PRIVATE
+static uint32_t ssao_replay_dst=1; // coverage destination factor: 1 erases, 6 keeps what the draw's own alpha leaves
+#endif
 static id ssao_rec;
 static uint64_t ssao_cleared;
 static int ssao_tree_fringe;
@@ -505,13 +539,15 @@ RenderTex *gpu_tex(Obj *t) {
     return g;
 }
 
-// Static vertex/index buffers (no D3DUSAGE_DYNAMIC) live in a Metal buffer, re-uploaded after Unlock.
+// Static vertex/index buffers (no D3DUSAGE_DYNAMIC) live in a Metal buffer, re-uploaded after a writable Lock or Unlock.
 typedef struct { id<MTLBuffer> buf; uint64_t used; } RenderBuf;
 static id<MTLBuffer> gpu_buf(Obj *b) {
     if (!b || (b->usage & 0x200)) return nil;
     RenderBuf *g = b->gpu;
     if (!g) { g = calloc(1, sizeof *g); b->gpu = g; b->dirty = 1; }
     if (b->dirty || !g->buf) {
+        if (diag_on && b->dirty == 2 && g->buf && g->buf.length >= b->size && memcmp(g->buf.contents, G + b->mem[0], b->size))
+            diag_event("buffer %08X (%u bytes) changed with no Unlock: uploaded after its Lock", b->guest, b->size);
         if (!g->buf || g->buf.length < b->size || in_flight(g->used)) {
             if (g->buf && g->buf.length >= b->size) ++stat_renamed;
             if (g->buf) live_buf_bytes -= (int64_t)g->buf.length; else ++live_buf;
@@ -593,6 +629,11 @@ int render_hdr_output_enabled(void);
 
 static void render_lazy_warm(void);
 static void render_clear_warm(unsigned first);
+#if NFS_GAME == NFS_GAME_MW
+#include "water_port.h"
+static id<MTLComputePipelineState> water_port_pso;   // NFS_WATER=port wave kernel, compiled at load (render_init)
+static id<MTLTexture> water_port_tex;
+#endif
 void render_init(void) {
     if (!mtl) return;
     render_hdr_output_init();
@@ -655,6 +696,20 @@ void render_init(void) {
         diag_event("float_scene_test: normal=%d mutant=%d expected=0/1 %s",good,bad,good==0&&bad==1?"PASS":"FAIL");
     }
     uint64_t pipeline_load_start = diag_on ? host_ticks() : 0;
+#if NFS_GAME == NFS_GAME_MW
+    materials_ripples_prepare();
+    if (mat_water_port()) {                // the authored water's wave kernel and maps, before any frame
+        NSError *err = nil;
+        id<MTLLibrary> lib = [mtl newLibraryWithSource:@(water_port_kernel()) options:nil error:&err];
+        id<MTLFunction> fn = [lib newFunctionWithName:@"port_water_waves"];
+        water_port_pso = fn ? [mtl newComputePipelineStateWithFunction:fn error:&err] : nil;
+        if (!water_port_pso) fprintf(stderr, "boot: water: port wave kernel failed, PC water kept: %s\n", err.localizedDescription.UTF8String);
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:256 height:256 mipmapped:YES];
+        d.textureType = MTLTextureType2DArray; d.arrayLength = 4;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; d.storageMode = MTLStorageModePrivate;
+        water_port_tex = water_port_pso ? [mtl newTextureWithDescriptor:d] : nil;
+    }
+#endif
     shader_cache_warm();
     ff_shader_warm();
     render_contact_warm();
@@ -668,9 +723,16 @@ void render_init(void) {
     // Scene PSOs then continue on the same pool while game loading advances.
     for (int i = 0; i < 4; ++i) dispatch_sync(shader_workers[i], ^{});
     for (int i = 0; i < nshaders; ++i) pipeline_register_shader(shaders[i]->key, shaders[i]->fn);
+#if NFS_GAME == NFS_GAME_MW
+    pipeline_history_open(userdata_dir());
+#endif
     pipeline_prewarm(shader_workers, bb_rt.ms ? bb_rt.ms.sampleCount : 1);
     if (diag_on) diag_event("pipeline_prewarm: loading_ms=%.3f", (host_ticks()-pipeline_load_start)/1e6);
+#if NFS_GAME == NFS_GAME_MW
     pipeline_loading_done();
+#else
+#include "game_pipeline_loading.inc"
+#endif
     if (diag_on) diag_event("shader_compile: load_ready=%d frame_sync=%llu", nshaders, stat_sync_shader);
 }
 
@@ -707,6 +769,17 @@ void render_resize(void) {
         fprintf(stderr, "boot: render: %ux MSAA back buffer and depth, %lld MB\n", samples, (long long)(msaa_bytes >> 20));
     }
     pass_dirty = 1;
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+    id<MTLCommandBuffer> initial=[queue commandBuffer];
+    MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture=bb_rt.ms ?: backbuffer_tex;
+    rp.colorAttachments[0].loadAction=MTLLoadActionClear;
+    rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+    rp.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,1);
+    [[initial renderCommandEncoderWithDescriptor:rp] endEncoding];[initial commit];
+    bb_rt.stale=bb_rt.ms!=nil;
+#endif
 }
 
 // BEGIN float scene routing (float_scene_test.py executes these production helpers).
@@ -714,6 +787,9 @@ void render_resize(void) {
 // it so enc_ms pointers, on-store resolves, pending clears and read histories keep
 // their original contract.
 void render_float_scene_begin(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_hdr_begin.inc"
+#endif
     if(fs_active || fs_serial==frame_serial)return;
     int floating=float_scene_on && !(diag_on && postfx_look_variant("floatoff"));
     if(!floating)return;
@@ -738,6 +814,9 @@ void render_float_scene_begin(void) {
     fs_active=1;fs_serial=frame_serial;pass_dirty=1;
 }
 void render_float_scene_final(int preserve) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_hdr_compose.inc"
+#endif
     if(preserve && fs_composing) {
         if(!fs_toned) {
             // A guest/untreated fallback also finishes its world tone before
@@ -786,6 +865,9 @@ void render_float_scene_final(int preserve) {
 float render_hdr_composition_headroom(void) { return fs_composing?fs_headroom:1; }
 void render_hdr_scene_treated(void) { if(fs_composing)fs_toned=1; }
 void render_float_scene_present_end(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_hdr_present_end.inc"
+#endif
     if(!fs_composing)return;
     fs_composite_rt=bb_rt;bb_rt=fs_display_rt;backbuffer_tex=bb_rt.tex;
     fs_composing=fs_hud=0;pass_dirty=1;
@@ -806,8 +888,12 @@ static void float_scene_copy(uint32_t dst,MTLPixelFormat format) {
     if(format==MTLPixelFormatBGRA8Unorm && (t->fmt==32 || t->fmt==33))format=MTLPixelFormatRGBA8Unorm;
     RenderTex *g=t?gpu_tex(t):NULL;
     if(!g || !g->rt)return;
+#if NFS_GAME == NFS_GAME_MW
     if(g->tex.width!=dev.pp[0] || g->tex.height!=dev.pp[1])return;
     NSUInteger w=dev.pp[0],h=dev.pp[1];
+#else
+#include "game_hdr_promote_size.inc"
+#endif
     if(g->tex.width==w && g->tex.height==h && g->tex.pixelFormat==format)return;
     if(g->tex.pixelFormat!=MTLPixelFormatBGRA8Unorm && g->tex.pixelFormat!=MTLPixelFormatRGBA8Unorm && g->tex.pixelFormat!=MTLPixelFormatRGBA16Float)return;
     end_pass();msaa_resolve(g);
@@ -829,6 +915,9 @@ static void float_scene_copy(uint32_t dst,MTLPixelFormat format) {
     if(g->ms)g->stale=1;
 }
 void render_float_scene_post_target(uint32_t surface) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_hdr_target.inc"
+#endif
     if(float_scene_on)float_scene_copy(surface,fs_composing?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm);
 }
 // END float scene routing
@@ -957,10 +1046,14 @@ static void lamp_flush(int why) {
     lamp_n = 0; lamp_z = nil;
     lamp_flushing = 0;
 }
+#if NFS_GAME == NFS_GAME_MW
 static int ssao_can_record(void) {
     return x360_post_ssao_enabled() && x360_post_chain_on() && M32(0x00925E90u)==6 &&
         M32(0x00901828u) && M32(0x00982AF0u) && M8(0x008F9B5Cu);
 }
+#else
+static int ssao_can_record(void) { return (int){0}; }
+#endif
 static const MTLSamplePosition ssao_samples[4]={{.25f,.25f},{.75f,.25f},{.25f,.75f},{.75f,.75f}};
 // A half-res four-sample grid retains the original 2x2 pixel centers. D16
 // depth is padded by one quantization step to keep rejection conservative.
@@ -1055,6 +1148,11 @@ id<MTLTexture> render_ssao_coverage(id<MTLTexture> depth, int allow_cuts) {
 id<MTLTexture> render_ssao_cpu_reference_coverage(void){return ssao_proof()?ssao_cpu_reference_mask.tex:nil;}
 id<MTLTexture> render_ssao_reference_coverage(void){return ssao_proof()?ssao_reference_mask.tex:nil;}
 static void begin_pass(void) {
+    if(headlights_casting()) {
+        if(enc&&!pass_dirty)return;
+        end_pass();ensure_cmd();enc=headlights_encoder(cmd);
+        enc_samples=1;memset(&eb,0,sizeof eb);pass_dirty=0;return;
+    }
     if (ssao_replay==2) return;
 
     if (lamp_replay == 2) return;    // recording: enc is the recorder (lamp_record)
@@ -1196,10 +1294,10 @@ static int soft_smoke_snapshot(id<MTLTexture> z) {
         else if (inv.selector==@selector(setFragmentBytes:length:atIndex:)) {
             const void *bytes;NSUInteger length,index;
             [inv getArgument:&bytes atIndex:2];[inv getArgument:&length atIndex:3];[inv getArgument:&index atIndex:4];
-            if(index==MAT_PS_BUF && length==sizeof(MatConsts)) {
-                MatConsts k;memcpy(&k,bytes,sizeof k);k.k[1][3]=i==3 || (late_control && i<2);
+            if(index==MAT_PS_BUF && (length==MAT_CONST_BASE_BYTES || length==sizeof(MatConsts))) {
+                MatConsts k;memcpy(&k,bytes,length);k.k[1][3]=i==3 || (late_control && i<2);
                 if(late_control && i==4)k.k[3][3]=0;
-                [e setFragmentBytes:&k length:sizeof k atIndex:index];
+                [e setFragmentBytes:&k length:length atIndex:index];
             } else [inv invokeWithTarget:e];
         } else [inv invokeWithTarget:e];
     }
@@ -1690,16 +1788,21 @@ void render_ripple_warm(void) { if (mtl) ripple_texture(); }   // the first comp
 // with `min r, r, cN.c` where `def cN` holds the literal 2500; the X360 clamps view depth at kMaxDist
 // (render_diff x360_port_candidates #2; X360F_KMAXDIST_WORLD, generated). x360 raises the literal to it in a copy of the bytecode before sm_translate:
 // distant haze and the skyline fog deeper, near fog is unchanged. The mirror runs the same vertex shaders.
+#if NFS_GAME == NFS_GAME_MW
 static int fog_x360(void) {
     static int v = -1;
     if (v < 0) { const char *e = getenv("NFS_FOG"); v = !(e && !strcmp(e, "pc")); }
     return v;
 }
+#else
+static int fog_x360(void) { return 0; }
+#endif
 // The 11 shaders' literal sits in different registers and components (c14-c19, .y/.z/.w; D3DX defs carry the
 // .xyzw write mask: dst token 0xA00F00nn), and 10 of them are vs_1_1, whose opcode tokens have no length field, so
 // the walk only trusts lengths from SM2 on; in SM1 it reads the leading comments, dcls and defs (D3DX emits every def
 // before the first ALU instruction) and stops at the first other instruction. Every component that is exactly 2500.0f
 // in a float-constant def is raised: in the PC's VSs 2500 is only ever the fog clamp (render_diff pc_effects).
+#if NFS_GAME == NFS_GAME_MW
 static uint32_t *fog_patch(const uint32_t *t, uint32_t n) {
     if (n < 2 || (t[0] >> 16) != 0xFFFEu || !fog_x360() || !X360_SHADER_LITS) return NULL;   // no ZZDATA0: PC fog
     int sm1 = ((t[0] >> 8) & 0xFFu) < 2;
@@ -1723,6 +1826,9 @@ static uint32_t *fog_patch(const uint32_t *t, uint32_t n) {
     }
     return c;
 }
+#else
+static uint32_t *fog_patch(const uint32_t *t, uint32_t n) { (void)t; (void)n; return NULL; }
+#endif
 // A grass/aux source can be identical for several PC techniques/options. Share
 // that exact library, including in-flight requests, without changing its source.
 // All callers use the same Relaxed compile options, so source is the full identity.
@@ -1765,6 +1871,9 @@ static char *shader_replacement(ShaderEntry *e) {
     // Material source generators have lazy compile-time switches shared with the
     // load-time eligibility checks. Serialize preparation, not Metal compilation.
     pthread_mutex_lock(&shader_source_mu);
+    ShaderEntry *owner=e, base=*e;
+    unsigned headlight=e->variant & HL_VARIANTS;
+    if(headlight) { base.variant &= ~HL_VARIANTS; e=&base; }
     char *source = e->variant == MAT_VARIANT_AUX ? mat_aux_shader(&e->refl, e->refl.shader_type, e->opt.vs_input_int, e->opt.vs_input_uint)
                    : e->variant == MAT_VARIANT_WATER ? mat_water_shader(&e->refl, e->refl.shader_type, e->opt.vs_input_int, e->opt.vs_input_uint)
                    : e->variant == MAT_VARIANT_GLASS ? mat_glass_shader(e->tokens, e->ntokens, &e->refl, e->refl.shader_type, e->opt.vs_input_int, e->opt.vs_input_uint)
@@ -1777,8 +1886,19 @@ static char *shader_replacement(ShaderEntry *e) {
                    : e->variant == MAT_VARIANT_CARBON_LAMP ? mat_carbon_lamp_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : (e->variant == MAT_VARIANT_REAL_GLASS || e->variant == MAT_VARIANT_REAL_CHROME) ? mat_realworld_shader(e->tokens, e->ntokens, &e->refl, &e->mat, e->variant == MAT_VARIANT_REAL_CHROME)
                    : e->variant == MAT_VARIANT_ROAD_FILM ? mat_roadfilm_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
+                   : (e->variant == MAT_VARIANT_RAIN_COVER || e->variant == MAT_VARIANT_RAIN_COVER_FILM) ? rain_cover_shader(e->tokens, e->ntokens, &e->refl, &e->mat, e->variant == MAT_VARIANT_RAIN_COVER_FILM)
+                   : e->variant == MAT_VARIANT_CLEARCOAT ? mat_clearcoat_shader(e->tokens, e->ntokens, &e->refl, &e->mat)
                    : e->variant ? mat_grass_shader(&e->refl, e->refl.shader_type, (int)e->variant - 1, e->opt.vs_input_int, e->opt.vs_input_uint)
                                : mat_replace(e->tokens, e->ntokens, &e->refl, &e->mat);
+    if(headlight) {
+        int material=headlights_material(fnv(e->tokens,4*(size_t)e->ntokens,1469598103934665603ull));
+        if(e->refl.shader_type==SM_VERTEX) {
+            for(int i=0;i<e->refl.n_constants;++i)
+                if(!strcmp(e->refl.constants[i].name,"LocalColourMatrix"))material=4;
+        }
+        char *patched=headlights_shader(source?source:e->refl.msl,&e->refl,headlight==HL_CASTER,material);
+        free(source);source=patched;owner->mat=e->mat;
+    }
     pthread_mutex_unlock(&shader_source_mu);
     return source;
 }
@@ -1790,6 +1910,9 @@ static void compile_entry(ShaderEntry *e) {
     free(fogged);
     if (rc != 0) {
         fprintf(stderr, "boot: render: shader translation failed: %s\n", e->refl.error);
+#if NFS_GAME == NFS_GAME_PRIVATE
+        if(diag_on)diag_event("PRIVATE SHADER REJECT profile=%s_%u_%u error=%s", e->tokens[0]>>16==0xFFFEu?"vs":"ps", (e->tokens[0]>>8)&255, e->tokens[0]&255, e->refl.error);
+#endif
     } else {
         NSError *err = nil;
         MTLCompileOptions *co = [MTLCompileOptions new];
@@ -1808,7 +1931,11 @@ static void compile_entry(ShaderEntry *e) {
         // A failed grass variant must never masquerade as a successful grass shader:
         // the caller falls back to the complete variant-0 PC draw, with PC bindings.
         if (!lib && !e->variant) lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:e->refl.msl],e->key,e->mat,e->variant), co, &err);
+#if NFS_GAME == NFS_GAME_MW
         if (!lib) fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String);
+#else
+        if (!lib) { fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String); if(diag_on)diag_event("PRIVATE MSL REJECT error=%s",err.localizedDescription.UTF8String); }
+#endif
         else { e->fn = [lib newFunctionWithName:@"sm_main"]; e->ok = e->fn != nil; }
         if (diag_on && getenv("BOOT_DIAG_MSL")) {        // <diag>/msl/<key>.metal: the translated source of every variant
             char path[1024];
@@ -1825,6 +1952,9 @@ static void compile_entry(ShaderEntry *e) {
     uint64_t dt = host_ticks() - t0;
     if (diag_on && dt > 20000000ull) diag_event("render: shader %016llX translated and compiled in %.0f ms%s", (unsigned long long)e->key, dt / 1e6,
                                                 pthread_main_np() ? "" : " (background)");
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_shader_publish.inc"
+#endif
     __atomic_store_n(&e->pending, 0, __ATOMIC_RELEASE);
     dispatch_semaphore_signal(e->ready);
 }
@@ -1842,11 +1972,17 @@ static ShaderEntry *new_entry(uint64_t key, const uint32_t *tokens, uint32_t n, 
     return e;
 }
 // BEGIN offline shader scheduling test
+#if NFS_GAME == NFS_GAME_MW
 static void shader_submit(ShaderEntry *e) {
     e->pending = 1; // published before dispatch, and cleared with release only after fn/refl/ok are final
     dispatch_queue_t q = shader_workers[shader_worker_next++ % 4];
     dispatch_async(q, ^{ @autoreleasepool { compile_entry(e); } });
 }
+#else
+static void shader_submit(ShaderEntry *e)
+#include "game_picture_shader_submit.inc"
+
+#endif
 // END offline shader scheduling test
 // BEGIN offline shader readiness test
 static int shader_pending(ShaderEntry *e) {
@@ -1866,11 +2002,22 @@ static int shader_pending(ShaderEntry *e) {
 }
 // END offline shader readiness test
 static void cache_path(char *out, size_t n) {
+#if NFS_GAME == NFS_GAME_MW
     snprintf(out, n, "%s/shadercache.bin", userdata_dir());
+#else
+#include "game_shader_cache_policy.inc"
+#endif
 }
 static int shader_cache_variant_valid(uint32_t variant) {
+    // Accept composable headlight variants only over supported base materials.
+    unsigned headlight=variant & HL_VARIANTS;
+    if(headlight) {
+        unsigned base=variant & ~HL_VARIANTS;
+        return (headlight==HL_RECEIVER || headlight==HL_CASTER) &&
+            (base==0 || base==MAT_VARIANT_ROAD_FILM || base==MAT_VARIANT_REAL_CHROME);
+    }
     // Accept only known material variants; reject unknown flags.
-    return !(variant > 10 && variant != MAT_VARIANT_WATER && variant != MAT_VARIANT_GLASS && variant != MAT_VARIANT_TREES && variant != MAT_VARIANT_BONE && variant != MAT_VARIANT_CARBON_LAMP && variant != MAT_VARIANT_HEADLAMP_CLEAR && variant != MAT_VARIANT_AUX && variant != MAT_VARIANT_SOFT_SMOKE && variant != MAT_VARIANT_SOFT_SMOKE_RESOLVED && variant != MAT_VARIANT_SOFT_SMOKE_LATE && variant != MAT_VARIANT_ROAD_FILM && variant != MAT_VARIANT_REAL_GLASS && variant != MAT_VARIANT_REAL_CHROME);
+    return !(variant > 10 && variant != MAT_VARIANT_WATER && variant != MAT_VARIANT_GLASS && variant != MAT_VARIANT_TREES && variant != MAT_VARIANT_BONE && variant != MAT_VARIANT_CARBON_LAMP && variant != MAT_VARIANT_HEADLAMP_CLEAR && variant != MAT_VARIANT_AUX && variant != MAT_VARIANT_SOFT_SMOKE && variant != MAT_VARIANT_SOFT_SMOKE_RESOLVED && variant != MAT_VARIANT_SOFT_SMOKE_LATE && variant != MAT_VARIANT_ROAD_FILM && variant != MAT_VARIANT_REAL_GLASS && variant != MAT_VARIANT_REAL_CHROME && variant != MAT_VARIANT_CLEARCOAT && variant != MAT_VARIANT_RAIN_COVER && variant != MAT_VARIANT_RAIN_COVER_FILM);
 }
 static void cache_append(const ShaderEntry *e) {
     char path[1024];
@@ -1908,8 +2055,24 @@ static void shader_cache_warm(void) {
         uint32_t variant;
         while (fread(&opt, sizeof opt, 1, f) == 1) {
             variant = 0;
-            if (hdr[1] != sizeof(SmOptions) && (fread(&variant, 4, 1, f) != 1 || !shader_cache_variant_valid(variant))) break;
+            if (hdr[1] != sizeof(SmOptions) && fread(&variant, 4, 1, f) != 1) break;
             if (fread(&n, 4, 1, f) != 1 || !n || n >= (1u << 20)) break;
+            if (!shader_cache_variant_valid(variant)) {
+                // Unsupported compositions must not discard later warm records.
+                if (fseek(f, 4 * (long)n, SEEK_CUR)) break;
+                continue;
+            }
+            if((variant & HL_VARIANTS) && !headlights_enabled()) {
+                if(fseek(f,4*(long)n,SEEK_CUR))break;
+                continue; // Off does not allocate or compile cached feature programs.
+            }
+            // Keep optional shelter records on disk without allocating tokens
+            // or shader entries while Off. A live On toggle uses the normal
+            // asynchronous lookup path when its first ripple draw arrives.
+            if ((variant == MAT_VARIANT_RAIN_COVER || variant == MAT_VARIANT_RAIN_COVER_FILM) && !rain_cover_on()) {
+                if (fseek(f, 4 * (long)n, SEEK_CUR)) break;
+                continue;
+            }
             uint32_t *t = malloc(4 * (size_t)n);
             if (fread(t, 4, n, f) != n) { free(t); break; }
             uint64_t hash = fnv(t, 4 * (size_t)n, 1469598103934665603ull);
@@ -1992,6 +2155,7 @@ static ShaderEntry *get_shader(Obj *s, const SmOptions *opt) { return get_shader
 // techniques not selected until a race. Validate bytecode with the translator's
 // parser; skip complete programs (including CTAB comments) rather than mistaking
 // instruction operands for another version token. No game shader objects are made.
+#if NFS_GAME == NFS_GAME_MW
 static void shader_preload_variant(Obj *s, const SmOptions *opt, uint32_t variant) {
     ShaderEntry e = {0}; e.tokens = s->tokens; e.ntokens = s->ntokens;
     e.opt = shader_options(shader_shape(s->tokens, s->ntokens, s->tokens_hash), opt); e.variant = variant;
@@ -2020,6 +2184,12 @@ static void shader_preload_blob(const uint32_t *words, uint32_t count, const cha
             for (int shadow = 0; shadow <= (shape->shadow != 0); ++shadow) {
                 opt.shadow_samplers = shadow ? shape->shadow : 0;
                 get_shader(&s, &opt);
+                if(headlights_enabled() && (aux || !strcmp(name,"IDI_CAR_FX"))) {
+                    shader_preload_variant(&s,&opt,HL_RECEIVER);
+                    if(v>>16==0xFFFE)shader_preload_variant(&s,&opt,HL_CASTER);
+                    if(roadfilm_shader_hash(s.tokens_hash)&&roadfilm_enabled())shader_preload_variant(&s,&opt,MAT_VARIANT_ROAD_FILM|HL_RECEIVER);
+                    if(!strcmp(name,"IDI_CAR_FX")&&realworld_materials_mode())shader_preload_variant(&s,&opt,MAT_VARIANT_REAL_CHROME|HL_RECEIVER);
+                }
                 if (world) for (uint32_t shell = 1; shell <= 10; ++shell) shader_preload_variant(&s, &opt, shell);
                 if (aux) shader_preload_variant(&s, &opt, MAT_VARIANT_AUX);
                 if (world) shader_preload_variant(&s, &opt, MAT_VARIANT_WATER);
@@ -2030,6 +2200,7 @@ static void shader_preload_blob(const uint32_t *words, uint32_t count, const cha
                     shader_preload_variant(&s, &opt, MAT_VARIANT_REAL_CHROME);
                 }
                 if (!strcmp(name, "IDI_CAR_FX")) { shader_preload_variant(&s, &opt, MAT_VARIANT_CARBON_LAMP); shader_preload_variant(&s, &opt, MAT_VARIANT_HEADLAMP_CLEAR); }
+                if (!strcmp(name, "IDI_CAR_FX") && clearcoat_shader_hash(s.tokens_hash)) shader_preload_variant(&s, &opt, MAT_VARIANT_CLEARCOAT);
                 if (!strcmp(name, "IDI_GLOSSYWINDOW_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_GLASS);
                 if (!strcmp(name, "IDI_TREE_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_TREES);
                 if (!strcmp(name, "IDI_WORLDBONE_FX")) shader_preload_variant(&s, &opt, MAT_VARIANT_BONE);
@@ -2070,8 +2241,44 @@ static void shader_catalogue_warm(void) {
     if (diag_on) diag_event("shader_compile: preloaded=%d frame_sync=%llu", nshaders - before, stat_sync_shader);
 }
 
+#else
+#include "game_shader_catalogue.inc"
+#endif
 // ---------------- vertex input ----------------
 typedef struct { uint8_t stream, type, usage, index; uint16_t offset; } Elem;
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+typedef struct { int valid, black, full; float amin,amax,xmin,xmax,ymin,ymax; } PrivateUpSummary;
+static PrivateUpSummary private_up_summary(const void *data, unsigned stride, unsigned count,
+                                         const Elem *elements, int nel, const float matrix[4][4]) {
+    PrivateUpSummary s={0}; s.black=1;s.amin=1;s.xmin=s.ymin=1e30f;s.xmax=s.ymax=-1e30f;
+    int pos=-1,col=-1,components=0;unsigned corners=0;
+    if(!data || count<3 || count>8 || !stride)return s;
+    for(int k=0;k<nel;k++)if(!elements[k].stream){
+        if((elements[k].usage==0 || elements[k].usage==9) && (elements[k].type==2 || elements[k].type==3)){
+            pos=elements[k].offset;components=elements[k].type==2?3:4;
+        }
+        if(elements[k].usage==10 && elements[k].type==4)col=elements[k].offset;
+    }
+    if(pos<0 || col<0 || (unsigned)pos+4*components>stride || (unsigned)col+4>stride)return s;
+    for(unsigned k=0;k<count;k++){
+        const unsigned char *v=(const unsigned char*)data+k*stride;
+        float p[4]={0,0,0,1},clip[4]={0};uint32_t color;
+        memcpy(p,v+pos,4*components);memcpy(&color,v+col,4);
+        for(int row=0;row<4;row++)for(int c=0;c<4;c++)clip[row]+=p[c]*matrix[row][c];
+        if(!isfinite(clip[3]) || fabsf(clip[3])<1e-8f)return s;
+        float x=clip[0]/clip[3],y=clip[1]/clip[3];if(!isfinite(x)||!isfinite(y))return s;
+        if(x<=-0.99f&&y<=-0.99f)corners|=1;if(x>=0.99f&&y<=-0.99f)corners|=2;
+        if(x<=-0.99f&&y>=0.99f)corners|=4;if(x>=0.99f&&y>=0.99f)corners|=8;
+        s.xmin=fminf(s.xmin,x);s.xmax=fmaxf(s.xmax,x);s.ymin=fminf(s.ymin,y);s.ymax=fmaxf(s.ymax,y);
+        float alpha=(float)(color>>24)/255.0f;
+        s.amin=fminf(s.amin,alpha);s.amax=fmaxf(s.amax,alpha);s.black&=(color&0xffffffu)==0;
+    }
+    s.valid=1;s.full=corners==15;
+    return s;
+}
+
+#endif
 static int decl_elems(Elem *out) {
     int n = 0;
     if (dev.decl) {
@@ -2415,7 +2622,10 @@ static void ssao_record(uint32_t type,uint32_t prims,int indexed,int32_t base_ve
     if(ssao_cpu_diag){ssao_diag_record_ns+=host_ticks()-t0;++ssao_diag_draws;}
 }
 void render_draw(uint32_t type, uint32_t prims, int indexed, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices,
+#if NFS_GAME == NFS_GAME_MW
                  uint32_t start, uint32_t up_vertices, uint32_t up_stride, uint32_t up_indices, uint32_t up_index_fmt) {
+    // A covered curtain leaves before any per-draw recording (lamp flush, AO list), so nothing replays it later.
+    if (rain_cover_enabled && rain_cover_curtain()) return;
     static float sign_saved_psc[224][4], sign_saved_vsc[256][4];
     int sign_freeze = diag_on && sign_diag_on && sign_diag_active();
     if (sign_freeze) { memcpy(sign_saved_psc, dev.psc, sizeof dev.psc); memcpy(sign_saved_vsc, dev.vsc, sizeof dev.vsc); }
@@ -2499,6 +2709,11 @@ void render_draw(uint32_t type, uint32_t prims, int indexed, int32_t base_vertex
             q_bb[0] = fminf(q_bb[0], x); q_bb[1] = fminf(q_bb[1], y); q_bb[2] = fmaxf(q_bb[2], x); q_bb[3] = fmaxf(q_bb[3], y);
         }
 }
+#else
+                 uint32_t start, uint32_t up_vertices, uint32_t up_stride, uint32_t up_indices, uint32_t up_index_fmt)
+#include "game_compat_render_draw.inc"
+
+#endif
 // ---------------- fixed function ----------------
 // Draws with no shaders (the effects' *_fixed techniques, e.g. world_fixed for the environment-map and reflection
 // renders) get equivalent vs_1_1/ps_1_1 bytecode built from the fixed-function state, which then goes through the
@@ -2512,14 +2727,32 @@ static uint32_t ff_src(int type, int reg) { return 0x80000000u | (uint32_t)reg |
 typedef struct { uint64_t key; Obj vs, ps; } FFShader;
 static FFShader ff_cache[64];
 static int nff_cache;
+#if NFS_GAME == NFS_GAME_MW
 static void ff_build(FFShader *f, int has_col, int has_tc, int tc_set,
+#else
+static void ff_build(FFShader *f, int has_pos_t, int has_col, int has_tc, int tc_set,
+#endif
                      uint32_t cop, uint32_t ca1, uint32_t ca2, uint32_t aop, uint32_t aa1, uint32_t aa2) {
     uint32_t v[64], n = 0, q[64], m = 0;
     v[n++] = 0xFFFE0101u;
     v[n++] = 31; v[n++] = 0x80000000u | SM_USAGE_POSITION; v[n++] = ff_dst(RT_INPUT, 0, 15, 0);
     if (has_col) { v[n++] = 31; v[n++] = 0x80000000u | SM_USAGE_COLOR; v[n++] = ff_dst(RT_INPUT, 1, 15, 0); }
     if (has_tc) { v[n++] = 31; v[n++] = 0x80000000u | SM_USAGE_TEXCOORD | (uint32_t)tc_set << 16; v[n++] = ff_dst(RT_INPUT, 2, 15, 0); }
+#if NFS_GAME == NFS_GAME_MW
     for (int r = 0; r < 4; ++r) { v[n++] = 9; v[n++] = ff_dst(RT_RASTOUT, 0, 1 << r, 0); v[n++] = ff_src(RT_INPUT, 0); v[n++] = ff_src(RT_CONST, r); }   // dp4 oPos.r, v0, c[r]
+#else
+        if (has_pos_t) {
+            // r1 = (screen.xyz, 1); r0 = viewport-inverse position.
+            v[n++] = 1; v[n++] = ff_dst(RT_TEMP, 1, 15, 0); v[n++] = ff_src(RT_INPUT, 0);
+            v[n++] = 1; v[n++] = ff_dst(RT_TEMP, 1, 8, 0); v[n++] = ff_src(RT_CONST, 4);
+            for (int r = 0; r < 4; ++r) { v[n++] = 9; v[n++] = ff_dst(RT_TEMP, 0, 1 << r, 0); v[n++] = ff_src(RT_TEMP, 1); v[n++] = ff_src(RT_CONST, r); }
+            // Undo RHW for clip.w and perspective-correct varyings.
+            v[n++] = 6; v[n++] = ff_dst(RT_TEMP, 1, 8, 0); v[n++] = (ff_src(RT_INPUT, 0) & ~0x00FF0000u) | 0x00FF0000u;
+            v[n++] = 5; v[n++] = ff_dst(RT_RASTOUT, 0, 15, 0); v[n++] = ff_src(RT_TEMP, 0); v[n++] = (ff_src(RT_TEMP, 1) & ~0x00FF0000u) | 0x00FF0000u;
+        } else {
+    for (int r = 0; r < 4; ++r) { v[n++] = 9; v[n++] = ff_dst(RT_RASTOUT, 0, 1 << r, 0); v[n++] = ff_src(RT_INPUT, 0); v[n++] = ff_src(RT_CONST, r); }
+        }   // dp4 oPos.r, v0, c[r]
+#endif
     v[n++] = 1; v[n++] = ff_dst(RT_ATTROUT, 0, 15, 0); v[n++] = has_col ? ff_src(RT_INPUT, 1) : ff_src(RT_CONST, 4);   // mov oD0
     v[n++] = 1; v[n++] = ff_dst(RT_TEXCRDOUT, 0, 15, 0); v[n++] = has_tc ? ff_src(RT_INPUT, 2) : ff_src(RT_CONST, 5);  // mov oT0
     v[n++] = 0x0000FFFFu;
@@ -2542,6 +2775,7 @@ static void ff_build(FFShader *f, int has_col, int has_tc, int tc_set,
     f->vs.tokens = malloc(4 * n); memcpy(f->vs.tokens, v, 4 * n); f->vs.ntokens = n;
     f->ps.tokens = malloc(4 * m); memcpy(f->ps.tokens, q, 4 * m); f->ps.ntokens = m;
 }
+#if NFS_GAME == NFS_GAME_MW
 static void ff_shader_warm(void) {
     // The effects' fixed world/environment passes use stage-0 texture/diffuse
     // modulation/selection. Use the same builder, without occupying ff_cache.
@@ -2550,31 +2784,58 @@ static void ff_shader_warm(void) {
     for (int col = 0; col <= 1; ++col) for (int tc = -1; tc < 8; ++tc) {
         for (unsigned i = 0; i < sizeof ops / sizeof *ops; ++i) {
             FFShader f = {0};
+#if NFS_GAME == NFS_GAME_MW
             ff_build(&f, col, tc >= 0, tc >= 0 ? tc : 0, ops[i][0], 2, 1, ops[i][1], 2, 1);
+#else
+            ff_build(&f, 0, col, tc >= 0, tc >= 0 ? tc : 0, ops[i][0], 2, 1, ops[i][1], 2, 1);
+#endif
             get_shader(&f.vs, &opt); get_shader(&f.ps, &opt);
             free(f.vs.tokens); free(f.ps.tokens);
         }
     }
 }
+#else
+#include "game_shader_fixed_warm.inc"
+#endif
 // Returns 0 when the state is outside the supported subset.
 static int ff_shaders(Obj **vs_out, Obj **ps_out, float (*vsc)[4], float (*psc)[4]) {
     uint32_t *rs = dev.rs, (*tss)[33] = dev.tss;
+#if NFS_GAME == NFS_GAME_MW
     if (rs[137]) return 0;                                             // LIGHTING
+#else
+    /* POSITIONT bypasses transform and lighting. */                                             // LIGHTING
+#endif
     Elem el[32];
+#if NFS_GAME == NFS_GAME_MW
     int nel = decl_elems(el), has_pos = 0, has_col = 0, tc_set = (int)(tss[0][11] & 0xFFFF), has_tc = 0;
+#else
+    int nel = decl_elems(el), has_pos = 0, has_pos_t = 0, has_col = 0, tc_set = (int)(tss[0][11] & 0xFFFF), has_tc = 0;
+#endif
     if (tss[0][11] >> 16 || (tss[0][24] & 255)) return 0;              // texcoord generation, texture transform
     for (int i = 0; i < nel; ++i) {
+#if NFS_GAME == NFS_GAME_MW
         if (el[i].usage == SM_USAGE_POSITIONT) return 0;
+#else
+        if (el[i].usage == SM_USAGE_POSITIONT && el[i].index == 0) has_pos = has_pos_t = 1;
+#endif
         if (el[i].usage == SM_USAGE_POSITION && el[i].index == 0) has_pos = 1;
         if (el[i].usage == SM_USAGE_COLOR && el[i].index == 0) has_col = 1;
         if (el[i].usage == SM_USAGE_TEXCOORD && el[i].index == tc_set) has_tc = 1;
     }
+#if NFS_GAME == NFS_GAME_MW
     if (!has_pos) return 0;
+#else
+    if (!has_pos || (!has_pos_t && rs[137]) || (has_pos_t && (!dev.viewport[2] || !dev.viewport[3]))) return 0;
+#endif
     uint32_t cop = tss[0][1], ca1 = tss[0][2], ca2 = tss[0][3], aop = tss[0][4], aa1 = tss[0][5], aa2 = tss[0][6];
     if (cop != 1 && tss[1][1] != 1) return 0;                          // stage 1 must be disabled
     if (cop > 7 || aop > 7 || (cop != 1 && cop < 2) || ca1 > 3 || ca2 > 3 || aa1 > 3 || aa2 > 3) return 0;
     if (cop == 1) { aop = 1; }
+#if NFS_GAME == NFS_GAME_MW
     uint64_t key = (uint64_t)has_col | (uint64_t)has_tc << 1 | (uint64_t)tc_set << 2 | (uint64_t)cop << 8 | (uint64_t)ca1 << 12 | (uint64_t)ca2 << 16
+#else
+    uint64_t key = (uint64_t)has_pos_t << 40 | (uint64_t)has_col | (uint64_t)has_tc << 1 | (uint64_t)tc_set << 2 | (uint64_t)cop << 8 | (uint64_t)ca1 << 12 | (uint64_t)ca2 << 16
+#endif
                  | (uint64_t)aop << 20 | (uint64_t)aa1 << 24 | (uint64_t)aa2 << 28;
     FFShader *f = NULL;
     for (int i = 0; i < nff_cache; ++i) if (ff_cache[i].key == key) f = &ff_cache[i];
@@ -2583,7 +2844,11 @@ static int ff_shaders(Obj **vs_out, Obj **ps_out, float (*vsc)[4], float (*psc)[
         f = &ff_cache[nff_cache++];
         memset(f, 0, sizeof *f);
         f->key = key;
+#if NFS_GAME == NFS_GAME_MW
         ff_build(f, has_col, has_tc, tc_set, cop, ca1, ca2, aop, aa1, aa2);
+#else
+        ff_build(f, has_pos_t, has_col, has_tc, tc_set, cop, ca1, ca2, aop, aa1, aa2);
+#endif
     }
     // constants: c0-c3 = columns of world * view * projection (row vectors, as D3D9 transforms them)
     float *W = dev.transform[256], *V = dev.transform[2], *P = dev.transform[3], wv[16], wvp[16];
@@ -2591,6 +2856,25 @@ static int ff_shaders(Obj **vs_out, Obj **ps_out, float (*vsc)[4], float (*psc)[
     for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) { wvp[r * 4 + c] = 0; for (int k = 0; k < 4; ++k) wvp[r * 4 + c] += wv[r * 4 + k] * P[k * 4 + c]; }
     memset(vsc, 0, 16 * 8);
     for (int i = 0; i < 4; ++i) for (int k = 0; k < 4; ++k) vsc[i][k] = wvp[k * 4 + i];
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (has_pos_t) {
+        // Viewport X/Y and MinZ/MaxZ have already been applied by D3D's T&L.
+        // The ordinary translated VS half-pixel fixup still applies exactly once.
+        float minz, maxz;
+        memcpy(&minz, &dev.viewport[4], 4); memcpy(&maxz, &dev.viewport[5], 4);
+        memset(vsc, 0, 16 * 4);
+        vsc[0][0] = 2.0f / dev.viewport[2];
+        vsc[0][3] = -1.0f - 2.0f * dev.viewport[0] / dev.viewport[2];
+        vsc[1][1] = -2.0f / dev.viewport[3];
+        vsc[1][3] = 1.0f + 2.0f * dev.viewport[1] / dev.viewport[3];
+        vsc[2][2] = maxz != minz ? 1.0f / (maxz - minz) : 0;
+        vsc[2][3] = -minz * vsc[2][2];
+        vsc[3][3] = 1.0f;
+    }
+#endif
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_frontend_clip.inc"
+#endif
     for (int k = 0; k < 4; ++k) vsc[4][k] = 1.0f;
     uint32_t tf = rs[60];
     psc[0][0] = ((tf >> 16) & 255) / 255.0f; psc[0][1] = ((tf >> 8) & 255) / 255.0f; psc[0][2] = (tf & 255) / 255.0f; psc[0][3] = (tf >> 24) / 255.0f;
@@ -2637,6 +2921,28 @@ typedef struct {
     __unsafe_unretained id<MTLTexture> noise, volume, shadow, normal, specular, opacity;
     float k[64][4];
 } GrassDraw;
+#if NFS_GAME == NFS_GAME_MW
+// Separate upload: generated paint never supplies either grass input.
+static id<MTLTexture> paint_flake_texture(id<MTLDevice> device) {
+    static id<MTLTexture> texture;
+    if (texture) return texture;
+    uint32_t bytes;
+    const uint8_t *volume = paint_flake_volume(&bytes);
+    if (!volume || bytes != PAINT_FLAKE_BYTES) return nil;
+    MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+    d.textureType = MTLTextureType3D; d.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    d.width = d.height = d.depth = 32; d.mipmapLevelCount = 6; d.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> t = [device newTextureWithDescriptor:d];
+    if (!t) return nil;
+    uint32_t off = 0;
+    for (NSUInteger level = 0, n = 32; level < 6; ++level, n >>= 1) {
+        [t replaceRegion:MTLRegionMake3D(0, 0, 0, n, n, n) mipmapLevel:level slice:0
+            withBytes:volume + off bytesPerRow:n * 4 bytesPerImage:n * n * 4];
+        off += (uint32_t)(n * n * n * 4);
+    }
+    texture = t; return texture;
+}
+#endif
 static id<MTLTexture> grass_noise_texture, grass_volume_texture;
 static int grass_upload(void) {
     if (grass_noise_texture && grass_volume_texture) return 1;
@@ -2964,8 +3270,30 @@ static id<MTLTexture> water_normal_upload(void) {
     [water_normal_texture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:rgba bytesPerRow:w * 4];
     return water_normal_texture;
 }
+#if NFS_GAME == NFS_GAME_MW
+// NFS_WATER=port: the four wave-map slices (water_port.m), rendered once per simulation step on their own command
+// buffer, committed before this frame's, then mipmapped (the mips carry the unresolved slope variance).
+static id<MTLTexture> water_port_waves(float t) {
+    static float last = -1.0f;
+    id<MTLTexture> tex = water_port_tex;
+    id<MTLComputePipelineState> pso = water_port_pso;
+    if (!tex || !pso) return nil;
+    if (t == last) return tex;
+    last = t;
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:pso]; [ce setTexture:tex atIndex:0]; [ce setBytes:&t length:sizeof t atIndex:0];
+    [ce dispatchThreads:MTLSizeMake(256, 256, 4) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+    [be generateMipmapsForTexture:tex]; [be endEncoding];
+    [cb commit];
+    return tex;
+}
+#endif
 static WaterDraw water_prepare(Obj *vs, Obj *ps, const SmOptions *vo, const SmOptions *po, const ShaderEntry *pcvs,
                                const DrawAttr *attr, int nattr, const uint32_t *strides, uint32_t streams, int need_zero,
+#if NFS_GAME == NFS_GAME_MW
                                uint64_t pc_key, id<MTLTexture> rt, id<MTLTexture> ds) {
     WaterDraw w = {.matched = mat_water_draw.mesh != 0};
     if (!w.matched || !mat_water_enabled() || dev.rs[27] || !dev.rs[7] || !dev.rs[14]) return w;
@@ -2976,7 +3304,7 @@ static WaterDraw water_prepare(Obj *vs, Obj *ps, const SmOptions *vo, const SmOp
     Obj *reflection = obj(M32(0x00982A6Cu)); RenderTex *r = reflection ? gpu_tex(reflection) : NULL;
     if (!d || !d->tex || !r || !r->tex || r->tex.width <= 1 || r->tex.height <= 1 ||
         r->tex == rt || r->tex.textureType != MTLTextureType2D || !M8(0x009197A8u) || !M32(0x0093DAE4u)) return w;
-    w.normal = water_normal_upload(); w.reflection = r->tex;
+    w.normal = mat_water_port() ? water_port_waves(w.k[21][0]) : water_normal_upload(); w.reflection = r->tex;
     if (!w.normal) return w;
     ShaderEntry *v = get_shader_variant(vs, vo, MAT_VARIANT_WATER), *p = get_shader_variant(ps, po, MAT_VARIANT_WATER);
     if (__atomic_load_n(&v->pending, __ATOMIC_ACQUIRE) || __atomic_load_n(&p->pending, __ATOMIC_ACQUIRE) || !v->ok || !p->ok) return w;
@@ -3019,6 +3347,9 @@ static WaterDraw water_prepare(Obj *vs, Obj *ps, const SmOptions *vo, const SmOp
     w.pso = pso;   // now owned by the pipelines map for the process lifetime
     return w;
 }
+#else
+                               uint64_t pc_key, id<MTLTexture> rt, id<MTLTexture> ds) { return (WaterDraw){0}; }
+#endif
 // ---------------- R19 building glass: one draw, the PC material's own blend/depth/alpha-test state ----------------
 // Replacement pipeline = the PC draw's pipeline (vertex layout, blend, write mask, formats) with the glassreflect
 // functions. Textures/samplers/aux stay the PC draw's own bindings (diffuse s0, shadow s1, WINDOWREFLECTION s2/s1).
@@ -3254,7 +3585,10 @@ static int bone_emit(void (^geometry)(void)) {
     return 1;
 }
 // ---------------- End X360 arrest worldbone ----------------
+static int headlight_receiver_encoding;
 static void material_emit(GrassDraw *g, WaterDraw *w, AuxDraw *a, void (^geometry)(void)) {
+    if(headlights_casting()){geometry();headlights_drawn(0);return;}
+    if(headlight_receiver_encoding)headlights_drawn(1);
     if (ssao_replay) { if (!trees_emit(geometry)) geometry();return; }
     if (glass_emit(geometry)) { aux_emit(a, geometry); return; }   // the glass draw is the base draw
     if (trees_emit(geometry)) { aux_emit(a, geometry); return; }   // R28: the tree draw is the base draw
@@ -3331,6 +3665,28 @@ static RWPaneDraw realworld_pane_draw(const Elem *el, int nel, uint32_t type, ui
     return entry->draw;
 }
 
+// Only queued moving parts need raster motion. The scene PSO and all its
+// attachments stay unchanged; the retained replay has a separate 1x PSO.
+static id<MTLRenderPipelineState> motion_object_pipeline(const ShaderEntry *v,const ShaderEntry *p,
+    const DrawAttr *attr,int nattr,const uint32_t *strides,uint32_t streams,int need_zero,uint64_t key,unsigned samples) {
+    static Map cache;
+    id<MTLRenderPipelineState> result=(__bridge id<MTLRenderPipelineState>)map_get(&cache,key);
+    if(result)return result;
+    MTLVertexDescriptor *vd=[MTLVertexDescriptor vertexDescriptor];
+    for(int k=0;k<nattr;++k){
+        MTLVertexAttributeDescriptor *a=vd.attributes[attr[k].reg];int ai,au;
+        a.format=attr[k].zero?MTLVertexFormatFloat4:vfmt(attr[k].fmt_type,&ai,&au);a.offset=attr[k].offset;a.bufferIndex=attr[k].buf;
+    }
+    for(unsigned i=0;i<16;++i)if(streams&(1u<<i)){vd.layouts[i].stride=strides[i];vd.layouts[i].stepFunction=MTLVertexStepFunctionPerVertex;}
+    if(need_zero){vd.layouts[30].stride=16;vd.layouts[30].stepFunction=MTLVertexStepFunctionConstant;vd.layouts[30].stepRate=0;}
+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexDescriptor=vd;
+    if(!temporal_render_pipeline(mtl,pd,
+        hdrclip_world_source(@(v->refl.msl),v->key,v->mat,v->variant),
+        hdrclip_world_source(@(p->refl.msl),p->key,p->mat,p->variant),(int)samples))return nil;
+    result=pipeline_build_device(mtl,pd,"object_motion",NULL);
+    if(result)map_put(&cache,key,result);return result;
+}
+
 static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices,
                       uint32_t start, uint32_t up_vertices, uint32_t up_stride, uint32_t up_indices, uint32_t up_index_fmt) {
     if (!mtl || !prims) return;
@@ -3360,6 +3716,8 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     }
     if (!dev.rt[0]) return;
     if (diag_on) ad1.mrt_draws += (dev.rt[1] | dev.rt[2] | dev.rt[3]) != 0;
+    if(headlights_casting() && (!headlights_material(ps->tokens_hash?ps->tokens_hash:fnv(ps->tokens,4*(size_t)ps->ntokens,1469598103934665603ull)) ||
+       dev.rs[7]!=1 || !dev.rs[14] || dev.rs[27]))return;
     // shaders (options from the current texture/sampler state)
     SmOptions vo, po;
     sm_default_options(&vo);
@@ -3370,8 +3728,8 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (el[i].type == 6 || el[i].type == 7 || el[i].type == 5) { /* filled below once we know the attribute register */ }
     }
     ShaderEntry *vse = get_shader(vs, &vo);
-    if (shader_pending(vse)) { ++stat_deferred; return; }
-    if (!vse->ok) { ++stat_fail; return; }
+    if (shader_pending(vse)) { headlights_missed(); ++stat_deferred; return; }
+    if (!vse->ok) { headlights_missed(); ++stat_fail; return; }
     // integer attribute formats need the VS compiled with them declared as ints
     uint16_t want_int = 0, want_uint = 0;
     for (int k = 0; k < vse->refl.n_inputs; ++k) {
@@ -3385,8 +3743,8 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     if (want_int || want_uint) {
         vo.vs_input_int = want_int; vo.vs_input_uint = want_uint;
         vse = get_shader(vs, &vo);
-        if (shader_pending(vse)) { ++stat_deferred; return; }
-        if (!vse->ok) { ++stat_fail; return; }
+        if (shader_pending(vse)) { headlights_missed(); ++stat_deferred; return; }
+        if (!vse->ok) { headlights_missed(); ++stat_fail; return; }
     }
     for (int st = 0; st < 8; ++st) {
         Obj *t = obj(dev.tex[st]);
@@ -3396,6 +3754,15 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (ttff & 256) po.tex_projected[st] = (uint8_t)((ttff & 255) == 3 ? 3 : 4);
     }
     ShaderEntry *pse = get_shader(ps, &po);
+    if (clearcoat_shader_hash(ps->tokens_hash) && clearcoat_enabled()) {
+        ShaderEntry *coat = get_shader_variant(ps, &po, MAT_VARIANT_CLEARCOAT);
+        ShaderEntry *coat_vs = ps->tokens_hash == 0x89E9A52CCEE09BCFULL ? get_shader_variant(vs, &vo, MAT_VARIANT_CLEARCOAT) : NULL;
+        if (!__atomic_load_n(&coat->pending, __ATOMIC_ACQUIRE) && coat->ok &&
+            (!coat_vs || (!__atomic_load_n(&coat_vs->pending, __ATOMIC_ACQUIRE) && coat_vs->ok))) {
+            pse = coat;
+            if (coat_vs) vse = coat_vs;
+        }
+    }
     if (roadfilm_draw(ps->tokens_hash, dev.psc[1][3])) {
         ShaderEntry *film = get_shader_variant(ps, &po, MAT_VARIANT_ROAD_FILM);
         if (!__atomic_load_n(&film->pending, __ATOMIC_ACQUIRE) && film->ok) pse = film;
@@ -3422,8 +3789,31 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             if (clear) vse = cover_vs;
         }
     }
-    if (shader_pending(pse)) { ++stat_deferred; return; }
-    if (!pse->ok) { ++stat_fail; return; }
+    if (rain_cover_enabled && rain_cover_ripple(ps->tokens_hash)) {
+        int variant = pse->variant == MAT_VARIANT_ROAD_FILM ? MAT_VARIANT_RAIN_COVER_FILM : MAT_VARIANT_RAIN_COVER;
+        ShaderEntry *cover_ps = get_shader_variant(ps, &po, variant);
+        ShaderEntry *cover_vs = get_shader_variant(vs, &vo, MAT_VARIANT_RAIN_COVER);
+        if (!__atomic_load_n(&cover_ps->pending, __ATOMIC_ACQUIRE) && !__atomic_load_n(&cover_vs->pending, __ATOMIC_ACQUIRE) && cover_ps->ok && cover_vs->ok) {
+            pse = cover_ps; vse = cover_vs;
+        }
+    }
+    if (shader_pending(pse)) { headlights_missed(); ++stat_deferred; return; }
+    if (!pse->ok) { headlights_missed(); ++stat_fail; return; }
+    headlight_receiver_encoding=0;
+    HLConstants headlight_constants;
+    int headlight=0;
+    if(!ssao_replay && !lamp_replay && headlights_enabled()) {
+        if(real_material!=MAT_VARIANT_REAL_GLASS && !mat_carbon_lamp_draw())
+            headlight=headlights_draw(&vse->refl,ps->tokens_hash,surface_rt(dev.rt[0])==&bb_rt,&headlight_constants);
+        if(!headlight && headlights_casting())return;
+        if(headlight) {
+            ShaderEntry *hv=get_shader_variant(vs,&vo,vse->variant|headlight);
+            ShaderEntry *hp=headlight==HL_RECEIVER?get_shader_variant(ps,&po,pse->variant|headlight):pse;
+            if(!__atomic_load_n(&hv->pending,__ATOMIC_ACQUIRE)&&!__atomic_load_n(&hp->pending,__ATOMIC_ACQUIRE)&&hv->ok&&hp->ok) {
+                vse=hv;pse=hp;
+            } else { headlights_missed();if(headlight==HL_CASTER)return;headlight=0; }
+        } else if(headlights_casting())return;
+    }
 
     // vertex input: which element feeds each shader input (the MTLVertexDescriptor is only built for a new pipeline)
     DrawAttr attr[16];
@@ -3472,14 +3862,25 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     NSUInteger lv, sl;
     id<MTLTexture> rt0 = surface_target(dev.rt[0], &lv, &sl);
     if(lamp_replay)rt0=lamp_rt.ms?lamp_rt.ms:lamp_rt.tex;
+    if(headlights_casting())rt0=headlights_colour();
     id<MTLTexture> dst = pass_depth(rt0, surface_target(dev.ds, &lv, &sl));
+    if(headlights_casting())dst=headlights_depth();
     if (!rt0) return;
     if (diag_on && !mf_active && rt0.width == mf_rt_w && rt0.height == mf_rt_h) { char w[160]; snprintf(w, sizeof w, "d prim%u x%u z%u zw%u blend%u(%u,%u) ps %016llX", type, prims, rs_z(7), rs_z(14), rs_z(27), rs_z(19), rs_z(20), (unsigned long long)pse->key); mf_pass_log(w, (uint32_t)rt0.width, (uint32_t)rt0.height); }
     uint32_t *rs = dev.rs;
+    uint32_t headlight_rs[256];
+    if(headlights_casting()) {
+        memcpy(headlight_rs,rs,sizeof headlight_rs);rs=headlight_rs;
+        rs[7]=rs[14]=1;rs[22]=1;rs[23]=4;rs[52]=0;rs[168]=0;
+        rs[174]=0;rs[195]=rs[175]=0; // lamp's metric receiver bias only
+    }
     uint32_t coverage_rs[256];
     if (ssao_replay) {
         memcpy(coverage_rs,rs,sizeof coverage_rs);rs=coverage_rs;
         rs[27]=1;rs[19]=rs[20]=1;rs[171]=1;rs[206]=0;rs[168]=15;
+#if NFS_GAME == NFS_GAME_PRIVATE
+        rs[20]=ssao_replay_dst;
+#endif
         RenderTex *target=ssao_target();rt0=target->ms?target->ms:target->tex;dst=ssao_coverage_z;
     }
     int smoke_draw = 0;
@@ -3514,6 +3915,10 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     if (diag_on && sign_diag_on && !ssao_replay && !lamp_replay)
         sign_diag_draw(vse->key, pse->key, type, prims, indexed, base_vertex, start, &vse->refl, &pse->refl);
     id<MTLFunction> sign_direct = (diag_on && sign_diag_on && !ssao_replay && !lamp_replay) ? sign_diag_direct(pse->key, pse->mat ? NULL : pse->refl.msl) : nil;
+    // Off: one integer request test; no temporal resources or shader bindings.
+    if (temporal_state_requested) temporal_render_scene(rt0,dst,frame_serial,dev.viewport,
+        !ssao_replay && !lamp_replay && !q_active && rs[7] &&
+        rt0==(bb_rt.ms?bb_rt.ms:bb_rt.tex) && dst==(ad_rt.ms?ad_rt.ms:ad_rt.tex));
     int a2c = alpha_to_coverage_draw(rs, (unsigned)rt0.sampleCount, blend);
     struct { uint64_t ps, vs; uint32_t fmts[4], bstate[8]; } pk = {pse->key, vse->key,
         {(uint32_t)rt0.pixelFormat, dst ? (uint32_t)dst.pixelFormat : 0, rs[168] & 15, (uint32_t)rt0.sampleCount},
@@ -3573,7 +3978,11 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             extern char diag_fx_pass[];
             diag_event("render: pipeline %016llX took %.0f ms (%s)", (unsigned long long)pkey, dt / 1e6, diag_fx_pass[0] ? diag_fx_pass : "no effect pass");
         }
+#if NFS_GAME == NFS_GAME_MW
         if (!pso) { fprintf(stderr, "boot: render: pipeline failed: %s\n", err.localizedDescription.UTF8String); ++stat_fail; return; }
+#else
+        if (!pso) { fprintf(stderr, "boot: render: pipeline failed: %s\n", err.localizedDescription.UTF8String); if(diag_on)diag_event("PRIVATE PIPELINE REJECT error=%s",err.localizedDescription.UTF8String); ++stat_fail; return; }
+#endif
         map_put(&pipelines, pkey, pso);
         if (diag_on && rs[15]) {
             extern char diag_fx_pass[];
@@ -3584,13 +3993,13 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
 
     if (diag_on && !ssao_replay && !lamp_replay && underglow_render_observing())
         underglow_scene_mesh(el, nel, type, prims, indexed, base_vertex, start, up_vertices, &vse->refl, ps->tokens_hash);
-    GrassDraw grass;
-    if (!ssao_replay) grass_prepare(&grass, vs, ps, &vo, &po, vse, pse, attr, nattr, strides, used_streams, need_zero, vkey, rt0, dst);
-    WaterDraw water = ssao_replay ? (WaterDraw){0} : water_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
-    AuxDraw aux = ssao_replay ? (AuxDraw){0} : aux_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, vkey, rt0, dst);
-    if (!ssao_replay) glass_prepare(vs, ps, &vo, &po, vse, pse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
-    trees_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
-    if (!ssao_replay) bone_prepare(vs, ps, &vo, &po, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
+    GrassDraw grass={0};
+    if (!ssao_replay && !headlights_casting()) grass_prepare(&grass, vs, ps, &vo, &po, vse, pse, attr, nattr, strides, used_streams, need_zero, vkey, rt0, dst);
+    WaterDraw water = ssao_replay || headlights_casting() ? (WaterDraw){0} : water_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
+    AuxDraw aux = ssao_replay || headlights_casting() ? (AuxDraw){0} : aux_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, vkey, rt0, dst);
+    if (!ssao_replay && !headlights_casting()) glass_prepare(vs, ps, &vo, &po, vse, pse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
+    if(!headlights_casting()) trees_prepare(vs, ps, &vo, &po, vse, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
+    if (!ssao_replay && !headlights_casting()) bone_prepare(vs, ps, &vo, &po, attr, nattr, strides, used_streams, need_zero, pkey, rt0, dst);
     id<MTLRenderPipelineState> proof_original = nil;
     id<MTLRenderPipelineState> proof_reference = nil;
     if (diag_on && smoke_draw && postfx_look_variant("softon")) {
@@ -3638,6 +4047,20 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         id<MTLRenderCommandEncoder> proxy = sign_diag_tee(enc, pkey, rt0, dst, depth_state_for(sr));
         if (proxy != enc) { sign_tee = proxy; enc = proxy; memset(&eb, 0, sizeof eb); }
     }
+    id<MTLRenderCommandEncoder> motion_real=enc,motion_tee=nil;
+    if(temporal_state_requested && temporal_draw_target && !ssao_replay && !lamp_replay && !proof_tee && !late_draw && !blend && rs[14]){
+        const TemporalPartPose *pose=temporal_pose_draw(temporal_draw_view);
+        int rigid=pose!=NULL && !pse->refl.writes_depth;
+        for(int k=0;k<vse->refl.n_inputs;++k)
+            if(vse->refl.inputs[k].usage==SM_USAGE_BLENDWEIGHT || vse->refl.inputs[k].usage==SM_USAGE_BLENDINDICES)rigid=0;
+        if(rigid && temporal_render_moved(temporal_view_state(temporal_draw_view),pose,dev.viewport)){
+            id<MTLRenderPipelineState> motion=motion_object_pipeline(vse,pse,attr,nattr,strides,used_streams,need_zero,pkey,(unsigned)rt0.sampleCount);
+            SmTemporalAux aux;float raster[2]={1.f/dev.viewport[2],-1.f/dev.viewport[3]};
+            temporal_render_constants(temporal_view_state(temporal_draw_view),pose,1,raster,&aux);
+            aux.viewport[0]=dev.viewport[2];aux.viewport[1]=dev.viewport[3];aux.viewport[2]=dev.viewport[0];aux.viewport[3]=dev.viewport[1];
+            if(motion){enc=motion_tee=temporal_render_record(enc,temporal_draw_target,temporal_draw_view,motion,&aux);memset(&eb,0,sizeof eb);}
+        }
+    }
     @try {
     if (gpt_on == 2 && !soft_smoke_cost_enabled()) {
         extern char diag_fx_pass[];
@@ -3648,7 +4071,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     if (eb.pso != (__bridge void *)pso) { [enc setRenderPipelineState:pso]; eb.pso = (__bridge void *)pso; }
     if (hdrclip_on) hdrclip_bind(enc, !lamp_replay && !ssao_replay && surface_rt(dev.rt[0])==&bb_rt ? HC_WORLD:HC_OTHER);
     if(float_scene_on){unsigned store=float_scene_store_policy(rt0.pixelFormat,dev.rt[0]);[enc setFragmentBytes:&store length:sizeof store atIndex:27];}
-    id<MTLDepthStencilState> dss = depth_state();
+    id<MTLDepthStencilState> dss = headlights_casting()?depth_state_for(rs):depth_state();
     if(late_draw)dss=depth_state_for(rs);
     if (lamp_replay || ssao_replay) {
         uint32_t lr[256]; memcpy(lr, rs, sizeof lr); lr[14] = 0; lr[59] = 0;
@@ -3667,6 +4090,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     float vpz0, vpz1;
     memcpy(&vpz0, &dev.viewport[4], 4); memcpy(&vpz1, &dev.viewport[5], 4);
     MTLViewport vp = {dev.viewport[0], dev.viewport[1], dev.viewport[2], dev.viewport[3], vpz0, vpz1};
+    if(headlights_casting())vp=(MTLViewport){0,0,HL_MAP_SIZE,HL_MAP_SIZE,0,1};
     if(ssao_replay&&!ssao_reference_record){vp.originX*=.5;vp.originY*=.5;vp.width*=.5;vp.height*=.5;}
     if (!(eb.have & EB_VIEWPORT) || memcmp(&eb.vp, &vp, sizeof vp)) { [enc setViewport:vp]; eb.vp = vp; eb.have |= EB_VIEWPORT; }
     NSUInteger scw = late_draw ? late_w : rt0.width, sch = late_draw ? late_h : rt0.height;
@@ -3701,6 +4125,8 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         eb.blend_color = b; eb.have |= EB_BLENDC;
     }
 
+    if(headlight)headlights_bind(enc,&headlight_constants,headlight==HL_RECEIVER);
+    headlight_receiver_encoding=headlight==HL_RECEIVER;
     // constants: float constants go through the upload ring, only the registers the shader reads, and only when
     // they changed since the last upload; small arrays and the aux blocks are set when they differ from the bound ones
     if (!bind_floats(0, ff ? ff_vsc[0] : dev.vsc[0], ff ? 0 : dev.ver_vsc, vse->refl.float_rel ? 256 : vse->refl.float_max, 256) ||
@@ -3729,9 +4155,12 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     }
     for (int s = 0; s < 16; ++s) { memcpy(&pa.lodbias[s], &dev.ss[s][8], 4); if (diag_on && sign_diag_on && sign_diag_canonical((unsigned)s)) pa.lodbias[s] = 0; }   // D3DSAMP_MIPMAPLODBIAS (a float), in the shader's lookups
     if (!(eb.have & EB_PSAUX) || memcmp(&eb.pa, &pa, sizeof pa)) { [enc setFragmentBytes:&pa length:sizeof pa atIndex:3]; eb.pa = pa; eb.have |= EB_PSAUX; }
+#if NFS_GAME == NFS_GAME_MW
     if (pse->mat) {                      // a material-shader replacement's extra constants (materials.m)
         MatConsts mk;
-        mat_constants(pse->mat, (const float (*)[4])dev.vsc, &mk);
+        unsigned mk_length = mat_constants(pse->mat, (const float (*)[4])dev.vsc, &mk);
+        if (mat_extra_texture(pse->mat) == MAT_TEX_CARNM && mk.k[11][0] > 1.5f && mk.k[11][2] < 0.5f)
+            mk.k[11][2] = -paint_flake_fade_b();
         if (smoke_draw) {
             static float range;
             if (!(range > 0)) { const char *e = getenv("NFS_SOFT_SMOKE_RANGE"); range = e ? strtof(e, NULL) : 0.6f; if (!(range >= 0.05f && range <= 4.0f)) range = 0.6f; }
@@ -3757,8 +4186,11 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             [enc setFragmentBytes:&lamps length:sizeof lamps atIndex:6];
             [enc setFragmentTexture:late_draw?ad_rt.tex:soft_depth atIndex:15];
         }
-        [enc setFragmentBytes:&mk length:sizeof mk atIndex:MAT_PS_BUF];
+        [enc setFragmentBytes:&mk length:mk_length atIndex:MAT_PS_BUF];
     }
+#else
+                                            
+#endif
 
     // textures and samplers
     for (int k = 0; k < pse->refl.n_samplers; ++k) {
@@ -3771,12 +4203,16 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         }
         RenderTex *g = t ? gpu_tex(t) : NULL;
         id<MTLTexture> tx = g ? g->tex : nil;
+#if NFS_GAME == NFS_GAME_MW
         if (diag_on && s == 0) {                // test only: NFS_TEST_CARDRAW_MISS=1 drops sampler 0 of car draws, to show the cardraw missing-texture counter fires
             static int force = -1;
             if (force < 0) force = getenv("NFS_TEST_CARDRAW_MISS") != NULL;
             uint32_t cfx = M32(0x00982C80u);
             if (force && cfx && M32(cfx + 4) == 4) { g = NULL; tx = nil; }
         }
+#else
+                                                
+#endif
         if (diag_on && sign_diag_on && tx) tx = sign_diag_texture_view(t->guest, tx);
         int ty = pse->refl.samplers[k].type;
         int shadow = pse->refl.samplers[k].shadow;
@@ -3812,29 +4248,44 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     if (pse->mat && mat_extra_texture(pse->mat) == MAT_TEX_RIPPLES) {   // materials.m: the X360 rain ripple frames
         id<MTLTexture> tx = ripple_texture();
         if (eb.ftex[MAT_TEX_SLOT] != (__bridge void *)tx) { [enc setFragmentTexture:tx atIndex:MAT_TEX_SLOT]; eb.ftex[MAT_TEX_SLOT] = (__bridge void *)tx; }
+        if (pse->variant == MAT_VARIANT_RAIN_COVER || pse->variant == MAT_VARIANT_RAIN_COVER_FILM) {
+            rain_cover_bind(enc, &vse->refl);
+            eb.ftex[10] = NULL; // the next ordinary draw rebinds its own slot
+        }
     }
     if (pse->mat && mat_extra_texture(pse->mat) == MAT_TEX_CARNM) {      // materials.m R26: this car draw's normal map (zero texture: none)
         Obj *nt = obj(mat_carnm_texture());
         if (nt && nt->kind != K_TEXTURE) { if (diag_on) ++bad_tex_binds; nt = NULL; }
         RenderTex *ng = nt ? gpu_tex(nt) : NULL;
         id<MTLTexture> tx = ng && ng->tex && ng->tex.textureType == MTLTextureType2D ? ng->tex : zero_tex2d;
+#if NFS_GAME == NFS_GAME_MW
+        if (mat_carnm_port()) tx = car_normals_port_texture(mtl, mat_carnm_port() - 1) ?: zero_tex2d;   // Port: TREAD, TREADR, DOORLINE
+#endif
         if (eb.ftex[MAT_TEX_SLOT] != (__bridge void *)tx) { [enc setFragmentTexture:tx atIndex:MAT_TEX_SLOT]; eb.ftex[MAT_TEX_SLOT] = (__bridge void *)tx; }
     }
     if (pse->mat && mat_extra_texture(pse->mat) == MAT_TEX_CARNM) {      // materials.m R30: the flake's noise volume (R27's), a neutral 1^3 when it is not loaded
         static id<MTLTexture> flat3d;
-        id<MTLTexture> tx = mat_flake_volume_ok() && grass_upload() ? grass_volume_texture : nil;
+        id<MTLTexture> tx = nil;
+#if NFS_GAME == NFS_GAME_MW
+        if (mat_flake_volume_ok() == 2) tx = paint_flake_texture(mtl);
+        else
+#endif
+        tx = mat_flake_volume_ok() && grass_upload() ? grass_volume_texture : nil;
         if (!tx) {
             if (!flat3d) {
                 MTLTextureDescriptor *d = [MTLTextureDescriptor new];
                 d.textureType = MTLTextureType3D; d.pixelFormat = MTLPixelFormatRGBA8Unorm; d.width = d.height = d.depth = 1; d.usage = MTLTextureUsageShaderRead;
                 flat3d = [mtl newTextureWithDescriptor:d];
-                const uint8_t px[4] = {128, 128, 128, 128};
+                const uint8_t px[4] = {128, 128, 128, 0};
                 [flat3d replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:0 withBytes:px bytesPerRow:4 bytesPerImage:4];
             }
             tx = flat3d;
         }
         if (eb.ftex[14] != (__bridge void *)tx) { [enc setFragmentTexture:tx atIndex:14]; eb.ftex[14] = (__bridge void *)tx; }
     }
+#if NFS_GAME == NFS_GAME_MW
+    if (daynight_sky_bind(enc, mtl, ps->tokens_hash, pse->refl.msl, frame_serial, zero_tex2d, sampler_state)) { eb.ftex[14] = NULL; eb.fsamp[14] = NULL; }
+#endif
     for (int k = 0; k < vse->refl.n_samplers; ++k) {
         int s = vse->refl.samplers[k].reg;
         Obj *t = obj(dev.tex[16 + s]);
@@ -3856,6 +4307,24 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         FILE *df = dump_file();
         if (df) {
             uint32_t *r = dev.rs;
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+            Obj *private_target=obj(dev.rt[0]);
+            fprintf(df,"  PRIVATE target d3dfmt=%u metalfmt=%lu samples=%lu srgb_write=%u\n",
+                    private_target?private_target->fmt:0,(unsigned long)rt0.pixelFormat,(unsigned long)rt0.sampleCount,dev.rs[194]);
+            if(up_vertices && up_stride && (uint64_t)up_vertices+(uint64_t)up_stride*8 <= (1ull<<32)){
+                unsigned nv=indexed?num_vertices:prim_vertices(type,prims);
+                PrivateUpSummary summary=private_up_summary(G+up_vertices,up_stride,nv,el,nel,ff?ff_vsc:dev.vsc);
+                if(summary.valid){
+                    fprintf(df,"  PRIVATE UP black=%d full=%d alpha=%g..%g ndc=%g,%g..%g,%g\n",
+                            summary.black,summary.full,summary.amin,summary.amax,summary.xmin,summary.ymin,summary.xmax,summary.ymax);
+                    if(summary.black && summary.full && type>=4 && type<=6 && prims>=2 && r[27] && r[19]==5 && r[20]==6 && r[171]==1)
+                        diag_event("PRIVATE BLACK FULLSCREEN INPUT frame=%llu alpha=%g..%g background_factor=%g..%g ps=%016llX",
+                                   (unsigned long long)dev.frames,summary.amin,summary.amax,1-summary.amax,1-summary.amin,(unsigned long long)pse->key);
+                }
+            }
+
+#endif
             fprintf(df, "draw %llu: prim %u x%u %s base %d first %u count %u start %u%s | vs %016llX v%d.%d ps %016llX v%d.%d | rt %08X ds %08X vp %u,%u %ux%u\n",
                     (unsigned long long)stat_draws, type, prims, indexed ? "indexed" : "plain", base_vertex, indexed ? min_index : start, indexed ? num_vertices : prim_vertices(type, prims), start, up_vertices ? " UP" : "",
                     (unsigned long long)vse->key, vse->refl.major, vse->refl.minor, (unsigned long long)pse->key, pse->refl.major, pse->refl.minor,
@@ -3907,6 +4376,12 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
                 Obj *t = obj(dev.tex[sm]);
                 fprintf(df, "  s%d: tex %08X kind %d fmt %X %ux%u levels %u usage %X | addr %u,%u filt %u/%u/%u\n", sm, dev.tex[sm], t ? t->kind : 0, t ? t->fmt : 0,
                         t ? t->w : 0, t ? t->h : 0, t ? t->levels : 0, t ? t->usage : 0, dev.ss[sm][1], dev.ss[sm][2], dev.ss[sm][5], dev.ss[sm][6], dev.ss[sm][7]);
+#if NFS_GAME == NFS_GAME_PRIVATE
+                RenderTex *private_sample=t?t->gpu:NULL;
+                fprintf(df,"    PRIVATE sampler d3dfmt=%u metalfmt=%lu srgb=%u\n",t?t->fmt:0,
+                        (unsigned long)(private_sample&&private_sample->tex?private_sample->tex.pixelFormat:MTLPixelFormatInvalid),dev.ss[sm][11]);
+
+#endif
                 float bias; memcpy(&bias, &dev.ss[sm][8], sizeof bias);
                 RenderTex *gt = t ? t->gpu : NULL;
                 fprintf(df, "    lod: bias %.4f min %u GPU levels %lu format %lu\n", bias, dev.ss[sm][9],
@@ -3914,9 +4389,24 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             }
             extern char diag_fx_pass[];
             fprintf(df, "  pass: %s\n", diag_fx_pass[0] ? diag_fx_pass : "(no effect pass)");
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "private_sampler_draws.inc"
+#endif
             if (ff) fprintf(df, "  fixed function: synthesized shaders\n");
             dump_consts(df, "vs", &vse->refl, ff ? ff_vsc : dev.vsc, 256);
             dump_consts(df, "ps", &pse->refl, ff ? ff_psc : dev.psc, 224);
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+            for(int private_stage=0;private_stage<2;private_stage++){
+                const SmResult *reflection=private_stage?&pse->refl:&vse->refl;
+                const uint32_t *values=private_stage?dev.psb:dev.vsb;
+                for(int k=0;k<reflection->n_constants;k++)if(reflection->constants[k].set==0){
+                    unsigned reg=reflection->constants[k].reg;
+                    if(reg<16)fprintf(df,"  PRIVATE %s b%u=%u %s\n",private_stage?"ps":"vs",reg,values[reg],reflection->constants[k].name);
+                }
+            }
+
+#endif
         }
     }
     // Fast path: every stream and the index buffer are static -> bind them as they are (no copies, no index scan).
@@ -3932,6 +4422,9 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             for (int s = 0; s < 16; ++s)
                 if (used_streams & (1u << s)) [enc setVertexBuffer:gpu_buf(obj(dev.stream[s])) offset:dev.stream_off[s] atIndex:(NSUInteger)s];
             if (need_zero) [enc setVertexBuffer:zero_buf offset:0 atIndex:30];
+#if NFS_GAME == NFS_GAME_MW
+            daynight_stream_bind(enc, mtl, obj(dev.stream[0]), gpu_buf(obj(dev.stream[0])), dev.stream_stride[0], dev.stream_off[0], vs->tokens_hash, dev.frames);
+#endif
             if (rw_pane_active) {
                 [enc setVertexBuffer:rw_pane.tint offset:0 atIndex:20];
                 [enc setVertexBytes:&rw_pane.first length:4 atIndex:21];
@@ -4047,6 +4540,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         }
     }
     } @finally {
+        if(motion_tee){enc=motion_real;memset(&eb,0,sizeof eb);}
         if (sign_tee) { enc = sign_real; sign_diag_replay(sign_tee); memset(&eb, 0, sizeof eb); }
         if(late_draw){
             enc=proof_real;[soft_late_draws addObject:late_record];
@@ -4076,7 +4570,14 @@ void quad_into(id<MTLCommandBuffer> cb, id<MTLTexture> src, MTLRegion sr, id<MTL
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].level = level;
     rp.colorAttachments[0].slice = slice;
-    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    // The blit pipeline writes RGBA to every covered sample, with no blending,
+    // discard or depth test. Keep stores for all later readers and sample reuse.
+    // Texture views/aliases and unsupported formats retain the conservative load.
+    int complete = src != dst && !src.parentTexture && !dst.parentTexture &&
+        (float_scene_on || dst.pixelFormat==MTLPixelFormatBGRA8Unorm || dst.pixelFormat==MTLPixelFormatRGBA16Float) &&
+        post_cuts_quad(dr.origin.x,dr.origin.y,dr.origin.z,dr.size.width,dr.size.height,dr.size.depth,
+                       mipdim((uint32_t)dst.width,(uint32_t)level),mipdim((uint32_t)dst.height,(uint32_t)level));
+    rp.colorAttachments[0].loadAction = complete ? MTLLoadActionDontCare : MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (gpt_on && cb == cmd) gpt_render_auto(rp, "quad");
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
@@ -4123,7 +4624,11 @@ void render_stretch(uint32_t src, uint32_t src_rect, uint32_t dst, uint32_t dst_
     else if(float_scene_on && !fs_active && src==dev.backbuffer)float_scene_copy(dst,fs_composing?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm);
     id<MTLTexture> d = surface_target(dst, &dl, &ds_);
     if (hdrclip_on && src==dev.backbuffer) hdrclip_scan(s, HC_MSAA);
+#if NFS_GAME == NFS_GAME_MW
     if(hdrclip_on && src==dev.backbuffer && MF32(0x009885D8u)>=15.0f){static int logged;if(!logged++){diag_event("float scene copy: active=%d source_format=%lu target_format=%lu",fs_active,(unsigned long)s.pixelFormat,(unsigned long)d.pixelFormat);}}
+#else
+                                            
+#endif
     id<MTLTexture> samples=s;
     if (s && s.sampleCount > 1) { RenderTex *r = surface_rt(src); msaa_resolve(r); s = r->tex; }   // from a multisampled surface
     if(hdrclip_on && src==dev.backbuffer && samples.sampleCount>1)hdrclip_pair(samples,s,0);
@@ -4205,9 +4710,15 @@ void render_dump_call(const char *line) {
     FILE *df = dump_file();
     if (df) fprintf(df, "call %s\n", line);
 }
+#if NFS_GAME == NFS_GAME_MW
 void texdump(uint32_t guest, id<MTLTexture> src) {
+#else
+void texdump(uint32_t guest, id<MTLTexture> src) { if(getenv("BOOT_DIAG_CONSTANTS_ONLY"))return;
+
+#endif
     if (!src || src.textureType != MTLTextureType2D || ndumped >= 4096) return;
     for (int i = 0; i < ndumped; ++i) if (dumped[i] == guest) return;
+    diag_capture_begin();
     dumped[ndumped++] = guest;
     char path[1024];
     snprintf(path, sizeof path, "%s/tex_%05llu", diag_dir, (unsigned long long)dev.frames);
@@ -4227,13 +4738,20 @@ void texdump(uint32_t guest, id<MTLTexture> src) {
     [cmd waitUntilCompleted];
     cmd = save; enc = save_enc; lamp_flushing = lamp_hold;
     save_png(dst, path, !(obj(guest) && (obj(guest)->usage & 1)));   // render-target textures: colour only
+    diag_capture_end();
 }
 
 // A sampled depth texture (hardware shadow map) as grey levels stretched over its depth range (black = nearest); it
 // holds what was committed before this frame's command buffer, i.e. the previous frame's map.
+#if NFS_GAME == NFS_GAME_MW
 static void depthdump(uint32_t guest, id<MTLTexture> src) {
+#else
+static void depthdump(uint32_t guest, id<MTLTexture> src) { if(getenv("BOOT_DIAG_CONSTANTS_ONLY"))return;
+
+#endif
     if (!src || src.textureType != MTLTextureType2D || ndumped >= 4096) return;
     for (int i = 0; i < ndumped; ++i) if (dumped[i] == guest) return;
+    diag_capture_begin();
     dumped[ndumped++] = guest;
     size_t w = src.width, h = src.height;
     id<MTLBuffer> b = [mtl newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
@@ -4259,6 +4777,7 @@ static void depthdump(uint32_t guest, id<MTLTexture> src) {
              guest, w, h, lo, hi, 100.0 * n1 / (w * h));
     diag_png(path, px, (uint32_t)w, (uint32_t)h, (uint32_t)w * 4, 0);
     free(px);
+    diag_capture_end();
 }
 
 // In the frames of BOOT_DIAG_DRAWS, render target 0 is saved after every BOOT_DIAG_DRAWSHOT-th draw (default 25,
@@ -4274,6 +4793,7 @@ static void drawshot(void) {
     id<MTLTexture> t = surface_target(dev.rt[0], &lv, &sl);
     if (t && t.sampleCount > 1) { RenderTex *r = surface_rt(dev.rt[0]); msaa_resolve(r); t = r->tex; }
     if (!t || t.textureType != MTLTextureType2D) return;
+    diag_capture_begin();
     char path[1024];
     snprintf(path, sizeof path, "%s/shots_%05llu", diag_dir, (unsigned long long)dev.frames);
     mkdir(path, 0755);
@@ -4287,6 +4807,7 @@ static void drawshot(void) {
     [cmd waitUntilCompleted];
     cmd = nil;                                                   // the next draw starts a new command buffer and a loading pass
     save_png(dst, path, 0);
+    diag_capture_end();
 }
 // stderr, every 300 frames: the draw and pipeline counts.
 void render_stats_log(void) {
@@ -4312,3 +4833,7 @@ void render_stats_log(void) {
         fprintf(stderr, "boot: render: %llu draws, %llu fixed-function (synthesized shaders), %llu fixed-function skipped, %llu deferred (shader compiling), %llu failed, %d shaders, %lu pipelines, %llu renamed\n",
                 (unsigned long long)stat_draws, (unsigned long long)stat_ff_drawn, (unsigned long long)stat_ff_skipped, (unsigned long long)stat_deferred, (unsigned long long)stat_fail, nshaders, (unsigned long)pipelines.n, (unsigned long long)stat_renamed);
 }
+#if NFS_GAME == NFS_GAME_PRIVATE
+
+#include "game_surface.inc"
+#endif

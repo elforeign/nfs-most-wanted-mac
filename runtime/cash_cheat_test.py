@@ -15,6 +15,10 @@ import re
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -331,7 +335,7 @@ def main():
     rows = port[port.index('#include "cash_cheat.h"'):port.index('// ---------------- Display')]
     registers = re.search(r'^    REG\(h_cash\);[^\n]+', port, re.M).group()
     assert 'cash_cheat.c' in (ROOT / 'runtime/build.sh').read_text()
-    assert 'cash_cheat_frame(c);' in (ROOT / 'runtime/d3d9.m').read_text()
+    assert 'cash_cheat_frame(c);' in mw_source(ROOT / 'runtime/d3d9.m')
     award = function((ROOT / 'recomp/out/speed_20.c').read_text(), 'f_00566010')
     getter = function((ROOT / 'recomp/out/speed_16.c').read_text(), 'f_0050E300')
     feature = (ROOT / 'runtime/cash_cheat.c').read_text()

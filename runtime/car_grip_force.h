@@ -50,4 +50,58 @@ typedef struct {
  * An unloaded wheel with valid inputs returns zero force.
  */
 int car_grip_force_limit(const CarGripForceLimit *in, CarGripForceResult *out);
+
+/* Ordinary-road slices of source 006EE920. These start AFTER the shared
+ * brake/drive torque preparation, slip-angle calculation and brake-lock check.
+ * Callers must supply that check's updated lock and a lateral curve sample
+ * with the selected GRIP_SCALE. Sliding forces retain pre-check slip and speed
+ * gain, as in the source. No drift mode or guest layout is used.
+ * Double intermediates/binary32 outputs; scalar equivalence, not x87 identity.
+ */
+typedef struct {
+    CarGripForceVector sliding;
+    float prior_saturation, lateral_velocity, curve_force, lateral_gain;
+    float wheel_torque, radius, angular_acceleration, road_acceleration, inertia;
+    int locked;
+} CarGripForceDemand;
+
+/* Select sliding when prior_saturation < 1 or locked. Clamp its longitudinal
+ * component to same-sign torque/radius. Otherwise use signed curve_force and
+ * torque/radius. Apply lateral_gain, then the unlocked adhesion inertia term.
+ */
+int car_grip_force_ordinary_demand(const CarGripForceDemand *in,
+                                  CarGripForceVector *out);
+
+typedef struct {
+    CarGripForceVector demand;
+    float load, static_grip, grip_multiplier, speed_gain, static_gain;
+    float speed, throttle, brake, ebrake;
+    int gear, locked;
+    float slip, slip_threshold;
+    float surface_lateral, surface_longitudinal;
+    float lateral_velocity, forward_velocity, slip_angle_turns;
+    float angle_correction, grip_scale;
+    float wheel_torque, radius, omega, angular_acceleration, road_acceleration;
+    float previous_feedback, rolling_friction, surface_rolling, inertia, dt;
+} CarGripForceOrdinary;
+
+typedef struct {
+    CarGripForceVector force;
+    float cap_scale;       /* radial force scale, BEFORE launch/feedback terms */
+    float saturation;      /* wheel feedback fraction, NOT cap_scale */
+    float stored_slip;     /* launch branch scales only this stored value */
+    float feedback, angular_acceleration;
+    int launch;
+} CarGripForceOrdinaryResult;
+
+/* Source ordinary circle cap, launch correction, slip feedback fraction,
+ * surfaces, signed low-road-speed lateral damping / GRIP_SCALE angle correction,
+ * and filtered wheel feedback. No torque preparation, brake lock, wheel omega
+ * integration or sign-history transition. Keep those native in the bridge.
+ * Saturation uses original slip; acceleration uses stored_slip. Feedback uses
+ * the final surface/angle-corrected force. Invalid inputs clear all output.
+ * grip_scale may be zero only on the forward_velocity <= 1 damping branch.
+ */
+int car_grip_force_ordinary_finish(const CarGripForceOrdinary *in,
+                                  CarGripForceOrdinaryResult *out);
 #endif

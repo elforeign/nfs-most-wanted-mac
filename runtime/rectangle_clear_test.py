@@ -13,6 +13,10 @@ import os
 import subprocess
 import tempfile
 
+import sys as _source_sys
+_source_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from save_file_fixture import mw_source
+
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME = ROOT / 'runtime'
 
@@ -59,7 +63,7 @@ for code, output in ((0, host_control),
 print('PASS GPU report validation: host transcript accepted; 3/3 malformed controls rejected', flush=True)
 
 
-text = (RUNTIME / 'render.m').read_text()
+text = mw_source(RUNTIME / 'render.m')
 helpers = text.split('// BEGIN rectangle clear helpers', 1)[1].split('// END rectangle clear helpers', 1)[0]
 helpers = helpers[helpers.index('\n'):]
 entry = 'void render_clear(' + text.split('void render_clear(', 1)[1].split('// BEGIN offline upload test:', 1)[0]
