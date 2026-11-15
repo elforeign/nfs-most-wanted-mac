@@ -12,6 +12,8 @@ This project is unofficial. It is not affiliated with or endorsed by Electronic 
 *Need for Speed* and *Most Wanted* are trademarks of Electronic Arts Inc.; all other names belong to their owners.
 Details: [NOTICE](NOTICE).
 
+See 4.6.0 running live on a Mac: [YouTube live stream](https://www.youtube.com/watch?v=wI0Jr0FTvRc&t=210s).
+
 ## Play it on your Mac
 
 1. Have your own PC game, **version 1.3**, on your Mac: the installed game folder or a .zip of it, or your PC game
