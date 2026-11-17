@@ -73,7 +73,7 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.7.0"
+PUBLIC_VERSION = "4.7.1"
 # Carbon's app: its names (install.CARBON), its data, Setup state and update folder name, and its own version.
 CARBON_PRODUCT = dict(CARBON, data="Carbon")
 CARBON_VERSION = "1.0.0"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.7.1
+
+- **Update now fixed:** Update now could stop with "The prepared update folder or its retained tools failed verification" when your game files were copied from a USB stick, network share or another computer.
+
 ## 4.7.0
 
 - **More console looks without console files:** without your own Xbox 360 files, wall and kerb depth, the console's particle shading and size, extra tyre smoke, the console's shadow fit and distant fog without the PC's cut-off are now On too. With your Xbox 360 files the console versions are still used.

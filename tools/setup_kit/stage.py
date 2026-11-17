@@ -5,10 +5,12 @@ job directory, bind their relative roots and provenance, fsync everything, then
 atomically publish ready.json. Application/recovery belongs to the installer.
 """
 import hashlib
+from itertools import chain
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import uuid
 
 from . import x360_extras
@@ -105,6 +107,12 @@ def publish(target, app, data, roots, destination, profile, version, provenance,
     try:
         shutil.copytree(app, target / app.name)
         shutil.copytree(data, target / "data")
+        # Launch checks every entry in the job for group/other write access.
+        for root in (target / app.name, target / "data"):
+            for path in chain((root,), root.rglob("*")):
+                mode = stat.S_IMODE(path.stat().st_mode)
+                if mode & 0o022:
+                    path.chmod(mode & ~0o022)
         hashes = dict(app=digest_tree(target / app.name), data=digest_tree(target / "data"))
         if hashes != dict(app=digest_tree(app), data=digest_tree(data)):
             raise InstallError("The staged update copy failed verification.", "Check the staging disk and retry in a new directory.")
