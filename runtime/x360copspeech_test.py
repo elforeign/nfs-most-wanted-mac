@@ -66,7 +66,8 @@ def main():
              '-I', str(ROOT / 'recomp/out'), str(ROOT / 'runtime/x360audio.c'),
              str(test_source), str(original),
              str(ROOT / 'runtime/settings.c'), str(ROOT / 'runtime/offline_stubs.c'), '-lz', '-o', str(binary)])
-        env = dict(os.environ, NFS_X360_AUDIO='off', NFS_X360_MUSIC='off')
+        # No roots.txt unless a check names one: the player's own Setup manifest must not pick the files.
+        env = dict(os.environ, NFS_X360_AUDIO='off', NFS_X360_MUSIC='off', NFS_ROOTS=str(scratch / 'no-roots.txt'))
         for key in list(env):
             if key == 'NFS_X360_COPSPEECH' or key.startswith('NFS_COP_TEST_'):
                 env.pop(key, None)
@@ -129,6 +130,9 @@ def main():
         print('deliberately shifted production patch: ' + next(
             line for line in broken.stdout.splitlines() if line.startswith('parity:')) + '; expected FAIL')
         serve('-', True, NFS_X360_COPSPEECH='x360')  # Default speech-only extraction path.
+        roots = scratch / 'roots.txt'  # Setup's layout: all four files under x360_root/SOUND/SPEECH.
+        roots.write_text(f'x360_root={EXTRACT}\n')
+        serve('-', True, NFS_X360_COPSPEECH='x360', NFS_ROOTS=str(roots))
         serve(EXTRACT, True, NFS_X360_COPSPEECH='x360', NFS_COP_TEST_ALLOC_FAIL='1')
         serve(EXTRACT, True, NFS_X360_COPSPEECH='x360', NFS_COP_TEST_WARM='1')
         serve(EXTRACT, True, NFS_COP_TEST_PREF='x360')

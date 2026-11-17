@@ -711,7 +711,7 @@ static void upload_ctab(Cpu *c, Effect *fx, State *st, int ps, uint64_t since) {
                 float m[16];
                 get_matrix(q, m, 0);
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_frontend_matrix.inc"
+#include "game_frontend_matrix.h"
 #endif
                 int as_cols = ccls == PC_MATRIX_COLUMNS || (ccls != PC_MATRIX_ROWS && q->cls == PC_MATRIX_COLUMNS);
                 uint32_t nr = as_cols ? q->cols : q->rows, per = as_cols ? q->rows : q->cols;
@@ -727,7 +727,7 @@ static void upload_ctab(Cpu *c, Effect *fx, State *st, int ps, uint64_t since) {
         }
         if (!nreg) continue;
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_effect_evidence.inc"
+#include "game_effect_evidence.h"
 #endif
         uint32_t buf = scratch(16 * nreg);
         if (rs == 2) {
@@ -1200,7 +1200,7 @@ static int e_BeginPass(Cpu *c) {
     fx->pass = &fx->cur->passes[i];
     fx->in_pass = 1;
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_frontend_begin.inc"
+#include "game_frontend_begin.h"
 #endif
     snprintf(diag_fx_pass, sizeof diag_fx_pass, "%s/%s/%s", fx->name, fx->cur->name, fx->pass->name);
     uint32_t esp = c->esp;
@@ -1216,7 +1216,7 @@ static int e_CommitChanges(Cpu *c) {
 #if NFS_GAME == NFS_GAME_MW
 static int e_EndPass(Cpu *c) { Effect *fx = FX; fx->in_pass = 0; snprintf(diag_fx_pass, sizeof diag_fx_pass, "(no effect pass)"); RET(D3D_OK, 1); }
 #else
-#include "game_frontend_end.inc"
+#include "game_frontend_end.h"
 #endif
 static int e_End(Cpu *c) {
     Effect *fx = FX;

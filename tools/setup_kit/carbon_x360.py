@@ -1,13 +1,15 @@
-"""Prepare Carbon's Xbox 360 artwork from the player's own console copy.
+"""Prepare Carbon's Xbox 360 artwork and selected sound from the player's copy.
 
-Two archives supply it: GLOBAL/GLOBALB.BUN (the 24 button and stick glyphs) and
+The artwork archives are: GLOBAL/GLOBALB.BUN (the 24 button and stick glyphs) and
 GLOBAL/DYNTEX.BIN (the two 256x256 controller diagrams). The source is an
 extracted folder or an ISO; logical files are found through the game's own file
 table, never by fixed disc offsets. Everything is checked before a byte is kept:
 the executable's title id, each archive's size and SHA-256, its chunk structure,
-every glyph surface and both diagram entries. The result holds only those two
-files under files/GLOBAL; any failure leaves nothing behind, and a Carbon
-without the artwork keeps its keycaps.
+every glyph surface and both diagram entries. Setup also retains the four music
+MPF/MUS pairs, the five improved GIN recordings, and the police/crew and UCAP
+speech banks with their CSI/EVT/IDX companions. Other sound files stay PC.
+Any failure leaves nothing behind;
+without an optional source Carbon keeps its PC sound and keycaps.
 """
 import hashlib
 from pathlib import Path
@@ -24,6 +26,27 @@ FIX = "Choose your own complete Need for Speed Carbon Xbox 360 copy (folder or .
 FILES = {
     "GLOBAL/GLOBALB.BUN": (26302100, "d8eddfd473df508e96556796bbee34e1fca7b4c185deb45c6edd88b442c29c8f"),
     "GLOBAL/DYNTEX.BIN": (12134656, "e0fc43d2a0ca35c7722252bfaf9088cc5cc555916e61a52cded2294a38dd4ada"),
+    "SOUND/ENGINE/GIN/EN_ACL_11.GIN": (262423, "6dd5a92a2c706fedffa527356053b9f0074dda9257b0077ea0cdbb4d3c5b81bb"),
+    "SOUND/ENGINE/GIN/EN_ACL_25.GIN": (378891, "018c9d5aac3d6c08d9cd4fcbbfa7ea2171e9c3b0a56331bb35f92c412ede768e"),
+    "SOUND/ENGINE/GIN/EN_ACL_68.GIN": (353269, "5b4545479e5e5fb56c575d4253f0cfecf832a84380c9937f61caa21a2b0eb49a"),
+    "SOUND/ENGINE/GIN/EN_DCL_11.GIN": (131925, "94685aed1437c58c9cc409b886966ba27fdcb2a82fd515865c80cb772c82a437"),
+    "SOUND/ENGINE/GIN/EN_DCL_68.GIN": (309869, "ddaaab77c9835f3c51eb2f1b88812a29eaa3edc4e366d7454e52980313369516"),
+    "SOUND/SPEECH/COPSPEECH.BIG": (433741824, "2dd1d9d6933a5f4217ea190039139d2a7759ea39f1a931c4c26081b6a3ecae60"),
+    "SOUND/SPEECH/COPSPEECH.CSI": (6564, "fdfcac0d239181be51e2fd551adb061777dc39a90ab0b7048dbc065997945c70"),
+    "SOUND/SPEECH/COPSPEECH.EVT": (25257, "d747def4de0b0262c6bb2dc5796df19f294e23b11d8161b2e9a7f78cc362e97e"),
+    "SOUND/SPEECH/COPSPEECH.IDX": (89376, "0aecfb5269285b33f437720395216c199638b5ef9bfb782eb2c83d11d71885c4"),
+    "SOUND/SPEECH/UCAPAUDIO.BIG": (4261888, "dc689d4ce2fe8c00cc3c3ca2d90132afef6477a44de123064a73a218562015d8"),
+    "SOUND/SPEECH/UCAPAUDIO.CSI": (180, "7753939aa301c65009d474620beddb032770346825057903a38ad83a196c016c"),
+    "SOUND/SPEECH/UCAPAUDIO.EVT": (555, "9b8df37af0233893fc96e19e32fd2d8c7b68a65529f0544d8772fb78f868a7cb"),
+    "SOUND/SPEECH/UCAPAUDIO.IDX": (528, "51bf7992ad795c0e07a67af5876800528171205c5287aa6238a3fd6030f7afc1"),
+    "SOUND/PFDATA/CB_MUS_0.MPF": (17168, "1e679d434129c4586b0891b241e0023247ee55be274d2c3a31ab1a9f5370f9cf"),
+    "SOUND/PFDATA/CB_MUS_0.MUS": (445296128, "92e19ffb291a9bacf1ff5dd89931c9fb0d41ed23c465223f4382d682bdc44f78"),
+    "SOUND/PFDATA/CB_MUS_1.MPF": (18100, "28756b7a5eb2b7d27fbf88dbe0916f066e59f94a1f16244a67c6f26dfc15718a"),
+    "SOUND/PFDATA/CB_MUS_1.MUS": (41680384, "5161d6bb4aa7e2cad4afe94fa9dad83b25c0783bb9b474f6db6fb24f33f99739"),
+    "SOUND/PFDATA/CB_MUS_2.MPF": (16320, "9d7e0d7d251e6c9f65ee90622eaad4ab6c7390ad6cd4527b33f461db0acb11fa"),
+    "SOUND/PFDATA/CB_MUS_2.MUS": (52387328, "79b041c6f4e98c022779aab918b955518088c228551122e7ea49e39bdb9cebf7"),
+    "SOUND/PFDATA/CB_MUS_3.MPF": (46400, "6673e8d3fc032d111b25cd2cf83d4d59f9341d64186694e4c94cc4e63348d120"),
+    "SOUND/PFDATA/CB_MUS_3.MUS": (125959936, "7276c2b5da3fb4fd6a1c784348b05d37ad4b3ce751cfc67aed50e0f3e80de9e1"),
 }
 # The 24 prompt slots, in the runtime's order: slot name, then the surface it draws when that differs.
 GLYPH_SLOTS = (("CROSS", None), ("TRIANGLE", None), ("CIRCLE", None), ("SQUARE", None), ("L1", None), ("R1", None),
@@ -132,7 +155,7 @@ def validate_archives(globalb, dyntex):
 
 
 def _resolve(source):
-    """The title id and the two logical files, found through the game's own tables."""
+    """The title id and the exact audited files from the game's own tables."""
     files = car_sources._physical(source)
     if "DEFAULT.XEX" not in files:
         raise CarbonArtError("The Carbon copy has no default.xex.")
@@ -146,7 +169,18 @@ def _resolve(source):
     logical = car_sources._logical(source, files)
     entries = {}
     for name in FILES:
-        entry = logical.get(car_sources.path_hash(name))
+        # Speech is localized on disc; the prepared English set uses PC names.
+        names = (name, name.replace(".", "_EN.", 1)) if name.startswith("SOUND/SPEECH/") else (name,)
+        entry = None
+        for source_name in names:
+            entry = logical.get(car_sources.path_hash(source_name))
+            # The car-source reader inventories only CARS/GLOBAL in extracted
+            # folders. Admit only this importer's exact sound list here.
+            if entry is None and "NFS/ZDIR.BIN" not in files and source_name in files:
+                key = files[source_name]
+                entry = (key, 0, source.size(key))
+            if entry is not None:
+                break
         if entry is None:
             raise CarbonArtError(f"The Carbon copy has no {name}.")
         if entry[2] != FILES[name][0]:
@@ -171,7 +205,7 @@ def _copy(source, entry, name, destination, progress, done, total):
 
 
 def prepare(source, out, progress=None):
-    """Write out/prepared/files/GLOBAL/{GLOBALB.BUN,DYNTEX.BIN}; return the roots, or raise CarbonArtError."""
+    """Write only audited artwork, music, five GINs and speech below prepared/files."""
     source, out = Path(source).resolve(), Path(out).resolve()
     if out == source or out.is_relative_to(source) or (source.is_dir() and source.is_relative_to(out)):
         raise CarbonArtError("The Carbon output must be separate from the game copy.")
@@ -192,9 +226,10 @@ def prepare(source, out, progress=None):
             raise CarbonArtError(str(error)) from error
         except (xdvdfs.DiscError, struct.error, UnicodeError) as error:
             raise CarbonArtError(f"The Carbon copy is damaged: {error}") from error
-        validate_archives(*[(stage / "files" / name).read_bytes() for name in FILES])
+        validate_archives(*[(stage / "files" / name).read_bytes()
+                            for name in ("GLOBAL/GLOBALB.BUN", "GLOBAL/DYNTEX.BIN")])
         stage.rename(final)
-        return X360Result({"x360_root": final / "files"}, ("xbox_art",), ())
+        return X360Result({"x360_root": final / "files"}, ("xbox_art", "xbox_music", "xbox_gin", "xbox_speech"), ())
     except OSError as error:
         raise CarbonArtError(f"Could not read or write the Carbon artwork: {error}") from error
     finally:

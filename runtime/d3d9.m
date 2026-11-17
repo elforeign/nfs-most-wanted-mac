@@ -394,11 +394,11 @@ static int q_GetData(Cpu *c) {         // (this, data*, size, flags)
 
 // ---------------- IDirect3D9 ----------------
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_widescreen.inc"
+#include "game_widescreen.h"
 #endif
 static void fill_mode(uint32_t p, uint32_t w, uint32_t h, uint32_t fmt) { M32(p) = w; M32(p + 4) = h; M32(p + 8) = 60; M32(p + 12) = fmt; }
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_mode_provider.inc"
+#include "game_mode_provider.h"
 #endif
 #if NFS_GAME == NFS_GAME_MW
 static const uint32_t modes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 720}, {1280, 960}, {1280, 1024}, {1360, 768},
@@ -419,7 +419,7 @@ static uint32_t nmodes(void) {
     return nmodes_;
 }
 #else
-#include "game_display_modes.inc"
+#include "game_display_modes.h"
 #endif
 #define NMODES nmodes()
 static void mode_at(uint32_t i, uint32_t *w, uint32_t *h) { *w = adapter_modes[i][0]; *h = adapter_modes[i][1]; }
@@ -604,7 +604,7 @@ void first_run_settings(Cpu *c, const char *where) {     // also from widescreen
             M32(FSAA_LEVEL), M32(RES_INDEX), M32(SHADOW_DETAIL));
 }
 #else
-#include "game_display_aa.inc"
+#include "game_display_aa.h"
 void first_run_settings(Cpu *c, const char *where) { }
 #endif
 void f_006C1990_orig(Cpu *c);
@@ -807,11 +807,11 @@ static int v_Present(Cpu *c) {
 }
 #else
 static void present(void)
-#include "game_menu_present.inc"
+#include "game_menu_present.h"
 
 static void autodrive_players(Cpu *c, int mode) { }
 static int v_Present(Cpu *c)
-#include "game_picture_present.inc"
+#include "game_picture_present.h"
 
 #endif
 static int v_GetBackBuffer(Cpu *c) {           // (this, iSwap, i, type, pp)
@@ -1271,5 +1271,5 @@ int win32_d3d9(Cpu *c, const char *fn) {
 }
 #if NFS_GAME == NFS_GAME_PRIVATE
 
-#include "game_d3dx.inc"
+#include "game_d3dx.h"
 #endif

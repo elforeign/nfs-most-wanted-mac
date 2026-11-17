@@ -5,7 +5,8 @@
 #include <cstdint>
 #include <cmath>
 
-#include "gen/x360_engine.inc"   // X360E_SHADOW_*: the retail fit's tuning numbers, from the player's default.xex
+#include "gen/x360_engine.inc"   // X360E_SHADOW_*: the fit's tuning numbers, from the player's default.xex, else the port's
+                                 // own (tools_snapshot/pubtables_gen.py SHADOW_FALLBACK)
 
 namespace nfsmw_x360 {
 

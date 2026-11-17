@@ -31,6 +31,12 @@ Step by step, including the one-time "Open Anyway" for an app that is not notari
 (same name, same Dock icon) and keeps it as "NFS Most Wanted Native 3.x.app". See the
 [changelog](CHANGELOG.md).
 
+## Also from this project: Carbon
+
+- **[NFS Carbon Native](https://github.com/elforeign/nfs-carbon-mac)** is the same port for Need for Speed: Carbon
+  (2006), in its own repository. It installs alone and needs only your Carbon PC files.
+- **Coming later:** Most Wanted's Rockport and Carbon's Palmont in one world, in a later release.
+
 ## What you need
 
 - An Apple Silicon Mac (M1 or later) with macOS 14.5 or later (provisional).

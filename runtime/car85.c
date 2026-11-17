@@ -860,7 +860,9 @@ static void register_logos(Cpu *c) {
         Source *fe = source(FRONTEND, a->fe);
         if (!fe) continue;
         unsigned brand = menu_manufacturer(a, M32(fe->ld + 0x1C));
-        if ((k & 1) && !a->manufacturer_name[0] && (brand <= 25 || brand >= 39)) continue; // retail artwork
+        // Retail FrontB.lzc ships CARSELECT_MANUFACTURER_<name> for ids 1..25 except
+        // NISSAN (13, hash 2C6AD22C): Nissan folders get the generated nameplate.
+        if ((k & 1) && !a->manufacturer_name[0] && ((brand <= 25 && brand != 13) || brand >= 39)) continue; // retail artwork
         uint32_t *texture = (k & 1) ? (a->manufacturer_name[0]?&a->brand_logo:&brand_logos[brand]) : &a->logo;
         if (*texture) continue;
         const char *label = (k & 1) ? addition_brand(a,M32(fe->ld+0x1C)) : (a->display_name[0]?a->display_name:a->name);

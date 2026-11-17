@@ -9,6 +9,8 @@ its mutant promotes all 8. Before the delivery barrier, the 1-byte prefix delive
 0 bytes and hit the checksum guard instead, masking the disabled completion guard.
 No external network or release dependencies. runtime/*_test.py discovery registers this test.
 Product proof: Carbon delivery good=1 / MW product refused=1; packaged products=2/2.
+Carbon identity proof: a DMG carrying the Carbon installer's Setup id verifies=1; the earlier helper id
+(org.nfsc-native.setup) refused that same DMG (rc=1, "bundle identity or version").
 The production binary is checked for absence of the fixture URL environment variable.
 """
 import contextlib
@@ -32,6 +34,9 @@ SUM = ASSET + '.sha256'
 PREFIX = '/elforeign/nfs-most-wanted-mac/releases/download/' + TAG + '/'
 SETUP = 'NFS Most Wanted Native Setup.app'
 CAP = 1024 * 1024
+# The identity tools/installer/build_installer.sh --game carbon writes into the Carbon Setup's Info.plist; written
+# here, not read from the helper, so a helper expecting another identity fails Carbon delivery.
+CARBON_SETUP_ID = 'org.nfscarbon-native.setup'
 
 
 def run(args, **kwargs):
@@ -70,7 +75,7 @@ def image(root, name, mode='good'):
     (contents / 'MacOS').mkdir(parents=True)
     (contents / 'Resources').mkdir()
     (contents / 'Resources/sealed.txt').write_text('original contents\n')
-    info = dict(CFBundleIdentifier='org.nfsc-native.setup' if 'Carbon' in SETUP else 'org.nfsmw-native.setup', CFBundleExecutable='Setup',
+    info = dict(CFBundleIdentifier=CARBON_SETUP_ID if 'Carbon' in SETUP else 'org.nfsmw-native.setup', CFBundleExecutable='Setup',
                 CFBundlePackageType='APPL', CFBundleName='Setup', CFBundleShortVersionString='4.2.0',
                 CFBundleVersion='4.2.0')
     if mode == 'version':
@@ -496,7 +501,11 @@ def carbon_delivery(root):
             # A MW build cannot accept the Carbon asset or fetch from its repository.
             wrong = build(root, 'wrong-product-helper')
             assert rejected(invoke(wrong, root, server, data))
-        print('Carbon delivery: verified=1; MW helper with Carbon asset refused=1; Carbon repository requests=2')
+            # Broken control: the identity the helper expected before it matched the Carbon installer.
+            stale = build(root, 'stale-carbon-id-helper', ('@"org.nfscarbon-native.setup"', '@"org.nfsc-native.setup"'), game='carbon')
+            outcome = invoke(stale, root, server, data)
+            assert rejected(outcome) and 'bundle identity' in outcome[1].get('message', ''), outcome[1]
+        print('Carbon delivery: verified=1; MW helper with Carbon asset refused=1; stale Carbon Setup id refused=1; Carbon repository requests=2')
     finally:
         ASSET, SUM, PREFIX, SETUP = saved
 

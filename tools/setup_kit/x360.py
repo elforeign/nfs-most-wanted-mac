@@ -41,6 +41,8 @@ REQUIRED = (
     "TRACKS/STREAML2RA.BUN", "TRACKS/STREAML2RA_PERM.BUN",
     "SOUND/PFDATA/MW_MUSIC.MPF", "SOUND/PFDATA/MW_MUSIC.MUS",
     "SOUND/SPEECH/COPSPEECH_EN.BIG", "SOUND/STREAMS/NISAUDIO.BIG", "SOUND/STREAMS/NISAUDIO.IDX",
+    # The cop speech bank is unusable without its sidecars (runtime/x360copspeech.c opens all four).
+    "SOUND/SPEECH/COPSPEECH_EN.CSI", "SOUND/SPEECH/COPSPEECH_EN.EVT", "SOUND/SPEECH/COPSPEECH_EN.IDX",
 ) + tuple(f"FRONTEND/PLATFORMS/{s}.LZC" for s in SCENES)
 SELECTED_DIRS = {"GLOBAL", "TRACKS", "CARS", "SOUND", "NIS", "FRONTEND", "LANGUAGES"}
 ARREST = re.compile(r"SCENE_ARREST[FM]\d+B?_BUNDLEB\.BUN$", re.I)
@@ -228,6 +230,8 @@ def _entries(data):
 
 
 def _wanted(name):
+    if name in REQUIRED:
+        return True
     top = name.split("/")[0]
     if top == "SOUND":
         return name.endswith((".ABK", ".GIN", ".BIG", ".IDX", ".MPF", ".MUS", ".MXB"))

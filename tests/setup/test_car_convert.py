@@ -1,4 +1,8 @@
 """Illumination regression: old 54/54 zero-lit synthetic vertices; fixed 0/54.
+Added-car sync: 30 source cars audited, 29 produce 232 compared files; nine
+sorted material trailers, missing-kit aliases and donor platform +08 defaults
+are decoded policy differences. One source has an unused unresolved texture
+table entry and retains Setup's pre-existing fail-closed refusal.
 Classified rims: old CCX 1728 zero-RGB vertices; fixed 0; stock-paint R8 2402 and 997TT 8200 -> 0 (catalog check).
 Bare stock-lit/missing-stock fixture: old 3 failures (2 dark each), fixed 0; finish: old 0 rows -> fixed 1.
 Missing source paint attributes: old 1/1 conversion errors; fixed 1/1 donor retained, 1 log line.
@@ -40,6 +44,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -331,6 +336,80 @@ def assert_written_hashes(test, directory, expected):
     """Parity is measured from published files, including the writer's work."""
     actual = {name: cc.file_hash(directory / name) for name in expected}
     test.assertEqual(actual, expected, 'published output hashes')
+
+
+def assert_geometry_parity(test, actual, expected):
+    """Only standalone row order may differ; every geometry byte stays exact."""
+    if actual == expected:
+        return 'byte-identical'
+    end = cc.u32(actual, 4) + 8
+    test.assertEqual(actual[:end], expected[:end], 'geometry envelope/solids differ')
+    def rows(data):
+        result = {}
+        for kind, offset, size in cc.children(data, end):
+            test.assertEqual(kind, 0x135200)
+            row = data[offset+8:offset+8+size]
+            key = cc.u32(row, 12)
+            test.assertNotIn(key, result)
+            result[key] = row
+        return result
+    test.assertEqual(rows(actual), rows(expected), 'standalone material payloads differ')
+    test.assertTrue(rows(actual), 'no material rows explain the difference')
+    return 'standalone material rows sorted by identity'
+
+
+def assert_solidmap_parity(test, actual, expected, geometry, donor_geometry, donor, car):
+    if actual == expected:
+        return 'byte-identical'
+    test.assertEqual(actual[:16], expected[:16], 'solidmap header differs')
+    a, b = (dict(struct.iter_unpack('<II', raw[16:])) for raw in (actual, expected))
+    test.assertEqual(a.keys(), b.keys(), 'solidmap request identities differ')
+    present = set(cc.validate_geometry(geometry))
+    refs = cc.validate_geometry(donor_geometry, input_pack=True)
+    names = {cc.name_hash(n): n for n in refs}
+    changed = []
+    for key in a:
+        if a[key] == b[key]:
+            continue
+        name = names[key]
+        suffix = name[len(donor)+1:]
+        match = re.fullmatch(r'KITW?\d{2}_(.+)', suffix)
+        test.assertIsNotNone(match, 'difference outside missing-kit fallback')
+        target = 'NFSAD_' + car + '_' + suffix
+        stock = 'NFSAD_' + car + '_KIT00_' + match[1]
+        test.assertNotIn(target, present)
+        test.assertIn(stock, present)
+        test.assertEqual(b[key], cc.name_hash(target))
+        test.assertEqual(a[key], cc.name_hash(stock))
+        changed.append(suffix + '->KIT00_' + match[1])
+    test.assertTrue(changed)
+    return f'{len(changed)} missing-kit requests use present stock solids; example ' + changed[0]
+
+
+def assert_texture_parity(test, actual, expected, donor_textures):
+    if actual == expected:
+        return 'byte-identical'
+    a, b = (dict(cc.texture_blobs(raw)) for raw in (actual, expected))
+    test.assertEqual(a.keys(), b.keys(), 'texture inventories differ')
+    defaults = {blob[-24:-20] for _, blob in cc.texture_blobs(donor_textures)}
+    normalized, changed = bytearray(expected), []
+    for entry in cc.index(expected, 0x33310003):
+        key, offset, size = entry[:3]
+        if a[key] == b[key]:
+            continue
+        # v5 platform +08 is retained from the selected native donor default.
+        # Setup chooses the first same-format donor in original stream order;
+        # the reference moves namespaced slot defaults last before choosing.
+        test.assertEqual(a[key][:-24], b[key][:-24], 'texture pixels or record differ')
+        test.assertEqual(a[key][-20:], b[key][-20:], 'other platform fields differ')
+        test.assertIn(a[key][-24:-20], defaults)
+        test.assertIn(b[key][-24:-20], defaults)
+        at = offset + size - 24
+        normalized[at:at+4] = a[key][-24:-20]
+        changed.append(f'{key:08X}:{cc.u32(b[key], len(b[key])-24)}->{cc.u32(a[key], len(a[key])-24)}')
+    test.assertEqual(actual, bytes(normalized), 'unclassified texture-container difference')
+    test.assertTrue(changed)
+    return 'native donor platform +08 defaults: ' + ','.join(changed)
 
 
 class CarConversion(unittest.TestCase):
@@ -691,11 +770,11 @@ class CarConversion(unittest.TestCase):
         for n, m in good.items():
             self.assertEqual(m['vertices'][:, :24].tobytes(), bad[n]['vertices'][:, :24].tobytes())
             self.assertEqual(m['vertices'][:, 28:].tobytes(), bad[n]['vertices'][:, 28:].tobytes())
-        # Missing stock paint evidence must leave black details alone.
+        # Unexported detail colours are repaired even without stock paint evidence.
         models = {'CAR_BASE_A': bad['NFSAD_CAR_BASE_A']}
         original = models['CAR_BASE_A']['vertices'].tobytes()
-        self.assertEqual(cc.map_vertex_lighting(models), 0)
-        self.assertEqual(models['CAR_BASE_A']['vertices'].tobytes(), original)
+        self.assertEqual(cc.map_vertex_lighting(models), 3)
+        self.assertNotEqual(models['CAR_BASE_A']['vertices'].tobytes(), original)
         print(f'illumination: old {dark(bad)} zero-lit vertices; fixed {dark(good)}; non-colour bytes exact')
 
     def test_rim_rgb_preserves_alpha_and_rubber(self):
@@ -716,7 +795,7 @@ class CarConversion(unittest.TestCase):
         self.assertEqual(wheel[:,27].tobytes(),before[:,27].tobytes())
         self.assertEqual(wheel[2:].tobytes(),before[2:].tobytes())
         self.assertEqual(cc.map_vertex_lighting(models),0)
-        # The stock-paint gate must protect black body detail, independently of rims.
+        # Zero non-rim colours are repaired regardless of stock-paint evidence.
         for lit in (False, True):
             for stock_present in (False, True):
                 with self.subTest(lit_paint=lit, stock_present=stock_present):
@@ -727,12 +806,12 @@ class CarConversion(unittest.TestCase):
                     fixture = {'CAR_FRONT_TIRE_A': models['CAR_KIT00_FRONT_TIRE_D'],
                                'CAR_DETAIL_A':dict(vertices=detail,records=[record(2)],names=[b'BOTTOM'])}
                     if stock_present: fixture['CAR_KIT00_BODY_A'] = models['CAR_KIT00_BODY_A']
-                    expected = 7 if stock_present and not lit else 2
+                    expected = 7 if stock_present and not lit else 4
                     self.assertEqual(cc.map_vertex_lighting(fixture), expected)
                     self.assertEqual(wheel[:2,24:27].tobytes(), bytes([255])*6)
                     self.assertEqual(wheel[:,27].tobytes(), before[:,27].tobytes())
                     self.assertEqual(wheel[2:].tobytes(), before[2:].tobytes())
-                    self.assertEqual(detail.any(), stock_present and not lit)
+                    self.assertTrue(detail.any())
         print('rim fixture: old stock-lit/missing-stock 2 dark -> fixed 0; alpha/rubber/body AO exact')
 
     def test_source_rim_finish(self):
@@ -966,6 +1045,108 @@ class StockPaintSelection(unittest.TestCase):
 
 
 class InstalledCarParity(unittest.TestCase):
+    def test_optional_added_car_catalog(self):
+        source_root = os.environ.get('NFS_CARBON_PC')
+        oracle_dir = ROOT / 'tools_snapshot'
+        if not source_root or not (oracle_dir / 'carbon_car.py').is_file():
+            self.skipTest('local source inputs and reference converter required')
+        source_root = Path(source_root).expanduser().resolve()
+        mw_root = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition'))
+        sys.path.insert(0, str(oracle_dir))
+        self.addCleanup(sys.path.remove, str(oracle_dir))
+        import private_cars
+        import carbon_namespace
+        rows = [r for r in private_cars.identities() if r['game'] == 'C' and r['role'] == 'addition']
+        self.assertEqual(len(rows), 30)
+        files, reordered, refusals, controls = 0, 0, 0, 0
+        for row in rows:
+            car, donor = row['folder'], row['donor']
+            with self.subTest(car=car), tempfile.TemporaryDirectory(prefix='setup-parity-') as td:
+                work = Path(td)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.dict(os.environ, {'NFS_GAME': str(mw_root), 'NFS_CARBON_LAMPGLASS': 'off'}):
+                    reference = carbon_namespace.convert(source_root / 'CARS' / car,
+                        mw_root / 'CARS' / donor, work / 'reference', revision=2)
+                    self.assertFalse(reference.get('missing_stock'), reference)
+                    try:
+                        result = cc.convert(source_root / 'CARS' / car, mw_root / 'CARS' / donor,
+                                            source_root / 'GLOBAL', work / 'setup')
+                    except cc.FormatError as exc:
+                        self.assertEqual(str(exc), 'unresolved geometry texture')
+                        geometry = (work / 'reference/GEOMETRY.BIN').read_bytes()
+                        models = cc.validate_geometry(geometry)
+                        images, _, dynamic = cc.shared_resources(lambda p: p.read_bytes(), mw_root)
+                        available = set(dict(cc.texture_blobs((work / 'reference/TEXTURES.BIN').read_bytes())))
+                        available |= images | dynamic | {cc.name_hash(f'{donor}_{r}') for r in cc.MW_PAINT_BINDINGS}
+                        missing = {h for m in models.values() for h in m['textures']} - available
+                        referenced = {m['textures'][r[i]] for m in models.values() for r in m['records']
+                                      for i in range(24, 29)}
+                        self.assertEqual(len(missing), 1)
+                        self.assertFalse(missing & referenced, 'missing image is used by a draw')
+                        refusals += 1
+                        result = None
+                if result is None:
+                    print('added-car policy refusal:', car, 'unused source texture table entry',
+                          ','.join(f'{h:08X}' for h in missing), flush=True)
+                    continue
+                assert_written_hashes(self, work / 'setup', result['outputs'])
+                classifications = []
+                for name in sorted(result['outputs']):
+                    actual, expected = ((work / kind / name).read_bytes() for kind in ('setup', 'reference'))
+                    if name == 'GEOMETRY.BIN':
+                        reason = assert_geometry_parity(self, actual, expected)
+                        reordered += reason != 'byte-identical'
+                        if reason != 'byte-identical':
+                            keys = [cc.u32(actual, o+20) for c, o, z in cc.children(actual, cc.u32(actual, 4)+8)]
+                            self.assertEqual(keys, sorted(keys))
+                            classifications.append(name + ': sorted standalone rows ' + ','.join(f'{k:08X}' for k in keys))
+                    elif name == 'SOLIDMAP.BIN':
+                        reason = assert_solidmap_parity(self, actual, expected,
+                            (work / 'setup/GEOMETRY.BIN').read_bytes(),
+                            (mw_root / 'CARS' / donor / 'GEOMETRY.BIN').read_bytes(), donor, car)
+                        if reason != 'byte-identical':
+                            classifications.append(name + ': ' + reason)
+                    elif name == 'TEXTURES.BIN':
+                        reason = assert_texture_parity(self, actual, expected,
+                            (mw_root / 'CARS' / donor / 'TEXTURES.BIN').read_bytes())
+                        if reason != 'byte-identical':
+                            classifications.append(name + ': ' + reason)
+                    else:
+                        self.assertEqual(actual, expected, car + '/' + name + ': unclassified output difference')
+                    files += 1
+                if not controls:
+                    geometry = (work / 'setup/GEOMETRY.BIN').read_bytes()
+                    expected_geometry = (work / 'reference/GEOMETRY.BIN').read_bytes()
+                    mutated = bytearray(geometry)
+                    _, solid_offset, solid_size, *_ = cc.index(geometry)[0]
+                    solid = geometry[solid_offset:solid_offset+solid_size]
+                    offset, _ = cc.find(solid, 0x134b01)
+                    mutated[solid_offset + ((offset + 135) & ~127)] ^= 1
+                    with self.assertRaises(AssertionError):
+                        assert_geometry_parity(self, bytes(mutated), expected_geometry)
+                    solidmap = bytearray((work / 'setup/SOLIDMAP.BIN').read_bytes())
+                    requests = cc.validate_geometry((mw_root / 'CARS' / donor / 'GEOMETRY.BIN').read_bytes(),
+                                                    input_pack=True)
+                    keys = {cc.name_hash(n) for n in requests}
+                    offset = next(i for i in range(16, len(solidmap), 8) if cc.u32(solidmap, i) in keys)
+                    solidmap[offset+4] ^= 1
+                    with self.assertRaises(AssertionError):
+                        assert_solidmap_parity(self, bytes(solidmap), (work / 'reference/SOLIDMAP.BIN').read_bytes(),
+                            geometry, (mw_root / 'CARS' / donor / 'GEOMETRY.BIN').read_bytes(), donor, car)
+                    textures = bytearray((work / 'setup/TEXTURES.BIN').read_bytes())
+                    textures[cc.index(textures, 0x33310003)[0][1]] ^= 1
+                    with self.assertRaises(AssertionError):
+                        assert_texture_parity(self, bytes(textures), (work / 'reference/TEXTURES.BIN').read_bytes(),
+                                              (mw_root / 'CARS' / donor / 'TEXTURES.BIN').read_bytes())
+                    controls = 3
+                print('added-car parity:', car, len(result['outputs']), 'outputs exact after classification;',
+                      '; '.join(classifications) or 'all bytes identical', flush=True)
+        self.assertEqual(refusals, 1, 'source-table policy refusal census changed')
+        self.assertEqual(files, (len(rows)-refusals)*8)
+        self.assertEqual(controls, 3)
+        print('added-car parity total:', len(rows), 'cars,', files, 'files;', reordered,
+              'sorted material trailers;', refusals, 'classified policy refusal;', controls, 'mutations rejected')
+
     def test_optional_installed_car(self):
         source_root = os.environ.get('NFS_CARBON_PC')
         if not source_root:
@@ -1022,7 +1203,11 @@ class InstalledCarParity(unittest.TestCase):
                     actual = cc.file_hash(work / 'public' / name)
                     self.assertEqual(actual, result['outputs'][name], f'{name}: written bytes differ from report')
                     expected = hashlib.sha256((work / 'baseline' / name).read_bytes()).hexdigest()
-                    self.assertEqual(actual, expected, f'{name}: unclassified difference from material-neutral reference')
+                    if name == 'GEOMETRY.BIN':
+                        assert_geometry_parity(self, (work / 'public' / name).read_bytes(),
+                                               (work / 'baseline' / name).read_bytes())
+                    else:
+                        self.assertEqual(actual, expected, f'{name}: unclassified difference from material-neutral reference')
                     default_hash = hashlib.sha256((work / 'default' / name).read_bytes()).hexdigest()
                     classifications[name] = 'byte-identical' if actual == default_hash else 'excluded lamp material rows/identities'
                     if name != 'GEOMETRY.BIN':

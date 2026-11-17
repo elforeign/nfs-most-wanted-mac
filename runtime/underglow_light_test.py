@@ -17,7 +17,9 @@ Independent quadrature checks pool RGB against captured logical strip endpoints.
 stale queue and delayed None admission each fail.
 Shop (not racing): the strips sit 0.100 m higher than the car's position; racing 0.000 m. Without the lift the shop
 check reads 0.000 m and fails 1 per run. Quick race (career bit clear): the owned quick-race selection is admitted 1/1; the selection before the fix
-(the career's car in every mode) admits 0/1 and fails 1. No game or emulation.
+(the career's car in every mode) admits 0/1 and fails 1.
+Front-end order: the harness runs the retail frame (car pass, shadow flush 006DEFBD, stub 006DF22A); fixed 0 of 13
+front-end pools before the car shadow; the old in-Render submission puts 13/13 before it and fails 13. No game or emulation.
 """
 from pathlib import Path
 import subprocess
@@ -69,6 +71,11 @@ void f_0075D220_orig(Cpu *c){M32(c->ecx+0x40)=0x55000;M32(0x55000)=41;c->eax=1;}
 void f_0075D220(Cpu *c);
 void f_00750B00_orig(Cpu *c){}
 void f_00750B00(Cpu *c);
+void f_00667660_orig(Cpu *c){}
+void f_00667660(Cpu *c);
+/* Retail front-end order: the car pass, the render-list flush that draws the
+ * queued car shadow (006DEFBD), then the stub at 006DF22A. */
+static int shadow_drawn,menu_pools_before_shadow;
 void f_005910E0(Cpu *c);void f_007A9DB0(Cpu *c);void f_007609B0(Cpu *c);void f_00739A70(Cpu *c);
 uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *a){
  if(fn==0x00739B40){++diag_queries;M32(a[1])=0;M32(a[2])=4;return 0;}
@@ -88,7 +95,8 @@ uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *a){
   CHECK(p[2]>0 && p[2] <= fixtures[fixture_index].hi[2]+MF32(0x52108));
   CHECK(p[2]>=fixtures[fixture_index].lo[2]-.005+MF32(0x52108)-1e-6);
   float *v=(float *)(G+o->mem[0]);CHECK(v[1]>10&&v[1]>v[0]&&v[1]>v[2]);}
- else{++pools;pool_colour=M32(poly+0x80);float *p=(float *)(G+poly);memcpy(pool_quad,p,64);
+ else{++pools;pool_colour=M32(poly+0x80);if(M32(0x925E90)!=6&&!shadow_drawn)++menu_pools_before_shadow;
+  CHECK(M32(0x925E90)==6||shadow_drawn);float *p=(float *)(G+poly);memcpy(pool_quad,p,64);
   /* Clipping can rotate the first vertex without changing coverage or UVs. */
   double b[4];pool_bounds(b);
   CHECK(b[2]-b[0]>2 && b[0]<0 && b[2]>0);
@@ -175,8 +183,11 @@ static void observed_begin(const Cpu *c,UGCarCapture *s) {
  }
 }
 #define underglow_light_begin observed_begin
+#define f_0074E160 car_render_pass
 PRODUCTION_WRAPPER
+#undef f_0074E160
 #undef underglow_light_begin
+void f_0074E160(Cpu *c){shadow_drawn=0;car_render_pass(c);shadow_drawn=1;f_00667660(c);shadow_drawn=0;}
 int main(int argc,char **argv){
  if(argc>1&&!strcmp(argv[1],"saved-off"))saved_preset=0;
  if(argc>1&&(!strcmp(argv[1],"native-off")||!strcmp(argv[1],"forced-on")))saved_light=0;
@@ -286,6 +297,7 @@ int main(int argc,char **argv){
   M32(0x80018)=11;c.ecx=0x57000;f_0075D220(&c);c.ecx=self;underglow_light_begin(&c,&capture);CHECK(!capture.valid);
 
  }
+ printf("menu pools before the car shadow: %u\n",menu_pools_before_shadow);
  printf("total checks=%u failures=%u\n",checks,failures);free(G);return failures?1:0;
 }
 '''
@@ -321,6 +333,8 @@ def function_fragment(source, signature):
 
 
 OLD_ADMISSION = '    uint32_t types=M32(0x009B09D8u),type=M32(ride);\n    if(!types || type>=256 || strcasecmp((char *)G+types+type*0xd0,"bmwm3gtre46")) return;\n    int lod=(int)M32(self+0x1628);\n    if(lod<0||lod>1) return;\n    uint32_t body=M32(self+0xb84+0x17*0x14+lod*4)&~3u;\n    if(!body||M32(body+8)!=0x8E3052B5u+(unsigned)lod) return;\n'
+# Before the fix: the front-end pool drew inside the car Render hook, before the shadow flush.
+OLD_MENU_END = 'void underglow_light_end(const Cpu *result,const UGCarCapture *s) {\n    if(!s->valid || !(result->eax&255)) return;\n    if(M32(0x00925E90u)==6) {\n        road_capture=*s;road_frame=dev.frames;road_pending=1;\n    } else ug_draw(result,s);\n}'
 OLD_ENABLED = 'int underglow_light_enabled(void) {\n    static int enabled=-1;\n    if (enabled<0) { const char *v=getenv("NFS_UNDERGLOW"); enabled=v&&!strcmp(v,"1"); }\n    return enabled;\n}'
 
 def fixtures():
@@ -364,6 +378,7 @@ def main():
         print('SKIP: stock car geometry and attributes required'); return 3
     assert hashlib.sha256(OLD_ADMISSION.encode()).hexdigest()=='26a54ad44c8e3c2f0c299c2dcdff4a006a836de07674cf9fc31938c0df6681de'
     assert hashlib.sha256(OLD_ENABLED.encode()).hexdigest()=='4fc0767a58a88315eb69c3f7f6e52d5eef2ecea443bef06a451262ad6da4905b'
+    assert hashlib.sha256(OLD_MENU_END.encode()).hexdigest()=='840851733a2ecdf338365b411bddb2d89f038027cb623294c8dd47fc1b9a1c80'
     source = (ROOT/'runtime'/'underglow_light.m').read_text()
     diag = (ROOT/'runtime'/'diag.c').read_text()
     wrapper = diag[diag.index('\nunsigned diag_car1[4];')+1:diag.index('void f_007387E0_orig')]
@@ -400,6 +415,7 @@ def main():
                 'no-shop-lift': (source.replace('    if(M32(0x00925E90u)!=6) s->position[2]+=SHOP_STRIP_LIFT;\n',''), wrapper),
                 'pool-units': (source.replace('rgb[k]*.18/(M_PI*100)', 'rgb[k]*.18/(M_PI*10)'), wrapper),
                 'stale-queue': (source.replace('road_frame!=dev.frames || ', ''), wrapper),
+                'menu-pool-before-shadow': (source.replace(function_fragment(source,'void underglow_light_end(const Cpu *result,const UGCarCapture *s)'),OLD_MENU_END), wrapper),
                 'career-car-in-quick-race': (source.replace(QUICK_RACE, OLD_CAREER_ONLY), wrapper)}
     with tempfile.TemporaryDirectory(prefix='ug-light-') as td:
         tmp = Path(td)

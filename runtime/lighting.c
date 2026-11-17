@@ -32,6 +32,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "lighting_colour.h"
 #include "host.h"
 #include "settings.h"
 
@@ -86,9 +87,6 @@ void lighting_set_world(int neutral) {   // the F10 menu (live: read at every se
 
 #define PRELIGHT 0.27f   // mean world vertex colour (15.1.1 draw dump: WORLD 68.7, WORLDNOFOG 60.0, NORMALMAP 62.7 of 255; grey)
 
-static float luminance(const float rgb[3]) {
-    return 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
-}
 static void ambient_rgb(uint32_t tod, float out[3]) {
     static int reported;
     float before[3];
@@ -96,8 +94,7 @@ static void ambient_rgb(uint32_t tod, float out[3]) {
     int active = in_game && wl_mode();
     for (int i = 0; i < 3; ++i) before[i] = out[i] = fminf(1.0f, rf(tod + 0x30 + 4 * i));
     if (active) {
-        float y = luminance(before), t = 2.0f / 3.0f;
-        for (int i = 0; i < 3; ++i) out[i] += t * (y - out[i]);
+        lighting_colour_desaturate(out, 2.0f / 3.0f);
     }
     // Once at the first in-game TOD after a load; FE setters rearm the line.
     if (!in_game) reported = 0;
@@ -117,18 +114,7 @@ static void sun_white(float elevation, float out[3]) {
     else if (elevation < 30) t = 4500 + (elevation - 15) * (800.0f / 15);
     else if (elevation < 62) t = 5300 + (elevation - 30) * (500.0f / 32);
     else t = 5800;
-    float inv = 1 / t, inv2 = inv * inv, inv3 = inv2 * inv;
-    float x = t <= 4000 ? -0.2661239e9f * inv3 - 0.2343589e6f * inv2 + 0.8776956e3f * inv + 0.179910f
-                         : -3.0258469e9f * inv3 + 2.1070379e6f * inv2 + 0.2226347e3f * inv + 0.240390f;
-    float y = t <= 4000 ? -0.9549476f*x*x*x - 1.37418593f*x*x + 2.09137015f*x - 0.16748867f
-                         : 3.0817580f*x*x*x - 5.87338670f*x*x + 3.75112997f*x - 0.37001483f;
-    float X = 0.85f * x/y + 0.15f * 0.95047f;
-    float Z = 0.85f * (1-x-y)/y + 0.15f * 1.08883f;
-    out[0] = 3.2404542f*X - 1.5371385f - 0.4985314f*Z;
-    out[1] = -0.9692660f*X + 1.8760108f + 0.0415560f*Z;
-    out[2] = 0.0556434f*X - 0.2040259f + 1.0572252f*Z;
-    float scale = 1 / luminance(out);
-    for (int i = 0; i < 3; ++i) out[i] *= scale;
+    lighting_colour_white(t, out);
 }
 
 // TOD sun colour BEFORE k. Ambient desaturation preserves Y, so preserving lit
@@ -143,7 +129,7 @@ static int neutral_sun(uint32_t tod, float out[3]) {
     for (int i = 0; i < 3; ++i) original[i] = fminf(1, k * rf(tod + 0x20 + 4*i));
     sun_white(asinf(nl) * 57.29577951308232f, out);
     float peak = fmaxf(out[0], fmaxf(out[1], out[2]));
-    float scale = fminf(luminance(original), 1 / peak);
+    float scale = fminf(lighting_colour_luminance(original), 1 / peak);
     for (int i = 0; i < 3; ++i) out[i] *= scale / k;
     return 1;
 }

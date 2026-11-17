@@ -1,9 +1,9 @@
-"""Carbon Xbox artwork preparation: synthetic archives in a folder, an ISO and extracted files.
+"""Carbon artwork/music/GIN/speech preparation in a folder, an ISO and extracted files.
 
-Good: 13/13 tests pass (the real-sample check runs when a Carbon Xbox 360 image is at NFS_CARBON_X360 or beside
+Good: 15/15 tests pass (the real-sample check runs when a Carbon Xbox 360 image is at NFS_CARBON_X360 or beside
 the checkout, else it skips). Broken, same tests, exit 1 (run with --broken NAME), failing tests of 13:
-title (the title id is not checked) 1; glyph (glyph completeness not checked) 3; fingerprint (archive hash not
-checked) 1; diagram (diagram entries not checked) 1.
+title (the title id is not checked) 2; glyph (glyph completeness not checked) 6; fingerprint (archive hash not
+checked) 15; diagram (diagram entries not checked) 2.
 The archives here are synthetic and carry no console data; the fingerprint table is patched to match them.
 """
 import hashlib
@@ -65,6 +65,10 @@ class Base(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
         self.assets = {GLOBALB: glyph_archive(), DYNTEX: diagram_archive()}
+        # Sound bytes are authenticated by the same complete-file digest as art;
+        # decoding is exercised by the private runtime tests.
+        self.assets.update({name: ("synthetic:" + name).encode()
+                            for name in cx.FILES if name.startswith("SOUND/")})
         self.patch_fingerprints(self.assets)
 
     def patch_fingerprints(self, assets):
@@ -87,16 +91,44 @@ class Base(unittest.TestCase):
 
 
 class PrepareTests(Base):
-    def test_every_source_form_prepares_the_same_two_files(self):
-        for form, source in self.sources().items():
+    def test_no_unrelated_sound_is_retained(self):
+        assets = dict(self.assets)
+        assets['SOUND/ENGINE/GIN/EN_DCL_25.GIN'] = b'unranked recording'
+        assets['SOUND/ENGINE/EN_11.ABK'] = b'unranked bank'
+        sources = self.sources(assets)
+        root = self.prepare(sources['iso']).roots['x360_root']
+        self.assertEqual(sorted(p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()),
+                         sorted(self.assets))
+
+    def test_each_sound_file_is_required_and_authenticated(self):
+        source = self.sources()['extracted']
+        for name, data in self.assets.items():
+            if not name.startswith('SOUND/'):
+                continue
+            with self.subTest(name=name):
+                target = source / name
+                target.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+                with self.assertRaisesRegex(cx.CarbonArtError, 'audited'):
+                    self.prepare(source, 'changed-' + target.name)
+                target.unlink()
+                with self.assertRaisesRegex(cx.CarbonArtError, 'no SOUND/'):
+                    self.prepare(source, 'missing-' + target.name)
+                target.write_bytes(data)
+
+    def test_every_source_form_prepares_only_the_requested_files(self):
+        # Retail speech basenames are localized; all source forms normalize
+        # these to the same PC-relative names in the prepared result.
+        disc_assets = {(name.replace(".", "_EN.", 1) if name.startswith("SOUND/SPEECH/") else name): data
+                       for name, data in self.assets.items()}
+        for form, source in self.sources(disc_assets).items():
             with self.subTest(form=form):
                 result = self.prepare(source, "out-" + form)
                 root = result.roots["x360_root"]
                 found = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
-                self.assertEqual(found, [DYNTEX, GLOBALB])
+                self.assertEqual(found, sorted(self.assets))
                 for name, data in self.assets.items():
                     self.assertEqual((root / name).read_bytes(), data)
-                self.assertEqual(result.features, ("xbox_art",))
+                self.assertEqual(result.features, ("xbox_art", "xbox_music", "xbox_gin", "xbox_speech"))
                 self.assertEqual(sorted(p.name for p in (self.work / ("out-" + form)).iterdir()), ["prepared"])
 
     def refused(self, sources, pattern):

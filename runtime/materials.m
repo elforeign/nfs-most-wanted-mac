@@ -906,11 +906,16 @@ static char *ripple_vs_patch(const char *msl) {
     return s;
 }
 
-// ---- R25: X360 parallax and N.L self-shadow on world normal maps (NFS_PARALLAX=x360|pc, default pc) ----
+// ---- R25: X360 parallax and N.L self-shadow on world normal maps (NFS_PARALLAX=x360|pc, default x360) ----
 // The shaders are always patched (with the flag 0 and the mode 0 they give the PC output), so the F10 switch is live both ways.
+// Without the console constants the numbers are the port's own (x360_shader_lits.py PORT_SCALARS); the switch unset means X360 on both builds.
 static int parallax_live = -1;
-static int parallax_on(void) { return X360_SHADER_LITS; }
-static int parallax_mode(void) { if (parallax_live < 0) { const char *e = getenv("NFS_PARALLAX"); parallax_live = !(e && !strcmp(e, "pc")); } return parallax_live; }
+static int parallax_on(void) { return 1; }
+int postfx_look_variant(const char *v);   // x360_post.m BOOT_DIAG_LOOK_AB: `parallaxpc` / `particlespc` draw the held pass PC
+static int parallax_mode(void) {
+    if (parallax_live < 0) { const char *e = getenv("NFS_PARALLAX"); parallax_live = e && *e ? strcmp(e, "pc") != 0 : 1; }
+    return parallax_live && !(diag_on && postfx_look_variant("parallaxpc"));
+}
 void materials_set_parallax(int x360) { parallax_live = x360 != 0; if (diag_on) diag_event("materials: parallax live now %s", parallax_live ? "x360" : "pc"); }
 #define NORMAL_SLOT 0x00982CB8u        // FUN_006c6d10's cached normal-map TextureInfo of the material being drawn
 static void parallax_constants(const float (*vsc)[4], MatConsts *o) {
@@ -1259,18 +1264,22 @@ static char *particle_t0_patch(const char *unused) {
     }
     return s;
 }
+// particles_x360: 0 PC, 1 the X360 style (Retail, Physical), 2 the X360 choice itself. Without the console constants
+// the X360 path runs on the port's own (x360_shader_lits.py) and only on the X360 choice, the default there (settings.c);
+// Retail and Physical keep the PC shading and size.
 static int particles_on(void) {
-    if (particles_x360 < 0) { const char *e = getenv("NFS_PARTICLES"); particles_x360 = !(e && !strcmp(e, "pc")); }
-    return particles_x360;
+    if (particles_x360 < 0) { const char *e = getenv("NFS_PARTICLES"); particles_x360 = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "x360") ? 2 : e && (!strcmp(e, "retail") || !strcmp(e, "physical")) ? 1 : roots_x360_has("shaders") ? 1 : 2; }
+    return particles_x360 > 0;
 }
+static int particles_style(void) { return particles_on() && (particles_x360 == 2 || X360_SHADER_LITS) && !(diag_on && postfx_look_variant("particlespc")); }
 void materials_set_particles(int x360) {   // the F10 menu: live (the shader reads the mode per draw, the clamp per particle)
-    particles_x360 = x360 != 0;
-    if (diag_on) diag_event("materials: particles now %s", particles_x360 ? "x360" : "pc");
+    particles_x360 = x360 < 0 ? 0 : x360 > 2 ? 2 : x360;
+    if (diag_on) diag_event("materials: particles now %s", particles_style() ? "x360" : "pc");
 }
 static void particle_constants(const float (*vsc)[4], MatConsts *o) {
     (void)vsc;
     if (particles_tint < 0) { const char *s = getenv("NFS_TEST_PARTICLE_TINT"); particles_tint = s && *s && strcmp(s, "0"); }
-    o->k[0][0] = X360_SHADER_LITS && particles_on() ? 1.0f : 0.0f;   // no X360 shader constants: the PC output
+    o->k[0][0] = particles_style() ? 1.0f : 0.0f;
     o->k[0][1] = particles_tint ? 1.0f : 0.0f;
     o->k[0][2] = particles_rain ? 1.0f : 0.0f;
     o->k[0][3] = particles_rain && particles_tint ? 1.0f : 0.0f;
@@ -1309,7 +1318,7 @@ void f_006C1160_orig(Cpu *c);
 void f_006C1160(Cpu *c) {
     uint32_t particle = M32(c->esp + 4), before = M32(PARTICLE_CURSOR);
     f_006C1160_orig(c);
-    if (!X360_SHADER_LITS || !particles_on() || !before || M32(PARTICLE_CURSOR) != before + 96 || particle_vid >= 16) return;   // no MaxParticleSize: PC size
+    if (!particles_style() || !before || M32(PARTICLE_CURSOR) != before + 96 || particle_vid >= 16) return;   // PC size
     uint32_t pview = M32(0x009195E0u + particle_vid * 0x70u);
     if (!pview) return;
     float m[16], ctr[3], cxn, cyn;
@@ -2899,8 +2908,8 @@ void mat_glass_frame(void) {
         __atomic_exchange_n(&glass_shader_fail, 0, __ATOMIC_RELAXED), __atomic_exchange_n(&glass_pipeline_fail, 0, __ATOMIC_RELAXED));
     glass_seen = glass_replaced = glass_blended = 0; memset(glass_skips, 0, sizeof glass_skips); memset(glass_entry, 0, sizeof glass_entry);
     memset(glass_uv_draws, 0, sizeof glass_uv_draws); memset(glass_uv_vertices, 0, sizeof glass_uv_vertices); last = now;
-    diag_event("particles: mode %s replaced draws %u (rain %u) quads %u clamped corners %u max d %.3f (after the clamp %.3f)", particles_on() ? "x360" : "pc",
-        particles_draws, particles_rain_draws, particles_quads, particles_clamped, particles_maxd, particles_maxd_after);
+    diag_event("particles: mode %s replaced draws %u (rain %u) quads %u clamped corners %u max d %.3f (after the clamp %.3f) values %s", particles_style() ? "x360" : "pc",
+        particles_draws, particles_rain_draws, particles_quads, particles_clamped, particles_maxd, particles_maxd_after, X360_SHADER_LITS ? "console" : "port");
     particles_draws = particles_rain_draws = particles_quads = particles_clamped = 0; particles_maxd = particles_maxd_after = 0.0f;
 }
 int mat_glass_constants(const SmResult *pcvs, const SmResult *pcps, const float (*vsc)[4], const float (*psc)[4], float out[32][4]) {

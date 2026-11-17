@@ -12,8 +12,12 @@
 #include "game_select.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
 #define PU_SETUP_NAME @"NFS Carbon Native Setup.app"
+#define PU_STAGE_GAME "'--game', 'carbon', "
+#define PU_UPDATES @"Library/Application Support/NFSMW-Setup/Carbon/updates"
 #else
 #define PU_SETUP_NAME @"NFS Most Wanted Native Setup.app"
+#define PU_STAGE_GAME ""
+#define PU_UPDATES @"Library/Application Support/NFSMW-Setup/updates"
 #endif
 #include "pub_update_rehearsal.h"
 #include "pub_update_write.h"
@@ -140,7 +144,7 @@ static NSString *const PrepareScript =
 @"        time.sleep(1)\n"
 @"    check_cancel()\n"
 @"    with contextlib.redirect_stdout(stream):\n"
-@"        rc = backend.main(['--stage-only', '--stage', str(job / 'staged'), '--dest', str(destination), '--events'])\n"
+@"        rc = backend.main(['--stage-only', " PU_STAGE_GAME "'--stage', str(job / 'staged'), '--dest', str(destination), '--events'])\n"
 @"    if rc or stream.error: raise RuntimeError(stream.error or 'Rebuild failed. Open the log')\n"
 @"    check_cancel()\n"
 @"    ready = job / 'staged/ready.json'\n"
@@ -267,7 +271,8 @@ static NSString *PUApplicationPath(void) {
     return PUCanonical(NSBundle.mainBundle.bundlePath);
 #endif
 }
-static NSString *PUUpdates(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/NFSMW-Setup/updates"]; }
+// Each game keeps its own update jobs: one app never adopts or overwrites the other's update.
+static NSString *PUUpdates(void) { return [NSHomeDirectory() stringByAppendingPathComponent:PU_UPDATES]; }
 static BOOL PUAlive(void) {
     if (pu_worker.running) return YES;
     int fd = open([pu_job stringByAppendingPathComponent:@"prepare.lock"].fileSystemRepresentation, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -448,6 +453,9 @@ static void update_text(char *buf, int n) {
     s_update.label = pu_state == PU_NEWER ? "Update now" : (pu_state == PU_UPDATE_FAILED || pu_state == PU_CANCELLED) ? "Retry update" : (pu_busy() || pu_state == PU_READY) ? "Update status" : "Check for updates";
 }
 __attribute__((constructor)) static void pub_update_register(void) {
+#if NFS_GAME == NFS_GAME_PRIVATE && !defined(NFS_PUBLIC)
+    return;  // a private Carbon build has no update rows, like Most Wanted's (build.sh: NFS_PUBLIC=1 only)
+#endif
     if (roots_exported()) {
         s_update.label = "Re-export from Setup to update";
         s_update.help = BUNDLE_UPDATE_MESSAGE;

@@ -12,7 +12,9 @@ struct Segment {
 using OwnedSegment=std::shared_ptr<const Segment>;
 struct SegmentLimits {
     size_t pendingBytes=32*1024*1024, pendingPackets=1024;
-    size_t segmentBytes=16*1024*1024, heldSegments=2;
+    // Live Segment objects, wherever held: the poster's five (queued plus in flight) and request bodies that
+    // Foundation releases after their completion. The poster's own bound drops segments; this one ends live.
+    size_t segmentBytes=16*1024*1024, heldSegments=8;
 };
 struct SegmentStats {
     uint64_t segments=0, video=0, audio=0, nonMonotonic=0;

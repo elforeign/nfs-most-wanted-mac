@@ -242,7 +242,9 @@ ISimable::GetWorldID (virtual +70), reached through IPlayer::GetSimable (+4).
 CarRenderInfo+88 is car-type data, not the live vehicle.
 Rendering reads underglow_get(profile, handle),
 rejects reflected/non-main poses, and preserves the guest CPU return state.
-Garage submissions use the car render hook. Road submissions are copied into
+Garage submissions are copied into one frame-owned slot and drawn from the
+empty front-end stub 00667660 (called at 006DF22A, after the car shadow flush
+at 006DEFBD), so the pool lies over the shadow as on the road. Road submissions are copied into
 one frame-owned slot and flushed through RenderVehicleFlares (00750B00),
 after opaque geometry; stale frames, held Off passes and duplicate flushes
 submit nothing.

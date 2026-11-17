@@ -399,6 +399,7 @@ std::shared_ptr<Poster> Poster::create(const std::string& key
         return std::shared_ptr<Poster>(new Poster(std::move(state)));
     }
 }
+static_assert(SegmentLimits{}.heldSegments>Poster::maxSegments,"the poster drops before the segmenter ends live");
 bool Poster::post(OwnedSegment segment) {
     auto s=state;
     bool admitted=false;
@@ -408,7 +409,7 @@ bool Poster::post(OwnedSegment segment) {
         int64_t duration=segment && segment->start90k>=0 && segment->end90k>segment->start90k ? segment->end90k-segment->start90k : 0;
         if(segment && !segment->bytes.empty() && duration>0 &&
             segment->bytes.size()<=maxBytes-s->counters.bytes && duration<=450000 &&
-            s->pending.size()+(s->sending?1:0)<5) {
+            s->pending.size()+(s->sending?1:0)<maxSegments) {
             s->pending.push_back(std::move(segment));
             s->counters.bytes+=s->pending.back()->bytes.size(); s->counters.ticks+=duration;
             s->counters.peakBytes=std::max(s->counters.peakBytes,s->counters.bytes);

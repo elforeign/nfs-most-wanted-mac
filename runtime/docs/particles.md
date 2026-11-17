@@ -2,7 +2,7 @@
 
 F10 World > **Particles: Retail / Physical / PC / X360**,
 `NFS_PARTICLES=retail|physical|pc|x360`, applies live. Physical is the default
-(a saved Retail, PC or X360 stays). Retail uses the X360 shading and size clamp when its data is available. PC and X360
+(a saved Retail, PC or X360 stays). Retail uses the X360 shading and size clamp when its data is available. Without that data the X360 choice runs them, on the port's own shadow half 0.5 and clamp 1.0 (`x360_shader_lits.py`), and is the default there; Retail and Physical keep the PC shading and size. PC and X360
 retain their original shading and size behavior in saved settings, environment
 overrides and live changes. Physical adds fading and lighting to the X360 style.
 PC/X360 look presets restore their respective style with Physical disabled.

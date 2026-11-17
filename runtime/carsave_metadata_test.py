@@ -7,7 +7,7 @@ the 'generation' mutant), a forged marker with another signature is refused (the
 'compat' mutant, signature check removed, admits it: 1/2). The metadata record's generation/set/save hash/checksum are decoded below.
 The actual boot file layer links separate strong metadata hooks, with exact
 save-file bytes, write-ahead journal recovery, and fresh-process admission.
-Approved traffic leaves all 90 player rows identical; its non-NULL getter is
+Approved traffic leaves all 89 player rows identical; its non-NULL getter is
 required before admitting the existing save without writing any bytes (3/3).
 Pinned 1ddd0da2 old loader fails 1/3; exact-generation mutant fails 1/3 for that
 catalog, alongside its original stale-generation control.
@@ -77,7 +77,7 @@ int main(int argc,char **argv) {
     char path[4096]; snprintf(path,sizeof path,"%s/TEST",userroot);
     unsigned char b[SIZE],old[SIZE],out[SIZE];
     // Include the selected own-slot FORDGT as well as addition 84.
-    mask[10]=2;
+    mask[10]=1;
     if(strcmp(argv[2],"seed")) {
         readsave(path,b); memcpy(old,b,SIZE);
         if(!strcmp(argv[2],"traffic")) CHECK(private_cars_traffic_get()!=NULL);
@@ -272,7 +272,7 @@ def main():
         # Different valid generation, same identities/packs/signature: admitted.
         stale = root/'stale'
         fixtures.pc.build(stale,mw,src,approvals=approval,adapter=fixtures.adapter)
-        # A verified, approved traffic pilot never enters the 90-car save mask,
+        # A verified, approved traffic pilot never enters the 89-car save mask,
         # part signature or selected player inventory. Preserve an old save
         # byte-for-byte while admitting it against this optional catalog member.
         traffic = root/'traffic'
@@ -305,7 +305,11 @@ def main():
             if variant=='old-loader':
                 start=actual.index('static int load(')
                 end=actual.index('\n}',start)+2
-                actual=actual[:start]+OLD_LOAD+actual[end:]
+                # Keep the authentic, digest-pinned traffic baseline above;
+                # adapt only its roster contract to the removed reservation.
+                old_load = OLD_LOAD.replace('ncar<76', 'ncar<75').replace('ncar>=76', 'ncar>=75')
+                old_load = old_load.replace('id==84+ncar', 'id==84+ncar+(ncar>=63)')
+                actual=actual[:start]+old_load+actual[end:]
             elif variant=='generation':
                 actual=actual.replace('if (!generation[0])\n        return "Required','if (!generation[0] || memcmp(m->generation,generation,sizeof generation))\n        return "Required')
             elif variant=='compat':
@@ -337,7 +341,7 @@ def main():
             assert len(record)==245 and record[:8]==b'NFSCAR3\x01'
             assert record[8:72].rstrip(b'\0').decode()==catalog_data['generation']
             assert record[72:137].rstrip(b'\0').decode()==catalog_data['compatibility']
-            used=bytes([1]+[0]*9+[2,0]); assert record[137:149]==used
+            used=bytes([1]+[0]*9+[1,0]); assert record[137:149]==used
             signature=hashlib.sha256(catalog_data['compatibility'].encode()+b'\0'+used)
             for k,car in enumerate(catalog_data['cars']):
                 if used[k//8] & (1 << (k%8)):

@@ -30,7 +30,7 @@ static const uint64_t AssetCap = 4ULL * 1024 * 1024 * 1024;
 #endif
 #if NFS_GAME == NFS_GAME_PRIVATE
 static NSString *const SetupName = @"NFS Carbon Native Setup.app";
-static NSString *const SetupID = @"org.nfsc-native.setup";
+static NSString *const SetupID = @"org.nfscarbon-native.setup";  // the Carbon Setup installer's CFBundleIdentifier
 static NSString *const Repository = @"elforeign/nfs-carbon-mac";
 static NSString *const AssetPrefix = @"NFS-Carbon-Native-Setup";
 #else

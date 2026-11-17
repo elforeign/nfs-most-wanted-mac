@@ -17,11 +17,12 @@ skip, cancellation and retry controls each fail their state oracle. Actual
 F-T events decode at one-byte boundaries, including measured per-car approval.
 Install and extras cancellation both wait for the backend's transaction boundary.
 
-Carbon product (SetupProduct=carbon): 15 checks of its backend commands (check, check with its Xbox 360 copy,
+Carbon product (SetupProduct=carbon): 21 checks of its backend commands (check, check with its Xbox 360 copy,
 build: --game carbon --carbon, never --pc, disc or --x360-extras), the backend accepting all three, its app name,
 its page order (Xbox 360 copy -> Review, no Most Wanted extras page) and Most Wanted's unchanged command: 0 violations.
-The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 6 of 15
-(the three commands and their Most Wanted inputs); the words test fails on the old source (no Carbon label).
+The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 11 of 21
+(the three commands, their Most Wanted inputs and five source commands). The compiled app's folder, executable,
+ZIP, 7z and ISO commands also reach the real pipeline: all five accepted with the decoded ISO tree; source digests stay fixed.
 
 Run: python3 -I tests/setup/test_app.py        (needs swiftc; no network, no window, no game files)
 
@@ -302,6 +303,12 @@ def carbon_product_failures(binary):
     want('Carbon skips the Most Wanted extras page', got['afterX360'] == 4)   # Page.review
     want('Most Wanted keeps its extras page', got['mwAfterX360'] == 3)       # Page.extras
     want('an unmarked bundle is Most Wanted', got['bundled'] == 'mw')
+    want('Carbon export product and changed destination', got['export'][2:] ==
+         ['--export-all-in-one', '--app', '/Carbon.app', '--dest', '/backup/Carbon.app',
+          '--work', '/work', '--events', '--game', 'carbon'])
+    for path, args in zip(('/folder', '/folder/NFSC.exe', '/game.zip', '/game.7z', '/disc.iso'), got['inputs']):
+        want('Carbon source command ' + path, args[2:] ==
+             ['--check', '--game', 'carbon', '--carbon', path, '--dest', '/other-destination', '--work', '/work', '--events'])
     return bad
 
 
@@ -501,8 +508,71 @@ class AppTests(unittest.TestCase):
         self.assertIn(original, SWIFT.read_text())   # still Most Wanted's command
         broken = compile_app(mutate('    if carbon {\n        // Carbon reads', '    if false {\n        // Carbon reads'))
         bad = carbon_product_failures(broken)
-        print('Original Setup command for Carbon: %d of 15 violated' % len(bad))
-        self.assertEqual(len(bad), 6)
+        print('Original Setup command for Carbon: %d of 21 violated' % len(bad))
+        self.assertEqual(len(bad), 11)
+
+    def test_carbon_generated_source_commands_reach_real_pipeline(self):
+        # The compiled app supplies every argument. Only native builds/toolchain probes are synthetic.
+        sys.path.insert(0, str(ROOT / 'tests/setup'))
+        import test_backend as fixtures
+        from contextlib import redirect_stdout
+        from unittest import mock
+        result = subprocess.run([str(self.real), '--carbon-product-test'], capture_output=True, text=True, check=True)
+        commands = json.loads(result.stdout)['inputs']
+        fixture = fixtures.CarbonBuildTests()
+        fixture.setUp()
+        try:
+            b = fixtures.b
+            zip_source = fixture.carbon_archive('.zip')
+            seven_source = fixture.carbon_archive('.7z')
+            iso = fixture.home / 'Carbon.iso'
+            iso.write_bytes(b'unknown Carbon disc layout')
+            changed_dest = fixture.home / 'Changed destination'
+            paths = {'/folder': fixture.carbon, '/folder/NFSC.exe': fixture.carbon / 'NFSC.exe',
+                     '/game.zip': zip_source, '/game.7z': seven_source, '/disc.iso': iso,
+                     '/other-destination': changed_dest, '/work': fixture.paths.work}
+            before = b.digest_tree(fixture.carbon)
+            hashes = [b.sha_file(path) for path in (zip_source, seven_source, iso)]
+            from setup_kit import carbon_repack
+            real = b.build
+            def build(args, paths, events, runner, source_root=None):
+                return real(args, paths, events, fixtures.CarbonRunner(fixture.log, fixture.child_env, paths.work), fixture.source)
+            with fixture.pipeline_stubs(), mock.patch.object(b, 'assert_not_running'), mock.patch.object(b, 'build', build), \
+                    mock.patch.object(carbon_repack, 'prepare', return_value=fixture.carbon) as decode_iso:
+                for index, command in enumerate(commands):
+                    fixture.stream.seek(0); fixture.stream.truncate()
+                    argv = [str(paths.get(arg, arg)) for arg in command[2:]]
+                    with redirect_stdout(fixture.stream):
+                        rc = b.main(argv)
+                    self.assertEqual(rc, 0, fixture.stream.getvalue()[-2000:])
+                decode_iso.assert_called_once_with(iso, fixture.paths.work, mock.ANY)
+            self.assertEqual(b.digest_tree(fixture.carbon), before)
+            self.assertEqual([b.sha_file(path) for path in (zip_source, seven_source, iso)], hashes)
+            self.assertFalse((fixture.paths.data / 'roots.txt').exists())
+        finally:
+            fixture.tearDown()
+
+    @unittest.skipUnless((ROOT / "tools/setup_kit/carbon_repack.py").is_file(), "public payload carries no repack reader")
+    def test_carbon_iso_picker_preserves_file_and_control(self):
+        # Compiled production pcRoot, with an existing ISO (the old code only
+        # dropped a file's name when it existed): current passes 1/1, old 0/1.
+        with tempfile.TemporaryDirectory(dir=_CACHE) as tmp:
+            iso = Path(tmp) / 'source.ISO'
+            iso.write_bytes(b'synthetic ISO picker input')
+            def selected(binary):
+                result = subprocess.run([str(binary), '--carbon-root-test', str(iso)],
+                                        capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+            self.assertEqual(selected(self.real), str(iso))
+            broken = compile_app(mutate('["zip", "7z", "iso"] :', '["zip", "7z"] :'))
+            self.assertEqual(selected(broken), str(iso.parent))
+        picker = SWIFT.read_text().split('    func choosePC() {', 1)[1].split('// The game folder', 1)[0]
+        self.assertIn('UTType(filenameExtension: "iso")', picker)
+                                                                                                              
+        build = BUILD.read_text()
+        self.assertIn('"$sdk/LzmaDec.c" "$sdk/bridge.c"', build)
+        self.assertIn('"$sdk/carbon_lzma.dylib"', build)
+        print('Carbon ISO picker: current 1/1 passes; removed ISO allowance 0/1 passes')
 
     def test_carbon_product_words_and_hidden_extras(self):
         text = SWIFT.read_text()
@@ -513,12 +583,11 @@ class AppTests(unittest.TestCase):
         self.assertIn('button art and its two controller diagrams', benefit)
         for word in ('arrest', 'texture', 'menu art', 'world', 'audio', 'music', 'movie', 'cars'):
             self.assertNotIn(word, benefit.lower())
-        # Most Wanted's extras sit behind the product: its feature list, both extras/export pairs, its review rows.
+        # Most Wanted's extras sit behind the product; both products offer export.
         self.assertIn('if !s.carbonProduct { featureList }', text)
         self.assertEqual(text.count('Button("Manage installed extras…")'), 2)
-        self.assertEqual(text.count('if !s.carbonProduct {  // Most Wanted\'s car extras and its all-in-one export\n'
-                                    '                Button("Manage installed extras…")')
-                         + text.count('            if !s.carbonProduct {\n                Button("Manage installed extras…")'), 2)
+        self.assertEqual(text.count('            if !s.carbonProduct {\n                Button("Manage installed extras…")'), 2)
+        self.assertEqual(text.count('            }\n            Button("Export all-in-one app…")'), 2)
         self.assertIn('                    } else {\n                        row("Xbox 360 copy"', text)
         choose = text.split('    func chooseCarbonX360() {', 1)[1].split('\n    }\n', 1)[0]
         self.assertIn('runCheck(forX360: true)', choose, 'the console copy is validated when chosen')

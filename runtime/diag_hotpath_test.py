@@ -45,9 +45,9 @@ def main():
     imports = imports.split('\n', 1)[1].split('\n    }\n    if (boot_trace', 1)[0]
     com = boot.split('            static int all = -1;', 1)[1]
     com = '            static int all = -1;' + com.split('            void render_dump_call', 1)[0]
-    diag = (ROOT / 'recomp/private_runtime/game_diagnostics.inc').read_text()
+    diag = (ROOT / 'recomp/private_runtime/game_diagnostics.h').read_text()
     selector = function(diag, 'int diag_frame_wanted(')
-    parser = (ROOT / 'recomp/private_runtime/frame_shots.inc').read_text().split('static int private_shot_due')[0]
+    parser = (ROOT / 'recomp/private_runtime/frame_shots.h').read_text().split('static int private_shot_due')[0]
     # Pin the original grammar, not merely two wrappers around today's parser.
     assert parser == OLD_PARSER
     pre = r'''

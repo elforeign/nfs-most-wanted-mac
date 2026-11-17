@@ -311,7 +311,7 @@ void prompts_input(int pad);              // padprompts.c: which input was used 
 void prompts_mouse_moved(float points);
 void prompts_pad_seen(int connected);
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "carbon_feedback_input.inc"
+#include "carbon_feedback_input.h"
 #endif
 // portmenu.m: the F10 settings menu takes F10 always, and every key, character, mouse event and pad read while open.
 int portmenu_key(uint8_t vk, int down, int repeat);
@@ -1070,7 +1070,7 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
     }
 }
 #else
-#include "game_script.inc"
+#include "game_script.h"
 #endif
 
 // One RETURN for BOOT_AUTODRIVE's result popups (d3d9.m); released 4 frames later by user32_script.
@@ -1566,7 +1566,7 @@ static const char *fe_package_in_control(void) {
     return NULL;
 }
 #else
-#include "carbon_pad_state.inc"
+#include "carbon_pad_state_impl.h"
 #endif
 // Options > Controls re-mapping: the game is waiting for the input to bind (the input object at IOModule
 // (GetIOModule 00634370 = 0x920DE0) +8: FUN_00628C00, called at 0052AFED when a field is picked, sets its +0x183C and
@@ -1579,7 +1579,7 @@ static int pad_remap_listening(void) {
     return io && M8(io + 0x183C) && M32(io + 0x1840) == 3;
 }
 #else
-#include "carbon_pad_remap.inc"
+#include "carbon_pad_remap.h"
 #endif
 // The game's action bindings (GameAction 0091F418: 76 entries of 0x34 bytes: an id, then keyboard primary/secondary
 // and controller primary/secondary, 12 bytes each {type, ?, index}). BOOT_DIAG logs the controller ones on change.
@@ -1665,7 +1665,7 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
     // Keep physical pressures for Z/Rz, including while capturing a binding.
 }
 #else
-#include "game_pad.inc"
+#include "game_pad.h"
 #endif
 
 // The pad's identity: its kind and the name the game sees (DIDEVICEINSTANCE, the Controls screen's page title, and the
@@ -1703,7 +1703,7 @@ static void pad_native(PadState *st, uint32_t phys) {
     if (diag_on && st->buttons != last) { last = st->buttons; diag_event("pad: native buttons %04X", st->buttons); }
 }
 #if NFS_GAME != NFS_GAME_MW
-#include "carbon_pad_delivery.inc"
+#include "carbon_pad_delivery.h"
 #endif
 // The F10 menu is open: the game reads a connected pad at rest (the layout's held menu keys are released too).
 static void pad_neutral(int idx, PadState *st) {
@@ -1928,7 +1928,7 @@ int pad_read_n(int idx, PadState *st) {
         float axv = axis[0] ? (float)atof(strchr(axis, '=') ? strchr(axis, '=') + 1 : "0") : 0;
         for (int k = 0; k < 4; ++k) if (axis[0] && !strncmp(axis, an[k], 2)) *ax[k] = axv;   // sticks: seen by the layout
 #if NFS_GAME != NFS_GAME_MW
-#include "carbon_pad_script.inc"
+#include "carbon_pad_script.h"
 #else
         if (kind_native(pad_kinds[idx])) pad_native(st, st->buttons);
         else pad_apply_layout(idx, st, st->buttons);   // buttons= is the physical P_* mask, mapped like a real pad
@@ -2003,7 +2003,7 @@ int pad_read_n(int idx, PadState *st) {
         if (hide == ~0u || osk_visible()) { pad_neutral(idx, st); return 1; }
         phys = (phys & ~hide) | inject;
 #if NFS_GAME != NFS_GAME_MW
-#include "carbon_pad_poll.inc"
+#include "carbon_pad_poll.h"
 #else
         if (kind_native(kind)) {           // PS, the touchpad click, the Edge's back paddles, when not the menu's shortcut
             GCControllerButtonInput *lp = nil, *rp = nil;

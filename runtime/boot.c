@@ -616,7 +616,7 @@ __attribute__((weak)) int private_cars_backup_before_write(const char *destinati
     (void)destination; (void)staged; return 1;
 }
 #else
-#include "game_save.inc"
+#include "game_save.h"
 #endif
 static int profile_write_denied(const char *path) {
 #if NFS_GAME == NFS_GAME_MW
@@ -859,7 +859,7 @@ static uint32_t new_music_handle(const X360MusicHandle *m) {
 }
 
 // ---- registry: the game's own key, kept in USERDATA/registry.txt between runs ----
-// The file is written on every RegSetValueEx ("dword <name>=<n>" or "sz <name>=<text>" lines). There is no FirstTime
+// The file is written at the RegCloseKey after RegSetValueEx calls ("dword <name>=<n>" or "sz <name>=<text>" lines). There is no FirstTime
 // value until the game writes one, so the first run auto-detects the video settings for the reported GPU and saves
 // them; later runs (and the in-game options menu) use the saved ones. BOOT_REG=name=value[,name=value...] overrides
 // DWORD values for one run without saving them (e.g. BOOT_REG=g_RacingResolution=3).
@@ -987,6 +987,8 @@ static RegValue *reg_find(uint32_t h, const char *name) {
         if (!strcasecmp(reg_vals[i].key, key) && !strcasecmp(reg_vals[i].name, name ? name : "")) return &reg_vals[i];
     return NULL;
 }
+// BEGIN registry batch
+static int reg_dirty;                             // a game value changed since registry.txt was last saved
 static void reg_set(uint32_t h, const char *name, uint32_t type, uint32_t data, uint32_t size) {
     const char *key = reg_key(h);
     if (!key) return;
@@ -996,8 +998,16 @@ static void reg_set(uint32_t h, const char *name, uint32_t type, uint32_t data, 
     v->type = type;
     if (type == 4) v->dw = M32(data);
     else { uint32_t n = size < sizeof v->sz ? size : sizeof v->sz - 1; memcpy(v->sz, G + data, n); v->sz[n] = 0; }
-    if (!getenv("BOOT_REG")) reg_save();          // BOOT_REG runs don't overwrite the saved settings
+    if (!getenv("BOOT_REG")) reg_dirty = 1;       // BOOT_REG runs don't overwrite the saved settings
 }
+// The game writes its video settings as one batch (19-20 values, then RegCloseKey): one durable save at the close
+// (and at exit) instead of one per value, which held the game thread ~11 ms each (a 230 ms frame).
+static void reg_flush(void) {
+    if (!reg_dirty) return;
+    reg_dirty = 0;
+    reg_save();
+}
+// END registry batch
 
 // ---- code the game loads at run time (EA AEMS sound modules marked executable with VirtualProtect) ----
 // The same module is loaded again at the same address at every sound reload (9 times in an hour of career): a
@@ -1035,8 +1045,18 @@ int code_region_of(uint32_t t) {
 }
 
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_files.inc"
+#include "game_files.h"
+#if __has_include("game_world.inc")
 #include "game_world.inc"
+#else
+int private_world_on;
+static void private_world_init(void) {}
+void private_world_prop_player(const float *position) { (void)position; }
+void private_world_before(Cpu *c, unsigned hook) { (void)c; (void)hook; }
+void private_world_after(Cpu *c, unsigned hook, uint32_t sp, uint32_t self) {
+    (void)c; (void)hook; (void)sp; (void)self;
+}
+#endif
 #endif
 static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "GetVersionExA")) {
@@ -1148,6 +1168,7 @@ static int win32(Cpu *c, const char *fn) {
     }
     if (!strcmp(fn, "ExitProcess") || !strcmp(fn, "TerminateProcess")) {
         printf("boot: ExitProcess(%u) after %u import calls\n", arg(c, 0), import_calls);
+        reg_flush();
         void app_restart_game_exited(int successful);
         app_restart_game_exited(!strcmp(fn, "ExitProcess") && arg(c, 0) == 0);
         diag_begin_exit();
@@ -1268,7 +1289,7 @@ static int win32(Cpu *c, const char *fn) {
         reg_set(arg(c, 0), gptr(arg(c, 1)), arg(c, 3), arg(c, 4), arg(c, 5));
         RET(0, 6);
     }
-    if (!strcmp(fn, "RegCloseKey")) RET(0, 1);
+    if (!strcmp(fn, "RegCloseKey")) { reg_flush(); RET(0, 1); }
     if (!strcmp(fn, "GetCurrentDirectoryA")) { strncpy((char *)G + arg(c, 1), "C:\\NFSMW", arg(c, 0)); RET(8, 2); }
     if (!strcmp(fn, "SetCurrentDirectoryA")) RET(1, 1);
     if (!strcmp(fn, "CreateDirectoryA")) {
@@ -1297,7 +1318,12 @@ static int win32(Cpu *c, const char *fn) {
             private_car_path((char *)G + arg(c, 0), host, sizeof host);
         }
 #else
-                                                
+        X360MusicHandle music;
+        int carbon_music_open(const char *, X360MusicHandle *);
+        int carbon_speech_open(const char *, X360MusicHandle *);
+        if (file_flags(acc, disp) == O_RDONLY && (carbon_music_open(host, &music) ||
+            carbon_speech_open(host, &music)))
+            RET(new_music_handle(&music), 7);
         int private_overlay = private_track_overlay_path(host, sizeof host, acc, disp);
         if (private_overlay < 0) RET(0xFFFFFFFFu, 7);
 #endif
@@ -1533,7 +1559,7 @@ static int win32(Cpu *c, const char *fn) {
 #if NFS_GAME == NFS_GAME_PRIVATE
 extern int private_d3dx_textures(Cpu *, const char *);
 extern int private_win32_extra(Cpu *, const char *);
-#include "game_ws2.inc"
+#include "game_ws2.h"
 int private_win32(Cpu *c, const char *fn) { return private_win32_extra(c, fn) || win32(c, fn); }
 
 #endif
@@ -1690,7 +1716,7 @@ static void race_setup(void) {
     printf("boot: SkipFE race %s, car %s, %u laps, %u opponents\n", race, car, M32(0x008F86BC), M32(0x00926080));
 }
 #else
-#include "game_startup.inc"
+#include "game_startup.h"
 static void race_setup(void) {  }
 #endif
 
@@ -1911,7 +1937,7 @@ int main(int argc, char **argv) {
 #else
     /* private image: MW startup disabled: widescreen_setup(); */
     /* private image: MW startup disabled: feedback_setup(); */
-#include "carbon_feedback_startup.inc"
+#include "carbon_feedback_startup.h"
 #endif
 
     Cpu cpu = {0}, *c = &cpu;

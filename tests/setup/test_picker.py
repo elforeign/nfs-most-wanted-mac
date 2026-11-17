@@ -12,6 +12,7 @@
 
 
 
+
 """
 import os
 import io
@@ -59,6 +60,20 @@ def compile_root(tmp, function, label):
 
 
 class PickerTests(unittest.TestCase):
+    def test_carbon_pc_root_keeps_archives(self):
+        with tempfile.TemporaryDirectory(prefix="carbon-inputs-") as td:
+            scratch = Path(td)
+            game = scratch / "game"
+            game.mkdir()
+            paths = [game, game / "NFSC.exe", scratch / "game.zip", scratch / "game.7z"]
+            for path in paths[1:]:
+                path.write_bytes(b"synthetic source")
+            function = extract_function(SWIFT.read_text())
+            binary = compile_root(scratch, function.replace("carbon: Bool = false", "carbon: Bool = true"), "carbon")
+            for path, expected in zip(paths, [game, game, paths[2], paths[3]]):
+                result = subprocess.run([str(binary), str(path)], capture_output=True, text=True, check=True)
+                self.assertEqual(Path(result.stdout.strip()), expected)
+
     def test_pc_root_and_backend(self):
         with tempfile.TemporaryDirectory(prefix="setup-picker-") as td:
             scratch = Path(td)

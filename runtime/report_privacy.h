@@ -259,7 +259,12 @@ static void ReportPrivacyCopyLog(const char *from, const char *to, long max) {
     if (file) fclose(file);
     if (!data || data.length > budget) {
         NSString *message = @"Log omitted: exceeds the 1 MiB privacy scan budget or could not be read.\n";
+#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
+        // Write sanitized bytes directly within the guarded profile's scratch tree.
+        if (![message writeToFile:destination atomically:NO encoding:NSUTF8StringEncoding error:NULL])
+#else
         if (![message writeToFile:destination atomically:YES encoding:NSUTF8StringEncoding error:NULL])
+#endif
             [NSFileManager.defaultManager removeItemAtPath:destination error:NULL];
         return;
     }
@@ -272,7 +277,11 @@ static void ReportPrivacyCopyLog(const char *from, const char *to, long max) {
         while (start < safe.length && bytes[start++] != '\n') {} // start at a complete line
         safe = [safe subdataWithRange:NSMakeRange(start, safe.length - start)];
     }
+#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
+    if (!safe || ![safe writeToFile:destination options:0 error:NULL])
+#else
     if (!safe || ![safe writeToFile:destination options:NSDataWritingAtomic error:NULL])
+#endif
         [NSFileManager.defaultManager removeItemAtPath:destination error:NULL];
 }
 
@@ -285,8 +294,17 @@ static void ReportPrivacyRedactBundle(NSString *folder, NSDictionary *identity) 
         NSString *text = ReportPrivacyDecodeData(data);
         text = ReportPrivacyIdentityRedact(text, identity);
         // Fail closed: a failed conversion/write must not leave an unredacted attachment.
+#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
+        NSError *error = nil;
+        NSString *safe = ReportEndpointRedact(text);
+        if (!safe || ![safe writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:&error]) {
+            fprintf(stderr, "report: text export failed: %s\n", safe ? error.localizedDescription.UTF8String : "privacy conversion failed");
+            [fm removeItemAtPath:path error:NULL];
+        }
+#else
         if (!text || ![ReportEndpointRedact(text) writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL])
             [fm removeItemAtPath:path error:NULL];
+#endif
     }
 }
 static void ReportRedactBundle(NSString *folder) {

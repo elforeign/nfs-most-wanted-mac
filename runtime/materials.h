@@ -160,7 +160,7 @@ enum { MAT_GLASS_UV1_SLOT = 29 };
 int mat_glass_uv1(const uint8_t *bytes, uint32_t size, const float **out, uint32_t *matched);
 void mat_glass_uv_note(int found, uint32_t vertices, uint32_t matched);
 void mat_glass_failure(int pipeline);
-void materials_set_particles(int x360);   // R21 NFS_PARTICLES, F10 live
+void materials_set_particles(int x360);   // R21 NFS_PARTICLES, F10 live: 0 PC, 1 X360 style, 2 the X360 choice
 void mat_glass_frame(void);                // Present: BOOT_DIAG per-second `glass:` line, including zero intervals
 
 // R28 tree shading: X360 billboardshader standard/p0 (09BF5164/09BF6634) on PC tree (effect 6) draws whose material

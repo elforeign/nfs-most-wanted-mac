@@ -1,3 +1,4 @@
+#include "game_select.h"
 // SDR video capture from SDR or linear HDR presentation sources.
 // The presenter only reserves a surface and encodes conversion;
 // hardware compression and MP4 passthrough run on a separate serial queue.
@@ -24,6 +25,17 @@ extern "C" void portmenu_status(const char *fmt, ...);
 #include "../media/media.h"
 #include <memory>
 #include <algorithm>
+
+#if NFS_GAME == NFS_GAME_PRIVATE
+static NSString *cliprec_movies_folder(void) {
+    const char *scratch = getenv("NFS_GAME_SCRATCH");
+    NSString *home = scratch && *scratch ? [NSString stringWithUTF8String:scratch] : NSHomeDirectory();
+    return [home stringByAppendingPathComponent:@"Movies/NFSC"];
+}
+#define CLIPREC_MOVIES_FOLDER cliprec_movies_folder()
+#else
+#define CLIPREC_MOVIES_FOLDER [NSHomeDirectory() stringByAppendingPathComponent:@"Movies/NFSMW"]
+#endif
 
 static constexpr unsigned kSurfaces = 8, kOverload = 120;
 // Live holds at most its pending frames plus the one held picture; the recording keeps the other surfaces
@@ -654,7 +666,7 @@ static void compressed(void *context, void *, OSStatus status, VTEncodeInfoFlags
 }
 - (void)attachFile {
     fileNeedsIDR=true;
-    NSString *folder = outputFolder ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Movies/NFSMW"];
+    NSString *folder = outputFolder ?: CLIPREC_MOVIES_FOLDER;
     NSDateFormatter *date = [NSDateFormatter new]; date.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     date.dateFormat = @"yyyyMMdd-HHmmss";
     NSString *name = [NSString stringWithFormat:@"Clip-%@-%@",[date stringFromDate:NSDate.date],NSUUID.UUID.UUIDString];
@@ -1180,7 +1192,7 @@ void replay_save_action(int unused) {
     }
     auto ring=actionReplay;
     auto exporter=replayExport.get();
-    NSString *folder=outputFolder ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Movies/NFSMW"];
+    NSString *folder=outputFolder ?: CLIPREC_MOVIES_FOLDER;
     double epoch=s->replayEpoch.load(std::memory_order_acquire);
     CMTime end=epoch?CMTimeMake(llround((time-epoch)*60000),60000):kCMTimeInvalid;
     if(exporter->save(ring,end,folder.fileSystemRepresentation)) {
@@ -1238,7 +1250,7 @@ void cliprec_action(int unused) {
 }
 void cliprec_open_folder(int unused) {
     (void)unused;
-    NSString *folder = [NSHomeDirectory() stringByAppendingPathComponent:@"Movies/NFSMW"];
+    NSString *folder = CLIPREC_MOVIES_FOLDER;
     [NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:nil];
     portmenu_open_folder(folder.fileSystemRepresentation);
 }

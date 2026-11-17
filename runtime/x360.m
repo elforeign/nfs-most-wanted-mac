@@ -41,7 +41,7 @@
 #include "x360_internal.h"
 #include "materials.h"
 #include "temporal_state.h"
-#include "gen/x360_engine.inc"   // X360E_SHADOW_*: the X360 shadow map size, focus and near plane (default.xex)
+#include "gen/x360_engine.inc"   // X360E_SHADOW_*: the shadow map size, focus and near plane (default.xex, else SHADOW_FALLBACK)
 
 #define SHADOW_FOCUS_FAR   0x00901AB0u
 #define SHADOW_FOCUS_ANGLE 0x00901AB4u
@@ -63,7 +63,6 @@ static void shadow_options(void) {
     const char *e = getenv("NFS_SHADOW_FIT");
     fit = e && !strcmp(e, "pc") ? 0 : e && !strcmp(e, "x360range") ? 1 : 2;
     if (pending_fit >= 0) fit = 2 - pending_fit;   // F10: x360, x360range, pc
-    if (!X360_ENGINE_CONSTS) fit = 0;               // no X360 default.xex: the X360 shadow values are unknown, PC fit
     if (!pc_shadow_saved) {
         pc_shadow[0] = F32(SHADOW_FOCUS_FAR); pc_shadow[1] = F32(SHADOW_FOCUS_ANGLE); pc_shadow[2] = F32(SHADOW_WIDTH);
         pc_shadow_saved = 1;

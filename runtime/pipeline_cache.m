@@ -232,10 +232,10 @@ static const PipelineRecipe recipes[] = {
     {.vertex=0x4F7FA17E9A753F92ull,.fragment=0xD1D251012267C742ull,.samples=0,.a2c=0,.color=80,.depth=260,.stencil=260,.blend=1,.mask=14,.srcRGB=4,.dstRGB=5,.opRGB=0,.srcAlpha=4,.dstAlpha=5,.opAlpha=0,.attributes={[0]={30,0,0},[1]={42,12,0},[2]={29,16,0},},.layouts={[0]={32,1,1},}}, // draw
 };
 #else
-#include "game_pipeline_recipes.inc"
+#include "game_pipeline_recipes.h"
 #endif
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_hdr_recipes.inc"
+#include "game_hdr_recipes.h"
 #endif
 // Protects functions, states and libraries. Readers: descriptor(), cached(),
 // pipeline_cached_library(), pipeline_loading_done(); writers also include
@@ -439,7 +439,7 @@ void pipeline_prewarm(dispatch_queue_t __strong queues[4], NSUInteger scene_samp
     history_replay(queues,scheduled);
 }
 #else
-#include "game_pipeline_prewarm.inc"
+#include "game_pipeline_prewarm.h"
 #endif
 void pipeline_loading_done(void) {
     frame_thread=pthread_self();

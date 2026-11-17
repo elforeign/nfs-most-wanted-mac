@@ -105,6 +105,10 @@ static volatile uint32_t notes_head;
 #include "report_sec.inc"
 static Sec secs[SECS];
 static uint64_t nsecs;
+int diag_car_state(float pos[3], float *speed) {
+    guest_read(); pos[0] = 12.5f; pos[1] = -34.25f; pos[2] = 56; *speed = 10; return 1;
+}
+#include "report_position.h"
 #include "report_format.inc"
 static int GatedMkdir(const char *path, mode_t mode) {
     if (image_gate && atomic_exchange(&block_image, 0))
@@ -135,6 +139,9 @@ static void reset_guest_state(void) {
     choice.value = 1; cat.value = 0;
     snprintf(user_note, sizeof user_note, "synthetic initial note");
     M32(GAMEFLOW_STATE) = 6;
+    M32(0x009142D0u) = 0x1000;
+    M32(0x1034) = 0x2000;
+    MF32(0x2010) = 1;
     M32(0x00901830u) = 1024;
     dev.pp[0] = 1920; dev.pp[1] = 1080;
     nsecs = 181;
@@ -282,6 +289,9 @@ int main(int argc, char **argv) {
         CHECK([summary containsString:@"category:   Audio\n"]);
         CHECK([summary containsString:@"synthetic initial note"]);
         CHECK([summary containsString:@"racing / free roam (game-flow 6)"]);
+#if !REPORT_LOCK_BASELINE
+        CHECK([summary containsString:@"position:   x=12.500000 y=-34.250000 z=56.000000; heading (forward)=1.000000,0.000000,0.000000\n"]);
+#endif
         CHECK([summary containsString:@"back buffer 1920x1080"]);
         CHECK([summary containsString:@"last 60s:   fps mean 60.0"]);
         CHECK([settings containsString:@"graphics.fixture = X360 (app.txt) [after restart]"]);

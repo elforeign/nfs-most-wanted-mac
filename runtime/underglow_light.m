@@ -471,14 +471,28 @@ static void ug_draw(const Cpu *result,const UGCarCapture *s) {
 /* World opaque geometry is queued during CarRenderInfo::Render. Flush the
  * road light with the retail vehicle lights, after that geometry has drawn;
  * otherwise a later opaque road draw would erase the projected pool. */
-static UGCarCapture road_capture;
-static uint64_t road_frame;
-static int road_pending;
+static UGCarCapture road_capture,menu_capture;
+static uint64_t road_frame,menu_frame;
+static int road_pending,menu_pending;
 void underglow_light_end(const Cpu *result,const UGCarCapture *s) {
     if(!s->valid || !(result->eax&255)) return;
     if(M32(0x00925E90u)==6) {
         road_capture=*s;road_frame=dev.frames;road_pending=1;
-    } else ug_draw(result,s);
+    } else {
+        menu_capture=*s;menu_frame=dev.frames;menu_pending=1;
+    }
+}
+/* Front end: the car shadow (DrawAmbientShadow 00743EA0) is queued in the
+ * render list, which draws at 006DEFBD after RenderFrontEndCars. The empty
+ * stub 00667660 is called next at 006DF22A, inside the same 0093DEBC effect
+ * scope; drawing there puts the pool over the shadow, as on the road. */
+void f_00667660_orig(Cpu *c);
+void f_00667660(Cpu *c) {
+    f_00667660_orig(c);
+    if(!menu_pending) return;
+    menu_pending=0;
+    if(menu_frame!=dev.frames || !underglow_light_enabled()) return;
+    Cpu draw=*c;draw.eax=1;ug_draw(&draw,&menu_capture);
 }
 void f_00750B00_orig(Cpu *c);
 void f_00750B00(Cpu *c) {

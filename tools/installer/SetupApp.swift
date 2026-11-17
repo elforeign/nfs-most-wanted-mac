@@ -494,6 +494,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
     if mode == .exportApp {
         return ["-I", sourceDir().appendingPathComponent("tools/setup.py").path,
                 "--export-all-in-one", "--app", pc.path, "--dest", dest.path, "--work", work.path, "--events"]
+                + (carbon ? ["--game", "carbon"] : [])
     }
     if carbon {
         // Carbon reads only its PC folder and, optionally, its own Xbox 360 copy (the artwork has no parts to choose).
@@ -517,7 +518,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "43d1ae014a1ac94bf862c07930a2c9f291bf63244b77d246bf92890b272a5c87"
+let carSelectionsSHA256 = "31a246c189e2eb01bad5e211128be6af2df8381e0433a1556b730c2fa4e0a1bd"
 
 struct CarChoice: Identifiable {
     let platform: String
@@ -789,18 +790,22 @@ final class Setup: ObservableObject {
     }
 
     // A file inside the game folder (speed.exe) stands for that folder; a .zip stays itself.
-    func pcRoot(_ url: URL) -> URL {
+    func pcRoot(_ url: URL, carbon: Bool = false) -> URL {
         var dir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &dir), !dir.boolValue,
-           url.pathExtension.lowercased() != "zip" { return url.deletingLastPathComponent() }
+           !(carbon ? ["zip", "7z", "iso"] : ["zip"]).contains(url.pathExtension.lowercased()) { return url.deletingLastPathComponent() }
         return url
     }
 
     func choosePC() {
         if carbonProduct {
-            guard let url = pickFolder(message: "Choose the Need for Speed Carbon folder (the one with NFSC.exe and TRACKS), or NFSC.exe itself.",
-                                       files: true, types: [.folder, .exe]) else { return }
-            pc = pcRoot(url); features = nil; x360 = nil; x360Status = ""
+            // The community disc reader is not in the public payload: offer .iso only where Setup carries it.
+            try? prepareSource()
+            let repack = FileManager.default.fileExists(atPath: sourceDir().appendingPathComponent("tools/setup_kit/carbon_repack.py").path)
+            guard let url = pickFolder(message: "Choose the Need for Speed Carbon folder (the one with NFSC.exe and TRACKS), NFSC.exe, a .zip/.7z of that folder" + (repack ? ", or the supported repack .iso." : "."),
+                                       files: true, types: [.folder, .exe, .zip] + [UTType(filenameExtension: "7z")].compactMap { $0 }
+                                           + (repack ? [UTType(filenameExtension: "iso")].compactMap { $0 } : [])) else { return }
+            pc = pcRoot(url, carbon: true); features = nil; x360 = nil; x360Status = ""
             runCheck(forX360: false)
             return
         }
@@ -857,14 +862,14 @@ final class Setup: ObservableObject {
     }
 
     func chooseX360() {
-        guard let url = pickFolder(message: "Choose your Xbox 360 copy: its folder, or the .iso file.", files: true) else { return }
+        guard let url = pickFolder(message: "Choose your Xbox 360 copy: its folder, .iso, or a .zip/.7z of it.", files: true) else { return }
         x360 = url
         features = nil
         x360Status = "Copy selected. Your chosen extras will be checked when building."
     }
 
     func chooseCarbon() {
-        guard !busy, let url = pickFolder(message: "Choose your Carbon game folder or its Xbox 360 ISO.", files: true) else { return }
+        guard !busy, let url = pickFolder(message: "Choose your Carbon game folder, its Xbox 360 .iso, or a .zip/.7z of it.", files: true) else { return }
         carbon = url
         state.recognition = nil
         runCars(.carsCheck)
@@ -872,7 +877,7 @@ final class Setup: ObservableObject {
 
     /// Carbon's console copy: its artwork has nothing to choose, so it is checked (and prepared) at once.
     func chooseCarbonX360() {
-        guard let url = pickFolder(message: "Choose your Need for Speed Carbon Xbox 360 copy: its folder, or the .iso file.", files: true) else { return }
+        guard let url = pickFolder(message: "Choose your Need for Speed Carbon Xbox 360 copy: its folder, .iso, or a .zip/.7z of it.", files: true) else { return }
         x360 = url
         features = nil
         runCheck(forX360: true)
@@ -1032,7 +1037,7 @@ final class Setup: ObservableObject {
             case .success:
                 if forX360 { self.x360Status = self.carbonProduct ? "Your Carbon Xbox 360 copy can be used." : "Your Xbox 360 copy can be used." }
                 else {
-                    self.pcStatus = self.carbonProduct ? "Your Carbon game folder can be used." : self.pcKind == .disc ? "Your disc images can be used."
+                    self.pcStatus = self.carbonProduct ? "Your Carbon PC source can be used." : self.pcKind == .disc ? "Your disc images can be used."
                         : pc.pathExtension.lowercased() == "zip" ? "Your game .zip can be used." : "Your game folder can be used."
                     // Notes on the game itself, e.g. no MOVIES folder (backend movie_note).
                     for note in st.warnings where note.hasPrefix("pc: ") { self.pcStatus += "\n" + note.dropFirst(4) }
@@ -1208,12 +1213,12 @@ struct ContentView: View {
                 }.padding(4)
             }
             nav(back: nil, next: .pc, nextEnabled: s.tools)
-            if !s.carbonProduct {  // Most Wanted's car extras and its all-in-one export
+            if !s.carbonProduct {
                 Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
-                Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
-                Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
+            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+            Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -1234,7 +1239,7 @@ struct ContentView: View {
         GroupBox(label: Text("Your Carbon PC game").bold()) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(s.pc?.path ?? "The installed folder with NFSC.exe and TRACKS.")
+                    Text(s.pc?.path ?? "The folder with NFSC.exe and TRACKS, or a .zip/.7z of it.")
                         .lineLimit(2).truncationMode(.middle).foregroundStyle(s.pc == nil ? .secondary : .primary)
                     Spacer()
                     Button("Choose…") { s.choosePC() }.disabled(s.checking)
@@ -1564,8 +1569,8 @@ struct ContentView: View {
             }
             if !s.carbonProduct {
                 Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
-                Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
             }
+            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
         }
     }
 }
@@ -1721,6 +1726,12 @@ struct Entry {
             print(jsonString(["names": chosen.names, "bytes": chosen.bytes, "requiredGB": chosen.requiredGB(hasX360: true), "arguments": command]))
             exit(0)
         }
+        if args.count > 2, args[1] == "--carbon-root-test" {
+            let carbon = Setup(product: .carbon)
+            let root = carbon.pcRoot(URL(fileURLWithPath: args[2]), carbon: true)
+            print(root.path)
+            exit(0)
+        }
         if args.count > 1, args[1] == "--carbon-product-test" {
             // What the Carbon product's Setup runs and shows, beside Most Wanted's unchanged command.
             let carbon = Setup(product: .carbon), mw = Setup(product: .mw)
@@ -1733,6 +1744,12 @@ struct Entry {
                 "check": carbon.installArguments(mode: .check, pc: pc, x360: nil, dest: dest, work: work),
                 "checkX360": carbon.installArguments(mode: .check, pc: pc, x360: x360, dest: dest, work: work),
                 "build": carbon.installArguments(mode: .build, pc: pc, x360: x360, dest: dest, work: work),
+                "export": carbon.installArguments(mode: .exportApp, pc: URL(fileURLWithPath: "/Carbon.app"), x360: nil,
+                                                   dest: URL(fileURLWithPath: "/backup/Carbon.app"), work: work),
+                "inputs": ["/folder", "/folder/NFSC.exe", "/game.zip", "/game.7z", "/disc.iso"].map {
+                    carbon.installArguments(mode: .check, pc: URL(fileURLWithPath: $0), x360: nil,
+                                            dest: URL(fileURLWithPath: "/other-destination"), work: work)
+                },
                 "mwBuild": mw.installArguments(mode: .build, pc: URL(fileURLWithPath: "/pc"), x360: x360, dest: dest, work: work),
                 "app": carbon.installedApp.path, "mwApp": mw.installedApp.path,
                 "afterX360": carbon.afterX360.rawValue, "mwAfterX360": mw.afterX360.rawValue,

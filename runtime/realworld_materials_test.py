@@ -6,6 +6,7 @@ Tolerances: F0 1e-5, pane R/T 1e-4, energy 1+1e-5, GGX FWHM 10%.
 The old boosted glass is R=.144/T=.60, chrome R=.50/direct mask=0.
 Wrong F0, wrong absorption, double-alpha and wrong-role controls must fail.
 Both vertex layouts and all six pixel techniques are generated and GPU compiled.
+Default Glass: unset env gives mode 1 (main: 0) and the F10 row has def 1 (Off def 0 fails the row check).
 Observed CPU F0 glass=.043249186/Cr=.554535985; 0 numeric failures.
 Wrong-k control F0=.272139370, 2 failures; absorption control 3 failures.
 GGX FWHM=.015479401 versus .015446579, relative error .213%.
@@ -911,10 +912,14 @@ int main(void){float vsc[256][4]={{0}};MatConsts out={0};int failures=0;
 '''+shader_guard[shader_guard.index('        char *s=realworld_materials_pixel'):]
         (tmp/'old-guard.c').write_text(pre.replace(shader_guard,old_guard)+EMIT_MAIN)
         build_emit(tmp/'old-guard.c',tmp/'old-guard')
-        for choice,expected in [(None,0),('off',0),('glass',1),('chrome',2),('all',3),('rims',0),('garbage',0)]:
+        for choice,expected in [(None,1),('off',0),('glass',1),('chrome',2),('all',3),('rims',0),('garbage',0)]:
             env=dict(os.environ,EXPECT=str(expected));env.pop('NFS_REALWORLD_MATERIALS',None)
             if choice is not None:env['NFS_REALWORLD_MATERIALS']=choice
             run([tmp/'emit'],env=env)
+        # The F10 row ships Glass (def 1): the shipped row passes, a row with def 0 (the old Off) fails.
+        row=(RT/'settings_port.c').read_text().split('.id = "graphics.realworld_materials"',1)[1].split('.apply',1)[0]
+        assert re.search(r'\.def = 1,',row) and not re.search(r'\.def = 0,',row),'F10 default is not Glass'
+        assert re.search(r'\.def = 0,',row.replace('.def = 1,','.def = 0,')),'broken control'
         bad=MODULE.replace('if (!car) return 0;','if (!car) return 1;')
         (tmp/'role-bad.c').write_text(bad)
         (tmp/'emit-bad.c').write_text((pre+EMIT_MAIN).replace('#include "'+str(MODULE_PATH)+'"','#include "role-bad.c"'))

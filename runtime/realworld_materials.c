@@ -84,7 +84,7 @@ void realworld_materials_set(int value) { mode = value >= 0 && value <= 3 ? valu
 int realworld_materials_mode(void) {
     if (mode < 0) {
         const char *e = getenv("NFS_REALWORLD_MATERIALS");
-        mode = !e ? 0 : !strcmp(e, "glass") ? 1 : !strcmp(e, "chrome") ? 2 : !strcmp(e, "all") ? 3 : 0;
+        mode = !e ? 1 : !strcmp(e, "glass") ? 1 : !strcmp(e, "chrome") ? 2 : !strcmp(e, "all") ? 3 : 0;
     }
     return mode;
 }

@@ -100,7 +100,7 @@ colours, ratios and directions stay. Diagnostics add `daynight: cars sun= sky=`;
 `BOOT_DIAG_LOOK_AB=carsoff` draws a shot's held copy with the rig unscaled (the
 same frame Off).
 
-In Carbon's Rockport (`carbon_daynight_cars.inc`, hook 00746A00), the same
+In Carbon's Rockport (`carbon_daynight_cars.h`, hook 00746A00), the same
 `NFS_DAYNIGHT_CARS` with On (On by default inside Carbon, `0`/`off` turns it
 off; Most Wanted keeps Off by default) replaces Carbon's fixed in-game rig
 (00A6CC20/CCC0/CD60: three lights x .10/.15/.05, no clock read; Carbon zeroes

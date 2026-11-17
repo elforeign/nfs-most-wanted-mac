@@ -8,6 +8,7 @@ import errno
 import hashlib
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -27,10 +28,10 @@ def is_export(app):
     return any(os.path.lexists(Path(app) / marker) for marker in (IDENTITY, MANIFEST))
 
 
-def runtime_supports_export(app):
+def runtime_supports_export(app, executable=ins.EXEC_NAME):
     # Search the signed executable, never a version number or a resource that
     # could have been added to an older runtime by a newer packaging script.
-    with (Path(app) / "Contents/MacOS" / ins.EXEC_NAME).open("rb") as executable:
+    with (Path(app) / "Contents/MacOS" / executable).open("rb") as executable:
         tail = b""
         for block in iter(lambda: executable.read(1024 * 1024), b""):
             data = tail + block
@@ -154,7 +155,7 @@ def sign_bundle(app):
         raise ins.InstallError("The exported app's signature did not verify.")
 
 
-def export_app(app, profile, destination, clone=clone_file, verify=None, sign=sign_bundle, on_publish=None):
+def export_app(app, profile, destination, clone=clone_file, verify=None, sign=sign_bundle, on_publish=None, game="mw"):
     """Return measurements; notify on_publish at rename, before fallible final sync/cleanup."""
     started = time.monotonic()
     app, profile, destination = map(lambda p: Path(p).absolute(), (app, profile, destination))
@@ -162,8 +163,14 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
         raise ins.InstallError("Choose a new .app in an existing ordinary folder.")
     if ins.exists(destination):
         raise ins.InstallError("The export destination already exists.", "Choose a new name; keep the previous export for rollback.")
-    if not ins.real_dir(app) or not ins.is_current_app(app):
-        raise ins.InstallError("Choose an installed NFS Most Wanted Native app.")
+    if game not in ("mw", "carbon"):
+        raise ins.InstallError("Unknown export product.")
+    product = ins.CARBON if game == "carbon" else dict(name=ins.APP_NAME, exec=ins.EXEC_NAME, bundle_id=ins.PUBLIC_BUNDLE_ID)
+    if not ins.real_dir(app) or not ins.is_current_app(app, product["bundle_id"]):
+        raise ins.InstallError(f"Choose an installed {product['name']} app.")
+    with (app / "Contents/Info.plist").open("rb") as info:
+        if plistlib.load(info).get("CFBundleExecutable") != product["exec"]:
+            raise ins.InstallError("The installed app has the wrong product executable.")
     verify = verify or (lambda p: ins.app_complete(p))
     metrics = dict(cloned_files=0, copied_files=0, transferred_bytes=0, digest_verified_bytes=0)
     with ins.profile_guard(profile), ins.dest_lock(app.parent):
@@ -171,7 +178,7 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
             raise ins.InstallError("An installation needs recovery.", "Run Setup to recover it before exporting.")
         if not verify(app):
             raise ins.InstallError("The installed app's signature did not verify.")
-        if not runtime_supports_export(app):
+        if not runtime_supports_export(app, product["exec"]):
             raise ins.InstallError("The installed runtime does not support all-in-one export.",
                                    "Update the ordinary installation with Setup, then export again.")
         roots = current_roots(app, profile)

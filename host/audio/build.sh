@@ -219,6 +219,19 @@ fi
 grep -q '^FAIL.*clips(on, SAMPLES)' build/limiter_guest_test_broken.txt
 echo ok
 
+# Passthrough exit release (hdmi_release_test.cpp): a fake CoreAudio property layer, no device opened. Fixed: 11 checks /
+# 0 failures; d->ready left open at exit (the old close_all_at_exit): 11 / 4, the stream stays 'mtct' 768000 Hz.
+$CXX -I"$F/include" hdmi_release_test.cpp -o build/hdmi_release_test $LIBS
+build/hdmi_release_test > build/hdmi_release_test.txt 2>&1 || { tail -30 build/hdmi_release_test.txt; exit 1; }
+sed 's/^        if (d->ready) d->ready->close();$/        (void)0;/' dsound_host.cpp > build/hdmi_release_broken_source.cpp
+if cmp -s dsound_host.cpp build/hdmi_release_broken_source.cpp; then echo 'error: hdmi_release broken control did not apply'; exit 1; fi
+$CXX -I. -I"$F/include" -DHDMI_RELEASE_SOURCE=\"build/hdmi_release_broken_source.cpp\" hdmi_release_test.cpp \
+    -o build/hdmi_release_broken $LIBS
+if build/hdmi_release_broken > build/hdmi_release_broken.txt 2>&1; then
+    echo 'error: passthrough-exit negative control unexpectedly passed'; exit 1
+fi
+grep -q '^FAIL: quit during a reopen: the stream is PCM again' build/hdmi_release_broken.txt
+
 # Callback/parking and large-period PCM fixture: synthetic callbacks, fake device only, with/without diagnostics.
 # Fixed: 144 checks / 0 failures each; detached-output mutant: 34 checks / 2 failures.
 # Old 1024-frame floor: 12 failures, 48 underruns/mode, 72.8% zero fill.

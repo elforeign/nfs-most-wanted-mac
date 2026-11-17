@@ -1,3 +1,7 @@
+#include "game_select.h"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#define osk_pad carbon_addons_host_osk_pad
+#endif
 // Controller text entry. Guest calls and queue draining run only on the guest thread.
 #include "funcs.h"
 #include "host.h"
@@ -6,7 +10,9 @@
 #include <string.h>
 #include <math.h>
 
+#if NFS_GAME == NFS_GAME_MW
 #define KM 0x0091D4B0u
+#endif
 int prompts_last_input(void);
 void prompts_input(int pad);
 int portmenu_is_open(void);
@@ -27,6 +33,7 @@ typedef struct { uint64_t generation; uint32_t target; int note, action; unsigne
 static Event events[32];
 static unsigned event_read, event_write;
 
+#if NFS_GAME == NFS_GAME_MW
 static uint32_t invoke(Cpu *c, void (*fn)(Cpu *), uint32_t self, unsigned n, const uint32_t *args) {
     Cpu q = *c;
     q.ecx = self; q.esp -= 128 + n * 4;
@@ -35,6 +42,7 @@ static uint32_t invoke(Cpu *c, void (*fn)(Cpu *), uint32_t self, unsigned n, con
     fn(&q);
     return q.eax;
 }
+#endif
 static void layout_reset(void) { row = column = shifted = page = 0; }
 const OskCapture *osk_capture(void) { return note.active ? &note : &game; }
 int osk_note_active(void) { return note.active; }
@@ -79,6 +87,7 @@ void osk_note_end(int cancel) {
 static void retire_game(void) {
     if (game.active) { game.active = 0; game.generation = ++serial; }
 }
+#if NFS_GAME == NFS_GAME_MW
 static void game_snapshot(Cpu *c) {
     uint32_t target = M32(KM + 0x414);
     if (!M8(KM + 0x410) || !target) { retire_game(); return; }
@@ -100,6 +109,27 @@ static void game_snapshot(Cpu *c) {
     size_t n = 0; game.text[0] = 0;
     for (unsigned i = 0; i < game.length && i < 155; ++i) utf8(game.text, &n, game.type == 5 ? '*' : M16(KM + 0x100 + 2 * i));
 }
+#else
+int carbon_addons_host_text_snapshot(Cpu *, OskCapture *);
+void carbon_addons_host_text_event(Cpu *, uint32_t, int, unsigned);
+void carbon_addons_host_text_restart(void) { retire_game(); }
+static uint64_t game_epoch;
+static void game_snapshot(Cpu *c) {
+    OskCapture next;
+    if (!carbon_addons_host_text_snapshot(c, &next)) { retire_game(); return; }
+    uint64_t epoch = next.generation;
+    if (!game.active || game.target != next.target || game_epoch != epoch) {
+        next.generation = ++serial;
+        layout_reset();
+    } else {
+        next.generation = game.generation;
+        next.owner = game.owner;
+    }
+    next.connected = next.owner >= 0 && next.owner < 2 ? present[next.owner] : 0;
+    game = next;
+    game_epoch = epoch;
+}
+#endif
 void osk_queue(uint64_t generation, int action, unsigned ch) {
     const OskCapture *s = osk_capture();
     if (event_write - event_read == 32) return;
@@ -119,7 +149,9 @@ void osk_pass(Cpu *c) {
             else if (e.action == OSK_CLEAR) note_text[0] = 0;
             else if (e.action == OSK_ACCEPT || e.action == OSK_CANCEL) osk_note_end(e.action == OSK_CANCEL);
             if (note.active) note_snapshot();
-        } else {
+        }
+#if NFS_GAME == NFS_GAME_MW
+        else {
             // Recheck the live target immediately before every call, including queued bursts.
             if (!M8(KM + 0x410) || M32(KM + 0x414) != e.target) { retire_game(); continue; }
             unsigned ch = e.action == OSK_DELETE || e.action == OSK_CLEAR ? 8 : e.ch;
@@ -129,11 +161,18 @@ void osk_pass(Cpu *c) {
             else if (e.action == OSK_CANCEL) invoke(c, f_005991B0, e.target, 0, NULL);
             game_snapshot(c);
         }
+#else
+        else {
+            carbon_addons_host_text_event(c, e.target, e.action, e.ch);
+            game_snapshot(c);
+        }
+#endif
         if (diag_on) diag_event("osk: action=%d generation=%llu length=%u active=%d", e.action, (unsigned long long)e.generation,
                                osk_capture()->length, osk_capture()->active);
     }
 }
 
+#if NFS_GAME == NFS_GAME_MW
 void f_0057F1D0_orig(Cpu *c);
 void f_0057F1D0(Cpu *c) {
     int manager = c->ecx == KM;
@@ -164,6 +203,7 @@ void f_00516520(Cpu *c) {
     if (--fe_depth && saved >= 0) fe_port = saved;
 }
 
+#endif
 // The layout uses physical positions, independent of the game's remappable bindings.
 static const char *letters[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
 static const char symbols[] = "!@#$%^&*()_+-=[]{};:'\"\\|,.<>/?`~ ";

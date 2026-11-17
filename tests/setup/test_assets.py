@@ -151,6 +151,10 @@ def make_iso(files, path):
     path.write_bytes(image)
 
 
+# The four files runtime/x360copspeech.c opens under x360_root (listed here, not taken from the importer).
+COP_SPEECH = tuple("SOUND/SPEECH/COPSPEECH_EN." + e for e in ("BIG", "CSI", "EVT", "IDX"))
+
+
 class AssetsTest(unittest.TestCase):
     def setUp(self):
         # Synthetic importer fixtures do not carry retail shader containers.
@@ -163,14 +167,15 @@ class AssetsTest(unittest.TestCase):
         self.pc, self.folder = self.base / "PC copy ü", self.base / "X360 copy ü"
         self.pc.mkdir()
         self.folder.mkdir()
-        self.files = list(x360.REQUIRED) + ["CARS/TEST/VINYLS.BIN", "NIS/SCENE_ARRESTF01_BUNDLEB.BUN", "GLOBAL/GAME_ONLY.BIN"]
+        self.files = list(dict.fromkeys(list(x360.REQUIRED) + list(COP_SPEECH) + [
+            "CARS/TEST/VINYLS.BIN", "NIS/SCENE_ARRESTF01_BUNDLEB.BUN", "GLOBAL/GAME_ONLY.BIN"]))
         self.disc = {"default.xex": b"XEX2 synthetic", "Movies/clip.wmv": b"synthetic movie"}
         archive, rows = bytearray(), []
         for i, name in enumerate(self.files):
             payload = ("asset " + name).encode()
             rows.append(struct.pack("<6I", x360.path_hash(name), 0, i, i, len(payload), 0))
             archive += payload + bytes(2048 - len(payload))
-            if name != "GLOBAL/GAME_ONLY.BIN":
+            if name != "GLOBAL/GAME_ONLY.BIN" and name not in COP_SPEECH:   # X360-only names, never in the PC tree
                 p = self.pc / name
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"PC")
@@ -243,6 +248,13 @@ class AssetsTest(unittest.TestCase):
         with self.optional_converters():
             x360.prepare(self.folder, self.base / "explicit-default", self.pc, extras=["arrest", "textures", "ui"])
         self.assertEqual(self.extra_manifest(self.base / "explicit-default/prepared"), self.extra_manifest(root))
+
+    def test_cop_speech_bank_and_sidecars_extracted(self):
+        # Before the fix only the BIG was named: the game found no CSI and fell back to PC cop speech.
+        with self.extraction_only():
+            x360.prepare(self.folder, self.base / "cop", self.pc)
+        files = self.base / "cop/prepared/files"
+        self.assertEqual([n for n in COP_SPEECH if not (files / n).is_file()], [])
 
     def test_optional_independent_manifests_and_retick(self):
         names = ("arrest", "textures", "ui")

@@ -85,7 +85,7 @@ def main():
     user=(RT/'user32.m').read_text()
     assert user.index('if(stream_key_route_event(e)) {')<user.index('            switch (e.type)')
     core=(RT/'onscreen_keyboard.c').read_text()
-    osk=core[core.index('static OskCapture game, note;'):core.index('static uint32_t invoke(')]
+    osk=core[core.index('static OskCapture game, note;'):core.index('#if NFS_GAME == NFS_GAME_MW\nstatic uint32_t invoke(')]
     osk+=core[core.index('static void layout_reset('):core.index('static void retire_game(')]
     for name,text in ORIGINAL_KEY.items():
         assert hashlib.sha256(text.encode()).hexdigest()==ORIGINAL_KEY_SHA256[name]

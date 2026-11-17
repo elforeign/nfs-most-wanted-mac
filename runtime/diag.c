@@ -1793,7 +1793,7 @@ void f_00753060(Cpu *c) {
 }
 
 #else
-#include "game_overlay_diagnostics.inc"
+#include "game_overlay_diagnostics.h"
 #endif
 
 

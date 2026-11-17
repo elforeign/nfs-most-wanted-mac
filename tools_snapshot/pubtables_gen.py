@@ -432,6 +432,34 @@ POST_FALLBACK = {
     # Only the diagnostic mirror A/B reads this: the port's own mirror multiplier, x1 (the mirror follows the main view).
     "X360E_MIRROR_WORLD": "1.0f",
 }
+# SHADOW_FALLBACK: the sun shadow's light-space perspective fit (runtime/x360_shadow_fit.cpp, the published LiSPSM method:
+# Wimmer, Scherzer and Purgathofer, "Light Space Perspective Shadow Maps", EGSR 2004) for a player without the console
+# executable. The PC numbers are the PC game's own tuning of the same fit (speed.exe 00901A84-00901AB4); the rest is the
+# paper's. None is read from, or fitted to, the console's table.
+SHADOW_FALLBACK = {
+    # The receiver range: the PC's own focus far (00901AB0, 50 m), in races and in the front end alike (the PC has one).
+    "X360E_SHADOW_FOCUS_RACE": "50.0f", "X360E_SHADOW_FOCUS_FE": "50.0f",
+    # The receiver range's near end, which is also the z_n of the paper's n_opt. Half a metre is inside the closest
+    # surface any camera looks at (the bonnet from the hood camera), so nothing visible is cut; the PC's 0.01 m would
+    # spend 6 of the range's 12 doublings of distance on the first 0.5 m in front of the lens, where there is only air.
+    "X360E_SHADOW_FOCUS_NEAR": "0.5f",
+    # n = n_opt x 1 + 0: the paper's optimum (z_n + sqrt(z_n z_f)) / sin(gamma) as published, untuned.
+    "X360E_SHADOW_N_SCALE": "1.0f", "X360E_SHADOW_N_OFFSET": "0.0f",
+    # The projection centre stands n before the receiver body's near face, as in the paper: no extra pull-back.
+    "X360E_SHADOW_EYE_BACK": "0.0f",
+    # Along the light (the map's depth): the PC's own room for casters between the body and the sun, height factor
+    # 00901A98 = 10 per half-extent (the PC doubles it in the call): the body takes the middle tenth of the depth range.
+    "X360E_SHADOW_Y_SCALE": "20.0f",
+    # Across the map's rows: the perspective's far plane at the body's far end (the paper), so no row lies past the
+    # last receiver (the PC's factor 10, 00901A9C, leaves rows past it).
+    "X360E_SHADOW_DEPTH_SCALE": "1.0f",
+    # Low sun: a caster's shadow is h / tan(elevation) long. A 10 m caster (a street lamp, a two-storey eave) at the
+    # 50 m range's edge needs elevation >= atan(10 / 50) = 11.3 deg for its shadow to stay inside the range, so the
+    # light is raised to that: z = 10 / sqrt(10^2 + 50^2). Higher suns are untouched.
+    "X360E_SHADOW_LIGHT_Z_MIN": "0.19611614f",
+}
+# The shadow map's size without the executable: the PC's 1024 (GetShadowWidth/Height 006C86B0/C0).
+LI_FALLBACK = {"X360E_SHADOW_SIZE": "1024"}
 # Authored shallow-film animation: 16 frames over two damping time constants.
 # beta=2*nu*k^2 + sqrt(nu*omega/2)*k/sinh(2*k*h), h=.001 m, lambda=.020 m,
 # nu=1e-6 m^2/s; omega^2=(g*k+sigma*k^3/rho)*tanh(k*h). FPS=8*beta.
@@ -439,6 +467,7 @@ RIPPLE_FALLBACK = {"X360E_RIPPLE_FPS": "18.3863f"}
 FALLBACK = {
     **RIPPLE_FALLBACK,
     **POST_FALLBACK,
+    **SHADOW_FALLBACK,
     "X360E_DROP_RADIUS": "LENS_DROP_RADIUS", "X360E_DROP_LIFE": "LENS_DROP_LIFE",
     "X360E_BRIGHT_LOW": "0.60", "X360E_BRIGHT_HIGH": "1.10",
     "X360E_FB_HIT_SOFT": "6.0f", "X360E_FB_HIT_SLOPE": "0.04f", "X360E_FB_WORLD_SLOPE": "0.028571429f",
@@ -637,10 +666,10 @@ def engine_consts(xex, work, build="USA"):
     return engine_text(r.stdout, "X360 default.xex (%s build, engine constants)" % build, build=build)
 
 
-ENGINE_STUB = (NO_X360 % "executable" + "// The post chain's constants are this port's own values (POST_FALLBACK): the chain runs on them.\n"
+ENGINE_STUB = (NO_X360 % "executable" + "// The post chain's and the shadow fit's constants are this port's own values (POST_FALLBACK, SHADOW_FALLBACK).\n"
                "#define X360_ENGINE_CONSTS 0\n" +
                "".join("#define %s %s\n" % (name, FALLBACK.get(name, "0.0f")) for name, _ in ENGINE + ENGINE_DEC) +
-               "".join("#define %s 0\n" % name for name, _ in ENGINE_LI))
+               "".join("#define %s %s\n" % (name, LI_FALLBACK.get(name, "0")) for name, _ in ENGINE_LI))
 
 
 def main():

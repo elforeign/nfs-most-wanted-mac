@@ -302,7 +302,7 @@ static const char *const kRealMaterials[] = {"Off", "Glass", "Chrome", "All"};
 static const char *const kRealMaterialsV[] = {"off", "glass", "chrome", "all"};
 static Setting s_real_materials = {.id = "graphics.realworld_materials", .category = SET_PICTURE, .order = 66, .label = "Physical car materials",
     .help = "Adds clear window optics and polished chrome highlights to selected car materials.",
-    .type = SET_CHOICE, .choices = kRealMaterials, .values = kRealMaterialsV, .nchoices = 4, .def = 0,
+    .type = SET_CHOICE, .choices = kRealMaterials, .values = kRealMaterialsV, .nchoices = 4, .def = 1,
     .env = "NFS_REALWORLD_MATERIALS", .apply = realworld_materials_set};
 static const char *const kHeadlamp[] = {"Retail", "Clear"}, *const kHeadlampV[] = {"retail", "clear"};
 static void headlamp_apply(int v) { materials_set_headlamp_glass(v == 1); }
@@ -327,7 +327,7 @@ static Setting s_trees = {.id = "graphics.trees", .category = SET_WORLD, .order 
     .type = SET_CHOICE, .choices = kPcX360, .values = kPcX360V, .nchoices = 2, .def = 1, .env = "NFS_TREES", .apply = trees_apply};
 static void water_apply(int v) { materials_set_water(v != 0); }   // the provider (X360 or Port) is fixed at start
 static void particles_apply(int v) {
-    materials_set_particles(v != 2);
+    materials_set_particles(v == 3 ? 2 : v != 2);   // 2: the X360 choice (the only one that runs it without console files)
     particles_physical_set(v == 1);
 }
 static Setting s_particles = {.id = "graphics.particles", .category = SET_WORLD, .order = 75, .label = "Particles",
@@ -742,5 +742,5 @@ __attribute__((constructor)) static void settings_port_register(void) {
     REG(h_cash); REG(s_cash20); REG(s_cash50); REG(s_cash100); REG(s_cash_amount);
 }
 #else
-#include "game_settings.inc"
+#include "game_settings.h"
 #endif

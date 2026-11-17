@@ -169,10 +169,10 @@ int main(int argc, char **argv) {
     print('My picks lost-edit mutant: rejected; failures=' + str(result.stderr.count('FAIL line')), flush=True)
 
     # The displayed My picks label under an override must not suppress Restore.
-    target = 'if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || v == settings_look_choice())) return 0;'
+    target = 'if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || look_value == settings_look_choice())) return 0;'
     assert settings.count(target) == 1
     c = tmp / 'settings_no_restore.c'
-    c.write_text(settings.replace(target, 'if (v == current(s)) return 0;'))
+    c.write_text(settings.replace(target, '(void)look_value; if (v == current(s)) return 0;'))
     exe = tmp / 'no_restore'
     subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(RT),
                     '-I', str(RT.parent / 'recomp'), str(RT / 'settings_look_test.c'), str(c), '-o', str(exe)], check=True)

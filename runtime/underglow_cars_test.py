@@ -1,5 +1,5 @@
 """Full player roster and native default through production store/light/ePoly.
-Game PlayerUsable + nonempty MODEL: 48 stock + 76 additions + 14 replacements.
+Game PlayerUsable + nonempty MODEL: 48 stock + 75 additions + 14 replacements.
 Default Off: all 138 stay dark after colour selection, then explicit Light On
 submits 0 emitter quads + 1 pool each (four logical strips), Measured and Stronger: 5659108/5659108 each.
 Changed fresh-colour assertion on ORIGINAL On code: 41002/41004 (2 failures,
@@ -65,7 +65,7 @@ def player_fixtures(observe=None):
     catalog = private_cars.identities()
     additions = [row for row in catalog if row['role'] == 'addition']
     swaps = [row for row in catalog if row['role'] == 'swap']
-    assert len(additions) == private_cars.CENSUS['final_additions'] == 76
+    assert len(additions) == private_cars.CENSUS['final_additions'] == 75
     assert len({r['id'] for r in additions}) == len(additions)
     assert all(row['name'] in stock for row in swaps)
     required = ('BMWM3GTRE46', 'CARRERAGT', 'PUNTO', 'ELISE', 'MUSTANGGT', 'CLIO', '997S')

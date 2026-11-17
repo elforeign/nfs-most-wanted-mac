@@ -48,16 +48,23 @@ from setup_kit import apply as a
 from setup_kit import install as ins
 
 
+# Each product's app, written out here so the fixture does not depend on the code under test.
+PRODUCTS = {ins.APP_BUNDLE: dict(bundle_id=ins.PUBLIC_BUNDLE_ID, exec=ins.EXEC_NAME),
+            "NFS Carbon Native.app": dict(bundle_id="io.github.nfs-carbon-native-mac", exec="NFSCarbon")}
+
+
 def put(path, body):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body.encode() if isinstance(body, str) else body)
 
 
 class Fixture:
-    def __init__(self, base, manifests=True):
+    def __init__(self, base, manifests=True, bundle=ins.APP_BUNDLE, version="4.3.0"):
         self.base = Path(base)
+        self.bundle, self.version = bundle, version
+        self.product = PRODUCTS[bundle]
         self.profile = self.base / "profile"
-        self.dest = self.base / "Applications" / ins.APP_BUNDLE
+        self.dest = self.base / "Applications" / bundle
         self.job = self.base / "job"
         self.ready = self.job / "ready.json"
         self.profile.mkdir()
@@ -65,7 +72,7 @@ class Fixture:
         self.old_data = self.base / "old-data"
         put(self.old_data / "pc/marker", "old")
         self.make_app(self.dest, "old")
-        self.make_app(self.job / ins.APP_BUNDLE, "new")
+        self.make_app(self.job / bundle, "new")
         put(self.job / "data/pc/marker", "new")
         put(self.job / "data/assets/marker", "new")
         put(self.profile / "Saves/career", b"career\0\xffnever-roll-back")
@@ -78,19 +85,20 @@ class Fixture:
         roots = dict(pc_root="data/pc", assets_root="data/assets")
         body = "".join(f"{k}={v}\n" for k, v in sorted(roots.items())).encode()
         put(self.job / "roots.txt", body)
-        self.descriptor = dict(format_version=1, version="4.3.0", app=ins.APP_BUNDLE, data="data", roots=roots,
-            hashes=dict(app=ins.digest_tree(self.job / ins.APP_BUNDLE), data=ins.digest_tree(self.job / "data"),
+        self.descriptor = dict(format_version=1, version=version, app=bundle, data="data", roots=roots,
+            hashes=dict(app=ins.digest_tree(self.job / bundle), data=ins.digest_tree(self.job / "data"),
                         roots=hashlib.sha256(body).hexdigest()),
             destination=dict(path=str(self.dest), identity=ins.ident(self.dest), sha256=ins.digest_tree(self.dest)),
             profile=str(self.profile), provenance={"fixture": True})
         self.write_ready()
         self.saves = (self.profile / "Saves/career").read_bytes()
 
-    def make_app(self, app, marker):
-        put(app / "Contents/Info.plist", plistlib.dumps(dict(CFBundleIdentifier=ins.PUBLIC_BUNDLE_ID,
-            CFBundleShortVersionString="4.3.0", CFBundleExecutable=ins.EXEC_NAME)))
-        put(app / "Contents/MacOS" / ins.EXEC_NAME, "#!/bin/sh\nexit 0\n")
-        (app / "Contents/MacOS" / ins.EXEC_NAME).chmod(0o755)
+    def make_app(self, app, marker, product=None, version=None):
+        product = product or self.product
+        put(app / "Contents/Info.plist", plistlib.dumps(dict(CFBundleIdentifier=product["bundle_id"],
+            CFBundleShortVersionString=version or self.version, CFBundleExecutable=product["exec"])))
+        put(app / "Contents/MacOS" / product["exec"], "#!/bin/sh\nexit 0\n")
+        (app / "Contents/MacOS" / product["exec"]).chmod(0o755)
         put(app / "Contents/marker", marker)
 
     def write_ready(self):
@@ -1110,6 +1118,38 @@ int main(int argc, char **argv) { @autoreleasepool {
                 else: self.assertEqual(arguments[arguments.index("--ready") + 1], str(stage / "ready.json"))
                 self.assertIn("--parent", arguments)
                 self.assertEqual((job / "profile.txt").read_text(), str(f.profile))
+
+
+
+class CarbonApplyTests(unittest.TestCase):
+    """Carbon's prepared update (1.0.0 -> 1.0.1) is applied to Carbon's app at its next launch and acknowledged;
+    Most Wanted's app and profile beside it are untouched, and the journal names Carbon's app for recovery.
+    Proof: with main 583933e9's apply.py/install.py this fails ("The installed app changed since this update was
+    prepared": Carbon's app is not a current Most Wanted app); fixed: passes."""
+    setUp, tearDown = ApplyTests.setUp, ApplyTests.tearDown
+
+    def test_carbon_update_applies_to_carbon_only(self):
+        f = Fixture(self.root, bundle="NFS Carbon Native.app", version="1.0.1")
+        f.make_app(f.dest, "old", version="1.0.0")
+        f.descriptor["destination"] = dict(path=str(f.dest), identity=ins.ident(f.dest), sha256=ins.digest_tree(f.dest))
+        f.write_ready()
+        most_wanted = f.dest.parent / ins.APP_BUNDLE
+        f.make_app(most_wanted, "most wanted", product=PRODUCTS[ins.APP_BUNDLE], version="4.6.0")
+        before = ins.digest_tree(most_wanted)
+        seen = []
+        with mock.patch.object(ins, "assert_not_running", lambda processes=None, pattern=ins.RUNNING_APP: seen.append(pattern)):
+            token = a.apply_ready(f.ready, f.profile, f.dest)
+        # Carbon's process is the one that must be closed (twice: before reading and before the exchange).
+        self.assertEqual([p.search("/x/NFS Carbon Native.app/Contents/MacOS/NFSCarbon") is not None for p in seen], [True, True])
+        journal = json.loads(ins.journal_path(f.profile).read_bytes())
+        self.assertEqual((journal["bundle"], journal["bundle_id"]), (f.bundle, f.product["bundle_id"]))
+        f.receipt(token)
+        self.assertEqual(a.acknowledge(f.profile, token), "finished")
+        with (f.dest / "Contents/Info.plist").open("rb") as info:
+            self.assertEqual(plistlib.load(info)["CFBundleShortVersionString"], "1.0.1")
+        self.assertEqual((f.dest / "Contents/marker").read_text(), "new")
+        self.assertEqual(ins.digest_tree(most_wanted), before)
+        self.assertEqual((f.profile / "Saves/career").read_bytes(), f.saves)
 
 
 if __name__ == "__main__":

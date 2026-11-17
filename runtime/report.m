@@ -46,8 +46,13 @@
 #include "slowlog.h"
 #include "slowclock.h"
 #include "slowlog_lumab.h"
+#include "report_position.h"
 
+#if NFS_GAME == NFS_GAME_MW
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
+#else
+uint32_t private_report_flow(void);
+#endif
 
 #ifndef PORT_BUILD_ID
 #define PORT_BUILD_ID "unknown"
@@ -65,7 +70,12 @@ int render_msaa_samples(void);
 uint64_t diag_rss_bytes(void);
 int diag_car_state(float pos[3], float *speed);
 void render_frame_counters(uint64_t *deferred, int *nshader, int *npipe);
+#if NFS_GAME == NFS_GAME_MW
 int pacing_sim_hz(void);
+#else
+int carbon_sim_hz(void);
+#define pacing_sim_hz carbon_sim_hz
+#endif
 int portmenu_is_open(void);
 static void session_note(const char *line, int audio);
 
@@ -180,9 +190,13 @@ static void cache_system(void) {
 static char sys_power[40] = "?", sys_thermal[16] = "?";
 // budget_ms: 1.5x the frame interval (the display's, or the sim rate when that is lower), set by cache_system
 static void print_render(FILE *f) {
+#if NFS_GAME == NFS_GAME_MW
     fprintf(f, "back buffer %ux%u, MSAA %dx, post %s, shadows %u (map %d), car paint %s", dev.pp[0], dev.pp[1],
             render_msaa_samples(), settings_get("graphics.postfx") == 1 ? "PC" : "X360", M32(0x00901830u), x360_shadow_map_size(),
             settings_get("graphics.car_paint") == 1 ? "PC" : "X360");
+#else
+    fprintf(f, "back buffer %ux%u, MSAA %dx, native post and car paint", dev.pp[0], dev.pp[1], render_msaa_samples());
+#endif
 }
 static int print_nondefault(FILE *f) {
     char vbuf[96];
@@ -289,9 +303,13 @@ static void session_open(void) {
                         "present_8_3\tpresent_16_7\tpresent_25\tpresent_other\tpresent_dropped\tvrr_requested\tadaptive_scheduling\t"
                         "rms_fl\trms_fr\trms_c\trms_lfe\trms_sl\trms_sr\tpeak_fl\tpeak_fr\tpeak_c\tpeak_lfe\tpeak_sl\tpeak_sr\tclip\tlimit_samples\t"
                         "dip_fl\tdip_fr\tdip_c\tdip_lfe\tdip_sl\tdip_sr\t"
+#if NFS_GAME == NFS_GAME_MW
                         "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\t"
                         "gpu_dev_util\tgpu_self_ms\tgpu_other_ms\tgpu_top\tgpu_mhz\t" SLOWLOG_COLUMNS
                         "\tcpu_game_ms\tproc_cpu_ms\tproc_pcore_pct\tproc_ghz\tproc_faults\tsys_cpu_pct\tmem_pressure\tclock_low\n");   // slowclock.c
+#else
+                        "thermal\tlow_power\tapp_active\toccluded\tfullscreen\tgpu_wall\n");
+#endif
     if (sess_f) {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
@@ -396,11 +414,17 @@ static void session_flush_hitches(uint64_t head, uint64_t gser) {
     if (skipped) fprintf(sess_f, "%9.2f s  (%llu more hitches not listed)\n", uptime(), (unsigned long long)skipped);
     if (written || skipped) fflush(sess_f);
 }
+#if NFS_GAME == NFS_GAME_MW
 static void session_exit(void) { padlink_idle(1); session_summary(); }
+#else
+static void session_exit(void) { session_summary(); }
+#endif
 
 // diag.c diag_frame, every frame, always: once a second a stats line into the ring; stalls and audio changes as notes.
 void report_frame(uint64_t frame, uint32_t flow) {
+#if NFS_GAME == NFS_GAME_MW
     if (diag_on) padlink_idle(0);
+#endif
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
     static uint32_t prev_causes, last_flow = ~0u;
     static uint64_t def0, last_def;
@@ -446,7 +470,13 @@ void report_frame(uint64_t frame, uint32_t flow) {
     double now = host_ticks() / 1e9;
     if (now < next) return;
     next = now + 1;
+#if NFS_GAME == NFS_GAME_MW
     slowlog_cached(&slow_sample);
+#else
+    slow_sample.thermal = (int)NSProcessInfo.processInfo.thermalState;
+    slow_sample.low_power = NSProcessInfo.processInfo.lowPowerModeEnabled;
+    snprintf(slow_sample.power, sizeof slow_sample.power, "unknown");
+#endif
     refresh_power_thermal();
     if (now >= next_sys) { next_sys = now + 5; cache_system(); }
     Sec *s = &secs[nsecs % SECS];
@@ -513,12 +543,14 @@ void report_frame(uint64_t frame, uint32_t flow) {
             // app frontmost, window hidden, native full screen, and the command buffers' queue-to-end ms (render_gpu_wall_ms)
             fprintf(perf_f, "\t%d\t%d\t%d\t%d\t%d\t%.2f", slow_sample.thermal, slow_sample.low_power, (int)NSApp.isActive, user32_window_occluded(),
                     ps.native_fullscreen, render_gpu_wall_ms());
+#if NFS_GAME == NFS_GAME_MW
             gpuclients_print(perf_f, &slow_sample.gpu);
             slowlog_print(perf_f, &slow_sample, settings_get("graphics.postfx") == 1 ? "PC" : "X360");
             static uint64_t clock_serial;                     // slowclock.c: CPU evidence, and the frame ring at a clock drop
             int clock_fresh = slow_sample.serial && slow_sample.serial != clock_serial;
             clock_serial = slow_sample.serial;
             slowclock_second(perf_f, slow_sample.enabled, frame, slow_sample.gpu.states, clock_fresh, report_session_dir(), s->t, report_note);
+#endif
             fputc('\n', perf_f);
             fflush(perf_f);
         }
@@ -529,9 +561,11 @@ void report_frame(uint64_t frame, uint32_t flow) {
         session_flush_hitches(head, g);
         if (s->t >= next_sum) { next_sum = s->t + 60; session_summary(); }
     }
+#if NFS_GAME == NFS_GAME_MW
     slowlog_lumab_tick(frame, flow, n ? draws / n : 0, s->gpu,
                       (int)NSApp.isActive, user32_window_occluded(),
                       settings_get("graphics.postfx") != 1, &slow_sample, report_session_dir());
+#endif
     ++nsecs;
     // the audio output and the default device: a note when either changes, and for new underruns
     static char last_mode[96] = "";
@@ -761,17 +795,27 @@ static ReportSnapshot *report_capture(const char *category, const char *note, co
     {
         char when[64];
         strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S %Z", &tm);
+#if NFS_GAME == NFS_GAME_MW
         uint32_t flow = M32(GAMEFLOW_STATE);
         fprintf(f, "NFSMW port problem report\n\n");
+#else
+        uint32_t flow = private_report_flow();
+        fprintf(f, "Carbon port problem report\n\n");
+#endif
         fprintf(f, "when:       %s\n", when);
         fprintf(f, "category:   %s\n", category && *category ? category : "Other");
         fprintf(f, "note:       %s\n", note && *note ? note : "(none)");
         fprintf(f, "reason:     %s\n", why && *why ? why : "reported from the F10 menu");
+#if NFS_GAME == NFS_GAME_MW
         fprintf(f, "build:      %s (speed.exe code %.12s)\n", port_build_id(), speed_exe_fingerprint);
+#else
+        fprintf(f, "build:      %s (NFSC.exe code %.12s)\n", port_build_id(), speed_exe_fingerprint);
+#endif
         fprintf(f, "macOS:      %s\n", sys_os);
         fprintf(f, "Mac model:  %s\n", sys_model);
         fprintf(f, "game:       %s (game-flow %u), frame %llu, %.0f s since start%s\n", flow_name(flow), flow,
                 (unsigned long long)diag_current_frame(), uptime(), diag_on ? ", BOOT_DIAG on" : "");
+        report_position(f, flow);
         fprintf(f, "display:    %s\n", sys_display);
         fprintf(f, "display:    %s\n", sys_edr);
         fprintf(f, "render:     ");
@@ -970,7 +1014,9 @@ void report_init(void) {
         fprintf(stderr, "boot: full diagnostic logging (Diagnostics menu): %s\n", dir);
     }
     session_open();
+#if NFS_GAME == NFS_GAME_MW
     slowlog_start();
+#endif
     atexit(session_exit);
     report_note("start: build %s", port_build_id());
     if (!getenv("BOOT_DIAG")) {

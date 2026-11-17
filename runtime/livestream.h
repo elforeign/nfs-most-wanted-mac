@@ -47,9 +47,12 @@ class Poster {
     std::shared_ptr<StreamState> state;
     explicit Poster(std::shared_ptr<StreamState>);
 public:
-    static constexpr size_t maxBytes=16*1024*1024;
+    // The queue rides out an upload stall of up to five 2 s segments (then drops): five 4K segments at 50 Mb/s
+    // are about 62.5 MB, and the per-segment deadline spans the same five segment intervals.
+    static constexpr size_t maxSegments=5;
+    static constexpr size_t maxBytes=64*1024*1024;
     static constexpr size_t maxResponseBytes=4096;
-    static constexpr double deadlineSeconds=3;
+    static constexpr double deadlineSeconds=10;
     // Empty keys and invalid destinations return null, without creating a session.
     static std::shared_ptr<Poster> create(const std::string& key
 #ifdef LIVESTREAM_TESTING

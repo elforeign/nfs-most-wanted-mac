@@ -3,7 +3,7 @@
 Original Carbon: 0 host thread sections; fixed Carbon and MW: 3 each.
 The pinned reporting-only control must fail the same three-thread assertion.
 Exit suppresses both hang/stall publication while retaining crash reports.
-Dependencies: diag_threads.h, diag.c, recomp/private_runtime/game_diagnostics.inc.
+Dependencies: diag_threads.h, diag.c, recomp/private_runtime/game_diagnostics.h.
 """
 from pathlib import Path
 import hashlib
@@ -100,7 +100,7 @@ int main(int argc,char **argv) {
 def main():
     assert hashlib.sha256(OLD.encode()).hexdigest() == OLD_SHA
     shared = (ROOT / 'runtime/diag_threads.h').read_text()
-    private = (ROOT / 'recomp/private_runtime/game_diagnostics.inc').read_text()
+    private = (ROOT / 'recomp/private_runtime/game_diagnostics.h').read_text()
     mw = (ROOT / 'runtime/diag.c').read_text()
     for source in (private, mw):
         assert '#include "diag_threads.h"' in source

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the Setup app and its disk image from this checkout:
 #   dist/NFS-Most-Wanted-Native-Setup-v<version>.dmg  and  dist/NFS-Most-Wanted-Native-Setup-v<version>.dmg.sha256
+# (--game carbon: the NFS-Carbon-Native-Setup-v<version>.dmg Setup for Carbon alone, same layout otherwise)
 # No game files are involved. The app carries the reviewed source tree (git archive of HEAD; in the maintainer's
 # checkout passed through the publication importer, so only allowlisted files, redacted and scanned), the pinned relocatable Python with its
 # wheels, and the pinned FFmpeg source tarball (tools/installer/deps.lock.json).
@@ -9,6 +10,7 @@
 #        tools/installer/build_installer.sh --dev [version]      skip the pinned dependencies (not releasable; output in build/)
 #        tools/installer/build_installer.sh --print-names VERSION    print the DMG and checksum file names, build nothing
 #        tools/installer/build_installer.sh --payload-only OUTDIR [VERSION]   write OUTDIR/source.tar.gz only
+#        --game mw|carbon (anywhere after the first argument; default mw) selects the Setup product.
 # Environment: PYTHON (default python3) runs the importer and scanner when present; no network is used except fetching missing
 # dependencies listed in deps.lock.json, each checked against its SHA-256.
 set -eu
@@ -16,9 +18,32 @@ set -eu
 MIN_MACOS=14.5          # the one place the macOS floor is set (raise or lower it here)
 PRODUCT="NFS-Most-Wanted-Native-Setup"
 NAME="NFS Most Wanted Native Setup"
+BUNDLE_ID="org.nfsmw-native.setup"
+BUNDLE_NAME="NFSMW Setup"
+PRODUCT_KEY=""          # Most Wanted's Info.plist has no SetupProduct key; Carbon's names itself
 PYTHON="${PYTHON:-python3}"
 
 die() { echo "build_installer: $*" >&2; exit 1; }
+
+# --game mw|carbon: taken out of the arguments, so the positional forms below are unchanged.
+GAME=mw
+n=$#
+while [ "$n" -gt 0 ]; do
+    a="$1"; shift; n=$((n - 1))
+    if [ "$a" = --game ]; then
+        [ "$n" -gt 0 ] || die "--game needs mw or carbon"
+        GAME="$1"; shift; n=$((n - 1))
+    else
+        set -- "$@" "$a"
+    fi
+done
+case "$GAME" in
+    mw) ;;
+    carbon) PRODUCT="NFS-Carbon-Native-Setup"; NAME="NFS Carbon Native Setup"; BUNDLE_ID="org.nfscarbon-native.setup"
+            BUNDLE_NAME="$NAME"; PRODUCT_KEY="
+  <key>SetupProduct</key><string>carbon</string>" ;;
+    *) die "--game must be mw or carbon (got '$GAME')" ;;
+esac
 
 # Accepts 4.0.0 or v4.0.0 (2 to 4 numeric parts); prints the number without the v.
 norm_version() {
@@ -38,6 +63,9 @@ esac
 
 cd "$(dirname "$0")/../.."
 ROOT="$(pwd -P)"
+if [ "$GAME" = carbon ] && [ -f "$ROOT/tools/publish/import.py" ]; then
+    die 'Carbon requires an exported checkout: python3 -I tools/publish/import.py SOURCE DEST --with-carbon; then run tools/installer/build_installer.sh --game carbon in DEST'
+fi
 OUT="$ROOT/build/installer"
 
 OUTDIR=""
@@ -75,6 +103,14 @@ make_payload() {
     fi
     # The importer's ownership marker is not part of the payload.
     rm -f "$OUT/public/tools/publish/owned.txt"; rmdir "$OUT/public/tools/publish" 2>/dev/null || true
+    # Bundle the native public-domain decoder next to its Python reader. Source
+    # installs can also compile it locally; the installer needs no decoder build.
+    sdk="$OUT/public/tools/setup_kit/lzma_sdk"
+    if [ "$MODE" != payload ] && [ -f "$sdk/bridge.c" ]; then
+        /usr/bin/clang -O2 -arch arm64 -mmacosx-version-min="$MIN_MACOS" -dynamiclib \
+            "$sdk/LzmaDec.c" "$sdk/bridge.c" -o "$sdk/carbon_lzma.dylib"
+        /usr/bin/codesign --force --sign - "$sdk/carbon_lzma.dylib"
+    fi
     mkdir -p "$dest"
     COPYFILE_DISABLE=1 tar -czf "$dest/source.tar.gz" -C "$OUT/public" .
 }
@@ -160,9 +196,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>Setup</string>
-  <key>CFBundleIdentifier</key><string>org.nfsmw-native.setup</string>
-  <key>CFBundleName</key><string>NFSMW Setup</string>
-  <key>CFBundleDisplayName</key><string>$NAME</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>$BUNDLE_NAME</string>
+  <key>CFBundleDisplayName</key><string>$NAME</string>$PRODUCT_KEY
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

@@ -165,6 +165,7 @@ MUTANTS = [
 
 def bridge_script():
     text = (ROOT / 'pub_update.m').read_text().split('static NSString *const PrepareScript =\n', 1)[1].split('\n;', 1)[0]
+    text = text.replace('" PU_STAGE_GAME "', '')  # Most Wanted's expansion (Carbon's adds --game carbon)
     return ''.join(json.loads(line[1:]) for line in text.splitlines())
 
 
@@ -506,7 +507,7 @@ int main(void) { return 0; }
             flags = ['-DPUB_UPDATE_REHEARSAL=1',
                      '-DPUB_UPDATE_REHEARSAL_FEED_URL="http://127.0.0.1:1/rehearsal"'] if enabled else []
             if product == 'carbon':
-                flags += ['-DNFS_GAME=2']
+                flags += ['-DNFS_GAME=2', '-DNFS_PUBLIC=1']  # the public build (a private one registers no rows)
             run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags,
                  path, '-framework', 'Cocoa', '-o', exe])
             data = run(['/usr/bin/strings', exe]).stdout
@@ -515,6 +516,33 @@ int main(void) { return 0; }
             assert repository in data and asset in data, product
         assert release_ok == [True, False], (product, release_ok)
     print('Production transports good=2 fixed product feeds/assets; broken=2 fixture-enabled builds detected')
+    # Each game's own update folder and rebuild: Carbon's jobs never share Most Wanted's folder (one app adopting or
+    # overwriting the other's update), and its preparer rebuilds Carbon. Main 583933e9: Carbon shared the folder and
+    # staged Most Wanted (both checks fail); fixed: pass.
+    for product, flags, folder, other, game in (
+            ('mw', [], 'NFSMW-Setup/updates', 'NFSMW-Setup/Carbon/updates', False),
+            ('carbon', ['-DNFS_GAME=2'], 'NFSMW-Setup/Carbon/updates', None, True)):
+        client = run(['/usr/bin/strings', root / (product + '-production')]).stdout
+        assert folder in client and (other is None or other not in client), (product, folder)
+        preparer = root / (product + '-preparer')
+        run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags, '-DPUB_UPDATE_WORKER=1',
+             ROOT / 'pub_update.m', '-framework', 'Cocoa', '-o', preparer])
+        assert ("'--game', 'carbon'" in run(['/usr/bin/strings', preparer]).stdout) == game, product
+    print('Update folders and rebuild product good=2 (Most Wanted, Carbon)')
+
+
+def carbon_selection():
+    """Carbon's runtime links the update rows and the next-launch apply instead of its empty stub.
+    Main 583933e9: neither unit selected, the stub kept (fails); fixed: passes."""
+    sys.path.insert(0, str(ROOT.parent / 'recomp/private_runtime'))
+    import layers
+    manifest = layers.load_manifest()
+    units = manifest['targets']['private']['units']
+    assert 'pub_update.m' in units and 'pub_update_launch.m' in units, units
+    enabled = manifest['_private_registry']['enabled_providers']
+    assert 'pub_update_launch' in enabled, sorted(enabled)
+    assert b'pub_update_launch' not in layers._disabled_bytes(manifest)
+    print('Carbon selection good=1: update rows and next-launch apply linked, stub removed')
 
 
 def main():
@@ -533,6 +561,7 @@ def main():
         ready_while_playing(root/"locked-profile")
         cancelled_launch(root/"cancelled-launch")
         production_transport(root/'production-transport')
+        carbon_selection()
         detach_order_cases(root)
         retry=root/'detach-retry'; retry.mkdir(); detach_retry_cases(retry)
         mounted=subprocess.run([sys.executable, '-I', '-B', __file__, '--mounted-prepare'], capture_output=True, text=True, timeout=120)

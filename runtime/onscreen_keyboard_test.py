@@ -339,7 +339,7 @@ def main():
             if name != 'good' and bridge == core and guest == bodies:
                 raise AssertionError(f'{name}: mutant did not change code')
             source = Path(d) / 'test.c'; exe = Path(d) / 'test'
-            source.write_text(PRE + guest + bridge + MAIN)
+            source.write_text(PRE + guest + '\n' + bridge + MAIN)
             result = subprocess.run(['clang', '-std=c11', '-O1', '-g', '-fsanitize=address,undefined',
                 '-I', str(R), '-I', str(ROOT/'recomp'), '-I', str(ROOT/'recomp/out'), str(source), str(R/'text_fit.c'), '-o', str(exe)], capture_output=True, text=True)
             if result.returncode:

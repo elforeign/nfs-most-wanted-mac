@@ -16,6 +16,9 @@
 
 
 
+
+
+
 """
 import os
 import shutil
@@ -29,10 +32,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SCRIPT = (ROOT / 'player_running.sh').read_text()
 SUFFIX = '/qwfake/NFSMW.app/Contents/MacOS/NFSMW'
+CSUFFIX = '/qwfake/NFS Carbon Native.app/Contents/MacOS/NFSCarbon'
 
 
 def make_game(d):
     g = Path(d) / 'qwfake/NFSMW.app/Contents/MacOS/NFSMW'
+    g.parent.mkdir(parents=True)
+    shutil.copy('/bin/sleep', g)
+    subprocess.run(['codesign', '-f', '-s', '-', str(g)], capture_output=True)
+    return g
+
+
+def make_carbon(d):
+    g = Path(d) / 'qwfake/NFS Carbon Native.app/Contents/MacOS/NFSCarbon'
     g.parent.mkdir(parents=True)
     shutil.copy('/bin/sleep', g)
     subprocess.run(['codesign', '-f', '-s', '-', str(g)], capture_output=True)
@@ -51,7 +63,7 @@ def reported(d, script_text):
     sp = Path(d) / 'port/runtime/player_running.sh'
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(script_text)
-    env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX)
+    env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX, PLAYER_RUNNING_CARBON=CSUFFIX)
     return subprocess.run(['sh', str(sp)], capture_output=True, text=True, env=env).returncode == 0
 
 
@@ -59,7 +71,7 @@ def run_script(d, script_text):
     sp = Path(d) / 'port/runtime/player_running.sh'
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(script_text)
-    env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX)
+    env = dict(os.environ, NFS_RUNS=f'{d}/runs', PLAYER_RUNNING_GAME=SUFFIX, PLAYER_RUNNING_CARBON=CSUFFIX)
     return subprocess.run(['sh', str(sp)], capture_output=True, text=True, env=env)
 
 
@@ -104,6 +116,22 @@ def cases(script_text):
             time.sleep(0.3)
             if reported(d, script_text):
                 bad.append('stopped game')
+            # Carbon app (installed or Desktop copy): a process named NFSCarbon inside an .app bundle
+            cg = make_carbon(d)
+            p = spawn(f"'{cg}' 60", True); pids.append(p); time.sleep(0.5)
+            if not reported(d, script_text):
+                bad.append('carbon game')
+            (Path(d) / 'runs/slots/999997').write_text(f'run {p}\n')
+            if reported(d, script_text):
+                bad.append('carbon launcher slot')
+            (Path(d) / 'runs/slots/999997').unlink()
+            stop(p)
+            time.sleep(0.3)
+            p = spawn("sh -c 'sleep 60; :' x/NFS_Carbon.app/Contents/MacOS/NFSCarbon", True)
+            pids.append(p); time.sleep(0.3)
+            if reported(d, script_text):
+                bad.append('carbon argv-only')
+            stop(p)
             # marker folder of the player's own launcher
             mk = Path(d) / 'runs/player'
             mk.mkdir()
@@ -137,11 +165,17 @@ PPID_LINE = '        path=$(ps -p "$p" -o comm= 2>/dev/null) || continue\n'
 assert PPID_LINE in SCRIPT
 launchd = SCRIPT.replace(PPID_LINE, '        [ "$(ps -p "$p" -o ppid= 2>/dev/null | tr -d " ")" = 1 ] || continue\n' + PPID_LINE)
 lbad = cases(launchd)
-print(f'player_running good script: {10 - len(good)}/10 cases' + (f' FAILED {good}' if good else ''))
+# the script before the Carbon rule: only NFSMW is looked for
+nocarbon = SCRIPT.replace("pgrep -x 'NFSMW|NFSCarbon'", 'pgrep -x NFSMW')
+assert nocarbon != SCRIPT
+cbad = cases(nocarbon)
+print(f'player_running no-Carbon copy: {len(cbad)} failed cases {cbad}')
+print(f'player_running good script: {12 - len(good)}/10 cases' + (f' FAILED {good}' if good else ''))
 print(f'player_running old-pattern copy: {len(obad)} failed cases {obad}')
 print(f'player_running launchd-parent copy: {len(lbad)} failed cases {lbad}')
 print(f'player_running filter-removed copy: {len(fbad)} failed cases {fbad}')
 ok = (not good and 'argv-only' in obad and lbad == ['terminal game']
-      and set(fbad) == {'launcher slot', 'launcher slot child'})
+      and cbad == ['carbon game']
+      and set(fbad) == {'launcher slot', 'launcher slot child', 'carbon launcher slot'})
 print('player_running_test: PASS' if ok else 'player_running_test: FAIL')
 sys.exit(0 if ok else 1)

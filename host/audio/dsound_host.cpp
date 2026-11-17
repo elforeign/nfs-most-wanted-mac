@@ -918,6 +918,10 @@ void close_all_at_exit() {
         if (d->thread.joinable()) { d->running = false; d->thread.join(); }
         if (d->opener.joinable()) d->opener.join();
         if (d->out) d->out->close();
+        // An open the opener finished after the mixer stopped (a quit during the launch reopen or a device change):
+        // left open, its passthrough would leave the device in the encoded format after the process is gone.
+        std::lock_guard<std::mutex> rdy(d->ready_m);
+        if (d->ready) d->ready->close();
     }
 }
 

@@ -54,7 +54,7 @@ void hdrclip_init(void) {
     if(hdrclip_on){hc_pairs=[mtl newBufferWithLength:8*sizeof(uint32_t) options:MTLResourceStorageModeShared];memset(hc_pairs.contents,0,hc_pairs.length);}
 }
 #else
-#include "game_hdrclip_init.inc"
+#include "game_hdrclip_init.h"
 #endif
 // Preserve offsets while ignoring comments in signatures, braces and return searches.
 static NSString *hc_code(NSString *s) {
@@ -150,7 +150,7 @@ static unsigned hc_select(unsigned stage) {
     return !hc_finished && hc_frame==frame_serial ? stage:HC_STAGES;
 }
 #else
-#include "game_hdrclip_select.inc"
+#include "game_hdrclip_select.h"
 #endif
 void hdrclip_bind(id<MTLRenderCommandEncoder> e,unsigned stage) {
     unsigned s=hc_select(stage);
@@ -249,7 +249,7 @@ void hdrclip_finish(void) {
     }];
 }
 #else
-#include "game_hdrclip_finish.inc"
+#include "game_hdrclip_finish.h"
 #endif
 
 // Shared native check, also runnable in an authorized game_run. No game assets.

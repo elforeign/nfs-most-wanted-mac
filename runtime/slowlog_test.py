@@ -181,7 +181,7 @@ def boundary_evidence(module, text):
 
 
 def main():
-    report = (RT / 'report.m').read_text()
+    report = mw_source(RT / 'report.m')
     post = mw_source(RT / 'render_post.m')
     header = report.split('if (perf_f)\n        fprintf(perf_f, ', 1)[1].split(');', 1)[0]
     assert 'SLOWLOG_COLUMNS' in header

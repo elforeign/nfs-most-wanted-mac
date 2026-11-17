@@ -335,8 +335,8 @@ int main(int argc,char **argv) {
                 CHECK(private_car_path(guest,routed,sizeof routed)); CHECK(strstr(routed,"/CARS/")!=NULL);
                 CHECK(strstr(routed,private_cars_generation())==NULL);
             }
-            CHECK(private_car_path("CARS/FORDGT/GEOMETRY.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[81].geometry));
-            CHECK(private_car_path("CARS/FORDGT/TEXTURES.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[81].textures));
+            CHECK(private_car_path("CARS/FORDGT/GEOMETRY.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[80].geometry));
+            CHECK(private_car_path("CARS/FORDGT/TEXTURES.BIN",routed,sizeof routed)); CHECK(!strcmp(routed,cars[80].textures));
             CHECK(!private_car_path("CARS/FORDGT/../GEOMETRY.BIN",routed,sizeof routed));
             CHECK(!private_car_path("CARS/RX7/GEOMETRY.BIN",routed,sizeof routed));
             fixture_selected_sources();
@@ -431,7 +431,7 @@ int main(int argc,char **argv) {
         uint32_t table=gmalloc(84*STRIDE); M32(TABLE)=table;
         for(unsigned j=0;j<84;++j) M32(table+j*STRIDE+0x90)=j;
         strcpy((char *)G+table,"FORDGT"); // fixture's original type 0 is a selected own-slot swap
-        unsigned char swapped[PRIVATE_CARS_MASK_SIZE]={0}; swapped[10]=2;
+        unsigned char swapped[PRIVATE_CARS_MASK_SIZE]={0}; swapped[10]=1;
         invoke(&c,self,out,0,1); CHECK(!memcmp(G+out,"NFSCAR3",7));
         CHECK(!private_cars_metadata_admit(G+out,SAVE_SIZE,swapped));
         CHECK(!memcmp(bytes+16,G+out+16,SAVE_SIZE-16)); // only reserved bytes change
@@ -450,7 +450,7 @@ int main(int argc,char **argv) {
         invoke(&c,self,buf,0,1); CHECK(!memcmp(bytes,G+buf,SAVE_SIZE));
         // Own-slot identity remains MW; removing only its catalog selection
         // must nevertheless refuse without changing the profile or save.
-        cars[81].selected=0; memcpy(before,G+self,sizeof before);
+        cars[80].selected=0; memcpy(before,G+self,sizeof before);
         invoke(&c,self,buf,0,0); CHECK(!(c.eax&255)); CHECK(!private_cars_save_allowed());
         CHECK(!memcmp(before,G+self,sizeof before)); CHECK(!memcmp(bytes,G+buf,SAVE_SIZE));
         printf("file-roundtrip checks=%u failures=%u bytes=%u\n",checks-start,failures-failed,SAVE_SIZE);

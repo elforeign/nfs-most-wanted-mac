@@ -1,5 +1,11 @@
 """Full-entry PC/X360 writer proof using generated data and independent readers.
 
+Setup sync: original SHA-checked rules fail 4/4 targeted checks (exit 1);
+current passes 4/4 and the complete 18-test module (exit 0). Source brake
+diffuse endpoints are 3/6 with power 10 on PC/X360; explicit amplitude
+translation is preserved. Stripped material labels stream three source images
+in requested slots; authored rear-brake omissions pass on both platforms.
+
 Original baseline: 8ac38cb3, convert() text SHA256
 43354b9c45189e6897c464539550e5bfbe5e8b29f7704f042bbaa307cfa73926.
 Its full entry rejects D's normalized fixture with FormatError:
@@ -75,6 +81,221 @@ ORIGINAL_GRIP_POLICY = r'''def _converter_policy(platform, lighting, tracked, ma
 ORIGINAL_GRIP_POLICY_SHA = '8df6b59d8a48d300435f0740d3a77f8ab3931988d7ebcde38e7f0a3dc8bcc8eb'
 
 BASELINE_REJECTION = 'Carbon mesh header must be 52 aligned bytes'
+
+
+# SHA-checked fragments of the original Setup rules, executed only by the broken control.
+ORIGINAL_SETUP_RULES = (
+    ('map_vertex_lighting',
+     'c6483101c0ecf39787f3e77cc86abfdb0a5264806b9194acb1cbf159d087e363',
+     r'''def map_vertex_lighting(models, source_car=None):
+    """Repair classified rim RGB and conditionally supply neutral body illumination.
+
+    MW car VS multiplies diffuse/specular/environment by saturate(2*COLOR.x).
+    CCX exports zero for its whole painted body (and most exterior draws), so
+    copying that field blacks out even correctly bound paint. Detect this from
+    stock BODY_A paint, not a car-name list. The paint gate protects authored
+    non-rim shading; classified zero-RGB rim vertices need repair independently.
+    This is a compatibility default, not a reconstruction of Carbon's lighting.
+    """
+    # Stripped labels retain the source texture identity. Classify paint by its
+    # replaceable skin binding, and rim draws by the rim atlas on a tire solid.
+    paint_images = {name_hash(f'{source_car}_{r}') for r in MW_PAINT_BINDINGS} if source_car else set()
+    rim_image = name_hash(source_car + '_TIRE') if source_car else None
+    def role(m, r, name):
+        label = bytes(name).split(b'\0')[0]
+        diffuse = m['textures'][r[24]] if not label and source_car else None
+        paint = label in PAINT_NAMES or (not label and diffuse in paint_images)
+        rim = label.startswith(b'RIM_') or (not label and '_TIRE_' in m['name'] and diffuse == rim_image)
+        return paint, rim
+    stock = next((m for n, m in models.items() if n.endswith('_KIT00_BODY_A')), None)
+    paint, base = [], 0
+    for r, name in zip(stock['records'], stock['names']) if stock is not None else ():
+        count = u32(r, 60)
+        if role(stock, r, name)[0]:
+            paint.append(stock['vertices'][base:base + count, 24:28])
+        base += count
+    neutral_body = bool(paint) and not any(v.any() for v in paint)
+    changed = 0
+    for m in models.values():
+        base = 0
+        for r, name in zip(m['records'], m['names']):
+            count = u32(r, 60)
+            colours = m['vertices'][base:base + count, 24:28]
+            if role(m, r, name)[1]:
+                # Lower LODs merge black lip vertices into lit spoke draws.
+                # Alpha is opacity, not evidence of vertex illumination.
+                dark = ~colours[:, :3].any(axis=1)
+                colours[dark, :3] = 255
+                changed += int(dark.sum())
+            elif neutral_body and not colours.any():
+                colours[:] = 255
+                changed += count
+            base += count
+    return changed
+'''),
+    ('material_resources',
+     '5971d26d7a7d5c566dfc16657950ad4cf67efa570235260a9e85c288008bdfa3',
+     r'''def material_resources(source, source_tex, donor_tex, car, slot, shared_raw, shared_images, dynamic,
+                       *, models=None, textures=None, shared_textures=None, source_aliases=None):
+    wanted = (geometry_texture_hashes(source) if models is None else
+              {h for m in models.values() for h in m['textures']})
+    models = ({m['name']: m for _, s in solids(source) for m in [model(s)]}
+              if models is None else models)
+    textures = pc_texture_entries(source_tex) if textures is None else textures
+    aliases = slot_texture_aliases(None, car, slot, decoded=textures)
+    aliases.update(source_aliases or {})
+    local = set(textures)
+    def lookup(wanted):
+        return (global_extras(shared_raw, wanted) if shared_textures is None else
+                {h: shared_textures[h] for h in wanted if h in shared_textures})
+    for kit in range(6):
+        hs = name_hash(f'{car}_KIT{kit:02d}_HEADLIGHT_GLASS_OFF')
+        if hs in wanted and hs not in local:
+            aliases[hs] = (name_hash('WINDOW_MASK'), 'WINDOW_MASK')
+    for name in ('UNIVERSAL_TIRE_N', 'TREAD_N'):
+        if name_hash(name) in wanted:
+            aliases[name_hash(name)] = (name_hash('TIRE_STYLE01_N'), 'TIRE_STYLE01_N')
+    for m in models.values():
+        for record, name in zip(m['records'], m['names']):
+            role = name.split(b'\0')[0]
+            diffuse = m['textures'][record[24]]
+            fallback = {b'GRILL_STOCK': 'GRILL_02', b'FOGLIGHT_GLASS': 'WINDOW_FRONT'}.get(role)
+            if fallback and diffuse not in local and diffuse not in shared_images:
+                aliases[diffuse] = (name_hash(fallback), fallback)
+    translated = {aliases.get(h, (h, None))[0] for h in wanted}
+    present = {aliases.get(h, (h, None))[0] for h in local} | {h for h, _ in texture_blobs(donor_tex)}
+    needed = translated - shared_images - dynamic - {name_hash(f'{slot}_{r}') for r in MW_PAINT_BINDINGS} - present
+    extras = lookup(needed | (wanted & set(map(name_hash, ('TIRE_STYLE01', 'TIRE_STYLE02')))) |
+                           set(map(name_hash, ('TIRE_STYLE01_N', 'DOORLINE_N'))))
+    # The shared grill name has different pixels in the two installations:
+    # source DXT5 has holes; MW's same-hash DXT1 atlas is fully opaque.
+    grill = name_hash('GRILL_02')
+    if grill in wanted or any(aliases.get(h, (h, None))[0] == grill for h in wanted):
+        require(name_hash(car + '_ENGINE') not in local, 'grill streaming slot occupied')
+        sourced = lookup({grill})
+        require(grill in sourced, 'source grill pixels absent')
+        extras.update(sourced)
+        target = (name_hash(slot + '_ENGINE'), slot + '_ENGINE')
+        for h in wanted:
+            if aliases.get(h, (h, None))[0] == grill: aliases[h] = target
+        aliases[grill] = target
+    # Same-hash MW carbon fibre is DXT1 and loses the source alpha atlas.
+    # DRIVER is a requested car image slot; refuse to displace authored art.
+    fibre = name_hash('CARBONFIBRE')
+    if fibre in wanted:
+        target_name = slot + '_DRIVER'
+        target_hash = name_hash(target_name)
+        occupied = {aliases.get(h, (h, None))[0] for h in local | wanted}
+        occupied.update(h for h, _ in texture_blobs(donor_tex))
+        require(name_hash(car + '_DRIVER') not in local | wanted and
+                target_hash not in occupied, 'carbon fibre streaming slot occupied')
+        sourced = lookup({fibre})
+        require(fibre in sourced, 'source carbon fibre pixels absent')
+        extras.update(sourced)
+        aliases[fibre] = (target_hash, target_name)
+    aliases.update(normal_resource_aliases(slot))
+    return aliases, extras
+'''),
+    ('_convert_decoded',
+     'd549cef8de02df4d5a3c88a2416d4edc66b25f5a35ce3345808a0be15fe92dcb',
+     r'''def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared_raw,
+                     attributes, mw_donor_dir, mw_root, out_dir, tracked, platform,
+                     source_inputs, source_check, code, policy, lighting,
+                     shared_textures=None, source_aliases=None, runtime_bindings=(),
+                     runtime_materials=(), audio_pack=None, grip=None):
+    """One assembly, resource, sidecar and audited writer path for both platforms."""
+    from . import car_grip, car_lighting, car_paint, car_physics
+    mw, mw_tex = (tracked.read(mw_donor_dir / n) for n in ('GEOMETRY.BIN', 'TEXTURES.BIN'))
+    refs = validate_geometry(mw, input_pack=True)
+    validate_textures(mw_tex, 5)
+    images, materials, dynamic = shared_resources(tracked.read, mw_root)
+    # Source runtime identities must resolve to the corresponding MW binding.
+    dynamic |= set(runtime_bindings)
+    aliases, extras = material_resources(source, source_tex, mw_tex, car, donor, shared_raw, images, dynamic,
+        models=models, textures=textures, shared_textures=shared_textures, source_aliases=source_aliases)
+    aliases, extras = supply_absent_lamp_images(None, car, donor, aliases, extras, decoded=textures)
+    used = {h for m in models.values() for h in m['lights']}
+    roles = material_role_map(shared_raw)
+    source_rows = _lighting_rows(shared_raw, 236)
+    mw_rows = {}
+    for path, raw in list(tracked.buffers.items()):
+        if path.is_relative_to(mw_root) and path.parent.name == 'GLOBAL':
+            for key, row in _lighting_rows(unpack_file(raw), 168).items():
+                require(key not in mw_rows or mw_rows[key] == row, 'conflicting MW lighting rows')
+                mw_rows[key] = row
+    # Keep the existing specialized rim finish and dynamic paint/rim bindings.
+    skipped = set(runtime_materials) | {name_hash('BODY'), name_hash('MAGSILVER'),
+                                     name_hash('MAGMATTE'), name_hash('CARBON_MAGMATTE'),
+                                     0xD6D6080A, 0x22719FA9}
+    selected = car_lighting.policy(source_rows, mw_rows, used, namespace='NFSAD_' + car,
+        roles=roles, dynamic=skipped, occupied=images | materials | set(textures) |
+        {name_hash(n) for n in models}, **lighting)
+    models, assembled = decoded_models(models, mw, donor if car != donor else None, aliases, selected.remap,
+                                        source_car=car)
+    stock = [f'{donor}_BASE_{lod}' for lod in 'ABCD'] + [f'{donor}_KIT00_BODY_{lod}' for lod in 'ABCD']
+    stock += [f'{donor}_KIT00_{end}_BRAKE_A' for end in ('FRONT', 'REAR')]
+    missing = sorted(set(stock) - models.keys())
+    if missing:
+        raise MissingStockPartError('missing stock parts: ' + ', '.join(missing))
+    geometry, stats = write_geometry(source, models, len(assembled), plate_reference=mw)
+    models = validate_geometry(geometry)
+    renames = []
+    textures_out, nt = convert_textures(source_tex, mw_tex, extras, aliases, source_sampler_state=True,
+        namespace=(donor, 'NFSAD_' + car), renames=renames, decoded=textures)
+    available = validate_textures(textures_out, 5) | images | dynamic
+    available |= {name_hash(f'{donor}_{r}') for r in MW_PAINT_BINDINGS}
+    models, solidmap = isolate(models, refs, donor, car, renames)
+    used = {h for m in models.values() for h in m['lights']}
+    rows = dict(selected.rows)
+    if name_hash('CARBON_MAGMATTE') in used:
+        rows.update(source_rim_rows(shared_raw, unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC'))))
+        require(name_hash('CARBON_MAGMATTE') in rows, 'source rim material absent')
+    materials |= rows.keys()
+    for m in models.values():
+        validate_model(m)
+        require(set(m['textures']) <= available, 'unresolved geometry texture')
+        require(set(m['lights']) <= materials, 'unresolved MW material')
+    geometry, _ = write_geometry(geometry, models)
+    geometry = append_material_rows(geometry, rows)
+    validate_geometry(geometry)
+    wheels = wheel_sidecar(attributes, car, donor, fit=True)
+    files = {'GEOMETRY.BIN': geometry, 'TEXTURES.BIN': textures_out, 'SOLIDMAP.BIN': solidmap, 'WHEELFIT.BIN': wheels}
+    if audio_pack is not None:
+        files['AUDIO.BIN'] = audio_pack
+    physics = car_physics.metadata(attributes, car, donor)
+    if physics is not None:
+        files['PHYSICS.BIN'] = physics
+    files['GRIP.BIN'] = car_grip.optional_metadata(attributes, car, donor) if platform == 'pc' else grip
+    files['PAINT.BIN'], paint = car_paint.metadata(shared_raw,
+        lambda: unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC')), car, donor, attributes)
+    collision = collision_sidecar(shared_raw, car, donor)
+    if collision is not None:
+        files['COLLISION.BIN'] = collision
+    source_check()
+    tracked.check()
+    code.check()
+    write_outputs(out_dir, files, tracked.protected + code.protected)
+    source_check()
+    tracked.check()
+    code.check()
+    normalized_source = source_inputs()
+    from .car_sources import path_hash
+    dependencies = {'source:' + str(key): dict(row) for key, row in normalized_source.items()}
+    dependencies.update({'mw:' + path_hash(str(p.relative_to(mw_root))):
+                         dict(size=len(tracked.buffers[p]), sha256=h)
+                         for p, h in tracked.hashes.items() if p.is_relative_to(mw_root)})
+    inputs = {str(p): h for p, h in sorted(tracked.hashes.items())}
+    if platform == 'x360':
+        inputs.update({'x360:' + str(key): row['sha256'] for key, row in normalized_source.items()})
+    return dict(car=car, donor=donor, platform=platform, namespace='NFSAD_' + car, converter_revision=2,
+        converter_policy=policy, approved=False, default_paint=paint,
+        solids=stats['solids'], assemblies=stats['assemblies'], textures=nt,
+        inputs=inputs, source_inputs=normalized_source, dependencies=dependencies,
+        outputs={n: hashlib.sha256(data).hexdigest() for n, data in files.items() if data is not None},
+        lighting=dict(rows=sorted(rows), dynamic=selected.dynamic, unsupported=selected.unsupported),
+        material_policy='MW roles and MW-derived lamp rows; classified neutral vertex illumination')
+'''),
+)
 
 
 def digest(data):
@@ -462,8 +683,7 @@ class PlatformConversion(unittest.TestCase):
             with self.assertRaisesRegex(cc.FormatError, 'opaque stream'):
                 cc.convert_x360(bundle,self.donor,self.root/'bad')
 
-    def test_lighting_policy_both_platforms(self):
-        name = 'HEADLIGHTGLASS'
+    def install_lighting(self, name):
         key = cc.name_hash(name)
         source_row = lighting_fixture.fixture(name)
         mw_row = lighting_fixture.fixture(name, False)
@@ -485,6 +705,10 @@ class PlatformConversion(unittest.TestCase):
         (self.pc/'GEOMETRY.BIN').write_bytes(raw)
         with (self.root/'mw/GLOBAL/GLOBALA.BUN').open('ab') as f:
             f.write(cc.chunk(0x135200,mw_row))
+        return source_row, mw_row
+
+    def test_lighting_policy_both_platforms(self):
+        source_row, mw_row = self.install_lighting('HEADLIGHTGLASS')
         for platform in ('pc','x360'):
             result = self.run_conversion(platform, platform+'-lamp', lighting={'lamps':True})
             data = (self.root/(platform+'-lamp')/'GEOMETRY.BIN').read_bytes()
@@ -507,6 +731,135 @@ class PlatformConversion(unittest.TestCase):
                 self.assertEqual(default['converter_policy'], off['converter_policy'])
             with self.assertRaisesRegex(cc.FormatError,'explicit lighting gains'):
                 self.run_conversion(platform,platform+'-bad-gains',lighting={'amplitudes':True})
+
+    def test_source_brakelight_levels_both_platforms(self):
+        source, mw = self.install_lighting('BRAKELIGHT')
+        source = bytearray(source)
+        struct.pack_into('<f', source, 0x64, 3.)
+        struct.pack_into('<f', source, 0x74, 6.)
+        struct.pack_into('<f', source, 0x8c, 10.)
+        # Update only the checked source material row, leaving its other chunks.
+        for path in (self.pc_global / 'GLOBALB.LZC',):
+            path.write_bytes(cc.chunk(0x135200, source) + path.read_bytes()[244:])
+        for key in ('GLOBAL/GLOBALB.LZC', 'GLOBAL/GLOBALB.BUN'):
+            self.files[key] = cc.chunk(0x135200, source) + self.files[key][244:]
+        self.refresh()
+        # The default compatibility frame is the matching MW GLOBALB row.
+        with (self.root / 'mw/GLOBAL/GLOBALB.LZC').open('ab') as f:
+            f.write(cc.chunk(0x135200, mw))
+        used = {cc.name_hash('CARBON_BRAKELIGHT')}
+        row = cc.chunk(0x135200, source)
+        native = cc.chunk(0x135200, mw)
+        bad = bytearray(source)
+        struct.pack_into('<f', bad, 0x64, float('nan'))
+        for malformed in (b'', row + row, cc.chunk(0x135200, bad)):
+            with self.assertRaises(cc.FormatError):
+                cc.source_light_rows(malformed, native, used)
+        for platform in ('pc', 'x360'):
+            result = self.run_conversion(platform, platform + '-brake')
+            data = (self.root / (platform + '-brake') / 'GEOMETRY.BIN').read_bytes()
+            rows = {cc.u32(data, o+20): data[o+8:o+8+z]
+                    for c, o, z in cc.walk(data) if c == 0x135200}
+            identity = cc.name_hash('CARBON_BRAKELIGHT')
+            self.assertEqual(set(rows), {identity})
+            self.assertEqual(rows[identity][0x30:0x5c], source[0x64:0x90])
+            self.assertEqual(rows[identity][0x5c:], mw[0x5c:])
+            for model in cc.validate_geometry(data).values():
+                self.assertEqual(model['lights'], [identity])
+            self.assertEqual(result['lighting']['rows'], [identity])
+            translated = self.run_conversion(platform, platform + '-brake-amplitudes',
+                lighting={'amplitudes': True, 'gains': cl.Gains(.25, 1, 1)})
+            expected = cl.policy({cc.name_hash('BRAKELIGHT'): bytes(source)},
+                {cc.name_hash('BRAKELIGHT'): mw}, [cc.name_hash('BRAKELIGHT')],
+                namespace='NFSAD_SYNTH', amplitudes=True, gains=cl.Gains(.25, 1, 1))
+            self.assertEqual(translated['lighting']['rows'], sorted(expected.rows))
+            self.assertNotIn(identity, translated['lighting']['rows'])
+        print('source brake levels: PC/X360 3/6, power 10; explicit amplitude policy retained')
+
+    def test_unexported_details_without_paint_gate(self):
+        for label in (b'EXHAUST\0', b'\0'):
+            vertices = np.zeros((4, 36), dtype=np.uint8)
+            vertices[:, 24:28] = [[0, 0, 0, 0], [0, 0, 0, 255], [12, 23, 34, 255], [0, 0, 0, 0]]
+            before = vertices.copy()
+            record = bytearray(104)
+            struct.pack_into('<I', record, 60, len(vertices))
+            model = dict(name='SYNTH_DETAIL_A', vertices=vertices, textures=[cc.name_hash('SYNTH_MISC')],
+                         records=[record], names=[label])
+            self.assertEqual(cc.map_vertex_lighting({'SYNTH_DETAIL_A': model}, 'SYNTH'), 2)
+            np.testing.assert_array_equal(vertices[[0, 3], 24:28], 255)
+            np.testing.assert_array_equal(vertices[1:3], before[1:3])
+            np.testing.assert_array_equal(vertices[:, :24], before[:, :24])
+            np.testing.assert_array_equal(vertices[:, 28:], before[:, 28:])
+        print('unexported details: labelled/stripped 2 zero colours -> 0; authored dark alpha retained')
+
+    def test_source_authored_rear_brake_both_platforms(self):
+        (self.pc / 'GEOMETRY.BIN').write_bytes(pc.geometry('SYNTH', True,
+            omit=('SYNTH_KIT00_REAR_BRAKE_A',)))
+        self.files['CARS/SYNTH/GEOMETRY.BIN'] = xenon.indexed_pack([
+            (hs, raw) for hs, raw in cc.solids(self.files['CARS/SYNTH/GEOMETRY.BIN'])
+            if hs != cc.name_hash('SYNTH_KIT00_REAR_BRAKE_A')])
+        self.refresh()
+        for platform in ('pc', 'x360'):
+            self.run_conversion(platform, platform + '-no-rear')
+            data = (self.root / (platform + '-no-rear') / 'GEOMETRY.BIN').read_bytes()
+            models = cc.validate_geometry(data)
+            self.assertNotIn('NFSAD_SYNTH_KIT00_REAR_BRAKE_A', models)
+            self.assertIn('NFSAD_SYNTH_KIT00_FRONT_BRAKE_A', models)
+        # An authored rear must still survive assembly, and front stays mandatory.
+        decoded = cc.decoded_models
+        def omit_front(*args, **kwargs):
+            models, assembled = decoded(*args, **kwargs)
+            models.pop('DONOR_KIT00_FRONT_BRAKE_A')
+            return models, assembled
+        with mock.patch.object(cc, 'decoded_models', omit_front):
+            for platform in ('pc', 'x360'):
+                with self.assertRaisesRegex(cc.MissingStockPartError, 'FRONT_BRAKE_A'):
+                    self.run_conversion(platform, platform + '-missing-front')
+        (self.pc / 'GEOMETRY.BIN').write_bytes(pc.geometry('SYNTH', True))
+        def omit_rear(*args, **kwargs):
+            models, assembled = decoded(*args, **kwargs)
+            models.pop('DONOR_KIT00_REAR_BRAKE_A')
+            return models, assembled
+        with mock.patch.object(cc, 'decoded_models', omit_rear):
+            with self.assertRaisesRegex(cc.MissingStockPartError, 'REAR_BRAKE_A'):
+                self.run_conversion('pc', 'missing-authored-rear')
+        print('rear brake: two source omissions accepted, missing front/authored rear refused')
+
+    def test_source_image_slots_with_stripped_material_labels(self):
+        def entry(name):
+            raw = bytearray(next(iter(cc.pc_texture_entries(pc.texture('X')).values()))[0])
+            struct.pack_into('<I', raw, 12, cc.name_hash(name))
+            raw[88:] = bytes(len(raw) - 88)
+            raw[88] = len(name) + 1
+            raw[89:90+len(name)] = name.encode() + b'\0'
+            return bytes(raw), bytes(12) + b'DXT1' + bytes(8), bytes(range(8))
+        images = {cc.name_hash(n): entry(n) for n in ('GRILL_06', 'ROTOR5', 'SILVER_SLATS')}
+        normal = cc.name_hash('TIRE_STYLE01_N')
+        images[normal] = entry('TIRE_STYLE01_N')
+        records = []
+        for i in range(3):
+            record = bytearray(104)
+            record[24], record[25] = i, 3
+            records.append(bytes(record))
+        models = {'SYNTH_BODY_A': dict(textures=list(images), records=records, names=[b'\0']*3)}
+        def resources(**kwargs):
+            return cc.material_resources(None, None, pc.texture('DONOR', 5), 'SYNTH', 'DONOR',
+                b'', set(), set(), models=models, textures=kwargs.pop('textures', {}),
+                shared_textures=images, **kwargs)
+        aliases, extras = resources()
+        self.assertEqual(extras, images)
+        for image, role in zip(('ROTOR5', 'GRILL_06', 'SILVER_SLATS'),
+                               ('DOOR_HANDLE', 'SIDELIGHT', 'LOGO')):
+            self.assertEqual(aliases[cc.name_hash(image)], (cc.name_hash('DONOR_'+role), 'DONOR_'+role))
+        self.assertEqual(aliases[normal][1], 'DONOR_TIRE_N')
+        occupied = cc.name_hash('SYNTH_DOOR_HANDLE')
+        aliases, _ = resources(textures={occupied: entry('SYNTH_DOOR_HANDLE')})
+        self.assertEqual(aliases[cc.name_hash('ROTOR5')][1], 'DONOR_SIDELIGHT')
+        for role in ('SIDELIGHT', 'LOGO'):
+            models['SYNTH_BODY_A']['textures'].append(cc.name_hash('SYNTH_'+role))
+        with self.assertRaisesRegex(cc.FormatError, 'more source-only images'):
+            resources(textures={occupied: entry('SYNTH_DOOR_HANDLE')})
+        print('source images: three requested slots, stripped material labels, exact entries; occupancy refuses overflow')
 
     def test_stripped_labels_keep_classified_illumination(self):
         def triangle(name, texture_role, label, zero_alpha=False):
@@ -685,6 +1038,13 @@ def asset_main():
 
 
 if __name__ == '__main__':
+    if '--original-setup-rules' in sys.argv:
+        sys.argv.remove('--original-setup-rules')
+        for name, sha, body in ORIGINAL_SETUP_RULES:
+            assert digest(body.encode()) == sha
+            scope = {}
+            exec(compile(body, '<original-setup-rules>', 'exec'), vars(cc), scope)
+            setattr(cc, name, scope[name])
     if '--assets' in sys.argv:
         raise SystemExit(asset_main())
     if '--original-grip-policy' in sys.argv:

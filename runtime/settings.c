@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "setting_bool.h"
 #include "roots.h"
+#include "game_select.h"
 
 // X360 rows and the files they need (roots.h features). With a roots.txt that lacks them the row is hidden, locked and
 // PC is in effect (also exported to its switch); with no roots.txt (the owner's layout) nothing changes.
@@ -24,11 +25,12 @@ static const struct { const char *id, *feature; } kNeedsX360[] = {
     // the option would silently render PC, so the row is hidden
     {"graphics.trees", "shaders"}, {"graphics.scenery_lights", "shaders"},
     {"graphics.grass", "shaders"},
-    {"graphics.parallax", "shaders"}, {"graphics.x360_arrest", "shaders"},
+    {"graphics.x360_arrest", "shaders"},
+    // (Wall and kerb depth needs neither: without ZZDATA0 it runs on PORT_SCALARS, opt-in, default PC below)
     // (the post chain's rows, Post-processing, Tone curve, Speed blur and Tone curve glow, need neither: without the
     // files the chain runs on this port's own constants, tools_snapshot/pubtables_gen.py POST_FALLBACK)
     {"graphics.x360_arrest", "engine"},
-    {"graphics.shadow_fit", "engine"},
+    // (Shadow fit needs neither: without default.xex the fit runs on SHADOW_FALLBACK)
     {"graphics.look_data", "look"},
 };
 // Car paint, PC-pack normal maps and glass use port-authored fallback values without console files.
@@ -156,6 +158,8 @@ void settings_init(void) {
     for (int i = 0; i < nall; ++i) {
         // Without console files the sea defaults to the port's own (Port); materials.m reads the same rule when the switch is unset.
         if (!strcmp(all[i]->id, "graphics.water") && !roots_x360_has("shaders")) all[i]->def = 2;
+        // Without console shaders the particles default to the X360 choice (the port's own values; materials.m reads the same rule).
+        if (!strcmp(all[i]->id, "graphics.particles") && !roots_x360_has("shaders")) all[i]->def = 3;
         load(all[i]); x360_gate(all[i]);
     }
 }
@@ -200,7 +204,12 @@ void settings_dump(const char *path) {
         int n = settings_rows(c, rows, 128);
         for (int i = 0; i < n; ++i) {
             char v[64];
-            fprintf(f, "%s\t%s\t%s\n", settings_category_names[c], rows[i]->id, has_value(rows[i]) ? settings_value_name(rows[i], rows[i]->value, v, sizeof v) : "");
+            int value = rows[i]->value;
+#if NFS_GAME == NFS_GAME_PRIVATE
+            // This derived row has no stored value; its getter reads the saved preset.
+            if (!strcmp(rows[i]->id, "graphics.look_preset") && rows[i]->get) value = rows[i]->get();
+#endif
+            fprintf(f, "%s\t%s\t%s\n", settings_category_names[c], rows[i]->id, has_value(rows[i]) ? settings_value_name(rows[i], value, v, sizeof v) : "");
         }
     }
     for (int i = 0; i < nall; ++i) if (all[i]->hidden) {
@@ -227,7 +236,13 @@ int settings_set(Setting *s, int v) {
     }
     // A partial preset may display My picks while another choice is active.
     // Selecting My picks still has to restore its saved values in that case.
-    if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || v == settings_look_choice())) return 0;
+    int look_value = v;
+#if NFS_GAME == NFS_GAME_PRIVATE
+    // The three-choice menu omits the shared enum's Xbox 360 entry.
+    if (!strcmp(s->id, "graphics.look_preset"))
+        look_value = v == 0 ? PRESET_PORT : v == 1 ? PRESET_PC : PRESET_MINE;
+#endif
+    if (v == current(s) && (strcmp(s->id, "graphics.look_preset") || look_value == settings_look_choice())) return 0;
     s->value = v;
     if (s->live_env && s->env) {          // the renderer reads the switch as it runs; load() exports the same spelling
         char buf[64];
@@ -276,6 +291,16 @@ const char *settings_source(const Setting *s) {
 // Port uses each row's shipped default. Device/audio/input/gameplay preferences stay outside
 // this table, except the optional chase-camera effect, explicitly disabled for retail looks.
 static const struct { const char *id, *pc, *x360; } kLook[] = {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    {"graphics.carbon_coat", "0", "0"},
+    {"graphics.carbon_materials", "0", "0"},
+    {"graphics.carbon_ao", "off", "off"},
+    {"graphics.carbon_envcube", "0", "0"},
+    {"graphics.carbon_reflect_hdr", "0", "0"},
+    {"graphics.daynight", "off", "off"},
+    {"graphics.daynight_mode", "game", "game"},
+    {"graphics.daynight_hour", "12", "12"},
+#else
     {"graphics.postfx", "pc", "x360"},
     {"graphics.tone_curve", "pc", "x360"},
     {"graphics.car_paint", "pc", "x360"},
@@ -332,6 +357,7 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"cars.later_games", "off", "off"},
     {"cars.traffic_pilot", "off", "off"},
     {"graphics.look_later_textures", "off", "off"},
+#endif
 };
 #define NLOOK (int)(sizeof kLook / sizeof *kLook)
 // Each chunk fits app.txt's 1024-byte value limit. The first key also reads old picks.
@@ -361,7 +387,11 @@ static int look_index(const Setting *s) {
 }
 static int look_tracks(const Setting *s) {
     return strcmp(s->id, "graphics.look_preset") && has_value(s) &&
+#if NFS_GAME == NFS_GAME_PRIVATE
+           look_index(s) >= 0;
+#else
            (s->category == SET_PICTURE || look_index(s) >= 0);
+#endif
 }
 static const char *look_spell(Setting *s, int which, const char *picks) {
     static char v[64];
@@ -386,6 +416,9 @@ static const char *look_spell(Setting *s, int which, const char *picks) {
     return NULL;                         // legacy picks did not include the new extras
 }
 static int look_matches(int which) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (which == PRESET_X360) return 0;
+#endif
     const char *picks = which == PRESET_MINE ? look_picks() : NULL;
     if (which == PRESET_MINE && !*picks) return 0;
     for (int i = 0; i < nall; ++i) {
@@ -453,6 +486,9 @@ static void look_row_edited(Setting *s) {
     if (app_pref_batch_end) app_pref_batch_end();
 }
 int settings_look_apply(int which) {
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (which == PRESET_X360) return -1;
+#endif
     if (which < PRESET_PORT || which > PRESET_MINE) return -1;
     (void)settings_look_state();
     // Copy before saving anything: app_pref implementations may invalidate their return buffer.

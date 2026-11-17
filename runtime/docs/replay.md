@@ -157,7 +157,8 @@ cross-routing HEVC. Results and measured fault numbers are in the test headers.
 AAC tap. Two-second GOPs begin with SPS/PPS and an IDR; both tracks retain their
 capture timestamps plus one fixed second to avoid initial AAC priming wrap.
 Pending samples are capped at 32 MiB, each segment at 16 MiB, and retained
-callback outputs at two segments; overload stops live independently. The
+callback outputs at eight live segments (the poster's five plus request bodies Foundation
+releases after completion); overload stops live independently (`ingest-backlog`). The
 default callback releases segments without writing files or sending data.
 The diagnostic switch never starts a broadcast.
 
@@ -230,11 +231,15 @@ segment's actual 90 kHz interval. Its sliding window retains two previously
 acknowledged entries plus the current segment. Segment/playlist serialization
 leaves at most one uploaded segment awaiting playlist acknowledgement (below
 YouTube's five-segment limit); queued plus in-flight work is also capped at five
-segments and 16 MiB. Only small playlist metadata survives payload retirement.
+segments and 64 MiB (five 4K segments at 50 Mb/s); beyond that a segment is dropped and
+live continues. Only small playlist metadata survives payload retirement.
 HTTP 202 is accepted, including a segment that precedes its playlist. HTTP 500
-gets at most two retries after 100/200 ms. One three-second absolute budget
-covers a segment, its playlist and both backoffs; Foundation's backup timeout
-is four seconds. Stop atomically closes admission and gives all accepted work
+gets at most two retries after 100/200 ms. One ten-second absolute budget (the
+queue's five segment intervals) covers a segment, its playlist and both backoffs;
+Foundation's backup timeout is eleven seconds. A stalled upload therefore rides
+through: livestream_test `ride-stall` holds the second segment's response 3.5 s at
+twice real time and all 8 segments post; at the former limits (two retained segments,
+three seconds) the same run stops after 2 with `ingest-backlog`. Stop atomically closes admission and gives all accepted work
 one shared three-second drain budget, preserving an active pair's earlier deadline.
 After drain it POSTs the exact last acknowledged playlist with one trailing
 `#EXT-X-ENDLIST`, allowing at most three more seconds for its 2xx acknowledgement.

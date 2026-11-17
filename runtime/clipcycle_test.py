@@ -37,6 +37,7 @@ assert hashlib.sha256(ORIGINAL.lstrip().encode()).hexdigest() == \
     'f3caf17430c72fabc607c91ecf97ba25ab9e84c95a4ae033fae1e47a938cfbf8'
 source = (RT / 'cliprec.mm').read_text()
 callbacks = source[source.index('void cliprec_action(int unused) {'):]
+folder_policy = source[source.index('#if NFS_GAME == NFS_GAME_PRIVATE'):source.index('static constexpr unsigned kSurfaces')]
 notice = re.search(r'            NSString \*name = destination.lastPathComponent;\n.*portmenu_status.*\n', source)[0]
 settings = (RT / 'settings_port.c').read_text()
 rows = settings[settings.index('static Setting s_cliprec ='):settings.index('// The key is never a Setting.text value')]
@@ -160,7 +161,7 @@ with tempfile.TemporaryDirectory(prefix='clipcycle-') as scratch:
     tmp = Path(scratch)
     for label, actions, expected in [('fixed', callbacks, 0), ('original', ORIGINAL.lstrip() +
             callbacks[callbacks.index('void cliprec_open_folder('):], 1)]:
-        code = HARNESS.replace('@CALLBACKS@', actions).replace('@ROWS@', rows).replace('@NOTICE@', notice)
+        code = HARNESS.replace('@CALLBACKS@', '#include \"game_select.h\"\n' + folder_policy + actions).replace('@ROWS@', rows).replace('@NOTICE@', notice)
         path = tmp / (label + '.mm')
         path.write_text(code)
         exe = tmp / label

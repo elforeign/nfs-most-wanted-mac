@@ -2,6 +2,16 @@
 """Build the shipped Setup source with its shipped Python, offline and without launching it.
 
 Usage: python -I tests/setup/test_release_artifact.py --expected-version VERSION [--setup Setup.app] [--pc GAME] [--proof]
+                                                       [--game mw|carbon]
+--game carbon audits the Carbon-only Setup (its own bundle id and SetupProduct=carbon): its payload builds and installs
+NFS Carbon Native.app from the Carbon PC folder alone (--pc, default inputs/NFSC beside the checkout, with NFSC.exe)
+under the same payload, toolchain, app, build-cache, profile and input checks. The Most Wanted car commands, native
+car-save proof, legacy replacement and --proof do not apply to it and are refused.
+Carbon runs the exported table-free controller and production settings-selector
+proofs with the bundled Python after building. With --x360 it audits both PC-only
+and optional-Xbox installations; neither may depend on redistributed console tables.
+Export regression: fixed PC-only/optional-Xbox PASS (exit 0); omitted settings
+registration and either forced-PC fallback FAIL (exit 1, 3/3 in each input mode).
 No Setup artifact or PC input: SKIP/exit 3 (also in offline_tests.sh). Release
 preparation requires a pass, so a skip cannot authorize uploading an untested app.
 The optional --proof repacks three broken source payloads and runs this same audit.
@@ -35,10 +45,22 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_NAME = 'NFS Most Wanted Native Setup.app'
+CARBON_APP_NAME = 'NFS Carbon Native Setup.app'
 CLT = Path('/Library/Developer/CommandLineTools')
 TABLES = ('recomp/functions_v13.tsv', 'recomp/server_functions.tsv', 'recomp/hooks.txt')
 GENERATED = ('attrib_x360', 'x360audio_attrib', 'attrib_light_data', 'trees_params',
              'controltype_buttons', 'auxlights_data', 'glass_uv1')
+# What each product's Setup must install, written here rather than read from the backend under test.
+# Carbon's program includes two generated tables, both made without any game folder.
+PRODUCTS = {
+    'mw': dict(app='NFS Most Wanted Native.app', bundle_id='io.github.nfsmw-native-mac', exec='NFSMostWanted',
+               exe='speed.exe', guide='runtime/docs/guide.md', profile='Library/Application Support/NFSMW-port',
+               generated=GENERATED),
+    'carbon': dict(app='NFS Carbon Native.app', bundle_id='io.github.nfs-carbon-native-mac', exec='NFSCarbon',
+                   exe='NFSC.exe', guide='runtime/docs/guide_carbon.md',
+                   profile='Library/Application Support/NFSMW-port/Carbon',
+                   generated=('x360_shader_lits', 'x360_engine')),
+}
 
 # Keep the normal CLI and source intact; select the CLT for every build child,
 # including preflight (the app normally uses the system-selected developer tools).
@@ -142,10 +164,12 @@ def bundle_version(app, expected):
     return info
 
 
-def verify_setup(app, expected):
+def verify_setup(app, expected, game='mw'):
     info = bundle_version(app, expected)
-    require(info.get('CFBundleIdentifier') == 'org.nfsmw-native.setup' and
-            info.get('CFBundleExecutable') == 'Setup' and info.get('CFBundlePackageType') == 'APPL',
+    bundle_id = 'org.nfscarbon-native.setup' if game == 'carbon' else 'org.nfsmw-native.setup'
+    require(info.get('CFBundleIdentifier') == bundle_id and
+            info.get('CFBundleExecutable') == 'Setup' and info.get('CFBundlePackageType') == 'APPL' and
+            info.get('SetupProduct') == ('carbon' if game == 'carbon' else None),
             'wrong Setup bundle identity')
     executable = app / 'Contents/MacOS/Setup'
     require(nonempty(executable) and not executable.is_symlink() and os.access(executable, os.X_OK),
@@ -267,7 +291,45 @@ def audit_car_commands(source, python, scratch, env):
     return proof
 
 
-def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
+def relocate_image(source, exe):
+    """Point the built image record at the PC executable this audit built from.
+
+    build_private.py records the executable path it translated, which for an installed
+    Setup is the staging copy that the install transaction renames away; the record then
+    names a file that no longer exists and the binding proof skips. The proof still checks
+    the executable's pinned SHA-256, so only a missing or different file fails.
+    """
+    require(exe is not None and Path(exe).is_file(), 'Carbon PC executable missing for the capability proofs')
+    record = source / 'recomp/out/carbon-base/image.json'
+    image = json.loads(record.read_text())
+    image['exe'] = str(Path(exe).resolve())
+    record.unlink()  # a replacement, never an in-place write through a hard link
+    record.write_text(json.dumps(image, indent=2) + '\n')
+
+
+def audit_carbon_capabilities(source, python, scratch, env, exe=None):
+    """Use the built payload's tests and sources, never the checkout's providers.
+
+    A missing test or its exit-3 skip fails the release, including prebuilt installs
+    without the translated PC evaluator needed by the table-free binding proof.
+    exe: the PC NFSC.exe the audit built from, when the build's own image record no longer names a file.
+    """
+    if exe is not None:
+        relocate_image(source, exe)
+    for name in ('private_pad_layout_test', 'private_padbind_public_test', 'private_port_settings_test'):
+        driver = source / 'recomp' / (name + '.py')
+        require(nonempty(driver), 'missing exported Carbon capability check: ' + name)
+        result = subprocess.run([str(python), '-I', str(driver)], cwd=scratch, env=env,
+                                capture_output=True, text=True, timeout=240)
+        (scratch / (name + '.log')).write_text(result.stdout + result.stderr)
+        require(result.returncode == 0, 'exported Carbon capability failed or skipped: ' + name + '\n' +
+                result.stdout[-1500:] + result.stderr[-2000:])
+    print('exported Carbon capabilities: PASS (table-free layout, native bindings, settings selectors)')
+
+
+def audit(resources, pc, scratch, expected_version, legacy=None, x360=None, game='mw'):
+    product = PRODUCTS[game]
+    require(game == 'mw' or not legacy, 'legacy replacement is a Most Wanted audit part')
     require(re.fullmatch(r'[A-Za-z0-9/._+,:@%=-]+', str(scratch)), 'scratch path must be shell-safe for the build cache')
     scratch.mkdir(parents=True)
     # Relocate the complete payload, including Python and its wheels. Any .pyc
@@ -303,15 +365,17 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     env = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', HOME=str(home), CFFIXED_USER_HOME=str(home), TMPDIR=str(tmp),
                LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
                DEVELOPER_DIR=str(CLT))
-    audit_car_commands(source, python, scratch, env)
+    if game == 'mw':  # the added-car commands belong to Most Wanted's app
+        audit_car_commands(source, python, scratch, env)
     # Prove this toolchain has no offline Metal compiler; never change xcode-select.
     probe = subprocess.run(['/usr/bin/xcrun', '--find', 'metal'], env=env, capture_output=True)
     require(probe.returncode != 0, 'CLT fixture unexpectedly supplies a Metal compiler')
     events_file = scratch / 'events.jsonl'
     started = time.monotonic()
     with events_file.open('w') as events, (scratch / 'stderr.log').open('w') as errors:
+        game_input = ['--game', 'carbon', '--carbon', str(pc)] if game == 'carbon' else ['--pc', str(pc)]
         child = subprocess.Popen([str(python), '-I', '-c', DRIVER, str(source), '--build',
-                                  '--pc', str(pc), '--dest', str(dest), '--work', str(work),
+                                  *game_input, '--dest', str(dest), '--work', str(work),
                                   *trusted_prebuilt,
                                   *(['--x360', str(x360)] if x360 else []), '--events'],
                                  cwd=scratch, env=env, stdout=events, stderr=errors)
@@ -345,11 +409,11 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
         raise RuntimeError(f'headless build exit {status}: {detail}')
     done = [e for e in events if e.get('ev') == 'done']
     require(len(done) == 1 and events[-1] == done[0], 'missing terminal done event')
-    app = dest / 'NFS Most Wanted Native.app'
+    app = dest / product['app']
     require(done[0].get('app') == str(app), 'done points outside scratch destination')
     info = bundle_version(app, expected_version)
-    require(info['CFBundleIdentifier'] == 'io.github.nfsmw-native-mac', 'wrong app identity')
-    require(info['CFBundleExecutable'] == 'NFSMostWanted', 'wrong app executable')
+    require(info['CFBundleIdentifier'] == product['bundle_id'], 'wrong app identity')
+    require(info['CFBundleExecutable'] == product['exec'], 'wrong app executable')
     for name in (info['CFBundleExecutable'], 'pub_update_helper', 'pub_update_worker'):
         binary = app / 'Contents/MacOS' / name
         require(nonempty(binary) and os.access(binary, os.X_OK), 'missing app binary: ' + name)
@@ -357,7 +421,7 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
                                    capture_output=True)
         require(signature.returncode == 0, 'invalid app binary signature: ' + name)
     guide = app / 'Contents/Resources/Guide.md'
-    require(nonempty(guide) and guide.read_bytes() == (source / 'runtime/docs/guide.md').read_bytes(),
+    require(nonempty(guide) and guide.read_bytes() == (source / product['guide']).read_bytes(),
             'Guide.md missing or different')
     licences = app / 'Contents/Resources/Licences.md'
     require(nonempty(licences), 'missing in-app licence texts')
@@ -376,14 +440,21 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
     cached = caches[0]
     for rel in TABLES:
         require((cached / rel).read_bytes() == (source / rel).read_bytes(), 'build table differs: ' + rel)
-    for name in GENERATED:
+    for name in product['generated']:
         require(nonempty(cached / f'runtime/gen/{name}.inc'), 'missing generated table: ' + name)
-    save_proof = subprocess.run([str(python), '-I', str(cached / 'runtime/carsave_public_test.py')],
-                                cwd=scratch, env=env, capture_output=True, text=True, timeout=240)
-    require(save_proof.returncode == 0, 'shipped native save proof failed or skipped:\n' +
-            save_proof.stdout[-1500:] + save_proof.stderr[-2000:])
-    profile = home / 'Library/Application Support/NFSMW-port'
+    if game == 'mw':  # the native save proof covers Most Wanted's added cars
+        save_proof = subprocess.run([str(python), '-I', str(cached / 'runtime/carsave_public_test.py')],
+                                    cwd=scratch, env=env, capture_output=True, text=True, timeout=240)
+        require(save_proof.returncode == 0, 'shipped native save proof failed or skipped:\n' +
+                save_proof.stdout[-1500:] + save_proof.stderr[-2000:])
+    else:  # Carbon installs alone: no Most Wanted profile beside its own
+        require(not (home / PRODUCTS['mw']['profile'] / 'roots.txt').exists(), 'Carbon install wrote a Most Wanted profile')
+    profile = home / product['profile']
     roots = read_roots(profile)
+    if game == 'carbon':
+        audit_carbon_capabilities(cached, python, scratch,
+                                  dict(env, NFS_PUBLIC='1', NFS_ROOTS=str(profile / 'roots.txt')),
+                                  exe=pc / product['exe'])
     require(all(path.is_relative_to(scratch) for path in roots.values()), 'installed root escaped scratch')
     game_dirs = [line.partition(b'=')[2].strip() for line in (profile / 'app.txt').read_bytes().splitlines()
                  if line.partition(b'=')[0].strip() == b'game_dir']
@@ -398,7 +469,9 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None):
         require((snapshot(legacy[0]), snapshot(legacy[1])) == original, 'legacy input changed')
         require({k: snapshot(p) for k, p in old_roots.items()} == root_hashes, 'legacy input roots changed')
         print(f'legacy replacement: PASS ({len(protected)} protected files, preferences, {len(roots)} valid roots; inputs unchanged)')
-    print(f'release artifact: PASS (3 binaries, Guide, 3 source tables, 7 generated tables; {len(events)} events; CLT only)')
+    label = '' if game == 'mw' else app.stem + ': '  # Most Wanted's line stays as it was
+    print(f'release artifact: PASS ({label}3 binaries, Guide, 3 source tables, {len(product["generated"])} generated tables; '
+          f'{len(events)} events; CLT only)')
     timing = json.loads((source / 'stage-seconds.json').read_text())
     stages = timing['stages']
     stages['unpack'] = unpack_seconds
@@ -459,8 +532,9 @@ except (RuntimeError, OSError) as error:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--setup', type=Path, default=ROOT / 'build/installer/dmg' / APP_NAME)
-    parser.add_argument('--pc', type=Path, default=Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')))
+    parser.add_argument('--game', choices=('mw', 'carbon'), default='mw', help='Setup product (default mw)')
+    parser.add_argument('--setup', type=Path, help='default: the build folder app for --game')
+    parser.add_argument('--pc', type=Path, help='the PC game folder (default: Most Wanted NFS_GAME; Carbon inputs/NFSC)')
     parser.add_argument('--x360', type=Path, help='optional authentic Xbox 360 source for root/hash preservation coverage')
     parser.add_argument('--proof', action='store_true')
     parser.add_argument('--expected-version',
@@ -469,22 +543,31 @@ def main():
     parser.add_argument('--legacy-profile', type=Path, help='scratch 4.2.0 profile with saves, registry, preferences and roots')
     parser.add_argument('--output', type=Path, help='new empty scratch output directory to retain the installation')
     args = parser.parse_args()
+    if args.setup is None:
+        args.setup = ROOT / 'build/installer/dmg' / (CARBON_APP_NAME if args.game == 'carbon' else APP_NAME)
+    if args.pc is None:
+        args.pc = (ROOT.parent / 'inputs/NFSC' if args.game == 'carbon' else
+                   Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')))
     resources = args.setup.resolve() / 'Contents/Resources'
-    if not args.setup.exists() or not (args.pc / 'speed.exe').is_file():
+    if not args.setup.exists() or not (args.pc / PRODUCTS[args.game]['exe']).is_file():
         print('SKIP: needs packaged Setup.app (--setup) and PC v1.3 input (--pc)')
         return 3
     try:
         require(args.expected_version, '--expected-version is required for an artifact audit')
         require(bool(args.legacy_app) == bool(args.legacy_profile), 'supply both legacy app and profile')
-        verify_setup(args.setup.resolve(), args.expected_version)
+        verify_setup(args.setup.resolve(), args.expected_version, args.game)
         require(nonempty(resources / 'source.tar.gz'), 'missing Setup source payload')
+        require(args.game == 'mw' or not (args.legacy_app or args.proof),
+                '--legacy-app and --proof are Most Wanted audit parts')
         require((CLT / 'usr/bin/clang').is_file(), 'Command Line Tools required for release artifact audit')
         def run(scratch):
             legacy = (args.legacy_app.resolve(), args.legacy_profile.resolve()) if args.legacy_app else None
             pc_before = snapshot(args.pc.resolve())
             x360 = args.x360.resolve() if args.x360 else None
             x360_before = snapshot(x360) if x360 else None
-            audit(resources, args.pc.resolve(), scratch / 'good', args.expected_version, legacy, x360)
+            if args.game == 'carbon' and x360:
+                audit(resources, args.pc.resolve(), scratch / 'pc-only', args.expected_version, game='carbon')
+            audit(resources, args.pc.resolve(), scratch / 'good', args.expected_version, legacy, x360, game=args.game)
             require(snapshot(args.pc.resolve()) == pc_before, 'original PC input changed')
             require(not x360 or snapshot(x360) == x360_before, 'original Xbox 360 input changed')
             if args.proof:

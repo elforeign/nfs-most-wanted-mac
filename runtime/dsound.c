@@ -12,7 +12,7 @@
 #include "../host/audio/dsound_host.h"
 #include "host.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_audio_policy.inc"
+#include "game_audio_policy.h"
 #endif
 
 void threads_set_event_async(uint32_t h);   // threads.c
@@ -643,5 +643,5 @@ int dsound_mix_rms(double rms[6], uint64_t *clipped, uint64_t *limited, double *
 }
 #if NFS_GAME == NFS_GAME_PRIVATE
 
-#include "game_sound.inc"
+#include "game_sound.h"
 #endif

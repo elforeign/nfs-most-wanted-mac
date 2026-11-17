@@ -107,8 +107,8 @@ def _inside(base, name):
     return path
 
 
-def verify_app(app):
-    if not ins.is_current_app(app) or not ins.app_complete(app):
+def verify_app(app, bundle_id=ins.PUBLIC_BUNDLE_ID):
+    if not ins.is_current_app(app, bundle_id) or not ins.app_complete(app):
         raise ins.InstallError("The update app is incomplete or its signature is invalid.")
 
 
@@ -132,13 +132,13 @@ def read_ready(ready, profile, destination):
         if record["format_version"] != 1 or Path(record["profile"]) != profile:
             raise ValueError("profile or version")
         bound = record["destination"]
-        if (not destination.is_absolute() or destination.name != ins.APP_BUNDLE
-                or not ins.real_dir(destination) or not ins.is_current_app(destination)
+        if (not destination.is_absolute() or destination.name not in ins.PRODUCTS
+                or not ins.real_dir(destination) or not ins.is_current_app(destination, ins.product(destination)["bundle_id"])
                 or Path(bound["path"]) != destination or bound["identity"] != ins.ident(destination)
                 or bound["sha256"] != ins.digest_tree(destination)):
             raise ins.InstallError("The installed app changed since this update was prepared.", "Prepare the update again.")
         app, data = _inside(ready.parent, record["app"]), _inside(ready.parent, record["data"])
-        if app.name != ins.APP_BUNDLE or data.name != "data" or app.parent != ready.parent or data.parent != ready.parent:
+        if app.name != destination.name or data.name != "data" or app.parent != ready.parent or data.parent != ready.parent:
             raise ValueError("artifact names")
         roots = record["roots"]
         if not isinstance(roots, dict) or "pc_root" not in roots:
@@ -305,11 +305,16 @@ def recover_locked(profile, record):
     return _rollback(profile, record)
 
 
-def apply_ready(ready, profile, destination, verify=verify_app, running=ins.assert_not_running, held=None,
+def apply_ready(ready, profile, destination, verify=None, running=None, held=None,
                 environment=None):
-    """Return health token; caller must supervise launch or recover on next launch."""
+    """Return health token; caller must supervise launch or recover on next launch.
+
+    verify and running default to the destination's product (Most Wanted's or Carbon's app)."""
     ready, profile, destination = map(Path, (ready, profile, destination))
     refuse_update(destination)
+    product = ins.product(destination)
+    verify = verify or (lambda app: verify_app(app, product["bundle_id"]))
+    running = running or (lambda: ins.assert_not_running(pattern=product["running"]))
     if not profile.is_absolute() or not ins.real_dir(profile):
         raise ins.InstallError("The update profile must be an existing plain absolute directory.")
     with ins.profile_guard(profile), ins.dest_lock(destination.parent, held):
@@ -319,6 +324,8 @@ def apply_ready(ready, profile, destination, verify=verify_app, running=ins.asse
         verify(app)
         record = dict(kind=KIND, token=uuid.uuid4().hex, dest=str(destination.parent), state="preparing", ids={},
                       ready=str(ready), ready_id=ins.ident(ready), job=str(ready.parent))
+        if destination.name != ins.APP_BUNDLE:  # another product's journal names its app (install._plan, recovery)
+            record.update(bundle=destination.name, bundle_id=product["bundle_id"])
         if ready.parent.name == "staged":
             record["job"] = str(ready.parent.parent)
         record["profile"] = str(profile)
@@ -404,10 +411,10 @@ def acknowledge(profile, token, held=None):
                 or Path(record["dest"]) != destination):
             raise ins.InstallError("Unexpected startup acknowledgment.")
         receipt = json.loads(ack_path(profile, token).read_bytes())
-        app = Path(record["dest"]) / ins.APP_BUNDLE
+        app = Path(record["dest"]) / record.get("bundle", ins.APP_BUNDLE)
         if receipt != dict(token=token, identity=ins.ident(app)):
             raise ins.InstallError("Startup acknowledgment does not match the installed app.")
-        verify_app(app)
+        verify_app(app, record.get("bundle_id", ins.PUBLIC_BUNDLE_ID))
         _journal(profile, record, "acknowledged")
         return _finish(profile, record)
 
@@ -437,7 +444,8 @@ def _supervise_locked(profile, destination, ready, parent, timeout):
     if ins.journal_path(profile).exists():
         ins.recover_interrupted(profile, held=held)
         ready = None  # recovery never immediately retries an unhealthy update
-    command = [str(Path(destination) / "Contents/MacOS" / ins.EXEC_NAME)]
+    product = ins.product(destination)
+    command = [str(Path(destination) / "Contents/MacOS" / product["exec"])]
     child = None
     environment = dict(os.environ, BOOT_USERDATA=str(profile))
 
@@ -477,7 +485,7 @@ def _supervise_locked(profile, destination, ready, parent, timeout):
             ins.write_synced(temporary, b'{"state":"failed"}\n', 0o600)
             os.replace(temporary, failed)
             ins.sync_dir(failed.parent)
-        verify_app(destination)
+        verify_app(destination, product["bundle_id"])
         subprocess.Popen(command[:1], close_fds=True, start_new_session=True, env=environment)
         raise
 

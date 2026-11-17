@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.7.0
+
+- **More console looks without console files:** without your own Xbox 360 files, wall and kerb depth, the console's particle shading and size, extra tyre smoke, the console's shadow fit and distant fog without the PC's cut-off are now On too. With your Xbox 360 files the console versions are still used.
+- **Tyre tread detail:** tread grooves generated from the PC files, On by default (F10 > Cars > Tyre and badge detail: Port); with your Xbox 360 files the console's tread is used.
+- **Car glass:** Physical car materials now default to Glass (F10 > Picture); Chrome stays opt-in and a saved choice is kept.
+- **Zipped Xbox 360 copy:** Setup also takes a .zip or .7z of your Xbox 360 files.
+- **Fixed:** underglow in the garage and customise screens draws over the car's shadow; Setup copies all of the cop speech files so the console cop voices play; live streaming rides through a short slow upload; quitting while the TV audio output reopens no longer leaves the TV unable to play normal sound.
+
 ## 4.6.0
 
 - **Console looks without console files:** without your own Xbox 360 files the game now draws its own post-processing chain, car paint, tyre and badge detail, metallic flake, building-window glass, lens rain drops, sea and road reflection size, all On. With your Xbox 360 files the console versions are still used.

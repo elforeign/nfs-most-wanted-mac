@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Synthetic all-in-one export proofs; no game, network or real profile.
 
+Carbon export: correct product passes 1/1; MW product dispatch fails 1/1.
+Carbon profile: correct routing passes 1/1; MW profile routing fails the same
+embedded-PC digest oracle 1/1. Cancellation and overwrite leave no new export.
+
 Relocation control: original preference-first selection resolves 1 external PC
 root; fixed selection resolves 4/4 embedded roots after moving the signed app.
 EXDEV control: corrupting one fallback copy fails its SHA-256 check (1/1).
@@ -243,6 +247,94 @@ int main(int argc, char **argv) { @autoreleasepool {
 
     def export(self, **kwargs):
         return ex.export_app(self.app, self.profile, self.destination, **kwargs)
+
+    def carbon_install(self):
+        self.app = self.app.rename(self.d / (ins.CARBON['name'] + '.app'))
+        macos = self.app / 'Contents/MacOS'
+        (macos / ins.EXEC_NAME).rename(macos / ins.CARBON['exec'])
+        with (self.app / 'Contents/Info.plist').open('wb') as info:
+            plistlib.dump(dict(CFBundleIdentifier=ins.CARBON['bundle_id'], CFBundleExecutable=ins.CARBON['exec'],
+                              CFBundleShortVersionString='1.0.0', CFBundlePackageType='APPL'), info)
+        ex.sign_bundle(self.app)
+        self.profile = self.profile / 'Carbon'
+        self.profile.mkdir()
+        self.write_roots()
+
+    def test_carbon_signed_export_identity_relocation_and_product_control(self):
+        self.carbon_install()
+        before = {key: ins.digest_tree(path) for key, path in self.roots.items()}
+        app_before = ins.digest_tree(self.app)
+        self.export(game='carbon')
+        self.assertTrue(ins.codesign_ok(self.destination))
+        with (self.destination / 'Contents/Info.plist').open('rb') as info:
+            self.assertEqual(plistlib.load(info)['CFBundleIdentifier'], ins.CARBON['bundle_id'])
+        # Move every external source offline and relocate the export, then use its embedded manifest.
+        for root in self.roots.values():
+            self.assertEqual(ins.digest_tree(root), before[next(k for k, v in self.roots.items() if v == root)])
+            root.rename(root.with_name(root.name + '-offline'))
+        self.assertEqual(ins.digest_tree(self.app), app_before)
+        moved = self.destination.rename(self.d / 'Moved Carbon.app')
+        roots = ex.current_roots(moved, self.d / 'missing-profile')
+        self.assertEqual(set(roots), set(self.roots))
+        for key, root in roots.items():
+            self.assertTrue(root.is_relative_to(moved))
+            self.assertEqual(ins.digest_tree(root), before[key])
+        with self.assertRaisesRegex(ins.InstallError, 'destination already exists'):
+            ex.export_app(self.app, self.profile, moved, game='carbon')
+        # Deliberately route Carbon through MW's product validation.
+        with self.assertRaisesRegex(ins.InstallError, 'Most Wanted'):
+            ex.export_app(self.app, self.profile, self.destination, game='mw')
+        self.assertFalse(self.destination.exists())
+
+    def test_carbon_backend_profile_route_and_mw_profile_control(self):
+        self.carbon_install()
+        output = io.StringIO()
+        # The parent profile is a valid MW profile with distinct content, to catch silent cross-product export.
+        mw = self.d / 'mw-data'
+        mw.mkdir()
+        (mw / 'synthetic.bin').write_bytes(b'Most Wanted profile control')
+        (self.profile.parent / 'roots.txt').write_text(f'pc_root={mw}\n')
+        (self.profile.parent / 'app.txt').write_text(f'game_dir={mw}\n')
+        environment = dict(NFSMW_SETUP_DATA=str(self.profile.parent), NFSMW_SETUP_STATE=str(self.d / 'state'),
+                           NFSMW_SETUP_HOME=str(self.d / 'setup'))
+        with ins.profile_guard(self.profile):
+            pass
+        before = ins.digest_tree(self.profile.parent)
+        with patch.dict(os.environ, environment), contextlib.redirect_stdout(output):
+            rc = backend.main(['--export-all-in-one', '--game', 'carbon', '--app', str(self.app),
+                               '--dest', str(self.destination), '--events'])
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(ins.digest_tree(self.profile.parent), before)
+        def correct_pc_root(app):
+            self.assertEqual(ins.digest_tree(ex.current_roots(app, self.profile)['pc_root']),
+                             ins.digest_tree(self.roots['pc_root']))
+        correct_pc_root(self.destination)
+        # Execute the production command with the Carbon profile dispatch removed.
+        import inspect
+        source = inspect.getsource(backend.main)
+        broken = source.replace('paths.data / CARBON_PRODUCT["data"] if args.game == "carbon" else paths.data,\n                                         clean_path(args.dest)',
+                                'paths.data,\n                                         clean_path(args.dest)')
+        self.assertNotEqual(broken, source)
+        namespace = dict(backend.__dict__)
+        exec(compile(broken, str(ROOT / 'tools/setup_kit/backend.py'), 'exec'), namespace)
+        wrong = self.d / 'Wrong Profile.app'
+        with patch.dict(os.environ, environment), contextlib.redirect_stdout(io.StringIO()):
+            rc = namespace['main'](['--export-all-in-one', '--game', 'carbon', '--app', str(self.app),
+                                   '--dest', str(wrong), '--events'])
+        self.assertEqual(rc, 0)
+        with self.assertRaises(AssertionError):
+            correct_pc_root(wrong)
+
+    def test_carbon_export_cancel_never_publishes(self):
+        self.carbon_install()
+        before = ins.digest_tree(self.app)
+        def cancel(source, destination):
+            raise backend.Cancelled()
+        with self.assertRaises(backend.Cancelled):
+            self.export(game='carbon', clone=cancel)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(ins.digest_tree(self.app), before)
+        self.assertEqual(list(self.d.glob('.all-in-one-*')), [])
 
     def inspect(self, app, argument=False):
         env = dict(os.environ, BOOT_USERDATA=str(self.profile), NFS_ROOTS=str(self.profile / "roots.txt"),

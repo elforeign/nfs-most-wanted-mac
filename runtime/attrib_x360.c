@@ -20,6 +20,8 @@
 //   with the game's own constructor (parents first) and appended to the vault's export tables, so everything that
 //   enumerates the vault or looks the collection up by key finds it.
 // Switch: gameplay.x360_data (NFS_X360_DATA, default on, restart): off leaves the PC collections as they are.
+// Without a console copy (ATTRIB_X360_PORT_SMOKE) the same switch is the row gameplay.port_tyre_smoke, default on:
+//   a port-authored recipe of the PC's own unreferenced asphalt smoke emitters (k_port_smoke, below).
 // BOOT_DIAG: `attrib_x360:` lines (each patched collection; emitter groups added to the particle system and, once a
 //   second while smoke is alive, the live emitter and particle counts of the EmitterSystem's groups).
 #include <stdint.h>
@@ -62,9 +64,65 @@ const MatGrassParams *attrib_x360_grass(uint32_t material_key) {
 
 #define EMITTER_SYSTEM_LIST 0x378u          // EmitterSystem+0x378: bList of EmitterGroups (+0x390 their count)
 
+#ifdef ATTRIB_X360_PORT_SMOKE
+// No console copy (tools/gen_tables.py's stub defines this): the port's own asphalt tyre smoke, from PC emitters only.
+// The PC's ATTRIBUTES.BIN ships asphalt tyre emitters that no collection references; the recipe adds them to the
+// asphalt emitter groups whose action (sk_ skid, dr_ drift) their names carry. emittergroup (ABA86E60) `Emitters`
+// (1C943636) is layout +0: {capacity, count, element size, flags} (u16) + capacity x {class, collection key, 0}; on
+// the PC capacity 6, element 12, flags 0, so the array grows in place. Elements are emitterdata (B30B18AF) references.
+// Its own row, On by default: "Extra tyre smoke" (the same switch, NFS_X360_DATA; restart).
+static Setting s_x360_data = {.id = "gameplay.port_tyre_smoke", .category = SET_GAMEPLAY, .order = 80,
+    .label = "Extra tyre smoke",
+    .help = "More tyre smoke on asphalt: the PC game's own unused smoke emitters added to skids, slides and drifts.",
+    .type = SET_TOGGLE, .def = 1, .env = "NFS_X360_DATA", .restart = 1};
+
+#define EMITTERDATA_CLASS 0xB30B18AFu       // StringHash32("emitterdata")
+#define EMITTERGROUP_CLASS 0xABA86E60u      // StringHash32("emittergroup")
+#define SK_SMOKE_DARK 0x00B4E4EFu           // emtd_sk_asphaltsmokedark1: unreferenced on the PC, child of the skid's fast smoke
+#define SK_SMOKE_EXTRA 0x6DA6DD9Du          // emtd_sk_extrasmoke1: unreferenced on the PC, child of the skid's fast smoke
+#define DR_SMOKE 0xDD458EB9u                // emtd_dr_asphalt_smk: unreferenced on the PC, the drift's asphalt smoke
+static const struct { uint32_t group, n, add[2]; } k_port_smoke[] = {
+    // skid on asphalt (PC: fast smoke 1 + 2, leaves): the two skid smokes the PC never references -> 5
+    {0xEAA2E866u, 2, {SK_SMOKE_DARK, SK_SMOKE_EXTRA}},     // fxtd_sk_asphalt
+    // the same skid without leaves (PC: fast smoke 1 + 2) -> 4
+    {0xD2F8D5BAu, 2, {SK_SMOKE_DARK, SK_SMOKE_EXTRA}},     // fxtd_sk_asphalt_no_leaves
+    // slide (PC: emtd_sl_asphaltfastsmk1, itself authored as a child of the skid's fast smoke): the skid's two -> 3
+    {0x7790C105u, 2, {SK_SMOKE_DARK, SK_SMOKE_EXTRA}},     // fxtd_sl_asphalt
+    // drift on asphalt with leaves (PC: leaves only, no smoke): the drift's own asphalt smoke -> 2
+    {0x95CDE6CBu, 1, {DR_SMOKE}},                          // fxtd_dr_asphalt_leaves
+    // drift on asphalt without leaves (PC: one empty reference, nothing drawn): the same smoke -> 2
+    {0x0EAC606Au, 1, {DR_SMOKE}},                          // fxtd_dr_asphalt_noleaves
+    // (emtd_dr_leaves_hvy, the fourth unreferenced asphalt emitter, is leaves, not smoke: not used)
+};
+static unsigned port_smoke_groups, port_smoke_added;
+
+// Appends the recipe's emitters to one asphalt group's array before the Collection is built from it. Only an array laid
+// out as the PC ships it is touched; an emitter already present is not added twice.
+static void tyre_smoke_port_patch(uint32_t key, uint32_t cls, uint32_t lay) {
+    if (cls != EMITTERGROUP_CLASS || !lay) return;
+    for (size_t i = 0; i < sizeof k_port_smoke / sizeof k_port_smoke[0]; ++i) {
+        if (k_port_smoke[i].group != key) continue;
+        uint32_t cap = M16(lay), cnt = M16(lay + 2), before = cnt;
+        if (M16(lay + 4) != 12 || (M16(lay + 6) & 0x8000) || cnt > cap) return;
+        for (uint32_t a = 0; a < k_port_smoke[i].n && cnt < cap; ++a) {
+            uint32_t e = 0;
+            while (e < cnt && M32(lay + 8 + 12 * e + 4) != k_port_smoke[i].add[a]) ++e;
+            if (e < cnt) continue;
+            uint32_t at = lay + 8 + 12 * cnt++;
+            M32(at) = EMITTERDATA_CLASS; M32(at + 4) = k_port_smoke[i].add[a]; M32(at + 8) = 0;
+        }
+        M16(lay + 2) = (uint16_t)cnt;
+        ++port_smoke_groups; port_smoke_added += cnt - before;
+        if (diag_on) diag_event("attrib_x360: port tyre smoke: emitter group %08X %u -> %u emitters (%u groups, %u added)",
+                                key, before, cnt, port_smoke_groups, port_smoke_added);
+        return;
+    }
+}
+#else
 static Setting s_x360_data = {.id = "gameplay.x360_data", .category = SET_GAMEPLAY, .order = 80, .label = "X360 Game Data",
     .help = "The X360 version's extra tyre smoke emitters on asphalt.",
     .type = SET_TOGGLE, .def = 1, .env = "NFS_X360_DATA", .restart = 1};
+#endif
 
 static const char *const kLightData[] = {"PC", "X360"}, *const kLightDataV[] = {"pc", "x360"};
 static Setting s_light_data = {.id = "graphics.lighting_data", .category = SET_WORLD, .order = 20, .label = "Lighting data",
@@ -174,6 +232,9 @@ void f_00457F90(Cpu *c) {
                 if (diag_on) diag_event("attrib_x360: collection %08X (class %08X) array at +%u replaced by the X360's (%u of %u)",
                                         key, cls, k_layout_patch[i].off, patched, (unsigned)(sizeof k_layout_patch / sizeof k_layout_patch[0]));
             }
+#ifdef ATTRIB_X360_PORT_SMOKE
+        tyre_smoke_port_patch(key, cls, lay);
+#endif
     }
     f_00457F90_orig(c);
 }

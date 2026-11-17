@@ -35,7 +35,7 @@
 
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import errno
 import fcntl
@@ -60,9 +60,9 @@ import unicodedata
 import uuid
 import zipfile
 
-from .install import (PUBLIC_BUNDLE_ID, InstallError, OWNER_MARK, OWN_DIR, assert_not_running, digest_tree, mark_owned,
+from .install import (PUBLIC_BUNDLE_ID, CARBON, InstallError, OWNER_MARK, OWN_DIR, assert_not_running, digest_tree, mark_owned,
                       owned, real_dir, recover_interrupted, remove, transactional_install, write_synced)
-from . import pc_disc, rtpatch, prebuilt
+from . import pc_disc, rtpatch, prebuilt, carbon_source
 from . import car_sources, car_catalog
 from . import stage as staging
 from .x360_cache import PreparedCache, preparation_key
@@ -73,9 +73,10 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.6.0"
-# Carbon's app, every name in one place. Working names until the release names are decided.
-CARBON_PRODUCT = dict(name="NFS Carbon Native", exec="NFSCarbon", bundle_id="io.github.nfs-carbon-native-mac", data="Carbon")
+PUBLIC_VERSION = "4.7.0"
+# Carbon's app: its names (install.CARBON), its data, Setup state and update folder name, and its own version.
+CARBON_PRODUCT = dict(CARBON, data="Carbon")
+CARBON_VERSION = "1.0.0"
 CARBON_EXE_SHA256 = "baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3"  # NFSC.exe (car_sources.json pin)
 CARBON_RUNNING = re.compile(re.escape(CARBON_PRODUCT["name"]) + r"\.app/Contents/MacOS/")
 CARBON_X360_BYTES = 40_000_000  # the two Xbox archives (38.4 MB), kept whole
@@ -168,7 +169,9 @@ def safe_cache_dir():
 # (pc_src.tmp and check-x360.tmp are the stamps' temporary files: an interrupted run leaves them; car-selection.json is
 # the extras page's ticked cars, written before the first PC check can mark the folder.)
 SETUP_WORK_NAMES = {"run-log.txt", "tmp", "tool-home", "toolchain", "logs", "stage", "check-x360", "check-x360.json",
-                    "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", ".setup.lock", "extras", "car-selection.json",
+                    "carbon_src", "carbon_src.json", "carbon_src.tmp",
+                    "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", "x360_src", "x360_src.json", "x360_src.tmp",
+                    ".setup.lock", "extras", "car-selection.json",
                     OWNER_MARK}
 SETUP_CACHE_NAMES = {"builds", "stages", "build.lock", "x360", "cars", OWNER_MARK}
 
@@ -574,12 +577,22 @@ ZIP_MAX_FILES = 20000         # it has about 1,500 entries
 PC_DIRS = ("GLOBAL", "TRACKS", "CARS", "FRONTEND", "SOUND")
 
 
-def zip_members(archive, label="The .zip", fix=None):
+def resource_fork(name):
+    name = name.replace("\\", "/")
+    return name.startswith("__MACOSX/") or Path(name).name.startswith("._")
+
+
+def zip_members(archive, label="The .zip", fix=None, max_bytes=None):
     """Checked entries of a PC game .zip; refuses anything that could write outside the extraction folder."""
+    return checked_archive_members(archive.infolist(), label, fix, ZIP_MAX_BYTES if max_bytes is None else max_bytes)
+
+
+def checked_archive_members(infos, label, fix, max_bytes, skip_resource_forks=True):
+    """Shared path/type/size policy for zip and the system archive reader's inventory."""
     members, total = [], 0
-    for info in archive.infolist():
+    for info in infos:
         name = info.filename
-        if name.replace("\\", "/").startswith("__MACOSX/") or Path(name.replace("\\", "/")).name.startswith("._"):
+        if skip_resource_forks and resource_fork(name):
             continue  # Finder's resource-fork copies, not game files
         parts = name.replace("\\", "/").split("/")
         if (name.startswith(("/", "\\")) or re.match(r"[A-Za-z]:", name) or ".." in parts or "\0" in name
@@ -590,8 +603,8 @@ def zip_members(archive, label="The .zip", fix=None):
             raise SetupError(f"{label} contains a link or special file: {name!r}", fix or "Use the original game download, or unzip it and choose the folder.")
         total += info.file_size
         members.append(info)
-        if len(members) > ZIP_MAX_FILES or total > ZIP_MAX_BYTES:
-            raise SetupError(f"{label} is far larger than the game (more than 8 GB or 20,000 files).",
+        if len(members) > ZIP_MAX_FILES or total > max_bytes:
+            raise SetupError(f"{label} is far larger than the game (more than {max_bytes // 1024**3} GB or 20,000 files).",
                              fix or "Choose the Need for Speed Most Wanted game .zip or its unzipped folder.")
     return members, total
 
@@ -609,16 +622,16 @@ def find_pc_root(top):
     return candidates[0]
 
 
-def unpacked(work, key, events, what, unpack):
-    """<work>/pc_src made by unpack(out), which returns the game folder in it. Reused while the inputs' key (paths,
+def unpacked(work, key, events, what, unpack, name="pc_src"):
+    """<work>/<name> made by unpack(out), which returns the game folder or ISO in it. Reused while the inputs' key (paths,
     sizes, modification times) and the unpacked files' digest are unchanged; never left half made."""
-    out = work / "pc_src"
-    stamp = work / "pc_src.json"
+    out = work / name
+    stamp = work / (name + ".json")
     try:
         recorded = json.loads(stamp.read_text())
         if recorded["key"] == key:
             root = Path(recorded["root"])
-            if root.is_relative_to(out) and digest_tree(root) == recorded["digest"]:
+            if root.exists() and root.is_relative_to(out) and digest_tree(root) == recorded["digest"]:
                 events.emit("warn", id="pc", msg=f"Reusing the game unpacked earlier from {what}.")
                 return root
     except (OSError, ValueError, KeyError, TypeError, InstallError):
@@ -655,9 +668,10 @@ def extract_pc_zip(source, work, events):
     return unpacked(work, dict(path=str(source), size=st.st_size, mtime=st.st_mtime_ns), events, "the .zip", unpack)
 
 
-def unpack_zip(archive, members, total, out, after, label="The .zip", fix=None):
+def unpack_zip(archive, members, total, out, after, label="The .zip", fix=None, max_bytes=None):
     """Write the checked members (zip_members) below out; Windows paths (as on the PC discs) become folders.
     after(index, bytes written) follows each member."""
+    max_bytes = ZIP_MAX_BYTES if max_bytes is None else max_bytes
     base = out.resolve()
     written = 0
     for i, info in enumerate(members):
@@ -673,7 +687,7 @@ def unpack_zip(archive, members, total, out, after, label="The .zip", fix=None):
             with archive.open(info) as src, open(target, "xb") as dst:
                 for block in iter(lambda: src.read(1024 * 1024), b""):
                     written += len(block)
-                    if written > total or written > ZIP_MAX_BYTES:  # sizes in the directory were false
+                    if written > total or written > max_bytes:  # sizes in the directory were false
                         raise SetupError(f"{label} unpacks to more than it declares.", fix or "Download the game .zip again.")
                     dst.write(block)
         except (zipfile.BadZipFile, zlib_error(), EOFError, NotImplementedError) as e:
@@ -682,6 +696,135 @@ def unpack_zip(archive, members, total, out, after, label="The .zip", fix=None):
         except FileExistsError:
             raise SetupError(f"{label} contains the same file twice: {info.filename!r}", fix or "Use the original game download.") from None
         after(i, written)
+
+
+X360_ARCHIVE_BYTES = 16 * 1024**3  # includes full-size Xbox 360 disc images
+X360_ARCHIVE_FIX = "Choose an archive containing one Xbox 360 ISO or one extracted game folder."
+
+
+def sevenzip_members(source):
+    """List with the system libarchive first; never let tar create filesystem entries.
+    Pair plain and verbose listings so escaped names or ambiguous metadata fail closed."""
+    listings = []
+    for flag in ("-tf", "-tvf"):
+        with tempfile.TemporaryFile() as listing, tempfile.TemporaryFile() as errors:
+            try:
+                result = subprocess.run(["/usr/bin/bsdtar", flag, str(source)], stdin=subprocess.DEVNULL,
+                                        stdout=listing, stderr=errors, env=dict(os.environ, LC_ALL="en_US.UTF-8"), timeout=120)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise SetupError(f"The .7z can't be listed: {e}", X360_ARCHIVE_FIX) from None
+            if result.returncode or listing.tell() > 16 * 1024**2:
+                raise SetupError("The .7z can't be read or has too many entries.", X360_ARCHIVE_FIX)
+            listing.seek(0)
+            try:
+                listings.append(listing.read().decode("utf-8").splitlines())
+            except UnicodeError:
+                raise SetupError("The .7z contains unreadable names.", X360_ARCHIVE_FIX) from None
+    names, details = listings
+    if len(names) != len(details) or len(names) > ZIP_MAX_FILES:
+        raise SetupError("The .7z has an invalid or oversized file listing.", X360_ARCHIVE_FIX)
+    members = []
+    seen = set()
+    for name, detail in zip(names, details):
+        fields = detail.split(None, 8)
+        if (len(fields) != 9 or fields[0][0] not in "-d" or fields[1] not in ("0", "1")):
+            raise SetupError(f"The .7z contains a link or special file: {name!r}", X360_ARCHIVE_FIX)
+        if fields[8] != name or "\\" in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise SetupError(f"The .7z contains an unsafe path: {name!r}", X360_ARCHIVE_FIX)
+        info = zipfile.ZipInfo(name)
+        info.external_attr = (0o040755 if fields[0][0] == "d" else 0o100644) << 16
+        try:
+            info.file_size = int(fields[4])
+        except ValueError:
+            raise SetupError("The .7z has an invalid file size.", X360_ARCHIVE_FIX) from None
+        if info.file_size < 0 or fields[0][0] == "d" and info.file_size:
+            raise SetupError("The .7z has an invalid file size.", X360_ARCHIVE_FIX)
+        key = name.rstrip("/").casefold()
+        if key in seen:
+            raise SetupError(f"The .7z contains the same path twice: {name!r}", X360_ARCHIVE_FIX)
+        seen.add(key)
+        members.append(info)
+    # Retain resource-fork entries in the stream inventory so every byte is consumed.
+    return checked_archive_members(members, "The .7z", X360_ARCHIVE_FIX, X360_ARCHIVE_BYTES, skip_resource_forks=False)
+
+
+def unpack_sevenzip(source, members, total, out, events):
+    """Tar emits one concatenated stream in listing order. Write only checked regular paths,
+    bounded by their declared sizes; no archive link, mode or owner is ever installed."""
+    with tempfile.TemporaryFile() as errors:
+        try:
+            child = subprocess.Popen(["/usr/bin/bsdtar", "-xOf", str(source)], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=errors)
+        except OSError as e:
+            raise SetupError(f"The .7z can't be unpacked: {e}", X360_ARCHIVE_FIX) from None
+        try:
+            written = 0
+            for info in members:
+                keep = not resource_fork(info.filename)
+                target = out / info.filename
+                if (info.external_attr >> 16) & 0o170000 == 0o040000:
+                    if keep:
+                        target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if keep:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                with (target.open("xb") if keep else nullcontext()) as dst:
+                    remaining = info.file_size
+                    while remaining:
+                        block = child.stdout.read(min(1024**2, remaining))
+                        if not block:
+                            raise SetupError("The .7z is truncated.", X360_ARCHIVE_FIX)
+                        if dst is not None:
+                            dst.write(block)
+                        remaining -= len(block)
+                        written += len(block)
+                        events.progress(written, total)
+            if child.stdout.read(1) or child.wait() != 0:
+                raise SetupError("The .7z is damaged or unpacks to more than it declares.", X360_ARCHIVE_FIX)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            child.stdout.close()
+
+
+def find_x360_root(top):
+    candidates = [p for p in top.rglob("*") if p.is_file() and p.suffix.lower() == ".iso"]
+    candidates += [p.parent for p in top.rglob("*") if p.is_file() and p.name.casefold() == "default.xex"]
+    candidates = sorted(set(candidates))
+    if len(candidates) != 1:
+        found = ", ".join(str(p.relative_to(top)) for p in candidates[:10]) or "none"
+        raise SetupError(f"The Xbox 360 archive must contain one ISO or game folder; found {len(candidates)}: {found}.",
+                         X360_ARCHIVE_FIX)
+    return candidates[0]
+
+
+def extract_x360_archive(source, work, events):
+    """Read-only .zip/.7z input; cache separately from the PC input in the same work folder."""
+    st = source.stat()
+    def unpack(out):
+        def space(total):
+            if shutil.disk_usage(work).free < total + 512 * 1024**2:
+                raise SetupError("There is not enough free disk space to unpack the Xbox 360 archive.",
+                                 "Free space on the work volume, then try again.")
+            out.mkdir(parents=True)
+            events.progress(0, total)
+        if source.suffix.lower() == ".zip":
+            try:
+                with zipfile.ZipFile(source) as archive:
+                    members, total = zip_members(archive, "The Xbox 360 .zip", X360_ARCHIVE_FIX, X360_ARCHIVE_BYTES)
+                    space(total)
+                    unpack_zip(archive, members, total, out, lambda i, n: events.progress(n, total),
+                               "The Xbox 360 .zip", X360_ARCHIVE_FIX, X360_ARCHIVE_BYTES)
+            except (zipfile.BadZipFile, OSError) as e:
+                raise SetupError(f"The Xbox 360 .zip can't be read: {e}", X360_ARCHIVE_FIX) from None
+        else:
+            members, total = sevenzip_members(source)
+            space(total)
+            unpack_sevenzip(source, members, total, out, events)
+        return find_x360_root(out)
+    return unpacked(work, dict(path=str(source), size=st.st_size, mtime=st.st_mtime_ns), events,
+                    "the Xbox 360 archive", unpack, name="x360_src")
 
 
 DISC_FIX = "Make the disc image again from the original disc (or download it again if the download was interrupted)."
@@ -1014,8 +1157,10 @@ def prepare_x360(source, out, pc, events, env, record=None, extras=None, game="m
     if source is None:
         events.emit("features", x360=False, missing=X360_MISSING)
         return {}
+    if source.is_file() and source.suffix.lower() in (".zip", ".7z"):
+        source = extract_x360_archive(source, out.parent, events)
     if not source.is_dir() and not (source.is_file() and source.suffix.lower() == ".iso"):
-        raise SetupError("Choose an Xbox 360 game folder or ISO.", "Choose your own complete Xbox 360 copy, or continue without Xbox 360 features.")
+        raise SetupError("Choose an Xbox 360 game folder, .iso, or a .zip/.7z of it.", "Choose your own complete Xbox 360 copy, or continue without Xbox 360 features.")
     module_name = "setup_kit.carbon_x360" if game == "carbon" else "setup_kit.x360"
     try:
         module = importlib.import_module(module_name)
@@ -1140,7 +1285,8 @@ def clean_work(paths, events, key=None):
     if not owned(paths.work, paths.state):
         log(f"{paths.work} is not Setup's own folder: nothing removed")
     else:
-        for name in ("stage", CHECK_X360, CHECK_X360 + ".json", "pc_src", "pc_src.json"):
+        for name in ("stage", CHECK_X360, CHECK_X360 + ".json", "pc_src", "pc_src.json", "x360_src", "x360_src.json",
+                     "carbon_src", "carbon_src.json"):
             try:
                 remove(paths.work / name)
             except OSError as e:
@@ -1397,6 +1543,8 @@ def build(args, paths, events, runner, source_root=ROOT):
     # speed.exe translation, the tables made without a game folder, the libraries), then it translates NFSC.exe and
     # installs its own app and profile (<data>/Carbon, where the Carbon program looks).
     carbon = clean_path(args.carbon) if getattr(args, "game", "mw") == "carbon" else None
+    if carbon and carbon.is_file() and carbon.name.casefold() == "nfsc.exe":
+        carbon = carbon.parent
     pc = selected_pc = None if carbon else clean_path(args.pc)
     dest = clean_path(args.dest)
     data_home = paths.data / CARBON_PRODUCT["data"] if carbon else paths.data
@@ -1424,7 +1572,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     extras = [carbon] if carbon else pc_extras(pc, pc_update, pc_exe, pc_discs)
     check_locations(paths, pc, x360, dest, source_root, extras, data_home=data_home)
     if stage_only:
-        check_stage_locations(args.stage, paths, pc, x360, destination, source_root, extras)
+        check_stage_locations(args.stage, paths, pc, x360, destination, source_root, extras, carbon=bool(carbon))
         if x360 and not x360.exists():
             raise SetupError(f"X360_SOURCE_MISSING: The remembered Xbox 360 source is unavailable: {x360}",
                              "Reconnect the Xbox 360 source or select its new location with --x360.")
@@ -1448,7 +1596,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     events.progress()
     events.stage("pc")
     if carbon:
-        validate_carbon(carbon)
+        carbon = carbon_source.prepare(carbon, paths.work, events)
         pc_hash, carbon_hash = None, digest_tree(carbon)
     elif is_pc_zip(pc):  # a .zip of the game folder: only read
         pc = extract_pc_zip(pc, paths.work, events)
@@ -1463,6 +1611,8 @@ def build(args, paths, events, runner, source_root=ROOT):
         pc_hash = digest_tree(pc)
     events.progress()
     events.stage("x360")
+    x360_source = (extract_x360_archive(x360, paths.work, events)
+                   if x360 and x360.is_file() and x360.suffix.lower() in (".zip", ".7z") else x360)
     stage = paths.work / "stage"
     if args.check:
         check_out = paths.work / CHECK_X360
@@ -1479,7 +1629,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         prepared_cache = PreparedCache(paths.cache / "x360", preparation_key(content, pc_hash, inventory, toolchain, **options))
         roots = restore_prepared_x360(prepared_cache, check_out, events, record) if owned(paths.cache, paths.state) else None
         if roots is None:
-            roots = prepare_x360(x360, check_out, pc, events, runner.env, record, **options)
+            roots = prepare_x360(x360_source, check_out, pc, events, runner.env, record, **options)
         if roots and x360_stat(x360) == before and x360_content_digest(x360) == content:  # changed while it was converted: not reused by the build
             record_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, content, toolchain, **options), roots, record)
         events.progress()
@@ -1497,7 +1647,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         space = dict(x360_bytes=(CARBON_X360_BYTES if carbon else x360_extras.required_bytes(chosen)) if x360 else 0,
                      x360_shared_bytes=146_000_000 if x360 and not carbon and "textures" in chosen and "arrest" not in chosen else 0)
         if stage_only:
-            check_space(paths, pc, clean_path(args.stage), stage_only=True, **space)
+            check_space(paths, carbon or pc, clean_path(args.stage), stage_only=True, **space)
         else:
             check_space(paths, carbon or pc, dest, **space)
         source = cache_home / "source"
@@ -1540,7 +1690,7 @@ def build(args, paths, events, runner, source_root=ROOT):
         if x360 and reused is None:
             reused = reuse_check_x360(paths.work, x360_identity(x360, pc_hash, inventory, x360_hash, toolchain, **options),
                                       x360_target, events, record)
-        prepared = reused if reused is not None else prepare_x360(x360, x360_target, pc_copy, events, runner.env, record, **options)
+        prepared = reused if reused is not None else prepare_x360(x360_source, x360_target, pc_copy, events, runner.env, record, **options)
         if not carbon:  # Carbon's build stages must not see the artwork root: their cache keys would change with it
             roots.update(prepared)
         if stage_only and x360 and not prepared:
@@ -1634,7 +1784,9 @@ def build(args, paths, events, runner, source_root=ROOT):
         if carbon:
             events.progress()
             return build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, events, runner, key, setup_log,
-                                x360_root=prepared.get("x360_root"))
+                                x360_root=prepared.get("x360_root"),
+                                choices=dict(carbon=clean_path(args.carbon), x360=x360, stage=clean_path(args.stage) if stage_only else None,
+                                             destination=destination))
         cached("runtime", ["runtime/boot"], ["sh", "runtime/build.sh"])
         # Coverage is validation against the current host source, not an input
         # to translated code. Recheck it even when both native artifacts resume.
@@ -1679,8 +1831,12 @@ def build(args, paths, events, runner, source_root=ROOT):
         return installed
 
 
-def build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, events, runner, key, setup_log, x360_root=None):
-    """Carbon's stages, after the tables and libraries: translate NFSC.exe, the hook archive, the runtime link, then its own app, signed, verified and installed."""
+def build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, events, runner, key, setup_log, x360_root=None,
+                 choices=None):
+    """Carbon's stages, after the tables and libraries: translate NFSC.exe, the hook archive, the runtime link, then its own app, signed, verified and installed.
+
+    choices: the Carbon folder, the Xbox 360 source, the update stage (--stage-only) and the app path. An update is
+    published to the stage like Most Wanted's; a committed install remembers the sources in Carbon's own Setup state."""
     py = Path(sys.executable).absolute()
     jobs = str(os.cpu_count() or 4)
     started = time.monotonic()
@@ -1706,34 +1862,62 @@ def build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, 
     product = CARBON_PRODUCT
     runner.run(["sh", "runtime/bundle.sh", stage, "--boot", source / "recomp/out/carbon/boot_carbon", "--game", "carbon",
                 "--name", product["name"], "--exec-name", product["exec"], "--bundle-id", product["bundle_id"],
-                "--version", PUBLIC_VERSION, "--build-version", PUBLIC_VERSION, "--source-id", identity(inventory)], cwd=source)
+                "--version", CARBON_VERSION, "--build-version", CARBON_VERSION, "--source-id", identity(inventory)], cwd=source)
     app = stage / f"{product['name']}.app"
     def verify(path):
-        verify_app(path, runner, bundle_id=product["bundle_id"], executable_name=product["exec"])
+        verify_app(path, runner, version=CARBON_VERSION, bundle_id=product["bundle_id"], executable_name=product["exec"])
     verify(app)
     events.progress()
+    choices = choices or {}
+    if choices.get("stage"):
+        events.stage("stage")
+        # The descriptor's data folder is named "data" and holds every root (apply.read_ready).
+        data = stage / "data"
+        remove(data)
+        carbon_data.rename(data)
+        roots = {name: data / Path(path).relative_to(carbon_data) for name, path in roots.items()}
+        return staging.publish(choices["stage"], app, data, roots, choices["destination"], data_home, CARBON_VERSION,
+                               dict(game="carbon", carbon=str(choices["carbon"]), x360=str(choices["x360"]) if choices.get("x360") else None,
+                                    source_id=identity(inventory)),
+                               on_commit=lambda path: setattr(events, "ready", path))
     events.stage("install")
+    def committed(path):
+        events.installed = path
+        # Only a committed install changes Carbon's remembered sources (Most Wanted's stay as they are).
+        if choices.get("carbon"):
+            with ignored_cancellation():
+                try:
+                    staging.save_choices(carbon_state(paths), choices["carbon"], choices.get("x360"), path)
+                except (OSError, InstallError) as e:
+                    events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
     installed = transactional_install(app, carbon_data, roots, data_home, dest, verify, log=setup_log,
                                       running=lambda: assert_not_running(pattern=CARBON_RUNNING),
-                                      on_commit=lambda path: setattr(events, "installed", path), move_data=True,
+                                      on_commit=committed, move_data=True,
                                       product=dict(bundle=app.name, bundle_id=product["bundle_id"]))
     clean_work(paths, events, key)
     events.progress()
     return installed
 
 
-def check_stage_locations(target, paths, pc, x360, destination, source, extras=()):
+def carbon_state(paths):
+    """Carbon's own Setup state (remembered sources); its updates live in <this>/updates, apart from Most Wanted's."""
+    return paths.state / CARBON_PRODUCT["data"]
+
+
+def check_stage_locations(target, paths, pc, x360, destination, source, extras=(), carbon=False):
     target = clean_path(target)
-    if destination.name != f"{PUBLIC_NAME}.app":
-        raise SetupError("The staging destination must name NFS Most Wanted Native.app.", "Pass --dest with the installed app path.")
-    protected = [pc, source, destination, destination.parent / "NFSMW.app", paths.data, paths.legacy,
-                 paths.work, paths.cache, paths.logs, paths.state / "source-choices.json"] + ([x360] if x360 else []) + list(extras)
+    name = CARBON_PRODUCT["name"] if carbon else PUBLIC_NAME
+    if destination.name != f"{name}.app":
+        raise SetupError(f"The staging destination must name {name}.app.", "Pass --dest with the installed app path.")
+    protected = ([pc] if pc else []) + [source, destination, destination.parent / "NFSMW.app", paths.data, paths.legacy,
+                 paths.work, paths.cache, paths.logs, paths.state / "source-choices.json",
+                 carbon_state(paths) / "source-choices.json"] + ([x360] if x360 else []) + list(extras)
     for keep in protected:
         if overlaps(target, keep):
             raise SetupError(f"The update stage overlaps a protected location: {keep}", "Choose a separate new staging directory.")
     # Ownership records and logs are also writes, even though staging never calls the installer.
     for writable in (paths.logs, paths.state / OWN_DIR):
-        for keep in [pc, source, destination, paths.data, paths.legacy] + ([x360] if x360 else []) + list(extras):
+        for keep in ([pc] if pc else []) + [source, destination, paths.data, paths.legacy] + ([x360] if x360 else []) + list(extras):
             if overlaps(writable, keep):
                 raise SetupError(f"Setup staging logs/state overlaps a protected location: {keep}",
                                  "Choose separate Setup logs, state, source and profile locations.")
@@ -1931,6 +2115,8 @@ def cars_command(args):
             recognition = None
             if carbon:
                 with cancellation():  # recognition has no catalog writes to protect
+                    if carbon.is_file() and carbon.suffix.lower() in (".zip", ".7z"):
+                        carbon = extract_x360_archive(carbon, paths.work, events)
                     recognition = car_sources.recognise(carbon)
                 engine._tick(cancel)
                 if recognition['game'] != 'carbon':
@@ -2042,7 +2228,7 @@ def main(argv=None):
         mode.add_argument('--cars-' + name, action='store_true', help='standalone extras ' + name)
     mode.add_argument('--cars-remove', nargs='+', type=int, help='deselect permanent slots; retain packs')
     mode.add_argument('--cars-restore', help='restore a verified retained generation')
-    ap.add_argument('--carbon', help='Carbon folder, any executable, or X360 ISO (with --game carbon: the Carbon PC folder)')
+    ap.add_argument('--carbon', help='Carbon folder, X360 ISO or its .zip/.7z (with --game carbon: the Carbon PC folder)')
     ap.add_argument('--game', choices=('mw', 'carbon'), default='mw',
                     help='carbon: --check or --build Carbon from --carbon alone, with an optional --x360 (no --pc, no Most Wanted copy)')
     ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')
@@ -2072,9 +2258,9 @@ def main(argv=None):
     try:
         if car_mode:
             return cars_command(args)
-        if args.game == "carbon" and not ((args.build or args.check) and args.carbon) or args.game == "carbon" and (
+        if args.game == "carbon" and not ((args.build or args.check) and args.carbon or args.stage_only or args.export_all_in_one) or args.game == "carbon" and (
                 args.pc or args.pc_disc or args.pc_update or args.pc_exe):
-            raise SetupError("--game carbon requires --build and --carbon (or --check and --carbon), and reads only the Carbon folder "
+            raise SetupError("--game carbon requires --build and --carbon (or --check and --carbon, or --stage-only), and reads only the Carbon folder "
                              "and, optionally, --x360 (your Carbon Xbox 360 copy), without --pc or disc images.")
         if any((args.carbon if args.game == "mw" else None, args.cars_spec, args.cars_mw_pc, args.cars_measure, args.cars_repair)):
             raise SetupError("Extras options require a --cars-* operation.")
@@ -2089,7 +2275,9 @@ def main(argv=None):
                 events = Events(args.events, log)
                 events.stage("bundle")
                 try:
-                    metrics = export_app(clean_path(args.app), paths.data, clean_path(args.dest),
+                    metrics = export_app(clean_path(args.app),
+                                         paths.data / CARBON_PRODUCT["data"] if args.game == "carbon" else paths.data,
+                                         clean_path(args.dest), game=args.game,
                                          on_publish=lambda path: setattr(events, "installed", str(path)))
                     log.write(("Export measurements: " + json.dumps(metrics, sort_keys=True) + "\n").encode())
                     events.emit("warn", id="bundle", msg=f"Exported in {metrics['seconds']:.1f} seconds. " +
@@ -2119,7 +2307,17 @@ def main(argv=None):
         elif not ((args.pc or args.game == "carbon") and args.dest and args.work) or args.stage:
             raise SetupError("--check and --build require --pc (Carbon: --carbon), --dest and --work; --stage requires --stage-only.")
         paths = Paths(args.work)
-        if args.stage_only:
+        if args.stage_only and args.game == "carbon":  # Carbon's remembered folder (its "pc") is the Carbon folder
+            choices = None if args.carbon and args.x360 and args.dest else staging.load_choices(carbon_state(paths), required=not args.carbon)
+            remembered_destination = not args.dest
+            args.carbon = args.carbon or (choices and choices["pc"])
+            args.x360 = args.x360 or (choices and choices["x360"])
+            args.dest = args.dest or (choices and choices["destination"])
+            if not args.dest:
+                raise SetupError("--stage-only requires --dest or a remembered destination.")
+            if remembered_destination:
+                staging.validate_destination(clean_path(args.dest), required=True)
+        elif args.stage_only:
             choices = None if args.pc and args.x360 and args.dest else staging.load_choices(paths.state, required=not args.pc)
             remembered_destination = not args.dest
             if not args.pc and choices:  # the disc images' update and speed.exe go with the remembered images
@@ -2135,8 +2333,9 @@ def main(argv=None):
                 staging.validate_destination(clean_path(args.dest), required=True)
         extras = [clean_path(p) for p in [args.pc_update, args.pc_exe] + (args.pc_disc or []) if p]
         if args.stage_only:
-            check_stage_locations(args.stage, paths, clean_path(args.pc), clean_path(args.x360) if args.x360 else None,
-                                  clean_path(args.dest), ROOT, extras)
+            check_stage_locations(args.stage, paths, clean_path(args.pc) if args.pc else None, clean_path(args.x360) if args.x360 else None,
+                                  clean_path(args.dest), ROOT, extras + ([clean_path(args.carbon)] if args.game == "carbon" else []),
+                                  carbon=args.game == "carbon")
         # Validate before creating anything at a user-selected path.
         check_locations(paths, clean_path(args.pc) if args.pc else None, clean_path(args.x360) if args.x360 else None,
                         clean_path(args.dest).parent if args.stage_only else clean_path(args.dest), ROOT, extras,

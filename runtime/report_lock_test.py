@@ -5,7 +5,7 @@ Pinned original: request 1069.00 ms / sound gap 1070.54 ms (40 checks / 2 failur
 Queued writer with report capture: request 0.92 ms / sound gap 45.02 ms (84 checks / 0 failures).
 Log budget: unbounded 11 checks / 1 failure; bounded 11 / 0.
 Regex resource error: unchecked 1 / 1 failure; fail-closed 1 / 0.
-The same fixture compares every bundle attachment byte for byte; no game or audio device needed.
+The same fixture compares every bundle attachment byte for byte except the added position line; no game or audio device needed.
 """
 import hashlib
 import os
@@ -274,8 +274,11 @@ def main():
         names = sorted(path.name for path in original.iterdir())
         assert names == sorted(path.name for path in fixed.iterdir()), names
         for name in names:
-            assert (original / name).read_bytes() == (fixed / name).read_bytes(), name + ' differs'
-        print(f'PASS: {len(names)} identical attachments; old save stalls sound, queued save stays below 200 ms')
+            old, new = (original / name).read_bytes(), (fixed / name).read_bytes()
+            if name == 'report.txt':
+                new = re.sub(rb'^position:.*\n', b'', new, flags=re.M)
+            assert old == new, name + ' differs'
+        print(f'PASS: {len(names)} attachments unchanged apart from position; old save stalls sound, queued save stays below 200 ms')
         run(work / 'budget', False, budget=True)
         run(work / 'unbounded', False, budget=True, unbounded=True)
         run(work / 'regex_error', False, regex_error=True)

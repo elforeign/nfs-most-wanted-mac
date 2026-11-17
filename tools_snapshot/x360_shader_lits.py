@@ -13,8 +13,8 @@ with the literal VALUES and the parameter DEFAULT values zeroed, so a changed nu
 changed program (another build, a mod, garbage) is refused.
 
 Input: the full ZZDATA0.BIN (base 0), or a slice of it named zzdata0_<hex base>.bin (the owner's extract). Without one:
---stub writes zeros with X360_SHADER_LITS 0 except the post chain and car paint/normal lighting scalars, which take
-this port's own values (PORT_SCALARS). Metallic flake and texture-dependent shader families still need the file.
+--stub writes zeros with X360_SHADER_LITS 0 except the post chain, car paint/normal lighting, wall depth and particle
+scalars, which take this port's own values (PORT_SCALARS), and the world fog and particle size clamps (PORT_DEFAULTS). Metallic flake and texture-dependent shader families still need the file.
 
 Macros (C string literals, spliced into the MSL source by concatenation so the shader text is byte for byte what it
 was): X360L_<shader>_C<reg> "float4(a, b, c, d)", X360LC_<shader>_C<reg> "float4(a,b,c,d)" (compact), named scalars
@@ -373,6 +373,33 @@ PORT_SCALARS = {
     # The blur's share by depth, fade = A - B x (depth in half metres): a streak shrinks with distance (1 / Z), so the
     # road and roadside keep the full blur to 13.5 m (fade 1) and the far scenery and sky none from 149 m (fade 0).
     "X360S_VT_FADE_A": "1.1", "X360S_VT_FADE_B": "0.0037",
+    # Wall and kerb depth (materials.m R25; used only when the player picks it, the row defaults to PC without the file).
+    # Offset-limited parallax (Welsh 2004, "Parallax Mapping with Offset Limiting"): uv += (s h + b) E.xy with the
+    # paper's example scale s = 0.04 texture units and its bias rule b = -0.5 s, so mid-height (h = 0.5) stays in place
+    # and the texture never swims on average. The shader spells it (SCALE2 h - BIAS): 0.04 and 0.02.
+    "X360S_PARALLAX_SCALE2": "0.04", "X360S_PARALLAX_BIAS": "0.02",
+    # Geometric self-shadow on the bumped sun term, saturate(k L.z) with L.z the tangent-space light's normal component:
+    # Kilgard 2000 ("A Practical and Robust Bump-mapping Technique for Today's GPUs") uses min(8 max(0, Lz), 1), a steep
+    # ramp so a light behind the geometric surface lights no bump and the boundary does not pop.
+    "X360S_PARALLAX_SELFSHADOW": "8.0",
+    # Particle shadow term (materials.m particles_msl, the 9-tap branch; used only when the player picks X360 without
+    # the file): colour x (h + h x shadow). A fully lit particle must equal the PC's fully lit one (2 h = 1), so h = 0.5;
+    # fully shadowed it keeps half, the floor the PC's own hardware-shadow path gives (saturate(0 + PCS_PARTICLE_HW_BIAS)).
+    "X360S_PARTICLE_HALF": "0.5",
+}
+# Effect parameter defaults the C code uses without the file (the rest stay 0).
+PORT_DEFAULTS = {
+    # The world's fog distance clamp (render.m fog_patch). The PC's fogged vertex shaders are the Hoffman-Preetham
+    # daylight model: transmittance exp(-(Br + Bm) s) with s = distance x FogValue, and the PC caps s at 2500. The model
+    # itself has no cap: optical depth keeps growing with distance, and past the point where transmittance falls below
+    # one 8-bit level any cap is invisible. This value lies beyond every drawn surface, so the clamp never binds and
+    # every surface gets the model's own haze.
+    "X360F_KMAXDIST_WORLD": 1.0e9,
+    # The particle size clamp (materials.m f_006C1160, with the X360 particle choice): a corner at most this far from
+    # the quad's projected centre in normalised device units (the screen spans -1..1 vertically). 1.0 keeps every
+    # particle's circumscribed circle within the screen's height, so a puff the camera drives into cannot cover more
+    # than the whole picture.
+    "X360F_PARTICLE_MAXD": 1.0,
 }
 
 
@@ -402,7 +429,7 @@ def text(have, source):
         out.append('#define %s "%s"' % (macro, spell(v, how)))
     for macro, name, param, cells, scale in DEFAULTS:
         vals = [finite(struct.unpack("<f", struct.pack("<f", f32(have[name][1][param][r][c]) * scale))[0],
-                       "%s %s" % (name, param)) if have else 0.0 for r, c in cells]
+                       "%s %s" % (name, param)) if have else PORT_DEFAULTS.get(macro, 0.0) for r, c in cells]
         text = ["%sf" % spell(v, "p") for v in vals]
         out.append("#define %s %s" % (macro, text[0] if len(text) == 1 else "{" + ", ".join(text) + "}"))
     return "\n".join(out) + "\n"

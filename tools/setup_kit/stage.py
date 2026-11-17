@@ -13,7 +13,7 @@ import uuid
 
 from . import x360_extras
 
-from .install import (InstallError, defer_interrupts, digest_tree, ident, is_current_app,
+from .install import (APP_BUNDLE, PRODUCTS, InstallError, defer_interrupts, digest_tree, ident, is_current_app,
                       real_dir, sync_dir, write_synced)
 
 
@@ -78,7 +78,8 @@ def validate_destination(destination, required=False):
     refuse_update(destination)
     if not required and not os.path.lexists(destination):
         return  # Explicit destinations may prepare a first installation.
-    if not real_dir(destination) or not is_current_app(destination):
+    # Carbon's app has its own id; any other name is checked as Most Wanted's (and refused by the stage checks).
+    if not real_dir(destination) or not is_current_app(destination, PRODUCTS.get(destination.name, PRODUCTS[APP_BUNDLE])["bundle_id"]):
         raise InstallError(f"STAGE_DESTINATION_INVALID: The installed app is missing or unrecognized: {destination}",
                            "Reselect the installed NFS Most Wanted Native.app with --dest.")
 

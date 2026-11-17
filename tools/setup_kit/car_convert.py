@@ -2,8 +2,9 @@
 
 Shared is a source GLOBAL directory, or a mapping containing ``carbon_global``,
 ``attributes`` and ``mw_root`` paths. No asset values are bundled here. Lamp
-material transcriptions remain excluded. Classified neutral illumination and
-source rim-finish coefficients are retained alongside MW material roles. Structural success does not approve appearance.
+cover transcriptions remain excluded. Classified neutral illumination, source
+brake-light levels and rim finishes accompany MW material roles. Structural
+success does not approve appearance.
 
 The reader validates all binary ranges before decoding. Outputs use independent
 resource identities and include SOLIDMAP.BIN and WHEELFIT.BIN. Input digests are
@@ -567,48 +568,35 @@ PAINT_NAMES = {b'BODY', b'BODY_LEFT', b'BODY_RIGHT', b'BODY_REAR', b'BODY_TOP', 
 
 
 def map_vertex_lighting(models, source_car=None):
-    """Repair classified rim RGB and conditionally supply neutral body illumination.
+    """Repair classified rim RGB and supply neutral colour to unexported vertices.
 
     MW car VS multiplies diffuse/specular/environment by saturate(2*COLOR.x).
-    CCX exports zero for its whole painted body (and most exterior draws), so
-    copying that field blacks out even correctly bound paint. Detect this from
-    stock BODY_A paint, not a car-name list. The paint gate protects authored
-    non-rim shading; classified zero-RGB rim vertices need repair independently.
+    All four colour bytes zero indicate an export gap. Authored dark non-rim
+    vertices carry alpha and retain their shading. Classified rim vertices
+    need RGB repair independently, preserving their authored alpha.
     This is a compatibility default, not a reconstruction of Carbon's lighting.
     """
-    # Stripped labels retain the source texture identity. Classify paint by its
-    # replaceable skin binding, and rim draws by the rim atlas on a tire solid.
-    paint_images = {name_hash(f'{source_car}_{r}') for r in MW_PAINT_BINDINGS} if source_car else set()
+    # Stripped labels retain the rim atlas identity on a tire solid.
     rim_image = name_hash(source_car + '_TIRE') if source_car else None
-    def role(m, r, name):
+    def rim(m, r, name):
         label = bytes(name).split(b'\0')[0]
         diffuse = m['textures'][r[24]] if not label and source_car else None
-        paint = label in PAINT_NAMES or (not label and diffuse in paint_images)
-        rim = label.startswith(b'RIM_') or (not label and '_TIRE_' in m['name'] and diffuse == rim_image)
-        return paint, rim
-    stock = next((m for n, m in models.items() if n.endswith('_KIT00_BODY_A')), None)
-    paint, base = [], 0
-    for r, name in zip(stock['records'], stock['names']) if stock is not None else ():
-        count = u32(r, 60)
-        if role(stock, r, name)[0]:
-            paint.append(stock['vertices'][base:base + count, 24:28])
-        base += count
-    neutral_body = bool(paint) and not any(v.any() for v in paint)
+        return label.startswith(b'RIM_') or (not label and '_TIRE_' in m['name'] and diffuse == rim_image)
     changed = 0
     for m in models.values():
         base = 0
         for r, name in zip(m['records'], m['names']):
             count = u32(r, 60)
             colours = m['vertices'][base:base + count, 24:28]
-            if role(m, r, name)[1]:
+            if rim(m, r, name):
                 # Lower LODs merge black lip vertices into lit spoke draws.
                 # Alpha is opacity, not evidence of vertex illumination.
                 dark = ~colours[:, :3].any(axis=1)
                 colours[dark, :3] = 255
-                changed += int(dark.sum())
-            elif neutral_body and not colours.any():
-                colours[:] = 255
-                changed += count
+            else:
+                dark = ~colours.any(axis=1)
+                colours[dark] = 255
+            changed += int(dark.sum())
             base += count
     return changed
 
@@ -835,6 +823,30 @@ def source_rim_rows(data, mw_data):
         row[20:48] = name.encode().ljust(28, b'\0')
         row[0x30:0x5c] = r[0x64:0x90]
         require(not rows, 'duplicate source rim material')
+        rows[name_hash(name)] = bytes(row)
+    return rows
+
+
+CARBON_SOURCE_LIGHTS = {name_hash('BRAKELIGHT'): 'CARBON_BRAKELIGHT'}
+
+
+def source_light_rows(data, mw_data, used):
+    """Keep source diffuse/alpha/power fields in the matching MW light frame."""
+    rows = {}
+    for source, name in CARBON_SOURCE_LIGHTS.items():
+        if name_hash(name) not in used:
+            continue
+        src = [data[o+8:o+8+z] for c, o, z in walk(data)
+               if c == 0x135200 and z == 236 and u32(data, o+20) == source]
+        mw = [mw_data[o+8:o+8+z] for c, o, z in walk(mw_data)
+              if c == 0x135200 and z == 168 and u32(mw_data, o+20) == source]
+        require(len(src) == len(mw) == 1 and u32(src[0], 8) == 3,
+                'source light material ' + name)
+        require(np.isfinite(np.frombuffer(src[0][0x64:0x90], '<f4')).all(), 'nonfinite source light level')
+        row = bytearray(mw[0])
+        struct.pack_into('<I', row, 12, name_hash(name))
+        row[20:48] = name.encode().ljust(28, b'\0')
+        row[0x30:0x5c] = src[0][0x64:0x90]
         rows[name_hash(name)] = bytes(row)
     return rows
 
@@ -1471,7 +1483,7 @@ def validate_geometry(data, carbon=False, *, input_pack=False):
             name = text_at(r, 20, 48)
             identity = u32(r, 12)
             require(identity == name_hash(name) and identity not in row_ids and
-                    (name in ('CARBON_MAGMATTE', 'CARBON_LAMP_BRAKE', 'CARBON_LAMP_HEAD') or
+                    (name in ('CARBON_MAGMATTE', 'CARBON_BRAKELIGHT', 'CARBON_LAMP_BRAKE', 'CARBON_LAMP_HEAD') or
                      re.fullmatch(r'IMP_[0-9A-F]{20}', name)), 'unexpected light material identity')
             require(np.isfinite(np.frombuffer(r[48:], '<f4')).all(), 'nonfinite light material')
             row_ids.add(identity)
@@ -1630,6 +1642,10 @@ def shared_resources(read, root):
     return images, materials, set(map(name_hash, dynamic))
 
 
+# Unconditional GetUsedCarTextureInfo requests, free of normal-map suffix rules.
+SOURCE_IMAGE_SLOTS = ('DOOR_HANDLE', 'SIDELIGHT', 'LOGO', 'BADGING_EU')
+
+
 def material_resources(source, source_tex, donor_tex, car, slot, shared_raw, shared_images, dynamic,
                        *, models=None, textures=None, shared_textures=None, source_aliases=None):
     wanted = (geometry_texture_hashes(source) if models is None else
@@ -1688,6 +1704,25 @@ def material_resources(source, source_tex, donor_tex, car, slot, shared_raw, sha
         require(fibre in sourced, 'source carbon fibre pixels absent')
         extras.update(sourced)
         aliases[fibre] = (target_hash, target_name)
+    # Only requested pack names stream. Carry source-only diffuse images in
+    # free requested slots, with rotors first. X360 strips material labels,
+    # so inspect decoded draw texture indices and the validated texture names
+    # retained by both texture adapters, never material labels or raw PC solids.
+    diffuse = {m['textures'][r[24]] for m in models.values() for r in m['records']}
+    def image_name(h):
+        record = extras[h][0]
+        return text_at(record, 89, 89 + record[88])
+    unrequested = sorted((h for h in extras if h in diffuse and h not in aliases and
+                          h not in shared_images | dynamic),
+                         key=lambda h: (not image_name(h).startswith('ROTOR'), image_name(h)))
+    occupied = {aliases.get(h, (h, None))[0] for h in local | wanted}
+    occupied.update(h for h, _ in texture_blobs(donor_tex))
+    free = [role for role in SOURCE_IMAGE_SLOTS
+            if name_hash(f'{car}_{role}') not in local | wanted and
+            name_hash(f'{slot}_{role}') not in occupied | shared_images]
+    require(len(unrequested) <= len(free), 'more source-only images than free streaming slots')
+    for h, role in zip(unrequested, free):
+        aliases[h] = (name_hash(f'{slot}_{role}'), f'{slot}_{role}')
     aliases.update(normal_resource_aliases(slot))
     return aliases, extras
 
@@ -1863,10 +1898,21 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     selected = car_lighting.policy(source_rows, mw_rows, used, namespace='NFSAD_' + car,
         roles=roles, dynamic=skipped, occupied=images | materials | set(textures) |
         {name_hash(n) for n in models}, **lighting)
+    # Compatibility levels apply only to role-only draws. Explicit amplitude
+    # translation and dynamic bindings retain car_lighting.policy's decision.
+    for light, name in CARBON_SOURCE_LIGHTS.items():
+        if light in used and light not in selected.dynamic and selected.remap.get(light) == light:
+            identity = name_hash(name)
+            require(identity not in images | materials | set(textures) | selected.rows.keys(),
+                    'source light namespace collision')
+            selected.remap[light] = identity
+    rear_brake = f'{car}_KIT00_REAR_BRAKE_A' in models
     models, assembled = decoded_models(models, mw, donor if car != donor else None, aliases, selected.remap,
                                         source_car=car)
     stock = [f'{donor}_BASE_{lod}' for lod in 'ABCD'] + [f'{donor}_KIT00_BODY_{lod}' for lod in 'ABCD']
-    stock += [f'{donor}_KIT00_{end}_BRAKE_A' for end in ('FRONT', 'REAR')]
+    stock += [f'{donor}_KIT00_FRONT_BRAKE_A']
+    if rear_brake:
+        stock += [f'{donor}_KIT00_REAR_BRAKE_A']
     missing = sorted(set(stock) - models.keys())
     if missing:
         raise MissingStockPartError('missing stock parts: ' + ', '.join(missing))
@@ -1883,6 +1929,9 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     if name_hash('CARBON_MAGMATTE') in used:
         rows.update(source_rim_rows(shared_raw, unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC'))))
         require(name_hash('CARBON_MAGMATTE') in rows, 'source rim material absent')
+    if used & set(map(name_hash, CARBON_SOURCE_LIGHTS.values())):
+        rows.update(source_light_rows(shared_raw,
+            unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC')), used))
     materials |= rows.keys()
     for m in models.values():
         validate_model(m)

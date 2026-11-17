@@ -42,7 +42,7 @@
 #if NFS_GAME == NFS_GAME_MW
 #include "report_github.h"
 #else
-#include "game_menu_report.inc"
+#include "game_menu_report.h"
 #endif
 #include "onscreen_keyboard.h"
 void osk_pass(Cpu *c);
@@ -57,16 +57,16 @@ void user32_menu_opening(void);          // user32.m: release held keys and butt
 void user32_menu_cursor(void);           // user32.m: the system cursor over the game while the menu is open
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_menu_policy.inc"
-#include "game_menu_shortcut.inc"
-#include "game_menu_text.inc"
+#include "game_menu_policy.h"
+#include "game_menu_shortcut.h"
+#include "game_menu_text.h"
 #endif
 
 // ---------------- state (game thread) ----------------
 #if NFS_GAME == NFS_GAME_MW
 static int is_open, tab, sel = -1, top, editing, dragging = -1, hover = -1, hover_tab = -1, dirty = 1;
 #else
-#include "game_menu_state.inc"
+#include "game_menu_state.h"
 #endif
 static int device;                       // help line: 0 keyboard, 1 mouse, 2 controller
 static char status[256];
@@ -172,6 +172,10 @@ static void change(Setting *s, int d) {
     if (s->type == SET_CHOICE || s->type == SET_TOGGLE) {
         int n = s->type == SET_TOGGLE && !s->choices ? 2 : s->nchoices;
         int v = !strcmp(s->id, "graphics.look_preset") ? settings_look_choice() : value_of(s);
+#if NFS_GAME == NFS_GAME_PRIVATE
+        // The shared enum includes Xbox 360; this menu has only Port, PC and My picks.
+        if (!strcmp(s->id, "graphics.look_preset")) v = v == PRESET_PC ? 1 : v == PRESET_MINE ? 2 : 0;
+#endif
         if (settings_set(s, (v + d + n) % n)) changed(s);
     } else if (s->type == SET_SLIDER) {
         if (settings_set(s, value_of(s) + d * (s->step > 0 ? s->step : 1))) changed(s);
@@ -237,7 +241,7 @@ static void set_open(int o) {
 #if NFS_GAME == NFS_GAME_MW
     if (diag_on) diag_event("menu: %s (tab %s, game-flow %u)", o ? "open" : "closed", settings_category_names[tab], M32(GAMEFLOW_STATE));
 #else
-#include "game_menu_event.inc"
+#include "game_menu_event.h"
 #endif
 }
 void portmenu_toggle(void) { set_open(!is_open); }
@@ -261,7 +265,7 @@ void portmenu_pass(Cpu *c) {
 }
 
 #else
-#include "game_menu_hold.inc"
+#include "game_menu_hold.h"
 #endif
 // ---------------- keyboard ----------------
 // user32.m key_event, every key (scripted ones too): 1 = the menu took it.
@@ -282,7 +286,7 @@ static int replay_game_blocked(void) {
     return 0;
 }
 #else
-#include "game_menu_replay.inc"
+#include "game_menu_replay.h"
 #endif
 static ReplayInput replayInput;
 void replay_controls_cancel(void) { replay_input_cancel(&replayInput); }
@@ -678,7 +682,7 @@ static int render(void) {
 #if NFS_GAME == NFS_GAME_MW
     snprintf(b, sizeof b, "NFSMW Mac port  ·  %s", port_build_id());
 #else
-#include "game_menu_title.inc"
+#include "game_menu_title.h"
 #endif
     text(ctx, b, PW - 28, 27, fnt(0, 12), c_faint, 1);
     // tabs
@@ -1047,6 +1051,6 @@ void portmenu_frame(void) {
                    settings_category_names[tab], sel);
     }
 #else
-#include "game_menu_capture.inc"
+#include "game_menu_capture.h"
 #endif
 }

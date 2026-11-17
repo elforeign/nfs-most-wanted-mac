@@ -6,7 +6,7 @@
 #include "host.h"
 #include "game_select.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "carbon_padfx_backend.inc"
+#include "carbon_padfx_backend.h"
 #endif
 void report_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;

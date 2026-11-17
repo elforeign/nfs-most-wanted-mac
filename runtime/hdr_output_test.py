@@ -307,7 +307,7 @@ def main():
             sys.path.insert(0, str(private_ao.parent))
             from private_ao_test import prewarm_fixture
             result = prewarm_fixture(scratch, (ROOT / 'render_post.m').read_text(),
-                                     (private_ao.parent / 'private_runtime/carbon_ao.inc').read_text())
+                                     (private_ao.parent / 'private_runtime/carbon_ao.h').read_text())
             if result:
                 return result
         (scratch / 'presenter.inc').write_text(production)

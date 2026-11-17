@@ -119,9 +119,9 @@ class MenuX360Traces(unittest.TestCase):
         # Independent registry expectations: shader-only, engine-only and both.
         shader_only = "graphics.trees graphics.scenery_lights graphics.water graphics.grass graphics.parallax".split()
         both = "graphics.rain_ripples graphics.x360_arrest".split()
-        engine_only = ["graphics.shadow_fit"]
-        # The post chain, lens drops, car materials and generated flake have port-authored fallback values.
-        neither = "graphics.postfx graphics.tone_curve graphics.speed_blur graphics.curve_glow graphics.raindrops graphics.car_paint graphics.car_normals graphics.car_glass graphics.car_flake".split()
+        engine_only = []
+        # The post chain, lens drops, car materials, generated flake and the shadow fit have port-authored fallback values.
+        neither = "graphics.shadow_fit graphics.postfx graphics.tone_curve graphics.speed_blur graphics.curve_glow graphics.raindrops graphics.car_paint graphics.car_normals graphics.car_glass graphics.car_flake".split()
         # Port building glass reads only the PC solids; X360 without the files falls back to Port in its own gate.
         neither += ["graphics.building_glass"]
         # Authored ripple provider is opt-in and needs no console inputs.
@@ -130,6 +130,9 @@ class MenuX360Traces(unittest.TestCase):
         # Authored water provider is opt-in and needs no console inputs.
         shader_only.remove("graphics.water")
         neither += ["graphics.water"]
+        # Wall and kerb depth runs on port-authored values (default X360, owner 11-15) without console shaders.
+        shader_only.remove("graphics.parallax")
+        neither += ["graphics.parallax"]
         names = shader_only + both + engine_only + neither
         d = Path(self.tmp.name) / "retained-menu"
         (d / "gen").mkdir(parents=True)

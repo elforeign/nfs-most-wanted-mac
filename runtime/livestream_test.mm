@@ -45,6 +45,7 @@
 #include "livestream.h"
 #include "live_encode.h"
 #import <Foundation/Foundation.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
@@ -563,6 +564,57 @@ static int processScanProof(const char *base,const char *anchor) {
     return 0;
 }
 #endif
+// Upload stall: real segmenter -> poster at the production limits, eight IDR-only 2 s segments fed at twice real
+// time; the fixture holds the second segment's response 3.5 s (seven segment intervals). Live must continue.
+static int rideStallProof(const std::string& key,live::StreamTestOptions options) {
+    options.deadlineSeconds=live::Poster::deadlineSeconds;
+    live::SegmentLimits limits;
+    auto p=live::Poster::create(key,options);
+    check(!!p,"ride activation");
+    constexpr unsigned frames=8;
+    std::vector<clip::OwnedPacket> packets;
+    auto sink=std::make_shared<clip::Sink>([&](const clip::OwnedPacket& packet) {
+        packets.push_back(packet); return clip::Result::consumed;
+    });
+    live::Encoder encoder(live::Profile::youtube(320,180),sink);
+    check(!encoder.status(),"ride encoder");
+    CVPixelBufferRef pixel=nullptr;
+    check(!CVPixelBufferCreate(nullptr,320,180,kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,nullptr,&pixel),"ride pixel");
+    CVPixelBufferLockBaseAddress(pixel,0);
+    for(size_t plane=0;plane<2;++plane) memset(CVPixelBufferGetBaseAddressOfPlane(pixel,plane),128,
+        CVPixelBufferGetBytesPerRowOfPlane(pixel,plane)*CVPixelBufferGetHeightOfPlane(pixel,plane));
+    CVPixelBufferUnlockBaseAddress(pixel,0);
+    for(unsigned i=0;i<frames;++i) {
+        check(encoder.encode(pixel,CMTimeMake(i*180000,90000),CMTimeMake(1500,90000)),"ride encode");
+        encoder.complete();
+    }
+    CVPixelBufferRelease(pixel); sink->close();
+    check(await([&]{return sink->drained();}) && packets.size()==frames,"ride video drain");
+    clip::AACEncoder audio; check(!audio.status,"ride AAC");
+    std::vector<float> pcm(48000*2*2*frames);
+    check(audio.encode(pcm.data(),pcm.size()/2,true,[&](clip::OwnedPacket packet) { packets.push_back(packet); }),"ride audio encode");
+    auto at=[](const clip::OwnedPacket& packet) { return CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(packet->sample())); };
+    std::stable_sort(packets.begin(),packets.end(),[&](const auto& a,const auto& b){ return at(a)<at(b); });
+    live::Segmenter mux([&](live::OwnedSegment seg) { return p->post(seg); },limits);
+    auto start=std::chrono::steady_clock::now();
+    bool fed=true;
+    for(auto &packet:packets) {
+        std::this_thread::sleep_until(start+std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(std::max(0.0,at(packet)/2))));
+        if(mux.consume(packet)!=clip::Result::consumed) { fed=false; break; }
+    }
+    bool finished=fed && mux.finish();
+    auto m=mux.stats();
+    await([&]{ auto s=p->stats(); return !s.running || s.playlists>=m.segments; },12);
+    auto s=p->stats();
+    printf("ride: segments=%llu posted=%llu playlists=%llu dropped=%llu running=%d error=%d segmenter_failed=%d reason=%s held_peak=%zu peak_ticks=%lld seconds=%.3f\n",
+        (unsigned long long)m.segments,(unsigned long long)s.posted,(unsigned long long)s.playlists,(unsigned long long)s.dropped,
+        s.running,(int)s.error,m.failed,m.reason?m.reason:"none",m.heldPeak,(long long)s.peakTicks,
+        std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
+    check(finished && !m.failed && m.segments==frames,"segmenter rides through a stalled upload");
+    check(s.running && s.posted==frames && s.playlists==frames && !s.dropped,"poster rides through a stalled upload");
+    p->stop(); drained(p); return 0;
+}
 int main(int argc,char **argv) {
 #ifdef LIVESTREAM_PROCESS_SCAN
     check(argc==4 && !strcmp(argv[1],"process-scan"),"process scan arguments");
@@ -610,6 +662,7 @@ int main(int argc,char **argv) {
         }
         if(mode.rfind("wipe-",0)==0) return keyWipeProof(mode,key,options);
         if(mode=="untrusted") options.anchorDER.clear();
+        if(mode=="ride-stall") return rideStallProof(key,options);
         if(mode=="deadline" || mode=="playlist-stall") options.deadlineSeconds=0.4;
         auto p=live::Poster::create(key,options);
         check(!!p,"explicit activation");
@@ -719,7 +772,7 @@ int main(int argc,char **argv) {
         }
         if(mode=="queued" || mode=="bytes") {
             bool queued=mode=="queued";
-            size_t bytes=queued?4*1024*1024:9*1024*1024;
+            size_t bytes=queued?live::Poster::maxBytes/4:live::Poster::maxBytes/16*9;
             unsigned count=queued?4:1;
             for(unsigned i=0;i<count;++i) check(p->post(segment(i,bytes,45000)),"bounded admission");
             check(await([&]{return createdSessions.load()==1;}),"request enters flight");

@@ -110,7 +110,7 @@ def main():
         assert body.index('diag_capture_begin();') < body.index('waitUntilCompleted') < body.index('diag_capture_end();')
     presenter = function((ROOT / 'runtime/render_present.m').read_text(), 'static void png_after(')
     assert presenter.index('diag_capture_begin();') < presenter.index('dispatch_semaphore_wait(') < presenter.index('diag_capture_end();')
-    for label, source in [('mw', diag), ('private', (ROOT / 'recomp/private_runtime/game_diagnostics.inc').read_text())]:
+    for label, source in [('mw', diag), ('private', (ROOT / 'recomp/private_runtime/game_diagnostics.h').read_text())]:
         monitor = function(source, 'static void *hang_monitor(')
         # Keep the production stall/hang conditions and reporting calls intact.
         monitor = monitor.replace('usleep(100000);', 'profile_wait_100ms();')

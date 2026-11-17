@@ -1,3 +1,5 @@
+#include "game_select.h"
+#if NFS_GAME == NFS_GAME_MW
 // settings_look_test.c - offline F10 look tests, no game/GPU.
 // clang -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I recomp runtime/settings_look_test.c runtime/settings.c -o /tmp/slt && /tmp/slt
 // PASS: 0 failures, including fresh-process preference reload, every affected extra,
@@ -92,7 +94,7 @@ static Setting extras[] = {
     EXTRA("graphics.hdr_output", .type=SET_TOGGLE, .restart=1),
     EXTRA("graphics.lamp_glow", .type=SET_TOGGLE),
     EXTRA("graphics.headlamp_glass", CH2("retail","clear")),
-    EXTRA("graphics.realworld_materials", .type=SET_CHOICE, .choices=(const char *const[]){"Off","Glass","Chrome","All"}, .values=(const char *const[]){"off","glass","chrome","all"}, .nchoices=4),
+    EXTRA("graphics.realworld_materials", .type=SET_CHOICE, .choices=(const char *const[]){"Off","Glass","Chrome","All"}, .values=(const char *const[]){"off","glass","chrome","all"}, .nchoices=4, .def=1),
     EXTRA("graphics.traffic_detail", CH2("off","on")),
     EXTRA("graphics.road_film", CH2("0","1")),
     EXTRA("graphics.car_reflection", CH2("pc","sharp"), .def=1, .restart=1),
@@ -312,7 +314,7 @@ int main(int argc, char **argv) {
     CHECK(physical != NULL);
     if (physical) {
         settings_look_apply(PRESET_PORT);
-        CHECK(settings_get(physical->id) == 0);
+        CHECK(settings_get(physical->id) == 1);   // Port takes the shipped default, Glass
         CHECK(settings_set(physical, 3));
         settings_look_apply(PRESET_PC);
         CHECK(settings_get(physical->id) == 0);
@@ -324,3 +326,195 @@ int main(int argc, char **argv) {
     printf("settings_look_test: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures != 0;
 }
+
+#else
+/* Carbon registration, fresh-process persistence and production selectors.
+ * private_port_settings_test.py supplies the extracted selector bodies. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <math.h>
+#include "settings.h"
+#include "roots.h"
+#include "carbon_port_selectors.h"
+void portmenu_status(const char *fmt, ...) { (void)fmt; }
+void carbon_devrows_crew(int v) { (void)v; }
+void carbon_devrows_nitrous(int v) { (void)v; }
+void carbon_devrows_speedbreaker(int v) { (void)v; }
+#include "carbon_port_settings.h"
+
+int diag_on;
+const char *game_dir;
+static char store[64][2][1024];
+static int nstore, failures;
+static const char *store_path;
+const char *app_pref(const char *key) {
+    for (int i=0;i<nstore;++i) if (!strcmp(store[i][0],key)) return store[i][1];
+    return NULL;
+}
+void app_pref_set(const char *key, const char *value) {
+    int i=0;
+    while (i<nstore && strcmp(store[i][0],key)) ++i;
+    if (i==nstore) { if(nstore==64) abort(); ++nstore; }
+    snprintf(store[i][0],sizeof store[i][0],"%s",key);
+    snprintf(store[i][1],sizeof store[i][1],"%s",value);
+    FILE *f=fopen(store_path,"wb"); if(!f) abort();
+    fwrite(&nstore,sizeof nstore,1,f); fwrite(store,sizeof store,1,f); fclose(f);
+}
+void app_pref_batch_begin(void) {}
+void app_pref_batch_end(void) {}
+void report_note(const char *fmt, ...) { (void)fmt; }
+void diag_event(const char *fmt, ...) { (void)fmt; }
+#define CHECK(x) do { if (!(x)) { fprintf(stderr,"FAIL line=%d: %s\n",__LINE__,#x); ++failures; } } while(0)
+
+/* Independent UI/default/encoding contract; never derived from registrations. */
+static const struct {
+    const char *id, *env, *spelling[3];
+    int def, max, category;
+} expected[] = {
+    {"graphics.carbon_coat","NFS_CARBON_COAT",{"0","1"},1,1,SET_PICTURE},
+    {"graphics.carbon_materials","NFS_CARBON_MATERIALS",{"0","1"},1,1,SET_PICTURE},
+    {"graphics.carbon_ao","NFS_CARBON_AO",{"off","on"},1,1,SET_PICTURE},
+    {"graphics.carbon_envcube","NFS_CARBON_ENVCUBE",{"0","1"},0,1,SET_PICTURE},
+    {"graphics.carbon_reflect_hdr","NFS_CARBON_REFLECT_HDR",{"0","1"},1,1,SET_PICTURE},
+    {"graphics.daynight","NFS_DAYNIGHT",{"off","on"},0,1,SET_PICTURE},
+    {"graphics.daynight_mode","NFS_DAYNIGHT_MODE",{"game","cycle","fixed"},0,2,SET_PICTURE},
+    {"graphics.daynight_hour","NFS_DAYNIGHT_HOUR",{NULL},12,24,SET_PICTURE},
+    {"audio.carbon_limiter","NFS_CARBON_LIMITER",{"0","1"},1,1,SET_AUDIO},
+    {"audio.carbon_pos_layout","NFS_CARBON_POS_LAYOUT",{"game","itu"},0,1,SET_AUDIO},
+    {"controls.adaptive_triggers","NFS_PAD_TRIGGERS",{"off","on"},1,1,SET_CONTROLS},
+};
+static const char *spelling(int i,int value) {
+    static char number[16];
+    if(i!=7) return expected[i].spelling[value];
+    snprintf(number,sizeof number,"%d",value); return number;
+}
+static int selected(int i) {
+    switch(i) {
+    case 0: return carbon_coat_shader(NULL,0,NULL)!=NULL;
+    case 1: carbon_coat_shader(NULL,0,NULL); return carbon_coat_materials;
+    case 2: carbon_ao_init(); return carbon_ao_on;
+    case 3: return port_cube_selector();
+    case 4: return port_reflect_selector();
+    case 5: return port_daynight_selector();
+    case 6: return port_clock_mode();
+    case 7: return (int)carbon_dn_number("NFS_DAYNIGHT_HOUR",12,0,24);
+    case 8: return private_carbon_limiter_enabled();
+    case 9: return carbon_posaudio_enabled();
+    case 10: return triggers_on();
+    }
+    abort();
+}
+static void verify(int i,int value) {
+    Setting *s=settings_find(expected[i].id);
+    CHECK(s!=NULL); if(!s) return;
+    CHECK(settings_get(s->id)==value);
+    CHECK(selected(i)==value);
+    const char *env=getenv(expected[i].env);
+    if(value!=expected[i].def) CHECK(env && !strcmp(env,spelling(i,value)));
+}
+int main(int argc,char **argv) {
+    if(argc<3) return 2;
+    store_path=argv[1];
+    FILE *f=fopen(store_path,"rb");
+    if(f) { if(fread(&nstore,sizeof nstore,1,f)!=1 || fread(store,sizeof store,1,f)!=1) abort(); fclose(f); }
+#ifndef PORT_SETTINGS_ORIGINAL
+    carbon_port_settings_init();
+#endif
+    /* Native/device rows deliberately sit in the same tabs as port controls. */
+    static Setting native_aa={.id="graphics.antialiasing", .category=SET_PICTURE,
+        .type=SET_SLIDER, .min=0, .max=3, .def=2, .own_pref=1};
+    static Setting hdr={.id="graphics.hdr_output", .category=SET_PICTURE,
+        .type=SET_SLIDER, .min=0, .max=2, .def=1};
+    static Setting native_audio={.id="audio.mode", .category=SET_AUDIO,
+        .type=SET_SLIDER, .min=0, .max=2, .def=2, .own_pref=1};
+    settings_add(&native_aa); settings_add(&hdr); settings_add(&native_audio);
+    settings_init();
+    for(int i=0;i<11;++i) {
+        Setting *s=settings_find(expected[i].id);
+        CHECK(s!=NULL); if(!s) continue;
+        CHECK(s->def==expected[i].def && s->category==expected[i].category);
+        CHECK(s->env && !strcmp(s->env,expected[i].env));
+        CHECK(s->restart && !s->own_pref && !s->live_env && !s->apply && !s->get);
+        CHECK(!s->hidden && (!s->locked || !strcmp(argv[2],"locked")));
+    }
+    if(failures) { printf("missing/invalid rows=%d\n",failures); return 1; }
+    CHECK(settings_count()==21);
+    Setting *preset=settings_find("graphics.look_preset");
+    CHECK(preset && preset->nchoices==3 && preset->derived && preset->own_pref && !*preset->pref);
+    CHECK(settings_look_apply(PRESET_X360)==-1);
+    CHECK(!getenv("NFS_SIMHZ") && !getenv("NFS_CARBON_SURROUND"));
+    const char *op=argv[2];
+    if(!strcmp(op,"defaults")) {
+        for(int i=0;i<11;++i) verify(i,expected[i].def);
+        CHECK(preset->get()==0);
+    } else if(!strcmp(op,"save") || !strcmp(op,"verify") || !strcmp(op,"reset")) {
+        if(argc!=5) return 2;
+        int i=atoi(argv[3]), value=atoi(argv[4]);
+        Setting *s=settings_find(expected[i].id);
+        if(!strcmp(op,"save")) {
+            int before=selected(i);
+            settings_set(s,value);
+            CHECK(settings_get(s->id)==value);
+            CHECK(selected(i)==before);
+            const char *saved=app_pref(s->id);
+            /* An unchanged default intentionally has no saved key. */
+            CHECK(saved ? !strcmp(saved,spelling(i,value)) : value==s->def);
+        } else if(!strcmp(op,"reset")) {
+            settings_reset(s);
+            CHECK(settings_get(s->id)==s->def);
+            CHECK(!app_pref(s->id) || !*app_pref(s->id));
+        } else verify(i,value);
+    } else if(!strcmp(op,"locked")) {
+        Setting *coat=settings_find(expected[0].id);
+        CHECK(coat->locked && settings_get(coat->id)==1 && selected(0)==1);
+        CHECK(settings_set(coat,0)==0);
+        settings_reset(coat);
+        CHECK(settings_get(coat->id)==1);
+        CHECK(preset->get()==2 && settings_look_choice()==PRESET_PC);
+        /* My picks is UI index 2, while the shared PC enum is also 2.
+         * It must still restore picks when an override changes the label. */
+        CHECK(settings_set(preset,2)==1);
+        CHECK(settings_look_choice()==PRESET_MINE);
+        CHECK(settings_get(expected[3].id)==1 && settings_get(expected[6].id)==2);
+    } else if(!strcmp(op,"preset_reset")) {
+        settings_reset(preset);
+        CHECK(preset->get()==0);
+    } else if(!strcmp(op,"custom")) {
+        for(int i=0;i<11;++i) settings_set(settings_find(expected[i].id),i==7?19:i==6?2:!expected[i].def);
+        CHECK(preset->get()==2);
+    } else if(!strcmp(op,"preset")) {
+        int choice=atoi(argv[3]);
+        settings_set(preset,choice);
+        CHECK(preset->get()==choice);
+        for(int i=8;i<11;++i) CHECK(settings_get(expected[i].id)==!expected[i].def);
+    } else if(!strcmp(op,"preset_verify")) {
+        int choice=atoi(argv[3]);
+        CHECK(preset->get()==choice);
+        char path[1200], line[512], expected_row[160];
+        snprintf(path,sizeof path,"%s.dump",store_path);
+        snprintf(expected_row,sizeof expected_row,"Picture\tgraphics.look_preset\t%s\n",preset->choices[choice]);
+        settings_dump(path);
+        FILE *dump=fopen(path,"r");
+        int found=0;
+        while(dump && fgets(line,sizeof line,dump)) if(!strcmp(line,expected_row)) found=1;
+        if(dump) fclose(dump);
+        remove(path);
+        CHECK(found);
+        for(int i=0;i<8;++i) verify(i,choice==0?expected[i].def:choice==1?(i==7?12:0):(i==7?19:i==6?2:!expected[i].def));
+        for(int i=8;i<11;++i) verify(i,!expected[i].def);
+    } else if(!strcmp(op,"cycle")) {
+        int choice=atoi(argv[3]), direction=atoi(argv[4]);
+        CHECK(preset->get()==choice);
+        change(preset,direction);
+        CHECK(preset->get()==(choice+direction+3)%3);
+        CHECK(menu_changes==1);
+    } else return 2;
+    CHECK(settings_get(native_aa.id)==2 && settings_get(hdr.id)==1 && settings_get(native_audio.id)==2);
+    CHECK(!app_pref(native_aa.id) && !app_pref(hdr.id) && !app_pref(native_audio.id));
+    printf("PORT SETTINGS %s failures=%d rows=%d\n",op,failures,settings_count());
+    return failures?1:0;
+}
+#endif

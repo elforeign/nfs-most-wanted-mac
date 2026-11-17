@@ -166,6 +166,20 @@ EXEC_NAME = "NFSMostWanted"
 PUBLIC_BUNDLE_ID = "io.github.nfsmw-native-mac"
 OWNER_BUNDLE_ID = "local.nfsmw-port"
 RUNNING_APP = re.compile(r"NFSMW\.app/Contents/MacOS/|NFS Most Wanted Native(?: 3\.x(?: \(\d+\))?)?\.app/Contents/MacOS/")
+# Carbon's app (Setup's backend.CARBON_PRODUCT adds its data folder). Carbon numbers from 1.0.0.
+CARBON = dict(name="NFS Carbon Native", exec="NFSCarbon", bundle_id="io.github.nfs-carbon-native-mac")
+CARBON_RUNNING = re.compile(re.escape(CARBON["name"]) + r"\.app/Contents/MacOS/")
+# Each game's updatable app by bundle name: its id, executable and running-process pattern.
+PRODUCTS = {APP_BUNDLE: dict(bundle_id=PUBLIC_BUNDLE_ID, exec=EXEC_NAME, running=RUNNING_APP),
+            CARBON["name"] + ".app": dict(bundle_id=CARBON["bundle_id"], exec=CARBON["exec"], running=CARBON_RUNNING)}
+
+
+def product(app):
+    """The product an installed app path names (Most Wanted's or Carbon's); refuses any other name."""
+    try:
+        return PRODUCTS[Path(app).name]
+    except KeyError:
+        raise InstallError("Refusing to update an app other than " + " or ".join(PRODUCTS) + ".") from None
 
 
 def public_app_path(dest, bundle=APP_BUNDLE):
@@ -182,7 +196,8 @@ def is_current_app(app, bundle_id=PUBLIC_BUNDLE_ID):
         with (Path(app) / "Contents/Info.plist").open("rb") as f:
             info = plistlib.load(f)
         major = int(str(info["CFBundleShortVersionString"]).split(".")[0])
-        return info["CFBundleIdentifier"] == bundle_id and major >= 4
+        # 3.x Most Wanted apps share the id and are kept; other products (Carbon) start at 1.0.0.
+        return info["CFBundleIdentifier"] == bundle_id and major >= (4 if bundle_id == PUBLIC_BUNDLE_ID else 1)
     except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
         return False
 

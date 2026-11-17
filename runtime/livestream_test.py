@@ -38,8 +38,8 @@ fixed accepts/posts 1/1. Oversize original stops; fixed drops 1 then posts 1/1.
 Large 200 body: legacy unbounded callback reads 524288 bytes over the segment
 and playlist responses (262144 each); fixed cancels at 5120 bytes, posted=0,
 failed=1 (4096 budget plus one delivered chunk).
-Four queued/in-flight 4 MiB segments fit exactly; fifth drops without stopping.
-Uncapped/unaccounted controls admit 18874368 bytes; fixed stays <=16777216.
+Four queued/in-flight 16 MiB segments fit exactly; fifth drops without stopping.
+Uncapped/unaccounted controls admit 2 x 36 MiB; fixed stays <= 64 MiB (byte bound five 4K segments).
 Raw/URL logging controls leak 1/12 sentinel matches; fixed emits 0, and full
 URLs are redacted before any test log/report. The original leak check passes:
 there was no production logger to fix; intentional logging controls fail it.
@@ -50,6 +50,7 @@ Legacy compiled faults plus the lost-completion lifetime control fail the same a
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+import io
 import re
 import hashlib
 import secrets
@@ -243,12 +244,16 @@ class Fixture:
                             fixture.stop.wait(0.002)
                         if fixture.mode in ('finish-drain-stall','finish-early-stall'): return
                 if fixture.mode=='finish-queue-stall' and not playlist: fixture.stop.wait(0.65)
+                if fixture.mode=='ride-stall' and not playlist and len(fixture.received)==2: fixture.stop.wait(3.5)
                 if final and fixture.mode in ('finish-final-stall','finish-total-stall','finish-joined-stall'):
                     fixture.stop.wait(10); return
                 if fixture.mode == 'playlist-stall' and not playlist:
                     # Spend most of the 400 ms budget before starting the playlist.
                     fixture.stop.wait(0.28)
                 if fixture.mode == 'stall' or (fixture.mode == 'playlist-stall' and playlist):
+                    # No response completes this exchange. After cancellation,
+                    # do not read another request from the retired connection.
+                    self.close_connection = True
                     fixture.stop.wait(12)
                     return
                 if fixture.mode == 'disconnect':
@@ -328,6 +333,45 @@ class Fixture:
         self.server.server_close()
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), 'fixture stopped'
+
+
+def cancellation_fixture_proof(directory):
+    """A reset after a held playlist must not become a second request error.
+
+    Original: valid playlist, invalid=1, extra_reads=1. Retired connection:
+    invalid=0, extra_reads=0; malformed playlist still increments invalid to 1.
+    """
+    class ResetAfterRequest(io.BytesIO):
+        extra_reads = 0
+
+        def readline(self, *args):
+            if self.tell() == len(self.getvalue()):
+                self.extra_reads += 1
+                raise ConnectionResetError('cancelled fixture peer')
+            return super().readline(*args)
+
+    for valid in (True, False):
+        fixture = Fixture(directory/'cert.pem', directory/'key.pem', 'fixture', 'playlist-stall')
+        fixture.stop.set()  # Release the held response as close() does after Stop.
+        fixture.names = ['12345678-1234-1234-1234-123456789abc-0.ts']
+        body = ('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n'
+                '#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2.0,\n'+fixture.names[0]+'\n').encode() if valid else b'invalid\n'
+        request = (f'POST /http_upload_hls?cid=fixture&copy=0&file=live.m3u8 HTTP/1.1\r\n'
+                   f'User-Agent: Test / Test / Test\r\nContent-Type: application/vnd.apple.mpegurl\r\n'
+                   f'Content-Length: {len(body)}\r\n\r\n').encode()+body
+        handler = object.__new__(fixture.server.RequestHandlerClass)
+        handler.rfile, handler.wfile = ResetAfterRequest(request), io.BytesIO()
+        try:
+            try:
+                handler.handle()
+            except ConnectionResetError:
+                fixture.server.handle_error(None, None)
+        finally:
+            fixture.close()
+        print(f'cancelled playlist fixture: valid={int(valid)} invalid={fixture.invalid} '
+              f'extra_reads={handler.rfile.extra_reads}', flush=True)
+        assert fixture.playlists == [valid] and fixture.invalid == int(not valid)
+        assert handler.rfile.extra_reads == 0, 'cancelled exchange must retire the connection'
 
 
 def compile_binary(directory, name, source, packets=None, driver=None, process_scan=False):
@@ -419,6 +463,8 @@ def run(exe, mode, fixture_mode, directory, key, broken=False, leak=False, abort
         valid = valid and fixture.received==[True]*2 and fixture.playlists==[True]*3 and 'finals=1 finalized=1' in output
     if mode == 'ordered':
         valid = valid and fixture.received == [True]*6 and fixture.playlists == [True]*6 and fixture.accepted == 1
+    if mode == 'ride-stall':
+        valid = valid and fixture.received == [True]*8 and fixture.playlists == [True]*8
     if mode in ('jitter', 'oversize'):
         valid = valid and fixture.received == [True] and fixture.playlists == [True]
     if mode in ('protocol','success') and not broken:
@@ -563,6 +609,7 @@ def main():
         fake_ingest_proof(directory)
         socket_probe(directory)
         key = 'stream-sentinel-'+secrets.token_hex(16)+'+/?&=#%é😀'
+        cancellation_fixture_proof(directory)
         fixed = compile_binary(directory, 'fixed', source)
         scan = compile_binary(directory, 'process-scan', source, process_scan=True)
         scan_key = 'scan-'+secrets.token_hex(24)+'+/?&=#%'
@@ -674,6 +721,15 @@ def main():
                               ('disconnect', 'disconnect'), ('redirect', 'redirect'), ('http', 'http'),
                               ('untrusted', 'ordered')]:
             run(fixed, mode, fixture, directory, key)
+        # A short upload stall: the fixed limits ride through it; the same driver at the old limits
+        # (two held segments, a 3 s per-segment deadline) ends live as the reported stream did.
+        run(fixed, 'ride-stall', 'ride-stall', directory, key)
+        riding = 'options.deadlineSeconds=live::Poster::deadlineSeconds;\n    live::SegmentLimits limits;'
+        assert driver.count(riding) == 1
+        old_limits = directory/'old-ride-limits.mm'
+        old_limits.write_text(driver.replace(riding, 'options.deadlineSeconds=3;\n    live::SegmentLimits limits; limits.heldSegments=2;'))
+        failure = run(compile_binary(directory, 'ride-old-limits', source, driver=old_limits), 'ride-stall', 'ride-stall', directory, key, broken=True)
+        assert 'FAIL stream: segmenter rides through a stalled upload' in failure and 'reason=ingest-backlog' in failure
         lost_lifetime=compile_binary(directory,'lost-completion-lifetime',source.replace('inFlight=shared_from_this();',''))
         run(lost_lifetime,'detached-stop','stall',directory,key,broken=True)
         limits = 'segment->bytes.size()<=maxBytes-s->counters.bytes'

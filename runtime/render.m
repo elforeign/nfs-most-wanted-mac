@@ -731,7 +731,7 @@ void render_init(void) {
 #if NFS_GAME == NFS_GAME_MW
     pipeline_loading_done();
 #else
-#include "game_pipeline_loading.inc"
+#include "game_pipeline_loading.h"
 #endif
     if (diag_on) diag_event("shader_compile: load_ready=%d frame_sync=%llu", nshaders, stat_sync_shader);
 }
@@ -788,7 +788,7 @@ void render_resize(void) {
 // their original contract.
 void render_float_scene_begin(void) {
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_hdr_begin.inc"
+#include "game_hdr_begin.h"
 #endif
     if(fs_active || fs_serial==frame_serial)return;
     int floating=float_scene_on && !(diag_on && postfx_look_variant("floatoff"));
@@ -815,7 +815,7 @@ void render_float_scene_begin(void) {
 }
 void render_float_scene_final(int preserve) {
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_hdr_compose.inc"
+#include "game_hdr_compose.h"
 #endif
     if(preserve && fs_composing) {
         if(!fs_toned) {
@@ -866,7 +866,7 @@ float render_hdr_composition_headroom(void) { return fs_composing?fs_headroom:1;
 void render_hdr_scene_treated(void) { if(fs_composing)fs_toned=1; }
 void render_float_scene_present_end(void) {
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_hdr_present_end.inc"
+#include "game_hdr_present_end.h"
 #endif
     if(!fs_composing)return;
     fs_composite_rt=bb_rt;bb_rt=fs_display_rt;backbuffer_tex=bb_rt.tex;
@@ -892,7 +892,7 @@ static void float_scene_copy(uint32_t dst,MTLPixelFormat format) {
     if(g->tex.width!=dev.pp[0] || g->tex.height!=dev.pp[1])return;
     NSUInteger w=dev.pp[0],h=dev.pp[1];
 #else
-#include "game_hdr_promote_size.inc"
+#include "game_hdr_promote_size.h"
 #endif
     if(g->tex.width==w && g->tex.height==h && g->tex.pixelFormat==format)return;
     if(g->tex.pixelFormat!=MTLPixelFormatBGRA8Unorm && g->tex.pixelFormat!=MTLPixelFormatRGBA8Unorm && g->tex.pixelFormat!=MTLPixelFormatRGBA16Float)return;
@@ -916,7 +916,7 @@ static void float_scene_copy(uint32_t dst,MTLPixelFormat format) {
 }
 void render_float_scene_post_target(uint32_t surface) {
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_hdr_target.inc"
+#include "game_hdr_target.h"
 #endif
     if(float_scene_on)float_scene_copy(surface,fs_composing?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm);
 }
@@ -1786,7 +1786,8 @@ static id<MTLTexture> ripple_texture(void) {
 void render_ripple_warm(void) { if (mtl) ripple_texture(); }   // the first composite (render_x360_raindrops_warm), not the first wet draw
 // NFS_FOG=x360|pc (default x360; restart): every fogged PC vertex shader (11) clamps the radial fog distance
 // with `min r, r, cN.c` where `def cN` holds the literal 2500; the X360 clamps view depth at kMaxDist
-// (render_diff x360_port_candidates #2; X360F_KMAXDIST_WORLD, generated). x360 raises the literal to it in a copy of the bytecode before sm_translate:
+// (render_diff x360_port_candidates #2; X360F_KMAXDIST_WORLD, generated; without ZZDATA0 the port's own value,
+// tools_snapshot/x360_shader_lits.py PORT_DEFAULTS). x360 raises the literal to it in a copy of the bytecode before sm_translate:
 // distant haze and the skyline fog deeper, near fog is unchanged. The mirror runs the same vertex shaders.
 #if NFS_GAME == NFS_GAME_MW
 static int fog_x360(void) {
@@ -1804,7 +1805,7 @@ static int fog_x360(void) { return 0; }
 // in a float-constant def is raised: in the PC's VSs 2500 is only ever the fog clamp (render_diff pc_effects).
 #if NFS_GAME == NFS_GAME_MW
 static uint32_t *fog_patch(const uint32_t *t, uint32_t n) {
-    if (n < 2 || (t[0] >> 16) != 0xFFFEu || !fog_x360() || !X360_SHADER_LITS) return NULL;   // no ZZDATA0: PC fog
+    if (n < 2 || (t[0] >> 16) != 0xFFFEu || !fog_x360()) return NULL;   // no ZZDATA0: the port's clamp (PORT_DEFAULTS)
     int sm1 = ((t[0] >> 8) & 0xFFu) < 2;
     uint32_t *c = NULL;
     for (uint32_t i = 1; i < n && t[i] != 0x0000FFFFu;) {
@@ -1953,7 +1954,7 @@ static void compile_entry(ShaderEntry *e) {
     if (diag_on && dt > 20000000ull) diag_event("render: shader %016llX translated and compiled in %.0f ms%s", (unsigned long long)e->key, dt / 1e6,
                                                 pthread_main_np() ? "" : " (background)");
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_shader_publish.inc"
+#include "game_shader_publish.h"
 #endif
     __atomic_store_n(&e->pending, 0, __ATOMIC_RELEASE);
     dispatch_semaphore_signal(e->ready);
@@ -1980,7 +1981,7 @@ static void shader_submit(ShaderEntry *e) {
 }
 #else
 static void shader_submit(ShaderEntry *e)
-#include "game_picture_shader_submit.inc"
+#include "game_picture_shader_submit.h"
 
 #endif
 // END offline shader scheduling test
@@ -2005,7 +2006,7 @@ static void cache_path(char *out, size_t n) {
 #if NFS_GAME == NFS_GAME_MW
     snprintf(out, n, "%s/shadercache.bin", userdata_dir());
 #else
-#include "game_shader_cache_policy.inc"
+#include "game_shader_cache_policy.h"
 #endif
 }
 static int shader_cache_variant_valid(uint32_t variant) {
@@ -2242,7 +2243,7 @@ static void shader_catalogue_warm(void) {
 }
 
 #else
-#include "game_shader_catalogue.inc"
+#include "game_shader_catalogue.h"
 #endif
 // ---------------- vertex input ----------------
 typedef struct { uint8_t stream, type, usage, index; uint16_t offset; } Elem;
@@ -2549,6 +2550,21 @@ static void underglow_scene_mesh(const Elem *elements, int count, uint32_t type,
     underglow_render_mesh_observe(&mesh);
 }
 
+#if NFS_GAME == NFS_GAME_PRIVATE
+// The mirror's original vertex shaders emit clip coordinates directly. Its HUD
+// frame uses the 4:3 front-end canvas, so the composite needs the same canvas.
+// Other post passes (including picture-in-picture) retain their full viewport.
+static MTLViewport mirror_composite_viewport(MTLViewport vp, uint64_t shader) {
+    // RVMPIP rvm vs_2_0 / vs_1_1; neither reads WorldViewProj.
+    if (shader != 0xE3D503E829EB7702ull && shader != 0x2406D3EEEE369C38ull) return vp;
+    double width = vp.height * (4.0 / 3.0);
+    if (width > 0 && width < vp.width) {
+        vp.originX += (vp.width - width) * 0.5;
+        vp.width = width;
+    }
+    return vp;
+}
+#endif
 static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_vertex, uint32_t min_index, uint32_t num_vertices,
                       uint32_t start, uint32_t up_vertices, uint32_t up_stride, uint32_t up_indices, uint32_t up_index_fmt);
 static void drawshot(void);
@@ -2711,7 +2727,7 @@ void render_draw(uint32_t type, uint32_t prims, int indexed, int32_t base_vertex
 }
 #else
                  uint32_t start, uint32_t up_vertices, uint32_t up_stride, uint32_t up_indices, uint32_t up_index_fmt)
-#include "game_compat_render_draw.inc"
+#include "game_compat_render_draw.h"
 
 #endif
 // ---------------- fixed function ----------------
@@ -2795,7 +2811,7 @@ static void ff_shader_warm(void) {
     }
 }
 #else
-#include "game_shader_fixed_warm.inc"
+#include "game_shader_fixed_warm.h"
 #endif
 // Returns 0 when the state is outside the supported subset.
 static int ff_shaders(Obj **vs_out, Obj **ps_out, float (*vsc)[4], float (*psc)[4]) {
@@ -2873,7 +2889,7 @@ static int ff_shaders(Obj **vs_out, Obj **ps_out, float (*vsc)[4], float (*psc)[
     }
 #endif
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "game_frontend_clip.inc"
+#include "game_frontend_clip.h"
 #endif
     for (int k = 0; k < 4; ++k) vsc[4][k] = 1.0f;
     uint32_t tf = rs[60];
@@ -4090,6 +4106,9 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     float vpz0, vpz1;
     memcpy(&vpz0, &dev.viewport[4], 4); memcpy(&vpz1, &dev.viewport[5], 4);
     MTLViewport vp = {dev.viewport[0], dev.viewport[1], dev.viewport[2], dev.viewport[3], vpz0, vpz1};
+#if NFS_GAME == NFS_GAME_PRIVATE
+    vp = mirror_composite_viewport(vp, vs->tokens_hash);
+#endif
     if(headlights_casting())vp=(MTLViewport){0,0,HL_MAP_SIZE,HL_MAP_SIZE,0,1};
     if(ssao_replay&&!ssao_reference_record){vp.originX*=.5;vp.originY*=.5;vp.width*=.5;vp.height*=.5;}
     if (!(eb.have & EB_VIEWPORT) || memcmp(&eb.vp, &vp, sizeof vp)) { [enc setViewport:vp]; eb.vp = vp; eb.have |= EB_VIEWPORT; }
@@ -4312,6 +4331,16 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             Obj *private_target=obj(dev.rt[0]);
             fprintf(df,"  PRIVATE target d3dfmt=%u metalfmt=%lu samples=%lu srgb_write=%u\n",
                     private_target?private_target->fmt:0,(unsigned long)rt0.pixelFormat,(unsigned long)rt0.sampleCount,dev.rs[194]);
+            extern char diag_fx_pass[];
+            if (up_vertices && up_stride == 24 && strstr(diag_fx_pass, "IDI_RVMPIP_FX/rvm/")) {
+                fprintf(df, "  RVM viewport: %.9g %.9g %.9g %.9g shader %016llX\n",
+                        vp.originX, vp.originY, vp.width, vp.height, (unsigned long long)vs->tokens_hash);
+                for (unsigned v = 0; v < 4; ++v) {
+                    uint32_t a = up_vertices + v * up_stride;
+                    fprintf(df, "  RVM v%u: %.9g %.9g %.9g color %08X uv %.9g %.9g\n", v,
+                            MF32(a), MF32(a + 4), MF32(a + 8), M32(a + 20), MF32(a + 12), MF32(a + 16));
+                }
+            }
             if(up_vertices && up_stride && (uint64_t)up_vertices+(uint64_t)up_stride*8 <= (1ull<<32)){
                 unsigned nv=indexed?num_vertices:prim_vertices(type,prims);
                 PrivateUpSummary summary=private_up_summary(G+up_vertices,up_stride,nv,el,nel,ff?ff_vsc:dev.vsc);
@@ -4835,5 +4864,5 @@ void render_stats_log(void) {
 }
 #if NFS_GAME == NFS_GAME_PRIVATE
 
-#include "game_surface.inc"
+#include "game_surface.h"
 #endif

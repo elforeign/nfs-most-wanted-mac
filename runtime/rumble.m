@@ -17,7 +17,7 @@
 #include "host.h"
 #include "game_select.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
-#include "carbon_padfx_output.inc"
+#include "carbon_padfx_output.h"
 /* GameController also declares the socket send API. Keep the local HID helper. */
 #define send carbon_rumble_send
 #endif

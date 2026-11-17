@@ -7,6 +7,12 @@
 
 
 
+
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -191,7 +197,77 @@ def check_targets(rows, review=False):
     print(f"Maximum lit-ground luminance shortfall: {worst:.3f}% ({worst_label}); k=1: {nominal_worst:.3f}%; max adapted CCT error {max_cct_error:.3f} K")
 
 
+# Generated once from the unchanged source at 624c769e using clang -O1.
+# These are original float results, independent of the extracted helper.
+COLOUR_ORIGINAL = (
+    (1.47904849, .908654809, .494243711),  # 0 degrees
+    (1.47904849, .908654809, .494243711),  # 5
+    (1.35258222, .935229719, .603389978),  # 10
+    (1.19769561, .963872671, .775737345),  # 22
+    (1.11813068, .976103365, .888869166),  # 45
+    (1.09319496, .979481041, .928837001),  # 61.352
+    (1.09226191, .979602635, .930379808),  # 70
+    (.220097318, .236763984, .263430655),  # ambient (.19,.24,.32), 2/3
+)
+
+
+def check_colour_helpers():
+    header = (ROOT / "runtime/lighting_colour.h").read_text()
+    lighting = (ROOT / "runtime/lighting.c").read_text()
+    sun = re.search(r"static void sun_white\(.*?\n\}", lighting, re.S).group()
+    # Compile the header alone with the production elevation wrapper: no guest
+    # memory, game headers, stubs or second copy of the temperature maths.
+    source = r'''
+#include <stdio.h>
+#include "lighting_colour.h"
+SUN
+int main(void) {
+    const float elevations[] = {0, 5, 10, 22, 45, 61.352f, 70};
+    float rgb[3];
+    for (int i=0; i<7; ++i) {
+        sun_white(elevations[i], rgb);
+        printf("%.9g %.9g %.9g\n", rgb[0], rgb[1], rgb[2]);
+    }
+    rgb[0]=.19f; rgb[1]=.24f; rgb[2]=.32f;
+    lighting_colour_desaturate(rgb, 2.0f/3.0f);
+    printf("%.9g %.9g %.9g\n", rgb[0], rgb[1], rgb[2]);
+    lighting_colour_white(2700, rgb);
+    printf("%.9g %.9g %.9g\n", rgb[0], rgb[1], rgb[2]);
+}
+'''.replace("SUN", sun)
+    def measure(text, folder):
+        (folder / "lighting_colour.h").write_text(text)
+        src, exe = folder / "colour.c", folder / "colour"
+        src.write_text(source)
+        subprocess.run(["clang", "-O1", str(src), "-o", str(exe)], check=True)
+        rows = [tuple(map(float, line.split())) for line in
+                subprocess.check_output([str(exe)], text=True).splitlines()]
+        assert len(rows) == 9
+        error = max(abs(a-b) for row, original in zip(rows[:8], COLOUR_ORIGINAL)
+                    for a, b in zip(row, original))
+        xyz = rgb_xyz(rows[8])
+        xy = tuple(v / sum(xyz) for v in xyz[:2])
+        dxy = math.hypot(xy[0]-.432855, xy[1]-.395925)
+        return error, dxy
+    with tempfile.TemporaryDirectory(prefix="lighting-colour-") as temp:
+        folder = Path(temp)
+        error, dxy = measure(header, folder)
+        # Mutate the actual helper, retaining the same matrix and normalization.
+        broken = header.replace("0.85f", "1.0f").replace("0.15f", "0.0f")
+        assert broken != header
+        broken_error, broken_dxy = measure(broken, folder)
+    assert error <= 1e-6, error
+    assert dxy <= .003, dxy
+    assert broken_error > 1e-6, broken_error
+    assert broken_dxy > .003, broken_dxy
+    print(f"PASS: original colour max/channel {error:.9g} (limit 1e-6); "
+          f"missing adaptation {broken_error:.9g} rejected")
+    print(f"PASS: 2700 K dxy {dxy:.9g} (limit .003); "
+          f"missing adaptation {broken_dxy:.9g} rejected")
+
+
 def main():
+    check_colour_helpers()
     effect = mw_source(ROOT / "runtime/d3dx_effect.c")
     setter = re.search(r"static int e_SetFloat\(Cpu \*c\) \{.*?\n\}", effect, re.S).group()
     # The actual recompiled instructions prove both uploads call vtable +0x78
@@ -272,6 +348,11 @@ int main(int argc, char **argv) {
     }
     M32(TIME_OF_DAY_PTR)=0x1000; M32(GAMEFLOW_STATE)=6;
     wf(0x103C,4);
+    // Pin the actual MW ambient wrapper as well as the standalone helper.
+    wf(0x1030,.19f); wf(0x1034,.24f); wf(0x1038,.32f);
+    float ambient_proof[3], ambient_original[3]={.220097318f,.236763984f,.263430655f};
+    ambient_rgb(0x1000,ambient_proof);
+    assert(close3(ambient_proof,ambient_original));
     // the synthetic sun/ambient records, defined once in the Python above
     const float records[8][6] = {RECORDS};
     int count=0;

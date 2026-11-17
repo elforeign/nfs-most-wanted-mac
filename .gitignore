@@ -13,6 +13,7 @@ __pycache__/
 host/audio/build/
 runtime/boot.soak*
 runtime/NFSMW.app/
+runtime/NFS Carbon.app/
 runtime/gen/
 runtime/boot.pconly*
 /.runs/

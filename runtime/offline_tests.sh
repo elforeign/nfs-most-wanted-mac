@@ -45,7 +45,10 @@
 #   materials_stub_test.py: every X360 material source with --stub includes, Metal compile and three-source broken control
 #   clearcoat_test.py + clearcoat_test.m: production paint variants, exact Off source, Metal layer and broken controls
 # Private layout coverage: private_pad_layout_test (auto-discovered) and private_padbind_test.
+# Report location readers and empty-reader controls: private_report_position_test (auto-discovered).
 # Xbox fallback: recomp/private_carbon_xboxart_test.py is auto-discovered (24 on / 0 off).
+#   recomp/private_devrows_test.py: retail density/cheat bridge and map/surround persistence (auto-discovered).
+# Carbon port controls and production-selector persistence: recomp/private_port_settings_test.py (auto-discovered).
 # Private session unlock coverage: recomp/private_unlock_test.py (auto-discovered).
 # B2 road position: recomp/private_road_headlight_test.py (auto-discovered),
 # captured 8190 m / zero attenuation -> <4 m / >.96; disabled-transform control.
@@ -54,6 +57,9 @@
 #   recomp/private_skydome_test.py: B2 sky selection and native ownership; auto-discovered
 #   recomp/private_daynight_cars_test.py: B2 car rig by day, key dot sun .9848; kind-2 control; auto-discovered
 # Private region coverage: private_world_test, private_files_test and test_worldmerge.
+#   recomp/private_carbon_speech_test.py: CSI v3/IDX + cached sidecars, 14135 native decodes and endian/cache controls.
+#   recomp/private_carbon_music_test.py: PC graphs, 2004 offsets, native XA decode and PC-offset control.
+#   recomp/private_files_test.py: five console GIN recordings and the PC RX-8 deceleration control.
 #   recomp/private_build_inputs_test.py: tracked starts, recreated witnesses and missing-row control.
 #   recomp/*_test.py  tools_snapshot/test_*.py  tools_snapshot/worldmerge/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
 #   recomp/windows_host_test.py: synthetic guest VM/PE/import/TLS/Lua/GIL/thread proof, plus broken controls
@@ -90,6 +96,8 @@
 # Discovery proof: 140 registered names (7 Setup), 0 collisions, exit 0; injecting a duplicate test_app exits 1.
 # test_release_artifact is autodiscovered: builds packaged Setup with bundled Python
 # and scratch HOME/CLT (no game launch); exit 3 without the Setup artifact or PC input.
+#   tests/setup/test_release_artifact_checks.py also exercises exported Carbon
+#   table-free controllers/settings (PC-only and optional-Xbox roots); 6 broken exports fail.
 # Artifact scan proof: packaged source + Python added 319 spurious test paths;
 # excluding generated root build/dist output leaves 0 artifact paths in the scan.
 . "$(dirname "$0")/env.sh"; nfs_need_py
@@ -449,3 +457,8 @@ secs=$(( $(date +%s) - t0 ))
 rm -rf "$OT_DIR"
 if [ -n "$fails" ]; then echo "OFFLINE FAIL:$fails (${secs}s)"; exit 1; fi
 echo "OFFLINE PASS ($nrun tests ${secs}s${skipped:+; SKIPPED:$skipped}$tier2_note)"
+#   recomp/private_addons_gameplay_test.py: saved rows and native movie/heat/catch-up/prologue/cash/card consumers, original and broken controls
+#   recomp/private_addons_language_test.py: installed text packs through the native language switch, original and partial-pack controls
+#   recomp/private_addons_unlock_test.py: saved/reloaded preference through native part/paint/rim/event gates and original session-only control
+
+# Host add-on fixtures are discovered from recomp/private_addons_{host,text,capture,stream}_test.py.

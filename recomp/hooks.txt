@@ -365,6 +365,7 @@
 007A9DB0    underglow_light.m: CarViewer::SetRideInfo (owned temporary ride copy)
 0075D220    underglow_light.m: VehicleRenderConn::Load (owned customization to runtime ride)
 00750B00    underglow_light.m: RenderVehicleFlares (flush main-view mounted light after opaque road)
+00667660    underglow_light.m: empty stub after the front-end car shadow flush (menu pool over the shadow)
 
 006AA020    car_grip_bridge.c: DoWheelForces (admitted local added-car grip scope)
 0069DA90    car_grip_bridge.c: Tire::UpdateLoaded (ordinary source grip)

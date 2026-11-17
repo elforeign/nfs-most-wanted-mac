@@ -6,5 +6,5 @@
 #include "game_image.h"
 #define f_006C1990 mw_f_006C1990
 #define f_006C1990_orig mw_f_006C1990_orig
-#include "game_display_bindings.inc"
+#include "game_display_bindings.h"
 #endif

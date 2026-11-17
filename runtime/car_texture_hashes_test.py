@@ -14,6 +14,7 @@ Proof of failure: the self test's overlapping pair is reported (1 shared hash) a
 Fresh conversion before the fix: FAIL 406 pairs / 460 pair-hashes (92 stock, 28 added packs), exit 1.
 Includes 41 stock-shared hashes, e.g. G35 holds IS300_TIRE 5CE624C1 and 997GT3RS holds 997S_TIRE D898A0EE.
 After: PASS 0 pairs / 0 pair-hashes; 539 exact images/state and 289560 material bindings preserved, exit 0.
+With the two front-brake-only source cars converting (30 added packs): 581 images/state, 321305 bindings.
 Omitting the geometry remap is rejected at G35/IS300_BASE_A (1/1 broken binding control).
 Role labels: the 23-character label must keep each renamed image's _TIRE/_BADGING ending (materials.m keys the X360
 normal map by it, label + "_N" through bStringHash) and _TIRE_N ending (x360_textures.m later_tire).
@@ -40,13 +41,13 @@ ROLES = ('_TIRE', '_BADGING', '_TIRE_N', '_BADGING_N')
 # Images whose v5 defaults come from a no-exact-donor fallback record (texture tail +132 = 0 where the un-renamed
 # conversion writes 1), per car, by source hash.
 PRE_NAMESPACE_DEFAULTS = {
-    '300C': '2571A11A 4A60BDEC 69C032BD 69C032BE 91050E14 931085BE',
-    '997GT3RS': '21978F9E 3C904906 7811C14A',
+    '300C': '4A60BDEC 6B587F99 8FA358A7 91050E14 931085BE 93877A05',   # source grilles under CTS_LOGO / _DOOR_HANDLE / _SIDELIGHT
+    '997GT3RS': '21978F9E 3C904906 A9C33AD9',   # last: the source ROTOR5 under 997S_DOOR_HANDLE
     '997TT': '1A975569 A009F4B1 A2156C5B',
     'CCX': '74BC59A5 76C7D14F 83A8FED0 87DE5552 917F6DDD',
     'COROLLA': 'B6AF56F6 D2AE1424',
     'G35': '0A4E0D99 0C598543 46367551',
-    'JAGUARXK': '65A00E49 67AB85F3 69C032BE A07F2D74 ED973F76 F7385801',
+    'JAGUARXK': '65A00E49 67AB85F3 A07F2D74 ED973F76 F7385801 F8BFC1FC',   # last: the source GRILL_06 under DB9_DOOR_HANDLE
     'MURCIELAGO640': '0E848CAA',
     'SKYLINE': '31284063 3333B80D E8C9FFDB',
 }
@@ -169,8 +170,8 @@ def main():
                 (added / row['name'] / 'TEXTURES.BIN').unlink()
             else:
                 converted.append(row)
-        assert incomplete == {'CHALLENGER71', 'CUDA'}, f'unexpected incomplete conversions: {incomplete}'
-        assert len(converted) == 28, f'expected 28 complete conversions, got {len(converted)}'
+        assert not incomplete, f'unexpected incomplete conversions: {incomplete}'
+        assert len(converted) == 30, f'expected 30 complete conversions, got {len(converted)}'
         status = check_packs(game, added)
         if status:
             return status

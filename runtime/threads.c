@@ -630,6 +630,19 @@ int win32_threads(Cpu *c, const char *fn) {
             diag_event("sleep: game thread %s(%u) %.2f ms (wait %.2f, GIL %.2f) frame %llu flow %u from%s", fn, ms,
                        (host_ticks() - t0) / 1e6, (t1 - t0) / 1e6, (host_ticks() - t1) / 1e6,
                        (unsigned long long)perf_nframes, M32(0x00925E90u), who);
+#else
+            // No symbol table here: the nearest return addresses (the bytes before them are a call) name the callers.
+            char at[96] = "";
+            for (uint32_t a = c->esp, n = 0; a < c->esp + 0x400 && n < 4; a += 4) {
+                uint32_t v = M32(a);
+                if (v > 0x401000 && v < 0xA00000 && (M8(v - 5) == 0xE8 || M8(v - 6) == 0xFF || M8(v - 2) == 0xFF || M8(v - 3) == 0xFF)) {
+                    snprintf(at + strlen(at), sizeof at - strlen(at), " %06X", v); ++n;
+                }
+            }
+            (void)who;
+            diag_event("sleep: game thread %s(%u) %.2f ms (wait %.2f, GIL %.2f) frame %llu from%s", fn, ms,
+                       (host_ticks() - t0) / 1e6, (t1 - t0) / 1e6, (host_ticks() - t1) / 1e6,
+                       (unsigned long long)perf_nframes, at);
 #endif
         }
         thread_checkpoint(c);
@@ -852,6 +865,6 @@ int threads_event_set(uint32_t h, int on) {   // with the GIL held
 uint32_t threads_wait(Cpu *c, uint32_t n, const uint32_t *h, int all, uint32_t ms) { return wait_handles(c, n, h, all, ms); }
 #if NFS_GAME == NFS_GAME_PRIVATE
 
-#include "game_thread.inc"
+#include "game_thread.h"
 uint32_t private_thread_create(uint32_t stack, uint32_t start, uint32_t param, uint32_t flags, uint32_t *tid_out) { return thread_create(stack, start, param, flags, tid_out); }
 #endif
