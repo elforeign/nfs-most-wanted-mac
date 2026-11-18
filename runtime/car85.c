@@ -67,6 +67,7 @@ typedef struct {
     uint32_t collision_size, collision, collision_key, collision_donor;
     uint32_t *solid_map;
     unsigned solid_count;
+    uint32_t stock_body[CAR_KIT_BODY_LODS];
     uint32_t paint_source, paint_key;
 } Addition;
 static Addition additions[MAX_ADDITIONS];
@@ -394,7 +395,7 @@ static const char *read_solid_map(Addition *a, FILE *f) {
         snprintf(space,sizeof space,"NFSAD_%s",a->name);
         FILE *models=fopen(geometry,"rb");
         if (models) {
-            int repaired=car_kit_fallback(models,space,a->solid_map,a->solid_count);
+            int repaired=car_kit_fallback(models,space,a->solid_map,a->solid_count,a->stock_body);
             fclose(models);
             if (diag_on && repaired>0) diag_event("car85: %s stock kit fallbacks=%d",a->name,repaired);
         }
@@ -1135,18 +1136,24 @@ void f_00681340(Cpu *c) {
 static Addition *solid_context(uint32_t ride) {
     return on() && ride ? addition_for_type(M32(ride)) : NULL;
 }
-static uint32_t private_solid_hash(Addition *a, uint32_t hash) {
+static uint32_t private_solid_hash(Addition *a, uint32_t hash, uint32_t fallback) {
     if (!a || !a->solid_count || !hash) return hash;
     unsigned lo=0,hi=a->solid_count;
     while (lo<hi) {
         unsigned m=lo+(hi-lo)/2; uint32_t key=a->solid_map[2*m];
         if (key<hash) lo=m+1; else hi=m;
     }
-    return lo<a->solid_count && a->solid_map[2*lo]==hash ? a->solid_map[2*lo+1] : hash;
+    if (lo<a->solid_count && a->solid_map[2*lo]==hash) return a->solid_map[2*lo+1];
+    return fallback ? fallback : hash;
 }
 static __attribute__((noinline)) void model_00751540(Cpu *c) {
+    Addition *a=model_namespace;
+    uint32_t lod=M32(c->esp+8), stock_body=0;
+    // BODY slot, primary model. Secondary models and textures have their own keys.
+    if (a && lod<CAR_KIT_BODY_LODS && M8(c->ecx+4)==0x17 && M32(c->esp+4)==0)
+        stock_body=a->stock_body[lod];
     f_00751540_orig(c);
-    c->eax=private_solid_hash(model_namespace,c->eax);
+    c->eax=private_solid_hash(a,c->eax,stock_body);
 }
 void f_00751540(Cpu *c) {
     if (!nadditions && !traffic_active) { f_00751540_orig(c); return; }
@@ -1168,7 +1175,7 @@ uint32_t car85_diag_model_hash(Cpu *c, uint32_t ride, uint32_t part, int lod) {
 static __attribute__((noinline)) void model_00751860(Cpu *c) {
     uint32_t info=M32(c->esp+4); Addition *a=solid_context(M32(c->esp+8));
     f_00751860_orig(c);
-    if (a) for (uint32_t at=info;at<info+0xE0*4;at+=4) M32(at)=private_solid_hash(a,M32(at));
+    if (a) for (uint32_t at=info;at<info+0xE0*4;at+=4) M32(at)=private_solid_hash(a,M32(at),0);
 }
 // materials.m records the lamp-state textures; tests that build this file alone keep this no-op.
 __attribute__((weak)) void mat_used_car_textures(uint32_t used) { (void)used; }

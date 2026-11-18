@@ -1,6 +1,6 @@
-"""Installed-pack kit lookup: old 5 missing targets; fixed 0 (BODY KIT03 -> KIT00).
+"""Installed-pack kit lookup: absent BODY_05 keys miss 5/5 before, 0/5 after.
 
-Fixed 47/47 assertions; skipped repair 6 failures (5 absent model targets).
+Existing-row repair control: 5/6 missing targets before, 0/6 after.
 Parser: missing-header control accepted before, rejected after; 13/13 fixed.
 Uses a synthetic partial-kit geometry pack, the production SOLIDMAP loader and
 lookup hook, and translated CarPart/model-table lookup. Old loader must fail.
@@ -22,6 +22,9 @@ sys.path.insert(0, str(ROOT / 'tests/setup'))
 from setup_kit import car_convert as cc
 import test_car_convert as fixture
 
+OLD_MAP_RETURN = 'return lo<a->solid_count && a->solid_map[2*lo]==hash ? a->solid_map[2*lo+1] : hash;'
+OLD_MAP_RETURN_SHA256 = 'cb91601a9f43913630faa30b2c12026106f406b6f02c7deba5cbe58700074982'
+
 
 def function(source, name):
     match = re.search(r'^[^\n;]*\b' + name + r'\([^\n]*\) \{\n', source, re.M)
@@ -41,6 +44,7 @@ typedef struct {
     char name[16], directory[PATH_MAX], geometry[PATH_MAX];
     uint32_t *solid_map;
     unsigned solid_count;
+    uint32_t stock_body[CAR_KIT_BODY_LODS];
 } Addition;
 static Addition additions[1], traffic_addition;
 static unsigned nadditions=1;
@@ -56,19 +60,22 @@ void f_0074D070(Cpu *c) { (void)c; abort(); }
 void f_00460C20(Cpu *c) { (void)c; abort(); }
 TRANSLATED
 PRODUCTION
-static uint32_t lookup(const char *name, Addition *a, unsigned lod) {
+static uint32_t lookup_model(const char *name, Addition *a, unsigned lod, unsigned slot, unsigned model) {
     // Prehashed model-table entries exercise the real retail instruction path.
     Cpu c={0}; c.esp=0x800000; c.ecx=0x10000;
     c.ebx=0x12345678; c.esi=0x76543210; c.edi=0x89ABCDEF; c.ebp=0xABCDEF89;
-    M16(c.ecx+12)=0;
+    M8(c.ecx+4)=slot; M16(c.ecx+12)=0;
     M32(0x9B09D4)=0x20000; M32(0x20000+0x2C)=0x30000;
-    M32(0x30000+4+lod*4)=parts_hash(name);
-    M32(c.esp+4)=0; M32(c.esp+8)=lod;
+    M32(0x30000+4+(lod+model*5)*4)=name ? parts_hash(name) : UINT32_MAX;
+    M32(c.esp+4)=model; M32(c.esp+8)=lod;
     model_namespace=a;
     f_00751540(&c);
     CHECK(c.esp==0x80000C);
     CHECK(c.ebx==0x12345678 && c.esi==0x76543210 && c.edi==0x89ABCDEF && c.ebp==0xABCDEF89);
     return c.eax;
+}
+static uint32_t lookup(const char *name, Addition *a, unsigned lod) {
+    return lookup_model(name,a,lod,0x17,0);
 }
 int main(int argc, char **argv) {
     assert(argc==3);
@@ -96,8 +103,23 @@ int main(int argc, char **argv) {
     CHECK(tire==parts_hash("NFSAD_CAR_KIT00_FRONT_TIRE_D"));
     CHECK(lookup("DONOR_KITW99_BODY_D",a,3)==parts_hash("NFSAD_CAR_KITW99_BODY_D"));
     CHECK(lookup("DONOR_KIT03_BODY_Z",a,4)==parts_hash("NFSAD_CAR_KIT03_BODY_Z"));
-    CHECK(private_solid_hash(a,parts_hash("DONOR_DIFFUSE"))==parts_hash("NFSAD_CAR_DIFFUSE"));
-    CHECK(lookup("UNRELATED",a,0)==parts_hash("UNRELATED"));
+    CHECK(private_solid_hash(a,parts_hash("DONOR_DIFFUSE"),0)==parts_hash("NFSAD_CAR_DIFFUSE"));
+    unsigned missing_body=0;
+    for (unsigned lod=0;lod<CAR_KIT_BODY_LODS;++lod) {
+        char donor[64], stock[64];
+        snprintf(donor,sizeof donor,"DONOR_KIT05_BODY_%c",'A'+lod);
+        snprintf(stock,sizeof stock,"NFSAD_CAR_KIT00_BODY_%c",'A'+lod);
+        CHECK(private_solid_hash(a,parts_hash(donor),0)==parts_hash(donor)); // map has no row
+        uint32_t actual=lookup(donor,a,lod);
+        missing_body+=(actual!=parts_hash(stock));
+        CHECK(actual==parts_hash(stock));
+    }
+    CHECK(lookup_model("UNRELATED",a,0,0x18,0)==parts_hash("UNRELATED"));
+    CHECK(lookup_model("DONOR_KIT05_BODY_A",a,0,0x17,1)==parts_hash("DONOR_KIT05_BODY_A"));
+    CHECK(lookup("DONOR_KIT05_BODY_A",a,5)==parts_hash("DONOR_KIT05_BODY_A"));
+    CHECK(lookup(NULL,a,0)==0);
+    a->stock_body[4]=0;
+    CHECK(lookup("DONOR_KIT05_BODY_E",a,4)==parts_hash("DONOR_KIT05_BODY_E"));
     Addition verified={0}; strcpy(verified.name,"CAR");
     snprintf(verified.geometry,sizeof verified.geometry,"%s/GEOMETRY.BIN",argv[1]);
     load_solid_map(&verified,argv[2]); // catalog paths take precedence over the legacy directory
@@ -109,9 +131,12 @@ int main(int argc, char **argv) {
     strcpy(traffic_addition.name,"CAR");
     snprintf(traffic_addition.directory,sizeof traffic_addition.directory,"%s",argv[1]);
     load_solid_map(&traffic_addition,argv[2]);
-    CHECK(private_solid_hash(&traffic_addition,parts_hash("DONOR_KIT03_BODY_A"))==parts_hash("NFSAD_CAR_KIT03_BODY_A"));
+    traffic_active=1;
+    CHECK(private_solid_hash(&traffic_addition,parts_hash("DONOR_KIT03_BODY_A"),0)==parts_hash("NFSAD_CAR_KIT03_BODY_A"));
+    CHECK(lookup("DONOR_KIT05_BODY_A",&traffic_addition,0)==parts_hash("DONOR_KIT05_BODY_A"));
     free(traffic_addition.solid_map); free(a->solid_map); free(G);
-    printf("kit lookup: %u checks, %u failures, missing targets %u/6\n",checks,failures,missing);
+    printf("kit lookup: %u checks, %u failures, missing targets %u/6, absent BODY_05 %u/5\n",
+           checks,failures,missing,missing_body);
     return failures!=0;
 }
 '''
@@ -127,7 +152,8 @@ int main(int argc, char **argv) {
     assert(map && before && fread(map,8,h[3],f)==h[3]); fclose(f);
     memcpy(before,map,h[3]*8);
     f=fopen(argv[1],"rb"); assert(f);
-    int result=car_kit_fallback(f,argv[4],map,h[3]); fclose(f);
+    uint32_t stock_body[CAR_KIT_BODY_LODS]={0};
+    int result=car_kit_fallback(f,argv[4],map,h[3],stock_body); fclose(f);
     unsigned changed=0;
     for (unsigned i=0;i<h[3];++i) {
         assert(map[2*i]==before[2*i]);
@@ -135,9 +161,14 @@ int main(int argc, char **argv) {
     }
     int expected=atoi(argv[3]);
     assert(result==expected && changed==(unsigned)(expected>0?expected:0));
+    for (unsigned lod=0;lod<CAR_KIT_BODY_LODS;++lod) {
+        char name[64];
+        snprintf(name,sizeof name,"NFSAD_CAR_KIT00_BODY_%c",'A'+lod);
+        assert(stock_body[lod]==(result>0 ? car_kit_hash(name) : 0));
+    }
     if (result>0) {
         f=fopen(argv[1],"rb"); assert(f);
-        assert(car_kit_fallback(f,argv[4],map,h[3])==0); fclose(f);
+        assert(car_kit_fallback(f,argv[4],map,h[3],stock_body)==0); fclose(f);
     }
     free(map); free(before); return 0;
 }
@@ -147,6 +178,7 @@ int main(int argc, char **argv) {
 def pack(directory):
     raw = fixture.geometry('DONOR', False)
     models = cc.validate_geometry(raw)
+    models['DONOR_KIT00_BODY_E'] = models['DONOR_KIT00_BODY_D']
     models['DONOR_KIT03_BODY_B'] = models['DONOR_KIT00_BODY_B']
     models['DONOR_KITW99_BODY_D'] = models['DONOR_KIT00_BODY_D']
     renamed, _ = cc.isolate(models, models, 'DONOR', 'CAR', {})
@@ -213,13 +245,22 @@ def main():
     source = (ROOT / 'runtime/car85.c').read_text()
     names = ('read_solid_map', 'load_solid_map', 'private_solid_hash', 'model_00751540', 'f_00751540')
     production = '\n'.join(function(source, name) for name in names)
-    old = production.replace('int repaired=car_kit_fallback(models,space,a->solid_map,a->solid_count);', 'int repaired=0;')
-    assert old != production
+    no_repair = production.replace('int repaired=car_kit_fallback(models,space,a->solid_map,a->solid_count,a->stock_body);',
+                                   'int repaired=0;')
+    assert hashlib.sha256(OLD_MAP_RETURN.encode()).hexdigest() == OLD_MAP_RETURN_SHA256
+    current_return = ('    if (lo<a->solid_count && a->solid_map[2*lo]==hash) return a->solid_map[2*lo+1];\n'
+                      '    return fallback ? fallback : hash;')
+    old_lookup = production.replace(current_return, '    (void)fallback;\n    ' + OLD_MAP_RETURN)
+    assert no_repair != production and old_lookup != production
     with tempfile.TemporaryDirectory(prefix='car-kit-') as td:
         tmp = Path(td)
         pack(tmp)
         inputs = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp.glob('*.BIN')}
-        for label, code in (('fixed', production), ('old-lookup', old)):
+        for label, code, status, counts in (
+            ('fixed', production, 0, 'missing targets 0/6, absent BODY_05 0/5'),
+            ('old-lookup', old_lookup, 1, 'missing targets 0/6, absent BODY_05 5/5'),
+            ('no-row-repair', no_repair, 1, 'missing targets 5/6, absent BODY_05 5/5'),
+        ):
             unit, binary = tmp / 'test.c', tmp / label
             unit.write_text(HARNESS.replace('TRANSLATED', translated).replace('PRODUCTION', code))
             build = subprocess.run(['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
@@ -229,7 +270,7 @@ def main():
             run = subprocess.run([str(binary), str(tmp), str(tmp / 'SOLIDMAP.BIN')],
                                  capture_output=True, text=True, env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'})
             print(label, run.stdout.strip())
-            assert run.returncode == (0 if label == 'fixed' else 1), run.stderr[-3000:]
+            assert run.returncode == status and counts in run.stdout, run.stderr[-3000:]
         assert all(hashlib.sha256(p.read_bytes()).hexdigest() == digest for p, digest in inputs.items())
         print('input geometry and SOLIDMAP digests unchanged')
         parser_checks(tmp)

@@ -1724,10 +1724,10 @@ int main(int argc, char **argv) {
     uint32_t ride=gmalloc(0x100),native=gmalloc(0x100);M32(ride)=160;M32(native)=25;
     for(unsigned i=0;i<a->solid_count;++i) {
         uint32_t old=a->solid_map[2*i],own=a->solid_map[2*i+1];
-        CHECK(private_solid_hash(solid_context(ride),old)==own);
-        CHECK(private_solid_hash(solid_context(native),old)==old);
-        CHECK(private_solid_hash(solid_context(native),own)==own);
-        CHECK(private_solid_hash(solid_context(ride),own)==own);
+        CHECK(fixture_solid_hash(solid_context(ride),old)==own);
+        CHECK(fixture_solid_hash(solid_context(native),old)==old);
+        CHECK(fixture_solid_hash(solid_context(native),own)==own);
+        CHECK(fixture_solid_hash(solid_context(ride),own)==own);
         model_namespace=solid_context(ride);M32(c.esp+4)=old;f_00751540(&c);c.esp=0x800000;CHECK(c.eax==own);
         model_namespace=solid_context(native);M32(c.esp+4)=old;f_00751540(&c);c.esp=0x800000;CHECK(c.eax==old);
         model_namespace=NULL;
@@ -1889,6 +1889,13 @@ void f_0056E180(Cpu *c) { c->eax=M32(c->esp+4)+4+19*48; c->esp+=4; }
 void f_0057F920(Cpu *c) {
     CC_MD5(G+M32(c->esp+4),M32(c->esp+12),G+M32(c->esp+8));c->esp+=20;
 }
+static uint32_t fixture_solid_hash(Addition *a, uint32_t hash) {
+#ifdef TEST_ORIGINAL_LOOKUP
+    return private_solid_hash(a,hash);
+#else
+    return private_solid_hash(a,hash,0);
+#endif
+}
 '''
     harness += MAIN
     harness = harness.replace('static uint32_t clone_ld[2];', 'uint32_t clone_ld[2];')
@@ -2005,6 +2012,7 @@ def main(selection_only=False):
             build=subprocess.run(['clang','-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all',
                                   '-I'+str(tmp),'-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                                   *(['-DNFS_PUBLIC=1'] if variant=='public' else []),
+                                  *(['-DTEST_ORIGINAL_LOOKUP=1'] if variant=='original' else []),
                                   str(tmp/'test.c'),str(ROOT/'runtime/car_grip.c'),str(ROOT/'runtime/car_physics.c'),str(ROOT/'runtime/traffic_pilot.c'),
                                   '-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3500:]

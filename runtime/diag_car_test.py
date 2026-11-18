@@ -59,7 +59,8 @@ void diag_car_begin(Cpu *c, DiagCarRender *s, uint64_t f) { ++entries; real_diag
 void diag_car_observe(Cpu *c, uint32_t site) { ++entries; real_diag_car_observe(c,site); }
 void diag_car_reject(uint32_t site) { ++entries; real_diag_car_reject(site); }
 void diag_car_end(Cpu *c, DiagCarRender *s) { ++entries; real_diag_car_end(c,s); }
-typedef struct { uint32_t type, solid_count, *solid_map; } Addition;
+#include "car_kit_fallback.h"
+typedef struct { uint32_t type, solid_count, *solid_map, stock_body[CAR_KIT_BODY_LODS]; } Addition;
 static Addition additions[2];
 static unsigned nadditions=1;
 static int traffic_active;

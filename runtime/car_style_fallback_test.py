@@ -49,9 +49,10 @@ int main(int argc, char **argv) {
     uint32_t *map = malloc(h[3]*8); assert(map);
     assert(fread(map, 8, h[3], f) == h[3]); fclose(f);
     f = fopen(argv[1], "rb"); assert(f);
-    int repaired = car_kit_fallback(f, argv[4], map, h[3]);
+    uint32_t stock_body[CAR_KIT_BODY_LODS];
+    int repaired = car_kit_fallback(f, argv[4], map, h[3], stock_body);
     assert(repaired >= 0);
-    assert(car_kit_fallback(f, argv[4], map, h[3]) == 0); fclose(f);
+    assert(car_kit_fallback(f, argv[4], map, h[3], stock_body) == 0); fclose(f);
     f = fopen(argv[3], "wb"); assert(f);
     assert(fwrite(map, 8, h[3], f) == h[3]); fclose(f); free(map);
     printf("%d\n", repaired);
