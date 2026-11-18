@@ -1,31 +1,33 @@
-"""Launch update offline proofs (synthetic apps/data; no game or network).
+"""
 
-Good/broken counts are printed by the suite: every durable apply, rollback and
-acknowledgment boundary is killed with SIGKILL and recovered through the shared
-Setup journal. Four deliberate mutants must fail the same safety oracles: missing
-journal, copy/delete exchange, premature backup deletion, changed staged hash.
-The normal app name must be executable at every observed boundary; recovery must
-produce a whole old/new app/data/roots/preferences set and preserve save bytes.
-Verified controls: 55 SIGKILL cases (22 apply, 12 rollback, 13 preference merge,
-6 acknowledgment, 2 partial copies); 4/4 unsafe mutants rejected; 8/8 invalid
-ready/destination cases rejected. Native harness: 4 good transfer/receipt paths,
-2 guarded/unhealthy startup refusals. All 31 tests pass with synthetic signatures.
-Restart arguments: correct ordering passes; 1 consumed-token ordering mutant fails.
-Review regressions: private retained tools good=1, broken=12 rejected; serialization
-good=2 intents/1 launch, old=2 intents/3 launches (oracle fails). Full-flush
-good=2 volumes at exchange/deletion, broken=3 missing-barrier controls rejected.
-Custom profile: good=3 launch paths, broken=3 missing-profile controls rejected.
-Ready index: good=1 small read with 1000 retained jobs, broken scan rejected;
-index publication/retirement good=2 layouts, changed retained tools rejected.
-Retained imports: -I -B leaves hashes unchanged (good=1); enabling bytecode
-writes changes the verified source (broken=1 rejected).
-Install retention regression: original before/after acknowledgment=3/3 (fails),
-shared collector=2/1 (passes); original empty-unmarked preservation=0/1 (fails).
-New collector checks: branch 4/4 pass, original 0/4; 34 SIGKILL boundaries
-(25 apply, 9 acknowledgment) with two Setup builds. Every surviving manifest
-reference must still exist at each deletion boundary.
-Deletion review regressions: original 0/2 pass (case alias deletes rollback data;
-inherited X360 override deletes live data); identity/environment collector 2/2 pass.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 import hashlib
 import json
@@ -71,7 +73,7 @@ class Fixture:
         self.job.mkdir()
         self.old_data = self.base / "old-data"
         put(self.old_data / "pc/marker", "old")
-        self.make_app(self.dest, "old")
+        self.make_app(self.dest, "old", version="4.0.0" if bundle == ins.APP_BUNDLE else "1.0.0")
         self.make_app(self.job / bundle, "new")
         put(self.job / "data/pc/marker", "new")
         put(self.job / "data/assets/marker", "new")
@@ -165,11 +167,40 @@ class ApplyTests(unittest.TestCase):
         path.mkdir()
         return Fixture(path, **kw)
 
+    def test_staged_app_requires_verified_newer_version(self):
+        # Original: all three invalid stages exchanged the app (0/3 rejected).
+        cases = (
+            ("downgrade", "4.7.0", "4.6.0", "4.8.0", "4.8.0"),
+            ("equal", "4.7", "4.7.0", "4.7.0", "4.7.0"),
+            ("substitution", "4.7.0", "4.8.0", "4.8.0", "4.9.0"),
+        )
+        for name, installed, staged, declared, target in cases:
+            with self.subTest(name=name):
+                f = self.fixture(name, version=declared)
+                f.make_app(f.dest, "old", version=installed)
+                put(f.job / "target-version.json", json.dumps(dict(version=target)))
+                f.make_app(f.job / f.bundle, "new", version=staged)
+                f.descriptor["hashes"]["app"] = ins.digest_tree(f.job / f.bundle)
+                f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
+                f.write_ready()
+                with self.assertRaisesRegex(ins.InstallError, "version"):
+                    f.apply()
+                self.assertFalse(ins.journal_path(f.profile).exists())
+                f.consistent("old")
+
+        f = self.fixture("newer", version="4.10.0")
+        f.make_app(f.dest, "old", version="4.9.0")
+        f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
+        f.write_ready()
+        put(f.job / "target-version.json", json.dumps(dict(version=f.version)))
+        f.apply()
+        f.consistent("new")
+
     def setup_pair(self, name="pair"):
         f = self.fixture(name)
         for index in range(2):
             stage = f.base / f"setup-{index}"
-            f.make_app(stage / ins.APP_BUNDLE, "old")
+            f.make_app(stage / ins.APP_BUNDLE, "old", version=f"4.0.{index}")
             put(stage / "data/pc/marker", "old")
             ins.transactional_install(stage / ins.APP_BUNDLE, stage / "data",
                 dict(pc_root=stage / "data/pc"), f.profile, f.dest.parent,
@@ -1044,20 +1075,25 @@ int main(int argc, char **argv) { @autoreleasepool {
 } }
 ''')
         executable = self.root / "launch-harness"
-        build = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", str(harness),
-            str(ROOT / "runtime/pub_update_launch.m"), "-framework", "Cocoa", "-o", str(executable)], capture_output=True)
-        self.assertEqual(build.returncode, 0, build.stderr.decode()[-2000:])
+        carbon = self.root / "carbon-harness"
+        for output, flags in ((executable, []), (carbon, ["-DNFS_GAME=2"])):
+            build = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", *flags, str(harness),
+                str(ROOT / "runtime/pub_update_launch.m"), "-framework", "Cocoa", "-o", str(output)], capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr.decode()[-2000:])
         home = self.root / "home"
         home.mkdir()
-        for layout in ("flat", "nested", "recovery", "ack", "unhealthy", "guarded"):
-            f = self.fixture(layout)
-            shutil.copy2(executable, f.dest / "Contents/MacOS" / ins.EXEC_NAME)
+        for name in ("carbon-nested", "carbon-ack", "flat", "nested", "stale", "unbound", "recovery", "ack", "unhealthy", "guarded"):
+            is_carbon = name.startswith("carbon-")
+            layout = name.removeprefix("carbon-")
+            f = self.fixture(name, **(dict(bundle="NFS Carbon Native.app", version="1.0.1") if is_carbon else {}))
+            app_executable = f.dest / "Contents/MacOS" / f.product["exec"]
+            shutil.copy2(carbon if is_carbon else executable, app_executable)
             environment = dict(os.environ, CFFIXED_USER_HOME=str(home), HOME=str(home), FIXTURE_PROFILE=str(f.profile))
             # The offline runner guards real games. This Foundation-only binary
             # must exercise normal transfer too; guarded refusal has its own case.
             environment.pop("BOOT_BACKGROUND", None)
             environment.pop("BOOT_DEADLINE", None)
-            command = [str(f.dest / "Contents/MacOS" / ins.EXEC_NAME)]
+            command = [str(app_executable)]
             token = "a" * 32
             if layout in ("ack", "unhealthy", "guarded"):
                 record = dict(kind=a.KIND, state="awaiting_ack", token=token,
@@ -1069,15 +1105,16 @@ int main(int argc, char **argv) { @autoreleasepool {
                     environment["FIXTURE_PUMP"] = "1"
                     if layout == "unhealthy": environment["FIXTURE_UNHEALTHY"] = "1"
             else:
-                job = home / "Library/Application Support/NFSMW-Setup/updates" / layout
+                job = home / "Library/Application Support/NFSMW-Setup/updates" / name
                 job.parent.mkdir(parents=True, exist_ok=True)
                 f.job.rename(job)
                 job.chmod(0o700)
                 f.job = job
-                stage = job / "staged" if layout == "nested" else job
+                nested = layout in ("nested", "stale", "unbound")
+                stage = job / "staged" if nested else job
                 stage.mkdir(exist_ok=True)
-                if layout == "nested":
-                    for item in (job / "data", job / ins.APP_BUNDLE, job / "roots.txt"):
+                if nested:
+                    for item in (job / "data", job / f.bundle, job / "roots.txt"):
                         item.rename(stage / item.name)
                 f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
                 put(stage / "ready.json", json.dumps(f.descriptor))
@@ -1085,7 +1122,15 @@ int main(int argc, char **argv) { @autoreleasepool {
                 python = job / "python/bin/python3"
                 put(python, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PWD/transfer.txt"\nprintf "%s" "$BOOT_USERDATA" > "$PWD/profile.txt"\n')
                 python.chmod(0o755)
+                if layout != "unbound":
+                    put(job / "target-version.json", json.dumps(dict(version=f.version)))
                 entry = a.publish_ready(stage / "ready.json", f.profile, f.dest)
+                if layout == "stale":
+                    # An older retained apply.py would accept this staged app
+                    # with matching hashes and a newer declared version.
+                    f.make_app(stage / f.bundle, "new", version="4.0.1")
+                    f.descriptor["hashes"]["app"] = ins.digest_tree(stage / f.bundle)
+                    put(stage / "ready.json", json.dumps(f.descriptor))
                 if layout == "recovery":
                     # Recovery uses the journal's pinned tools even after a
                     # previous cleanup has already retired the ready index.
@@ -1106,6 +1151,12 @@ int main(int argc, char **argv) { @autoreleasepool {
                 else:
                     self.assertEqual(json.loads(a.ack_path(f.profile, token).read_bytes()),
                                      dict(token=token, identity=ins.ident(f.dest)))
+            elif layout in ("stale", "unbound"):
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertIn(b"CONTINUE=1", result.stdout)
+                self.assertIn(b"version verification failed", result.stderr)
+                self.assertTrue((stage / ".apply-failed.json").exists())
+                self.assertFalse((job / "transfer.txt").exists())
             else:
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
                 self.assertNotIn(b"CONTINUE", result.stdout, result.stderr.decode() + " expected " + str(f.dest))

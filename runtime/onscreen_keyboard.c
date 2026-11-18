@@ -62,8 +62,7 @@ static void utf8(char *out, size_t *n, unsigned ch) {
 }
 static void note_snapshot(void) {
     note.length = (uint32_t)strlen(note_text);
-    size_t n = 0; note.text[0] = 0;
-    for (unsigned i = 0; i < note.length; ++i) utf8(note.text, &n, (uint8_t)note_text[i]);
+    memcpy(note.text, note_text, note.length + 1);
 }
 void osk_note_begin(char *text, size_t capacity, int owner) {
     osk_note_end(0);
@@ -143,9 +142,8 @@ void osk_pass(Cpu *c) {
         const OskCapture *s = osk_capture();
         if (!s->active || e.generation != s->generation || e.target != s->target || e.note != s->note || prompts_last_input() != 1) continue;
         if (e.note) {
-            size_t n = strlen(note_text);
-            if (e.action == OSK_TYPE && e.ch < 256 && note.allowed[e.ch] && n < note.limit) { note_text[n] = (char)e.ch; note_text[n + 1] = 0; }
-            else if (e.action == OSK_DELETE && n) note_text[n - 1] = 0;
+            if (e.action == OSK_TYPE && e.ch < 256 && note.allowed[e.ch]) text_append(note_text, note_capacity, e.ch);
+            else if (e.action == OSK_DELETE) text_edit_key(note_text, 0x08, 0, 0);
             else if (e.action == OSK_CLEAR) note_text[0] = 0;
             else if (e.action == OSK_ACCEPT || e.action == OSK_CANCEL) osk_note_end(e.action == OSK_CANCEL);
             if (note.active) note_snapshot();

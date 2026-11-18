@@ -164,14 +164,22 @@ The diagnostic switch never starts a broadcast.
 
 F10 > Display > Live streaming provides **Enter stream key**, **Forget stream
 key**, **Go live**, **Stop live**, and a fixed status readout. The native secure
-sheet accepts 1–512 UTF-8 bytes without truncation; control characters are
-rejected. Save replaces only the in-memory key; Cancel preserves the previous
-key. Stop and errors preserve the saved key for another Go; Forget and quit
-clear it. Stop, Forget and quit attempt to finish accepted uploads and acknowledge
+sheet accepts 1–512 UTF-8 bytes without truncation and rejects control characters.
+**Remember on this Mac** is checked by default. Save stores the key in that
+game's save folder for future launches, including after rebuilds and updates.
+Clear the checkbox before saving to keep the new key for this session and
+remove any previously remembered key. Cancel preserves the previous key.
+Stop and errors preserve the key for another Go. Forget clears the key from
+memory and storage. Quit clears the in-memory copy. Stop, Forget and quit
+attempt to finish accepted uploads and acknowledge
 one final playlist within a shared six-second network bound, then erase the
 poster key before returning.
-Terminal failures abort and erase immediately. There is no Keychain, preference, environment key, reveal control or
-automatic restart/reconnect. Stop live before replacing the key. Secure entry
+Terminal failures abort and erase the poster key immediately. The remembered
+key lives in `.stream-key/stream-key` inside the per-game save folder, including
+when using `BOOT_USERDATA`. It is stored as UTF-8 with an integrity checksum
+in a 0600 file under a 0700 directory. The store uses an atomic replacement.
+An unreadable, unsafe or damaged file shows **Saved key unavailable**. A
+missing key shows **No key**. Stop live before replacing the key. Secure entry
 bypasses generic text settings, the controller keyboard and report notes.
 Copy/cut/drag exports, services, contextual menus and undo are disabled. Cmd+V
 inserts only plain text directly into the secure field editor, without an Edit
@@ -185,14 +193,14 @@ late callbacks retain the old stopped poster. Transport or encoder failure
 stops live independently and requires another Go. Key entry and restart create
 zero capture, encoder, poster or session resources.
 
-Public strings contain only fixed status/error text. Report export redacts
+Public strings contain only fixed status and error text. Report attachments
+exclude the saved key file and its temporary file by name. Report export redacts
 labelled stream keys and ingest `cid`, including bounded percent/JSON escape
 decoding, before truncation/export. The saved 512-byte key, validation scratch and
 poster's 512-byte copy are explicitly erased. Stop closes admission, drains accepted work and sends ENDLIST; its bounded
 completion erases the poster copy synchronously on its serial queue. Terminal
 poster errors abort in-flight work and erase immediately. Stop and terminal errors preserve the saved UI key so Go can start again without
-re-entry. Forget and quit erase it.
-Forget and the initial AppKit quit request clear saved/editor storage before
+re-entry. Forget and the initial AppKit quit request clear in-memory and editor storage before
 waiting for transport completion (the game may defer exit). Immediate quit and
 `applicationWillTerminate` use the same cleanup; both `atexit` paths are
 idempotent fallbacks.
@@ -202,9 +210,11 @@ The key-bearing storage and its lifetime are:
 | Storage | Lifetime and cleanup |
 | --- | --- |
 | Saved `keyBytes` | Save until replacement, Forget or quit; full allocation overwritten. |
+| Remembered file | Save with Remember checked until replacement, Forget or Save with Remember cleared. |
+| Temporary file and record buffers | Atomic Save stages the record in the private directory. Save or Forget removes any leftover staging file. Read and write record buffers are overwritten before return. |
 | `replaceKey` UTF-8 scratch | Validation call only; full stack buffer overwritten on acceptance/rejection. |
 | Secure field/cell and field editor text storage | Entry until Save, Cancel, close, Stop, Forget or quit; replace the full text with an equal-length run, then empty it and clear undo. |
-| Pasteboard `NSString` and Save's field-value `NSString` | Scoped autorelease pools drain after insertion/Save; immutable Foundation copies can only be released. The user's clipboard remains untouched. |
+| Pasteboard, field-value and load validation `NSString` | Scoped autorelease pools drain after insertion, Save or load. Immutable Foundation copies are released. The user's clipboard remains untouched. |
 | Start API's temporary `std::string` | Start call only; bytes overwritten before return. |
 | Poster key bytes | Explicit Go until graceful completion or its bounded timeout; terminal failure erases immediately. Full allocation overwritten synchronously, including while old callbacks retain the state. Validation examines UTF-8 scalars without creating a key string. |
 | Per-request encoded `cid` buffer | Segment/playlist/retry request creation only; bounded stack buffer overwritten immediately after creating the request. |

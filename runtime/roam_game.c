@@ -5,8 +5,8 @@
 // mode on). Ghost mode toggles with D-pad Down (pad 0) or G while driving online, or in F10 > Online > Ghost mode.
 // Unset, MainLoop and World_Service only test session state: no socket, no thread.
 //
-// Per frame, after World_Service 0075AAD0 (the world/sim step MainLoop 00663D30 runs before Main_DisplayFrame):
-// drain the socket into the client session, send HELLO until WELCOME, then the local car's state at 20 Hz.
+// MainLoop 00663D30 drains the socket and sends HELLOs, including in the front end.
+// After World_Service 0075AAD0, send the local car's state at 20 Hz and update remote vehicles.
 // The local car: SndCamera::m_PLayerCars[0] 009142D0 (NumPlayers 008EF998) -> EAXCar +0x34 EAX_CarState, which
 // CarSoundConn::UpdateState 004B15E0 fills each frame: the world body matrix copied to +0x10 (004B1655: ecx =
 // state + 0x10, push body, call 00445090 bMatrixCopy) - rotation rows +0x10/+0x20/+0x30, position row +0x40 - and
@@ -583,7 +583,7 @@ static void roam_send_look(uint32_t now, uint8_t *packet) {
     roam_last_look = now;
     roam_send(packet, roam_client_look(&roam, &roam_local_look, packet));
 }
-static void roam_frame(Cpu *c) {
+static void roam_network(void) {
     uint32_t now = roam_ms();
     uint64_t phase = diag_on ? host_ticks() : 0;
     uint8_t b[ROAM_MAX_DGRAM];
@@ -597,11 +597,34 @@ static void roam_frame(Cpu *c) {
         if (!was && roam.welcomed) diag_event("roam: welcomed, id %u near %d", roam.id, roam.near);
     }
     roam_view_expire(&roam.view, now, 1000);
-    if (roam.welcomed && (uint32_t)(now - roam_last_rx) > 5000) roam.welcomed = 0;
+    if (roam.welcomed && (uint32_t)(now - roam_last_rx) > 5000) {
+        roam.welcomed = 0; roam.id = 0;
+        roam.has_members = roam.nmembers = 0; roam_view_init(&roam.view);
+    }
     // A periodic HELLO is also a heartbeat when alone. Banned retries stay within the cookie lifetime.
     if (now - roam_last_hello >= (roam.last_err == ROAM_ERR_BANNED ? 5000u : roam.welcomed ? 2000u : 500u)) {
         roam_last_hello = now; roam_send(b, roam_client_hello(&roam, b));
     }
+    if (roam_log) fprintf(roam_log, "N %u network_ms %.6f\n", now, (host_ticks()-phase)/1e6);
+    int remotes = 0;
+    for (int i = 0; i < ROAM_MAX_REMOTE; ++i) {
+        const RoamRemote *r = &roam.view.r[i];
+        if (r->used && r->n && !r->map_only) remotes++;
+    }
+    roam_online_players(roam.welcomed, remotes + 1, roam.last_err ? roam.last_err : !roam.welcomed && now - roam_started > 15000 ? 4 : 0);
+    if (now - roam_last_sec >= 1000) {
+        roam_last_sec = now;
+        if (roam_log) fflush(roam_log);
+        if (diag_on)
+            diag_event("roam: id %u welcomed %d remotes %d tx %u rx %u bundles %u entries %u bad %u err %d cars spawned %u failed %u killed %u lost %u ghosts %d skips %u cache_protected %u",
+                       roam.id, roam.welcomed, remotes, roam_tx, roam_rx, roam.rx_bundles, roam.rx_entries, roam.rx_bad,
+                       roam.last_err, roam_spawned, roam_spawn_fail, roam_killed, roam_lost, roam_ghosts, roam_ghost_skips, roam_cache_protected);
+    }
+}
+
+static void roam_world(Cpu *c) {
+    uint32_t now = roam_ms();
+    uint8_t b[ROAM_MAX_DGRAM];
     if (roam.welcomed) {
         roam_send_look(now, b);
         RoamState s;
@@ -613,14 +636,11 @@ static void roam_frame(Cpu *c) {
             roam_send(b, roam_client_state(&roam, &s, b));
         }
     }
-    if (roam_log) fprintf(roam_log, "N %u network_ms %.6f\n", now, (host_ticks()-phase)/1e6);
-    int remotes = 0;
-    for (int i = 0; i < ROAM_MAX_REMOTE; ++i) {
+    for (int i = 0; (diag_on || roam_log) && i < ROAM_MAX_REMOTE; ++i) {
         const RoamRemote *r = &roam.view.r[i];
         if (!r->used || !r->n) continue;
         float pos[3], q[4], vel[3];
         if (!roam_view_pose(&roam.view, r->id, now, pos, q, vel)) continue;
-        remotes++;
         static uint16_t seen_id[ROAM_MAX_REMOTE];
         static uint8_t seen_ghost[ROAM_MAX_REMOTE];
         int rg = (r->s[r->n - 1].flags & ROAM_FLAG_GHOST) != 0;
@@ -636,15 +656,6 @@ static void roam_frame(Cpu *c) {
     int has_car = roam_local_vehicle() != 0;
     roam_cars(c, now, has_car);
     if (roam.welcomed) roam_toggle_poll(has_car);
-    roam_online_players(roam.welcomed, remotes + 1, roam.last_err ? roam.last_err : !roam.welcomed && now - roam_started > 15000 ? 4 : 0);
-    if (now - roam_last_sec >= 1000) {
-        roam_last_sec = now;
-        if (roam_log) fflush(roam_log);
-        if (diag_on)
-            diag_event("roam: id %u welcomed %d remotes %d tx %u rx %u bundles %u entries %u bad %u err %d cars spawned %u failed %u killed %u lost %u ghosts %d skips %u cache_protected %u",
-                       roam.id, roam.welcomed, remotes, roam_tx, roam_rx, roam.rx_bundles, roam.rx_entries, roam.rx_bad,
-                       roam.last_err, roam_spawned, roam_spawn_fail, roam_killed, roam_lost, roam_ghosts, roam_ghost_skips, roam_cache_protected);
-    }
 }
 
 static void roam_session(Cpu *c) {
@@ -684,14 +695,14 @@ static void roam_session(Cpu *c) {
 void f_00663D30_orig(Cpu *c);
 void f_00663D30(Cpu *c) {
     roam_session(c);
+    if (atomic_load(&roam_state) == 1 && roam_fd >= 0) roam_network();
     f_00663D30_orig(c);
 }
 
 void f_0075AAD0_orig(Cpu *c);
 void f_0075AAD0(Cpu *c) {   // World_Service (cdecl, no arguments)
     f_0075AAD0_orig(c);
-    roam_session(c);
-    if (atomic_load(&roam_state) == 1 && roam_fd >= 0) roam_frame(c);
+    if (atomic_load(&roam_state) == 1 && roam_fd >= 0) roam_world(c);
 }
 
 // RBVehicle::CanCollideWith(const RigidBody &) (0069B740, thiscall, one argument; every vehicle body's vtable slot +0x48,

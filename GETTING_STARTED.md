@@ -1,19 +1,23 @@
 # Getting started
 
-Setup turns **your own copy** of Need for Speed: Most Wanted into a native Mac app. It checks your game files,
-translates and compiles the game on your Mac, converts your assets and installs the app. Nothing is uploaded, and
-nothing it makes is meant to be shared.
+**Best of all worlds:** The PC game on your Mac, with console-inspired bloom, colour and car detail already included, plus more Xbox 360 features from your own console files. Setup builds from your own files on your Mac; nothing is uploaded or meant to be shared.
 
 ## What you need
 
 | | |
 |---|---|
 | **Mac** | Apple Silicon (M1 or later) with **macOS 14.5 or later** (provisional). |
-| **The game** | Your own **Need for Speed: Most Wanted (2005)** for PC, **version 1.3**, installed: the folder that holds `speed.exe`, `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` of that folder (Setup unpacks a copy into its work folder and only reads the `.zip`). Any `speed.exe` that has the 1.3 code is accepted; Setup checks it first and changes nothing if it can't be used. |
-| **Or: the game discs** | Instead of an installed game: your PC game discs as `.iso` images or mounted in Finder, the game's official 1.3 update (`nfsmwpatch1.3.exe`), and a `speed.exe` that has the 1.3 code (the one on the discs and in the update is copy-protected). Setup installs the game from the discs into its work folder and applies the update without running it; your files are only read. |
 | **Xcode Command Line Tools** | Apple's free developer tools. Setup offers to install them; in Terminal, `xcode-select --install`. |
 | **Disk space** | About 12 GB free while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy). |
-| **Optional: Xbox 360 copy** | Your own Xbox 360 copy of the game, as a folder or an `.iso` (both work), for the Xbox 360 features (below). The USA and the European (PAL) retail discs are supported. |
+
+## What you can use
+
+- Choose your own installed PC game folder, or pick its `speed.exe`. You need version 1.3.
+- Or choose a `.zip` or `.7z` of that folder, or your original PC discs as `.iso` images or mounted/inserted discs. For older discs, choose the official 1.3 patch and a compatible 1.3 `speed.exe` when Setup asks; the disc executable is copy-protected.
+- Optional: add your own Xbox 360 files as an `.iso`, extracted folder, `.zip` or `.7z` for more console features. They do not replace the PC game.
+- Have a `.rar` or `.bin/.cue`? Unpack it to a folder first.
+
+Stuck? See [Troubleshooting](TROUBLESHOOTING.md) or ask on [Discord](https://discord.gg/d6HfMwdM9v).
 
 This project does not provide, link to, or explain how to obtain any game file. Use your own copy.
 
@@ -21,11 +25,9 @@ This project does not provide, link to, or explain how to obtain any game file. 
 
 1. Download the Setup disk image from the
    [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest) and open it.
-2. Open **NFS Most Wanted Native - Setup**. The app is not notarized by Apple, so the first time macOS blocks it: click **Done**, then go to
+2. Open **NFS Most Wanted Native Setup**. The app is not notarized by Apple, so the first time macOS blocks it: click **Done**, then go to
    **System Settings > Privacy & Security** and click **Open Anyway** next to its name. You only do this once.
-3. **Choose your game folder, or a .zip of it.** Or choose **PC disc images**, then disc 1, the 1.3 update and a
-   `speed.exe` with the 1.3 code. Setup finds the other discs beside disc 1 whatever their names, and asks for any it
-   can't find. Optionally choose your Xbox 360 copy. Choose where the app goes.
+3. Choose your PC game using an option above. For discs, Setup finds the other discs beside disc 1 and asks for any it can't find. Optionally add your Xbox 360 files and choose where the app goes.
 4. If asked, install Apple's Command Line Tools and wait for them.
 5. Click **Build**. You see each step and its progress. The first build compiles the whole game on your Mac, so it
    takes a while. **Cancel** stops it and leaves anything already installed as it was.
@@ -58,9 +60,7 @@ Terminal equivalent:
 
 ## The Xbox 360 features
 
-With your own Xbox 360 copy, Setup can add: world, audio, reverb, music, police, nis (cutscenes), vinyls, textures
-and movies. At the end Setup reports which ones it could add. Without an Xbox 360 copy the PC game alone is used and
-these features are simply absent. Setup only reads your copy; it never provides these files.
+With your own Xbox 360 copy, Setup can add its world, music, police radio, cutscene sound, vinyls, textures and movies. Setup reports what it could add. Console-inspired looks are already included even without those files. Setup only reads your copy; it never provides these files.
 
 ## Playing
 

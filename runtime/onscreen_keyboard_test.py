@@ -11,6 +11,8 @@ Physical-device tracker: 6/0 checks/failures; broken connection tracking 6/2.
 Pointer hide proof: fixed 1/2/3 calls after pad/mouse/key batches of 1,000 inputs;
 SHA-256-pinned original: 1,000 calls for 1,000 pad inputs.
 R3 review proof: original press-to-clear 350 checks/25 failures; release-to-clear 350/0.
+Note UTF-8: Backspace after Aé leaves 2 bytes in the original (partial UTF-8)
+and 1 byte in the fix. Typing é again leaves the valid 3-byte Aé.
 """
 from pathlib import Path
 import hashlib
@@ -154,6 +156,16 @@ int main(int argc,char **argv) {
  old=osk_capture()->generation; osk_queue(old,OSK_TYPE,'X'); osk_note_end(0);
  osk_note_begin(text,sizeof text,0); pass(); CHECK(strlen(text)==94);
  event(OSK_ACCEPT,0); CHECK(!osk_note_active()); CHECK(strlen(text)==94); menu_open=0;
+ strcpy(text,"A\xc3\xa9");osk_note_begin(text,sizeof text,0);
+ CHECK(!strcmp(osk_capture()->text,text));
+ event(OSK_DELETE,0);
+ unsigned after=strlen(text);
+ CHECK(after==1 && !strcmp(text,"A"));
+ event(OSK_TYPE,0xe9);
+ unsigned inserted=strlen(text);
+ CHECK(inserted==3 && !strcmp(text,"A\xc3\xa9") && !strcmp(osk_capture()->text,text));
+ printf("note UTF-8: bytes after delete=%u after insert=%u\n",after,inserted);
+ osk_note_end(0);
  // A 256-character note: holding Circle repeats delete (once at the press, then after 0.4 s at 20 per second); R3 clears the field.
  char big[257]=""; osk_pad(0,0,0,0,0,0,0,0,1,0); osk_note_begin(big,sizeof big,0); pass(); CHECK(osk_capture()->limit==256);
  for(unsigned i=0;i<240;++i) event(OSK_TYPE,'A');
@@ -314,6 +326,13 @@ def main():
         ('0056C820', 20, False), ('0056C7C0', 20, False), ('0056C7F0', 20, False),
         ('005A8700', 22, False), ('005A3790', 22, False), ('00599100', 22, False), ('005991B0', 22, False)])
     core = (R / 'onscreen_keyboard.c').read_text()
+    old_note = core.replace('memcpy(note.text, note_text, note.length + 1);',
+                            'size_t n = 0; note.text[0] = 0;\n'
+                            '    for (unsigned i = 0; i < note.length; ++i) utf8(note.text, &n, (uint8_t)note_text[i]);')
+    old_note = old_note.replace('text_append(note_text, note_capacity, e.ch);',
+                                '{ size_t n = strlen(note_text); if (n < note.limit) { note_text[n] = (char)e.ch; note_text[n + 1] = 0; } }')
+    old_note = old_note.replace('text_edit_key(note_text, 0x08, 0, 0);',
+                                '{ size_t n = strlen(note_text); if (n) note_text[n - 1] = 0; }')
     variants = {
         'good': (core, bodies),
         'limit': (core, bodies.replace('if ((sf == of)) goto L_005A37D1;', 'if (0) goto L_005A37D1;')),
@@ -330,6 +349,7 @@ def main():
         'hold repeat': (core.replace('text_delete_repeat(&delete_at[port], (buttons & 2) != 0, now)', '(edge & 2) != 0'), bodies),
         'clear all': (core.replace('edge & 512', 'edge & 1024'), bodies),
         'note rollback': (core.replace('if (cancel) memcpy(note_text, note_original, note_capacity);', '(void)cancel;'), bodies),
+        'old note bytes': (old_note, bodies),
     }
     start = core.index('            // R3 alone clears on release;')
     end = core.index('            if (edge & 4)', start)
@@ -347,6 +367,8 @@ def main():
             result = subprocess.run([str(exe)], capture_output=True, text=True)
             lines = result.stdout.splitlines()
             print(name + ': ' + (lines[-1] if lines else result.stderr[-150:]))
+            if name in ('good', 'old note bytes'):
+                print(next(line for line in lines if line.startswith('note UTF-8:')))
             if (name == 'good') != (result.returncode == 0):
                 print('\n'.join(lines[:20])); print(result.stderr[-1500:]); raise SystemExit(1)
 

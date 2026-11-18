@@ -55,7 +55,10 @@ static double process_cpu_s(long *faults) {
 static int system_ticks(uint64_t *busy, uint64_t *total) {
     host_cpu_load_info_data_t c;
     mach_msg_type_number_t n = HOST_CPU_LOAD_INFO_COUNT;
-    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&c, &n) != KERN_SUCCESS) return 0;
+    mach_port_t host = mach_host_self();
+    kern_return_t result = host_statistics(host, HOST_CPU_LOAD_INFO, (host_info_t)&c, &n);
+    mach_port_deallocate(mach_task_self(), host);
+    if (result != KERN_SUCCESS) return 0;
     *busy = (uint64_t)c.cpu_ticks[CPU_STATE_USER] + c.cpu_ticks[CPU_STATE_SYSTEM] + c.cpu_ticks[CPU_STATE_NICE];
     *total = *busy + c.cpu_ticks[CPU_STATE_IDLE];
     return 1;

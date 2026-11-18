@@ -56,6 +56,9 @@
 
 
 
+
+
+
 """
 import argparse
 import contextlib
@@ -320,6 +323,54 @@ class AssetsTest(unittest.TestCase):
         self.assertEqual(coverage["sizes"][x360.SHADER_FILE], 413696)
         self.assertEqual((raw / "default.xex").read_bytes(), self.disc["default.xex"])
         self.assertEqual(381569024 - (raw / x360.SHADER_FILE).stat().st_size, 381155328)
+
+    def test_metadata_sizes_checked_before_any_copy(self):
+        for name, limit in (("default.xex", "XEX_MAX_BYTES"), ("NFS/ZDIR.BIN", "ZDIR_MAX_BYTES")):
+            for source in (self.folder, self.iso):
+                with self.subTest(name=name, source=source), self.extraction_only(), \
+                        mock.patch.object(x360, limit, len(self.disc[name]) - 1, create=True), \
+                        mock.patch.object(x360.Source, "copy", side_effect=AssertionError("copy before size check")):
+                    with self.assertRaisesRegex(x360.X360Error, "not the expected size"):
+                        x360.prepare(source, self.base / "oversized", self.pc)
+
+    def test_work_volume_budget_counts_assets_and_movies_before_copy(self):
+        retained = sum(len(data) for name, data in self.disc.items() if not name.startswith("Movies/"))
+        planned = sum(len(("asset " + name).encode()) for name in self.files) + len(self.disc["Movies/clip.wmv"])
+        copy = x360.Source.copy
+        copied = []
+
+        def record(source, name, dest, offset=0, size=None):
+            copied.append(name)
+            return copy(source, name, dest, offset, size)
+
+        with self.extraction_only(), mock.patch.object(x360.Source, "copy", record):
+            for available in (planned - 1, planned):
+                with self.subTest(available=available), \
+                        mock.patch.object(x360.shutil, "disk_usage", side_effect=[
+                            shutil._ntuple_diskusage(0, 0, retained), shutil._ntuple_diskusage(0, 0, available)
+                        ]) as usage:
+                    out = self.base / f"budget-{available}"
+                    copied.clear()
+                    if available < planned:
+                        with self.assertRaisesRegex(x360.X360Error, "not enough free disk space"):
+                            x360.prepare(self.folder, out, self.pc)
+                        self.assertEqual(copied, ["DEFAULT.XEX", "NFS/ZDIR.BIN", "NFS/ZZDATA0.BIN"])
+                        self.assertEqual(list(out.iterdir()), [])
+                    else:
+                        result = x360.prepare(self.folder, out, self.pc)
+                        self.assertEqual((result.roots["movies"] / "CLIP.WMV").read_bytes(), self.disc["Movies/clip.wmv"])
+                    self.assertEqual(usage.call_count, 2)
+                    for call in usage.call_args_list:
+                        self.assertTrue(call.args[0].is_relative_to(out.resolve()))
+
+    def test_xbox_folder_rejects_multiply_linked_file(self):
+        original = self.folder / "Movies/clip.wmv"
+        duplicate = original.with_name("copy.wmv")
+        os.link(original, duplicate)
+        with self.assertRaisesRegex(x360.X360Error, "more than one hard link"):
+            x360.Source(self.folder)
+        duplicate.unlink()
+        self.assertIn("MOVIES/CLIP.WMV", x360.Source(self.folder).files)
 
     def test_automatic_slice_discovery_and_precedence(self):
         root = self.base / "installed/files"

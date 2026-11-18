@@ -25,7 +25,7 @@ def run(base, name, source):
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-function', '-fobjc-arc', '-I'+str(ROOT/'recomp'),
                '-I'+str(ROOT/'recomp/out'), '-I'+str(RUNTIME),
-               str(work/'menu_tabs_test.m'), str(RUNTIME/'settings.c'),
+               str(work/'menu_tabs_test.m'), str(RUNTIME/'blackbox.c'), str(RUNTIME/'settings.c'),
                str(RUNTIME/'text_fit.c'), str(RUNTIME/'offline_stubs.c'),
                str(RUNTIME/'replay_input.c'), '-framework', 'Cocoa',
                '-framework', 'CoreText', '-framework', 'QuartzCore',

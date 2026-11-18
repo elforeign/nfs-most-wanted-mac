@@ -217,6 +217,23 @@ uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args) {
     c->esp = sp;                           // stdcall callees already popped; cdecl ones didn't
     return c->eax;
 }
+#if NFS_GAME == NFS_GAME_MW
+void f_007C45F0(Cpu *c) {
+    double exponent = ST(0), base = ST(1);
+    if (isfinite(base) && isfinite(exponent)) {
+        f_007C45F0_orig(c);
+        return;
+    }
+    // Retail propagates NaNs and returns the x87 indefinite for |base| == 1 with an infinite exponent.
+    double result = isnan(base) || isnan(exponent) ? base + exponent :
+                    isinf(exponent) && fabs(base) == 1.0 ? -__builtin_nan("") : pow(base, exponent);
+    x87_pop(c);
+    ST(0) = result;
+    c->eflags &= ~0x40u;  // ADD ESP at the retail x87 return clears ZF.
+    c->abi_skip = 0;
+    c->esp += 4;
+}
+#endif
 // Calls per import and per host (COM) function, for <diag>/calls.txt: which stubs the game really uses.
 static uint64_t import_calls_n[2048], host_fn_calls_n[4096];
 // Calls per server.dll import (its IAT is outside speed's thunk table), for BOOT_DIAG_LANSERVER's summary.
@@ -306,12 +323,13 @@ int boot_trace;
 #include <dirent.h>
 #include <fcntl.h>
 #include <fnmatch.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 // Saves, settings (registry.txt) and the shader cache: ~/Library/Application Support/NFSMW-port, or BOOT_USERDATA
 // (scripted test runs that create aliases or change settings use a scratch copy, not the player's profile).
 const char *userdata_dir(void) {
-    static char dir[1024];
+    static char dir[PATH_MAX];
     if (!dir[0]) {
         const char *e = getenv("BOOT_USERDATA");
 #if NFS_GAME == NFS_GAME_PRIVATE
@@ -324,6 +342,10 @@ const char *userdata_dir(void) {
         // with its parents: a missing parent made every save and registry write fail silently (a "first run" each time)
         for (char *p = dir + 1; *p; ++p) if (*p == '/') { *p = 0; mkdir(dir, 0755); *p = '/'; }
         mkdir(dir, 0755);
+        // The selected root may be an alias. Save checks still reject links
+        // in descendants of this canonical directory.
+        char resolved[PATH_MAX];
+        if (realpath(dir, resolved)) strcpy(dir, resolved);
     }
     return dir;
 }
@@ -806,19 +828,23 @@ static int file_close(uint32_t h) {
 // its result (+0x2f4 = 0 ok / 1 error, +0x2f8 = code) to 0 whatever happened. If a write, sync, close or rename failed
 // during that step, report the failure the game itself uses for a failed open, so state 0xc shows its save-error dialog.
 void extratrax_save_complete(int committed);
-void padbind_save_complete(int committed);
+int padbind_save_complete(int committed);
 void underglow_save_complete(int committed);
 static void save_sidecars_complete(uint32_t self, uint32_t state_before, unsigned seq_before, unsigned commits_before) {
     if (state_before != 0xb || !M32(self + 0x300)) return;
     int ok = save_fail_seq == seq_before && save_commit_seq != commits_before && !M32(self + 0x2f4);
     SAVE_VOID("trax.publication", { extratrax_save_complete(ok); });
-    SAVE_VOID("sidecar.padbind", { padbind_save_complete(ok); });
+    int bindings_saved = SAVE_TIME("sidecar.padbind", padbind_save_complete(ok));
     SAVE_VOID("sidecar.underglow", { underglow_save_complete(ok); });
 #if NFS_GAME == NFS_GAME_MW
     SAVE_VOID("sidecar.provenance", { private_cars_save_complete(ok); });
 #else
     SAVE_VOID("sidecar.provenance", { game_save_complete(ok); });
 #endif
+    if (ok && !bindings_saved) {
+        M32(self + 0x2f4) = 1;
+        M32(self + 0x2f8) = 7;
+    }
 }
 static void save_task_fixup(uint32_t self, uint32_t state_before, unsigned seq_before) {
     if (state_before != 0xb || !M32(self + 0x300) || save_fail_seq == seq_before) return;
@@ -882,20 +908,22 @@ static RegValue reg_vals[64] = {
 static void reg_path(char *out, size_t n) {
     snprintf(out, n, "%s/registry.txt", userdata_dir());
 }
-static void reg_save(void) {
+static int reg_save(void) {
 
     char path[1024], tmp[1100];
     reg_path(path, sizeof path);
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "w");
-    if (!f) return;
+    if (!f) return 0;
     for (unsigned i = 0; i < 64 && reg_vals[i].key; ++i) {
         if (strcmp(reg_vals[i].key, reg_keys[1])) continue;                 // only the game's key is saved
         if (reg_vals[i].type == 4) fprintf(f, "dword %s=%u\n", reg_vals[i].name, reg_vals[i].dw);
         else fprintf(f, "sz %s=%s\n", reg_vals[i].name, reg_vals[i].sz);
     }
     // A write error (disk full) keeps the previous registry.txt: durable_commit renames only a complete, synced file.
-    if (!durable_commit(f, tmp, path)) fprintf(stderr, "boot: registry.txt not saved: %s\n", strerror(errno));
+    if (durable_commit(f, tmp, path)) return 1;
+    fprintf(stderr, "boot: registry.txt not saved: %s\n", strerror(errno));
+    return 0;
 }
 // END offline registry
 static RegValue *reg_put(const char *name) {
@@ -1003,9 +1031,7 @@ static void reg_set(uint32_t h, const char *name, uint32_t type, uint32_t data, 
 // The game writes its video settings as one batch (19-20 values, then RegCloseKey): one durable save at the close
 // (and at exit) instead of one per value, which held the game thread ~11 ms each (a 230 ms frame).
 static void reg_flush(void) {
-    if (!reg_dirty) return;
-    reg_dirty = 0;
-    reg_save();
+    if (reg_dirty && reg_save()) reg_dirty = 0;
 }
 // END registry batch
 
@@ -1859,10 +1885,6 @@ static void private_cars_boot(void) { /* private image: MW car inventory disable
 
 // ---------------- loader ----------------
 int main(int argc, char **argv) {
-#if NFS_GAME == NFS_GAME_PRIVATE
-    private_track_overlay_init();
-    private_world_init();
-#endif
     game_dir = app_start(argc, argv);
     void settings_init(void), settings_dump(const char *), report_init(void);
 #if NFS_GAME == NFS_GAME_PRIVATE
@@ -1870,6 +1892,10 @@ int main(int argc, char **argv) {
     private_settings_init();
 #endif
     settings_init();                       // settings.c: the F10 menu's saved values, before anything reads its switch
+#if NFS_GAME == NFS_GAME_PRIVATE
+    private_track_overlay_init();
+    private_world_init();
+#endif
     void car_grip_init(void);
     car_grip_init();                       // saved grip choice, before the first physics scope
     private_cars_boot();

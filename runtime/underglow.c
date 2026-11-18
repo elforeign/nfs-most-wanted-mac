@@ -7,6 +7,7 @@
  * Low ownership bits 2/4 are career/custom, as in DeleteCareer/CustomCar. */
 static uint32_t active_profile;
 static unsigned char active_name[32];
+static unsigned char pending_name[32];
 static UGSnapshot live, pending;
 static int pending_valid;
 static int profile_valid(uint32_t profile) {
@@ -48,7 +49,7 @@ void underglow_profile_load(uint32_t profile, uint32_t buffer, uint32_t size) {
     if (!active(profile) || (uint64_t)buffer+size>(1ull<<32) ||
         !ug_save_digest(G+buffer,size,digest)) return;
     UGSnapshot loaded;
-    if (!ug_store_load(userdata_dir(),digest,&loaded)) return;
+    if (!ug_store_load_career(userdata_dir(),active_name,digest,&loaded)) return;
     /* Validate against the admitted live table, including identical-model cars. */
     for (unsigned i=0;i<loaded.count;++i) {
         UGIdentity car;
@@ -106,10 +107,11 @@ void underglow_profile_save(uint32_t profile, uint32_t buffer, uint32_t size) {
         if (identity(profile,live.entries[i].car.handle,&car) &&
             ug_identity_equal(&car,&live.entries[i].car)) pending.entries[pending.count++]=live.entries[i];
     }
+    memcpy(pending_name,active_name,sizeof pending_name);
     pending_valid=1;
 }
 void underglow_save_complete(int committed) {
-    if (committed && pending_valid) (void)ug_store_publish(userdata_dir(),&pending);
+    if (committed && pending_valid) (void)ug_store_publish_career(userdata_dir(),pending_name,&pending);
     underglow_save_begin();
 }
 void f_00590BD0_orig(Cpu *c);

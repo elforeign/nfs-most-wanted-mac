@@ -183,6 +183,13 @@ def _image_movies(f, size, joliet, directory):
     return files
 
 
+def _folder_file(root, path):
+    info = path.stat()
+    if info.st_nlink > 1:
+        raise DiscError(f"The disc folder contains a file with more than one hard link: {path.relative_to(root)}")
+    return (path.relative_to(root).as_posix(), None, info.st_size)
+
+
 def _folder_movies(root, folder):
     files, entries = {}, 0
     def walk(path, depth):
@@ -203,8 +210,8 @@ def _folder_movies(root, folder):
             if p.is_dir():
                 walk(p, depth + 1)
             elif p.is_file():
-                name = p.relative_to(root).as_posix()
-                files[name.casefold()] = (name, None, p.stat().st_size)
+                entry = _folder_file(root, p)
+                files[entry[0].casefold()] = entry
             else:
                 raise DiscError("The disc's MOVIES folder contains a special file.")
     walk(folder, 0)
@@ -224,7 +231,7 @@ class Disc:
                 if p.is_file() and not p.is_symlink():
                     if p.name.casefold() in self.files:
                         raise DiscError(f"The disc folder has {p.name} twice (in different case).")
-                    self.files[p.name.casefold()] = (p.name, None, p.stat().st_size)
+                    self.files[p.name.casefold()] = _folder_file(self.path, p)
                 if p.name.casefold() == "movies":
                     if p.is_symlink() or not p.is_dir() or movies is not None:
                         raise DiscError("The disc's MOVIES folder is a link, duplicated or not a folder.")
@@ -308,10 +315,18 @@ def install_list(disc):
     return numbers, files
 
 
-def is_disc(path):
+def is_disc(path, *, allow_mdf=False):
     """A disc image (.iso) or a folder with a disc's game archives, as opposed to an installed game folder."""
     path = Path(path)
     if path.is_file():
+        if allow_mdf and path.suffix.lower() == ".mdf":
+            # Only ISO-compatible 2048-byte images, never raw-sector MDF/MDS.
+            try:
+                with path.open("rb") as f:
+                    _root(f, os.fstat(f.fileno()).st_size)
+                return True
+            except (DiscError, OSError):
+                return False
         return path.suffix.lower() == ".iso"
     try:
         names = {p.name.casefold() for p in path.iterdir()} if path.is_dir() else set()
@@ -324,7 +339,7 @@ MISSING_FIX = ("Choose the missing disc as well (Setup reads each disc's number 
                "or keep the images of all your discs in one folder.")
 
 
-def disc_set(chosen, extra=()):
+def disc_set(chosen, extra=(), *, allow_mdf=False, missing_fix=MISSING_FIX):
     """{number: Disc} of every disc the set needs, in order. extra are discs the player chose one by one, from any
     folder; the rest are looked for beside the chosen disc (and those): the other .iso images there (for an image) or
     folders (for a folder, such as the discs mounted in /Volumes). Every disc is identified by its own autorun.inf
@@ -356,7 +371,7 @@ def disc_set(chosen, extra=()):
                     pass
             image = first.handle is not None
             for p in beside:
-                if p == chosen or p in map(Path, extra) or not (p.is_file() and p.suffix.lower() == ".iso" if image else p.is_dir()):
+                if p == chosen or p in map(Path, extra) or not (is_disc(p, allow_mdf=allow_mdf) if image else p.is_dir()):
                     continue
                 try:
                     other = Disc(p)
@@ -366,14 +381,14 @@ def disc_set(chosen, extra=()):
                     found[other.number] = other
                 else:
                     other.close()
-        # The Setup app reads the missing numbers from "Disc N[, M] of the set" to offer a choice for each.
+        # Most Wanted's Setup reads "Disc N[, M] of the set" to offer a choice for each.
         if 1 not in found:
-            raise DiscError("Disc 1 of the set was not found with the chosen disc.", MISSING_FIX)
+            raise DiscError("Disc 1 of the set was not found with the chosen disc.", missing_fix)
         numbers, _ = install_list(found[1])
         missing = sorted(numbers - set(found))
         if missing:
             raise DiscError(f"Disc {', '.join(map(str, missing))} of the set ({len(numbers)} discs) was not found with disc 1.",
-                            MISSING_FIX)
+                            missing_fix)
     except BaseException:
         for disc in found.values():
             disc.close()

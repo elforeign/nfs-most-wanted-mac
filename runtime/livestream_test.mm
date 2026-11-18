@@ -257,6 +257,8 @@ extern "C" void cliprec_live_stop(void) { scanCaptureState=0; }
 - (void)sendEvent:(NSEvent *)event { (void)event; }
 @end
 static ScanApp *scanApp;
+static std::string scanProfile;
+extern "C" const char *userdata_dir(void) { return scanProfile.c_str(); }
 @interface ScanPasteboard : NSObject
 + (instancetype)generalPasteboard;
 - (NSString *)stringForType:(NSPasteboardType)type;
@@ -525,6 +527,7 @@ static int finishProof(const std::string& mode,const std::string& key,const live
 #ifdef LIVESTREAM_PROCESS_SCAN
 static int processScanProof(const char *base,const char *anchor) {
     scanInput();
+    scanProfile=std::string(anchor).substr(0,std::string(anchor).find_last_of('/'));
     processScanOptions.baseURL=base;
     std::ifstream cert(anchor,std::ios::binary);
     processScanOptions.anchorDER.assign(std::istreambuf_iterator<char>(cert),{});
@@ -536,6 +539,7 @@ static int processScanProof(const char *base,const char *anchor) {
         scanApp.keyWindow=[[ScanParent alloc] initWithContentRect:NSMakeRect(0,0,640,480)
             styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
         stream_key_edit(0);
+        remember.state=NSControlStateValueOff;
         NSEvent *paste=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
             modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:0 context:nil
             characters:@"v" charactersIgnoringModifiers:@"v" isARepeat:NO keyCode:9];

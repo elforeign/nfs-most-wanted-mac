@@ -9,6 +9,7 @@ blend: the car-appear discontinuity removed (snapshots without a car at the orig
        worst blended pose 0.0 m; blend 1790.9 m -> FAIL on the appear check. Socket EPERM -> SOCKET PENDING, exit 3.
 Membership/map/order/duplicate-age controls: normal exit 0, each mutant exit 1 on its named check.
 Stale-state control: normal removes a LOOK-only peer within 950 ms; freshness mutant retains it and exits 1.
+Cookie renewal over 60 simulated seconds on the UDP relay: 6 challenges, 0 active drops; original 6 drops.
 """
 from pathlib import Path
 import re
@@ -33,7 +34,7 @@ def run(td, name, core, relay=None, args=()):
     assert p.returncode == 0, p.stderr[-2500:]
     p = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=120)
     for line in p.stdout.splitlines():
-        if line.startswith(('interp:', 'FAIL', 'ROAM', 'SOCKET', 'scale:', 'rate:', 'interest', 'timeout:', 'version:', 'appear:', 'membership:')):
+        if line.startswith(('interp:', 'FAIL', 'ROAM', 'SOCKET', 'scale:', 'rate:', 'interest', 'timeout:', 'version:', 'appear:', 'membership:', 'renewal:')):
             print(name + ':', line, flush=True)
     return p.returncode, p.stdout + p.stderr
 
@@ -49,6 +50,16 @@ def main():
             print('SOCKET PENDING: run on a socket-enabled host (roam_test)')
             return 3
         assert rc == 0, out[-3000:]
+        cookie = 'memcpy(c->cookie, b, 20); c->has_cookie = 1;'
+        assert src.count(cookie) == 1
+        old_cookie = Path(td) / 'roam_core_cookie.c'
+        old_cookie.write_text(src.replace(cookie, cookie + '''
+        c->welcomed = 0; c->id = 0;
+        c->has_members = c->nmembers = 0; roam_view_init(&c->view);'''))
+        rc, out = run(td, 'renewal', RT / 'roam_core.c', args=('--renewal-only',))
+        assert rc == 0 and '0 state drops' in out, out[-3000:]
+        rc, out = run(td, 'old_cookie', old_cookie, args=('--renewal-only',))
+        assert rc == 1 and re.search(r'([56]) challenges, \1 state drops', out), out[-3000:]
         rc, out = run(td, 'broken', broken)
         assert rc == 1 and 'FAIL: lag' in out, ('broken control did not fail on the lag check', rc, out[-3000:])
         assert src.count(APPEAR) == 1, 'appear-control anchor moved'

@@ -478,8 +478,8 @@ static NSString *ask_game_dir(const char *why) {
 
 // ---------------- NSApp, the menu bar, Quit ----------------
 static void quit_now(void) { diag_begin_exit();
-    void stream_key_forget(int);
-    stream_key_forget(0);
+    void stream_key_quit(void);
+    stream_key_quit();
     fflush(NULL); exit(0);
 }
 
@@ -544,18 +544,18 @@ void app_restart_game(int unused) {
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
     (void)app;
     // The game exits through ExitProcess after WM_CLOSE, before AppKit can
-    // deliver applicationWillTerminate. Scrub saved/editor storage, then finish
+    // deliver applicationWillTerminate. Scrub the in-memory key and editor, then finish
     // the transport within its shared bound before handing WM_CLOSE to the game.
-    void stream_key_forget(int);
-    stream_key_forget(0);
+    void stream_key_quit(void);
+    stream_key_quit();
     if (!quitting++ && user32_request_close()) return NSTerminateCancel;
     quit_now();
     return NSTerminateNow;
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
-    void stream_key_forget(int);
-    stream_key_forget(0);
+    void stream_key_quit(void);
+    stream_key_quit();
 }
 - (void)changeGameFolder:(id)sender {
     (void)sender;

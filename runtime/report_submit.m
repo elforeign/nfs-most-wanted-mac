@@ -98,11 +98,24 @@ static ReportRawTaskRunner ReportRawRunner(NSString *(^findTool)(void), NSTask *
 }
 // Freeze one CLI credential for this review session. Account switching in the CLI cannot
 // change the identity between verification and creation. Keep secrets out of argv and diagnostics.
-static ReportTaskRunner ReportRunner(NSString *(^findTool)(void), NSTask *(^makeTask)(void), double (^now)(void), void (^pause)(double)) {
+static ReportTaskRunner ReportRunner(NSString *(^findTool)(void), NSTask *(^makeTask)(void), double (^now)(void),
+    void (^pause)(double), void (^__strong *clearCredential)(void)) {
     ReportRawTaskRunner raw = ReportRawRunner(findTool, makeTask, now, pause);
+    NSObject *lock = [NSObject new];
     __block NSDictionary *pinnedEnvironment;
+    __block NSUInteger generation = 0;
+    *clearCredential = ^{
+        @synchronized (lock) {
+            ++generation;
+            pinnedEnvironment = nil;
+        }
+    };
     return ^(NSArray *arguments, NSData *input, double seconds, ReportTaskDone done) {
-        if (pinnedEnvironment) { raw(arguments, input, seconds, pinnedEnvironment, done); return; }
+        NSUInteger request;
+        @synchronized (lock) {
+            if (pinnedEnvironment) { raw(arguments, input, seconds, pinnedEnvironment, done); return; }
+            request = generation;
+        }
         raw(@[@"auth", @"token", @"--hostname", @"github.com"], nil, 15, ReportChildEnvironment(),
             ^(int status, NSData *output, BOOL uncertain) {
                 if (status || uncertain || !output.length) { done(-2, nil, NO); return; }
@@ -115,19 +128,21 @@ static ReportTaskRunner ReportRunner(NSString *(^findTool)(void), NSTask *(^make
                 }
                 NSMutableDictionary *environment = [ReportChildEnvironment() mutableCopy];
                 environment[@"GH_TOKEN"] = token;
-                pinnedEnvironment = [environment copy];
-                raw(arguments, input, seconds, pinnedEnvironment, done);
+                @synchronized (lock) {
+                    if (request == generation) {
+                        pinnedEnvironment = [environment copy];
+                        raw(arguments, input, seconds, pinnedEnvironment, done);
+                        return;
+                    }
+                }
+                done(-2, nil, NO);
             });
     };
-}
-ReportTaskRunner ReportGitHubRunner(void) {
-    return ReportRunner(^{ return ReportExecutable(); }, ^{ return [NSTask new]; },
-        ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; });
 }
 BOOL ReportValidIssueURL(NSString *text) {
     if (text.length > 200) return NO;
     NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:
-        @"\\Ahttps://github\\.com/elforeign/nfs-most-wanted-mac/issues/[1-9][0-9]*\\z" options:0 error:NULL];
+        @"\\Ahttps://github\\.com/" REPORT_GITHUB_REPOSITORY "/issues/[1-9][0-9]*\\z" options:0 error:NULL];
     return text && [pattern numberOfMatchesInString:text options:0 range:NSMakeRange(0, text.length)] == 1;
 }
 // Local capability: this adapter implements text issue creation only; images use manual browser attachment.
@@ -142,16 +157,33 @@ static NSString *ReportAccount(NSData *data) {
 }
 @implementation ReportSubmission {
     ReportTaskRunner _runner;
+    void (^_clearCredential)(void);
     NSUInteger _generation;
 }
-- (instancetype)initWithSnapshot:(NSDictionary *)snapshot runner:(ReportTaskRunner)runner {
-    if ((self = [super init])) { _snapshot = @{@"title":[snapshot[@"title"] copy], @"body":[snapshot[@"body"] copy]}; _runner = [runner copy]; _message = @"Check your GitHub account separately before posting."; }
+- (instancetype)initWithSnapshot:(NSDictionary *)snapshot runner:(ReportTaskRunner)runner
+    clearCredential:(void (^)(void))clearCredential {
+    if ((self = [super init])) {
+        _snapshot = @{@"title":[snapshot[@"title"] copy], @"body":[snapshot[@"body"] copy]};
+        _runner = [runner copy];
+        _clearCredential = [clearCredential copy];
+        _message = @"Check your GitHub account separately before posting.";
+    }
     return self;
+}
+- (instancetype)initWithSnapshot:(NSDictionary *)snapshot runner:(ReportTaskRunner)runner {
+    void (^clearCredential)(void) = nil;
+    if (!runner) {
+        runner = ReportRunner(^{ return ReportExecutable(); }, ^{ return [NSTask new]; },
+            ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; }, &clearCredential);
+    }
+    return [self initWithSnapshot:snapshot runner:runner clearCredential:clearCredential];
 }
 - (void)notify { if (self.changed) self.changed(); }
 - (void)forgetAccount {
+    if (_clearCredential) _clearCredential(); // Clear on preview close, including during an in-flight task.
+    _account = nil;
     if (_state == ReportSubmitChecking || _state == ReportSubmitReady || _state == ReportSubmitFailed) {
-        ++_generation; _account = nil; _state = ReportSubmitIdle;
+        ++_generation; _state = ReportSubmitIdle;
         _message = @"Check your GitHub account separately before posting.";
     }
 }
@@ -163,6 +195,7 @@ static NSString *ReportAccount(NSData *data) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_generation || self->_state != ReportSubmitChecking) return;
             NSString *account = status == 0 && !uncertain ? ReportAccount(output) : nil;
+            if (!account && self->_clearCredential) self->_clearCredential();
             self->_account = account; self->_state = account ? ReportSubmitReady : ReportSubmitFailed;
             self->_message = account ? @"Account verified. Review the public destination, then choose Yes." :
                 @"GitHub identity unavailable. CLI may be missing, signed out or offline. Copy text & open GitHub is available.";
@@ -178,7 +211,9 @@ static NSString *ReportAccount(NSData *data) {
     _runner(ReportAccountArguments(), nil, 15, ^(int status, NSData *output, BOOL uncertain) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (generation != self->_generation || self->_state != ReportSubmitPosting) return;
-            if (status || uncertain || ![ReportAccount(output) isEqual:account]) {
+            // A preview closed during revalidation cannot start a new POST.
+            if (status || uncertain || !self->_account.length || ![ReportAccount(output) isEqual:account]) {
+                if (self->_clearCredential) self->_clearCredential(); // Revalidation failed.
                 self->_state = ReportSubmitFailed; self->_account = nil;
                 self->_message = @"GitHub identity changed or could not be verified. No issue was requested. Check account again.";
                 [self notify]; return;
@@ -186,10 +221,11 @@ static NSString *ReportAccount(NSData *data) {
             NSUInteger creationGeneration = ++self->_generation;
             NSData *body = [NSJSONSerialization dataWithJSONObject:@{@"title":self.snapshot[@"title"], @"body":self.snapshot[@"body"]} options:0 error:NULL];
             self->_runner(@[@"api", @"--hostname", @"github.com", @"--method", @"POST",
-                @"repos/elforeign/nfs-most-wanted-mac/issues", @"--input", @"-", @"--jq", @".html_url"], body, 25,
+                @"repos/" REPORT_GITHUB_REPOSITORY "/issues", @"--input", @"-", @"--jq", @".html_url"], body, 25,
                 ^(int result, NSData *data, BOOL unknown) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         if (creationGeneration != self->_generation || self->_state != ReportSubmitPosting) return;
+                        if (self->_clearCredential) self->_clearCredential(); // POST completed.
                         NSString *url = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
                         if (ReportValidIssueURL(url)) self->_issueURL = url;
                         if (self->_issueURL && result == 0 && !unknown) {

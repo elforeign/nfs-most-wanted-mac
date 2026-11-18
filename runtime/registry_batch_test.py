@@ -6,6 +6,7 @@ Each durable save of registry.txt (two F_FULLFSYNC and a directory sync) held th
 Video options wrote 20 values, a 230 ms frame. Compiles runtime/boot.c's "registry batch" block in a scratch harness
 with a counting reg_save, writes 20 values and closes the key.
 Recorded: current code 1 save per batch (PASS); the pinned pre-fix reg_set 20 saves (FAIL, exit 1).
+After a failed commit, the old flush retries 0/1 and the fixed flush retries 1/1.
 Also checks that RegCloseKey and ExitProcess flush the batch in boot.c.
 """
 from pathlib import Path
@@ -44,8 +45,8 @@ static const char *reg_keys[] = {NULL, "HKLM\\Software\\EA Games\\Game"};
 static RegValue reg_vals[64];
 static uint8_t G[4096];
 #define M32(a) (*(uint32_t *)(G + (a)))
-static int saves;
-static void reg_save(void) { ++saves; }
+static int saves, attempts, fail_save;
+static int reg_save(void) { ++attempts; if (fail_save) return 0; ++saves; return 1; }
 static const char *reg_key(uint32_t h) { return h == 0x3004u ? reg_keys[1] : NULL; }
 static RegValue *reg_find(uint32_t h, const char *name) {
     for (unsigned i = 0; i < 64 && reg_vals[i].key; ++i)
@@ -54,8 +55,16 @@ static RegValue *reg_find(uint32_t h, const char *name) {
 }
 '''
 MAIN = r'''
-int main(void) {
+int main(int argc, char **argv) {
     unsetenv("BOOT_REG");
+    if (argc>1) {
+        M32(64)=42; reg_set(0x3004u,"g_Retry",4,64,4);
+        fail_save=1; reg_flush();
+        if (attempts!=1 || saves) return 2;
+        fail_save=0; reg_flush(); reg_flush();
+        printf("successful retries=%d/1 attempts=%d\n",saves,attempts);
+        return !(saves==1 && attempts==2 && reg_find(0x3004u,"g_Retry")->dw==42);
+    }
     for (uint32_t i = 0; i < 20; ++i) {                 // FUN_006C1F10 (Most Wanted) / 00711BFB..00711E08 (Carbon)
         char name[32]; snprintf(name, sizeof name, "g_Setting%u", i);
         M32(64) = i;
@@ -70,14 +79,22 @@ int main(void) {
 '''
 
 
-def build_run(tmp, name, body, typedef):
+OLD_FLUSH = '''static void reg_flush(void) {
+    if (!reg_dirty) return;
+    reg_dirty = 0;
+    reg_save();
+}'''
+assert hashlib.sha256(OLD_FLUSH.encode()).hexdigest() == '256281357e90220e8cf8f4e1cef0218e64438b8da8dc390041fc1ef77627ffe2'
+
+
+def build_run(tmp, name, body, typedef, args=()):
     src = tmp / (name + '.c')
     src.write_text(PREFIX % typedef + body + MAIN)
     exe = tmp / name
     r = subprocess.run(['clang', '-O1', '-Wall', '-Wno-unused-function', str(src), '-o', str(exe)],
                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     assert r.returncode == 0, r.stdout
-    p = subprocess.run([str(exe)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.run([str(exe), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.returncode, p.stdout.strip()
 
 
@@ -101,6 +118,11 @@ def main():
         code, out = build_run(tmp, 'old', OLD_REG_SET, typedef)
         failures += code == 0
         print('pinned pre-fix control: %s  %s' % (out, 'FAIL as expected' if code else 'UNEXPECTED PASS'))
+        old_flush = block.split('static void reg_flush(void)',1)[0]+OLD_FLUSH
+        for name, body, expected in [('retry',block,0),('old-flush',old_flush,1)]:
+            code, out = build_run(tmp,name,body,typedef,('retry',))
+            print(f'{name}: {out}')
+            failures += code!=expected or f'successful retries={1-expected}/1' not in out
     return 1 if failures else 0
 
 

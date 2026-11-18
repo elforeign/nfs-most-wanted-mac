@@ -560,12 +560,14 @@ int snapshot_handles(const char *path) {
         (root / 'file.c').write_text('#include <assert.h>\n' + audit.FILE_PREFIX + scan + layer + extra)
         file_source = (root / 'file.c').read_text()
         # Check repeated descriptor reads in the same executable as real saves.
-        native = native.replace('carsave_public_init(argv[4],NULL); file_init(argv[4]);', '''carsave_public_init(argv[4],NULL); file_init(argv[4]);
+        native = native.replace('carsave_public_init(userdir,NULL); file_init(userdir);', '''carsave_public_init(userdir,NULL); file_init(userdir);
     extern int snapshot_handles(const char *);
     if (private_cars_count()) CHECK(snapshot_handles(private_cars_get(0)->geometry));''')
         (root / 'save.c').write_text(native)
+        (root / 'userdata.c').write_text(saves.userdata_fixture(boot))
         save_inputs = [str(root / 'save.c'), str(root / 'file.c'), str(ROOT / 'runtime/carsave_public.c'),
-                       str(ROOT / 'runtime/car_grip.c'), str(ROOT / 'runtime/car_catalog.c'), str(ROOT / 'runtime/private_cars_public.c'), str(root / 'public.c')]
+                       str(ROOT / 'runtime/car_grip.c'), str(ROOT / 'runtime/car_catalog.c'), str(ROOT / 'runtime/private_cars_public.c'),
+                       str(root / 'public.c'), str(root / 'userdata.c')]
         (root / 'public.c').write_text(public)
         build(common + save_inputs + ['-o', str(root / 'save')])
         for mode in ('seed', 'load', 'secondary', 'backup-load', 'reconcile', 'transaction'):

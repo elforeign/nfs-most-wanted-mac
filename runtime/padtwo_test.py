@@ -17,6 +17,7 @@
 
 
 
+
 """
 from pathlib import Path
 import os
@@ -111,6 +112,7 @@ int osk_pad(int port, uint32_t buttons, int up, int down, int left, int right,
     (void)lx; (void)ly; (void)connected; (void)xbox; return 0;
 }
 void rumble_update(void) { ++rumble_calls; }
+void rumble_select(void *controller) { (void)controller; }
 void padfx_update(void *ctl, int ds, float lt, float rt) {
     (void)ctl; (void)ds; (void)lt; (void)rt; ++fx_calls;
 }
@@ -130,7 +132,7 @@ uint32_t portmenu_pad(uint32_t phys, int u, int d, int l, int r, float lx, float
     return menu_hide ? ~0u : 0;
 }
 int portmenu_is_open(void) { return menu_hide; }
-static void di_event(uint8_t key, int down) { (void)key; (void)down; ++key_calls; }
+static void di_event(uint8_t key, int down) { di_keys[key] = down ? 0x80 : 0; ++key_calls; }
 static int script_layout = 0;
 static int pad_layout_xbox(void) { return script_layout; }
 int controltype_passthrough(int idx) { (void)idx; return 0; }
@@ -273,6 +275,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
     if (count == 1) {
         CHECK(invoke(i_CreateDevice,4,0u,guid,out,0u) == DIERR_DEVICENOTREG); CHECK(!M32(out));
         CHECK(invoke(i_GetDeviceStatus,2,0u,guid) != DI_OK);
+        b.extendedGamepad.buttonX = b.extendedGamepad.buttonOptions = b.extendedGamepad.buttonMenu = button(1);
+        fake_source = @[b,a];
+        CHECK(pad_read(&ps) && !ps.native);
+        CHECK(di_keys[3] && di_keys[4] && di_keys[5]);
+        fake_source = @[a]; notify(GCControllerDidDisconnectNotification,b);
+        CHECK(pad_read(&ps) && ps.native);  // no empty-slot poll between the two controllers
+        unsigned still_held = !!di_keys[3] + !!di_keys[4] + !!di_keys[5];
+        printf("hot-plug: %u synthetic menu keys still held\n", still_held);
+        CHECK(still_held == 0);
     } else {
         CHECK(invoke(d_Acquire,1,dev1) == DI_OK); CHECK(obj(dev1)->acquired);
         CHECK(invoke(d_Unacquire,1,dev1) == DI_OK); CHECK(!obj(dev1)->acquired && obj(dev0)->acquired);
@@ -349,7 +360,7 @@ def main():
     assert di.count(mutation) == 1
     with tempfile.TemporaryDirectory(prefix='padtwo_') as td:
         td = Path(td)
-        for broken in (False, "index", "menu", "led", "disconnect", "connect", "link-presence", "link-battery", "link-unknown"):
+        for broken in (False, "index", "menu", "led", "disconnect", "connect", "link-presence", "link-battery", "link-unknown", "hotplug-keys"):
             sample = user if broken != "menu" else user.replace(' : (portmenu_is_open() ? ~0u : 0);', ' : 0;')
             assert broken != "menu" or sample != user
             if broken == "led":
@@ -360,6 +371,9 @@ def main():
                 assert sample != user
             if broken == "connect":
                 sample = user.replace("padfx_connect((__bridge void *)n.object);", "(void)n;")
+                assert sample != user
+            if broken == "hotplug-keys":
+                sample = user.replace("if (ctl != menu_controller) {\n                pad_menu_keys(0);", "if (ctl != menu_controller) {")
                 assert sample != user
             link = (R / 'padlink.c').read_text()
             if broken == "link-presence":
@@ -386,7 +400,10 @@ def main():
             run(['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-fobjc-arc',
                  '-Wno-deprecated-declarations', '-fsanitize=address,undefined', '-DPADLINK_SOURCE="' + str(link_source) + '"', '-I', str(R), '-I', str(R.parent / 'recomp'),
                  str(src), '-framework', 'Foundation', '-o', str(exe)])
-            for setting in (['1', '2'] if broken in ('connect', 'link-presence', 'link-unknown') else ['2'] if broken else [None, '1', '2', 'invalid']):
+            settings = ['1', '2'] if broken in ('connect', 'link-presence', 'link-unknown') else ['2']
+            if broken == 'hotplug-keys':
+                settings = ['1']
+            for setting in settings if broken else [None, '1', '2', 'invalid']:
                 env = dict(os.environ, NFS_RUMBLE='off')
                 env.pop('BOOT_PAD', None)
                 env.pop('BOOT_PAD2', None)
@@ -398,6 +415,8 @@ def main():
                     if p.returncode != 1 or 'FAIL' not in p.stdout:
                         raise RuntimeError('index-0 negative variant was not rejected: ' + p.stdout + p.stderr[-2000:])
                     print('deliberately broken ' + str(broken) + ': ' + p.stdout.strip().splitlines()[-1])
+                    if broken == 'hotplug-keys':
+                        assert 'hot-plug: 3 synthetic menu keys still held' in p.stdout, p.stdout
                 elif p.returncode:
                     raise RuntimeError(p.stdout + p.stderr[-3000:])
                 else:

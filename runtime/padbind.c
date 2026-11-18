@@ -347,13 +347,13 @@ static int migration_backup(void) {
     if (!ok) remove(backup);
     return ok;
 }
-static void sets_save(void) {
-    if (!sets_dirty) return;                  // no-op loads/swaps never rewrite the sidecar
-    if (migration_backup_needed && !migration_backup()) return;
+static int sets_save(void) {
+    if (!sets_dirty) return 1;                // no-op loads/swaps never rewrite the sidecar
+    if (migration_backup_needed && !migration_backup()) return 0;
     char p[1100], tmp[1110];
     sets_path(p, sizeof p); snprintf(tmp, sizeof tmp, "%s.tmp", p);
     FILE *f = fopen(tmp, "w");
-    if (!f) return;
+    if (!f) return 0;
     fprintf(f, "# NFSMW pad bindings v3\n# profile, name hash, name, layout, set, 19 primary/secondary type,device,object triples\n"
                "# legacy rows are rollback copies; native_ps values and hashes are never migrated.\n");
     for (int i = 0; i < nsets; ++i) {
@@ -367,6 +367,7 @@ static void sets_save(void) {
     if (SAVE_TIME("stream.close", fclose(f))) ok = 0;
     if (ok && !SAVE_TIME("rename", rename(tmp, p))) sets_dirty = migration_backup_needed = 0;
     else remove(tmp);
+    return !sets_dirty;
 }
 static Set *set_find_kind(const char *profile, uint32_t hash, int layout, int binding_set) {
     sets_load();
@@ -652,7 +653,8 @@ static void bindings_stage(const char *profile, const char *name, int layout) {
     }
     pending_bindings_valid = 1;
 }
-void padbind_save_complete(int committed) {
+int padbind_save_complete(int committed) {
+    int saved = 1;
     if (committed) {
         Set newer[2];
         int restore[2] = {0};
@@ -661,20 +663,22 @@ void padbind_save_complete(int committed) {
                 Set *snapshot = &pending_bindings[i];
                 Set *row = set_find_kind(snapshot->profile, snapshot->hash, snapshot->layout, i);
                 // Page changes can store newer edits while the save task is in flight.
-                if (row && (!pending_before_valid[i] || memcmp(row->r, pending_before[i], sizeof row->r))) {
+                if (row && memcmp(row->r, snapshot->r, sizeof row->r) &&
+                    (!pending_before_valid[i] || memcmp(row->r, pending_before[i], sizeof row->r))) {
                     newer[i] = *row; restore[i] = 1;
                 }
                 row = set_put_kind(snapshot->profile, snapshot->hash, snapshot->name, snapshot->layout, i);
                 *row = *snapshot; sets_dirty = 1;
             }
         }
-        sets_save();
+        saved = sets_save();
         for (int i = PADBIND_DEFAULT; i <= PADBIND_DRAG; ++i) if (restore[i]) {
             Set *row = set_find_kind(newer[i].profile, newer[i].hash, newer[i].layout, i);
             *row = newer[i]; sets_dirty = 1;
         }
     }
-    pending_bindings_valid = 0;
+    if (saved) pending_bindings_valid = 0;
+    return saved;
 }
 // END offline bindings transaction
 void f_0056E180(Cpu *c) {

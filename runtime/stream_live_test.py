@@ -59,8 +59,8 @@ def main():
     poster=poster.replace(marker,'++createdSessions; '+marker)
     capture=(RT/'cliprec.mm').read_text()
     key_source=(RT/'stream_key.m').read_text()
-    wrapper=('\nint proof_key(const char *bytes) { return replaceKey([NSString stringWithUTF8String:bytes]); }\n'
-             'void proof_quit_fallback(void) { quitKey(); }\n'
+    wrapper=('\nint proof_key(const char *bytes) { return replaceKey([NSString stringWithUTF8String:bytes],NO); }\n'
+             'void proof_quit_fallback(void) { stream_key_quit(); }\n'
              'unsigned proof_saved_residue(void) { unsigned n=0; for(size_t i=0;i<sizeof keyBytes;++i) n|=keyBytes[i]; return n; }\n')
     with tempfile.TemporaryDirectory(prefix='proof-',dir=CACHE) as scratch:
         d=Path(scratch); fixture_module.certificate(d); fixture_module.socket_probe(d)

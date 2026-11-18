@@ -46,7 +46,12 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
         s->version = a >> 28; s->codec = a >> 24 & 15; s->channels = (a >> 18 & 63) + 1; s->rate = a & 0x3ffff;
         s->storage = b >> 30; s->loop = b >> 29 & 1; s->samples = b & 0x1fffffff;
         unsigned hs = 8;
-        if (s->loop) { if (!within(rel, 12, ext)) return fail(why, n, "sound %u loop field outside bank", i, 0); s->loop_start = rd32(h + 8); hs = 12; }
+        if (s->loop) {
+            if (!within(rel, 12, ext)) return fail(why, n, "sound %u loop field outside bank", i, 0);
+            s->loop_start = rd32(h + 8);
+            if (s->loop_start >= s->samples) return fail(why, n, "sound %u invalid loop start %u", i, s->loop_start);
+            hs = 12;
+        }
         s->hdr = bank + rel; s->data = s->hdr + hs;
         if (last && s->hdr < last->data) return fail(why, n, "sound %u header not after sound %u", i, (unsigned)(last - o->s));
         if (last) last->end = s->hdr;

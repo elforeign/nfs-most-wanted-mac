@@ -1,7 +1,8 @@
 """Public report review, consent, privacy and actual F10 input; fake transports only.
 Wall time (same load, back to back): 195 s with the 51 builds in sequence, 52 s with four at a time; identical result lines.
 
-Proof: public 401 checks/0 failures; private 6/0; 49 broken controls rejected.
+Proof: public 406 checks/0 failures; private 6/0; 49 broken controls rejected.
+Home paths in the preview and POST: predecessor rules 406 checks/5 failures; fixed 406/0.
 Pinned original 13984ab7: 16 checks/11 failures, including fake creation, fallback copy,
 constant fallback URL, diagnostics, account/public warning, screenshot review and fresh input.
 Archive regression without history: predecessor 1 failure/0 completed proofs; fixed 0 failures/1 completed proof.
@@ -34,7 +35,7 @@ MUTANTS = {
     'join_codes': ('report_github.m', 'return ReportEndpointRedact(text);', 'return text;'),
     'bundle': ('report_privacy.h', 'if (!text || ![ReportEndpointRedact(text) writeToFile:', 'if (!text || ![text writeToFile:'),
     'home': ('report_github.m', 'if (home.length)', 'if (0 && home.length)'),
-    'generic_home': ('report_github.m', 'text = ReplacePattern(text, @"/(?:Users|home)/[^/\\\\s]+", @"~");', '(void)text;'),
+    'home_paths_predecessor': ('report_privacy.h', '|~/|', '|'),
     'user': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"computer", @"serial", @"wifi"]'),
     'computer': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"serial", @"wifi"]'),
     'serial_identity': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"wifi"]'),
@@ -54,7 +55,7 @@ MUTANTS = {
     'discord_mouse': ('report_github.m', 'else if (x >= 600 && x < 800) Confirm(3);', 'else if (x >= 600 && x < 800) Confirm(2);'),
     'discord_controller': ('report_github.m', 'if ((edge & 1) && padArmed) { padArmed = NO; Confirm(confirmSelected); }', 'if ((edge & 1) && padArmed) { padArmed = NO; Confirm(0); }'),
     'section_bounds': ('report_github.m', 'discord ? 220 : 1400', 'discord ? 14000 : 14000'),
-    'fallback_query': ('report_github.m', '@"https://github.com/elforeign/nfs-most-wanted-mac/issues/new"', '@"https://github.com/elforeign/nfs-most-wanted-mac/issues/new?body=unreviewed"'),
+    'fallback_query': ('report_github.m', 'REPORT_GITHUB_REPOSITORY "/issues/new"', 'REPORT_GITHUB_REPOSITORY "/issues/new?body=unreviewed"'),
     'key_repeat': ('report_github.m', 'if (repeat && (key == 0x0D || key == 0x20)) return;', '(void)repeat;'),
     'mouse_release': ('report_github.m', 'if (!mouseArmed || wasHeld) return;', 'if (wasHeld) return;'),
     'shot_seen': ('report_github.m', 'if (!screenshotSeen) return;', 'if (NO && !screenshotSeen) return;'),
@@ -85,6 +86,13 @@ def build_and_run(base, name, mutation=None, public=True):
         # This deliberately broken control needs the forward declaration to compile.
         if name == 'consent':
             source = source.replace('static void SendToGitHub', 'static BOOL OpenBrowser(NSURL *url);\nstatic void SendToGitHub', 1)
+        if name == 'home_paths_predecessor':
+            source = source.replace(r'(?<![A-Za-z0-9])(?:\"%', r'(?<![A-Za-z0-9_])(?:\"%', 1)
+            preview = work / 'report_github.m'
+            redaction = preview.read_text()
+            email = next(line for line in redaction.splitlines() if 'ReplacePattern' in line and '@"[email]"' in line)
+            prior = r'    text = ReplacePattern(text, @"/(?:Users|home)/[^/\\s]+", @"~"); // home paths'
+            preview.write_text(redaction.replace(email, prior + '\n' + email, 1))
         if name == 'private':
             header = work / 'report_github.h'
             header.write_text(header.read_text().replace('#if defined(NFS_PUBLIC) && NFS_PUBLIC', '#if 1'))
@@ -95,7 +103,7 @@ def build_and_run(base, name, mutation=None, public=True):
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-Wno-unused-variable', '-Wno-unused-parameter', '-fsanitize=address,undefined', '-fobjc-arc', f'-DNFS_PUBLIC={int(public)}',
                '-I' + str(ROOT / 'recomp'), '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME),
-               str(work / 'report_github_test.m'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
+               str(work / 'report_github_test.m'), str(RUNTIME / 'blackbox.c'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'ImageIO', '-framework', 'QuartzCore', '-framework', 'Metal',
                '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)

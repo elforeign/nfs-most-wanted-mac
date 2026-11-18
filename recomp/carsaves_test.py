@@ -21,6 +21,7 @@ Traffic-only retail CRC: 21/21; accommodating the pilot type count fails 4/21.
 WO3 production serializer/file/completion/load: 23/23; omitted metadata staging
 and omitted own-slot dependency mutants each fail 4/23. Swap-only saves are
 marked while retail payload bytes [16:] remain identical.
+Journal blocked by a file: original recovery 0/1, fixed 1/1; neither publishes the failed attempt.
 Retail MW CRC mismatch: good 21/21; unconditional-override mutant fails 4/21.
 Measured matching: good 91/91, skip-admission mutant 20/91 failures; owner-open mutant 2/91.
 Missing/stale/Off: good 22/22 each; skip mutant 3/22, owner mutant 2/22.
@@ -432,6 +433,23 @@ int main(int argc,char **argv) {
         for(unsigned j=0;j<84;++j) M32(table+j*STRIDE+0x90)=j;
         strcpy((char *)G+table,"FORDGT"); // fixture's original type 0 is a selected own-slot swap
         unsigned char swapped[PRIVATE_CARS_MASK_SIZE]={0}; swapped[10]=1;
+        if(getenv("SHIP_JOURNAL_RECOVERY")) {
+            const char *root=getenv("BOOT_USERDATA"); char journal[4096], path[4096];
+            snprintf(journal,sizeof journal,"%s/.car-catalog",root);
+            snprintf(path,sizeof path,"%s/roundtrip",root);
+            CHECK(!carsave_roundtrip_file(root,bytes,G+out));
+            int fd=open(journal,O_WRONLY|O_CREAT|O_EXCL,0600); assert(fd>=0); close(fd);
+            invoke(&c,self,out,0,1);
+            CHECK(carsave_roundtrip_file(root,G+out,G+buf)!=0);
+            fd=open(path,O_RDONLY); assert(fd>=0); CHECK(pread(fd,G+buf,SAVE_SIZE,36)==SAVE_SIZE); close(fd);
+            CHECK(!memcmp(bytes,G+buf,SAVE_SIZE)); CHECK(!unlink(journal));
+            invoke(&c,self,out,0,1);
+            int recovered=!carsave_roundtrip_file(root,G+out,G+buf);
+            CHECK(recovered);
+            if(recovered) CHECK(!private_cars_metadata_admit(G+buf,SAVE_SIZE,swapped));
+            printf("private journal recovered=%d/1 checks=%u failures=%u\n",recovered,checks-start,failures-failed);
+            return failures?1:0;
+        }
         invoke(&c,self,out,0,1); CHECK(!memcmp(G+out,"NFSCAR3",7));
         CHECK(!private_cars_metadata_admit(G+out,SAVE_SIZE,swapped));
         CHECK(!memcmp(bytes+16,G+out+16,SAVE_SIZE-16)); // only reserved bytes change
@@ -616,7 +634,7 @@ def main():
         file_layer += audit.marked('runtime/boot.c','// BEGIN offline file layer:','// END offline file layer')
         file_layer += r'''
 void extratrax_save_complete(int ok) { }
-void padbind_save_complete(int ok) { }
+int padbind_save_complete(int ok) { (void)ok; return 1; }
 int carsave_roundtrip_file(const char *root,const void *input,void *output) {
     userroot=root; char path[4096]; snprintf(path,sizeof path,"%s/roundtrip",root);
     unsigned seq=save_fail_seq,commits=save_commit_seq;
@@ -643,7 +661,7 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
         pointer=json.loads((stale/'current.json').read_bytes())
         pack=stale/pointer['generation']/'additions/240SX/GEOMETRY.BIN'
         pack.write_bytes(pack.read_bytes()+b'stale')
-        for variant in ("good","activation_off","activation_ids","activation_capacity","activation_dependent_capacity","activation_backup","activation_hardlink","activation_repeat_backup","activation_overwrite","activation_zero_crc","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save","pilot_mw_save","pilot_crc"):
+        for variant in ("good","sticky_journal","activation_off","activation_ids","activation_capacity","activation_dependent_capacity","activation_backup","activation_hardlink","activation_repeat_backup","activation_overwrite","activation_zero_crc","skip_admission","owner_guard","unconditional_crc","skip_metadata_stage","skip_swap_dependency","unguarded_mw_save","pilot_mw_save","pilot_crc"):
             mutant=variant!="good"
             actual=source
             if variant=="skip_admission":
@@ -658,6 +676,9 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
             if variant=="skip_metadata_stage":
                 actual=actual.replace('if (!reason) reason = private_cars_metadata_stage(G + buffer, size, used);','/* deliberately omit metadata at the real serializer */')
                 assert actual!=source
+            if variant=='sticky_journal':
+                actual,count=re.subn(r'if \(reason == private_cars_journal_failure\).*\n\s*else profile_refused = 1;', 'profile_refused = 1;', actual)
+                assert count==1
             if variant=='unguarded_mw_save':
                 actual=actual.replace('if (private_cars_count() || car85_player_count()) {','if (1) { /* restore the broken unconditional MW validation */')
                 assert actual!=source
@@ -702,6 +723,12 @@ int carsave_roundtrip_file(const char *root,const void *input,void *output) {
                 '-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),
                 str(root/'test.c'),str(root/'files.c'),'-framework','CoreGraphics','-framework','CoreText','-framework','CoreFoundation','-o',str(exe)],capture_output=True,text=True)
             assert build.returncode==0,build.stderr[-3000:]
+            if variant in ('good','sticky_journal'):
+                user=root/('journal-'+variant); user.mkdir()
+                case=subprocess.run([str(exe),str(catalog_root)],env=dict(env,BOOT_USERDATA=str(user),SHIP_FILE_ROUNDTRIP='1',SHIP_JOURNAL_RECOVERY='1'),capture_output=True,text=True)
+                print(variant,case.stdout.strip())
+                assert case.returncode==int(mutant) and f'recovered={int(not mutant)}/1' in case.stdout,case.stderr[-2200:]
+                if mutant: continue
             if variant in ('good','pilot_crc'):
                 case=subprocess.run([str(exe),str(catalog_root)],env=dict(env,SHIP_RETAIL_CRC_ONLY='1',SHIP_RETAIL_CRC_PILOT='1'),capture_output=True,text=True)
                 print('pilot-retail-crc',variant,case.stdout.strip())

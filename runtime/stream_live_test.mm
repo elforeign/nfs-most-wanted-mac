@@ -39,6 +39,8 @@ static std::atomic<unsigned> createdSessions{0};
 extern "C" int proof_key(const char *);
 extern "C" unsigned proof_saved_residue();
 extern "C" void proof_quit_fallback();
+static const char *keyProfile;
+extern "C" const char *userdata_dir(void) { return keyProfile; }
 static std::shared_ptr<live::Poster> quittingPoster;
 static bool scriptedQuit=false;
 static void diag_begin_exit(void) {}
@@ -111,6 +113,7 @@ int main(int argc,char **argv) { @autoreleasepool {
     // including paths that deliberately fail before capture can own cleanup.
     atexit(livestream_stop);
     require(argc==5,"mode/base/anchor/profile arguments");
+    keyProfile=argv[4];
     std::string mode=argv[1],key; std::getline(std::cin,key);
     proofOptions.baseURL=argv[2];
     std::ifstream cert(argv[3],std::ios::binary);

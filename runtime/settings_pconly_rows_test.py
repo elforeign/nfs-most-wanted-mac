@@ -6,7 +6,10 @@ checks the outputs the player gets: the reflection target size from x360.m's own
 ct_map (a non-PC control wanted, none = the port's bindings).
 Control: the same test on settings.c with the two old gate lines put back must fail (rows hidden, 320x240, Type 1).
 Numbers: new code 0 failures; old gate lines 6 failures (2 rows hidden, env forced to pc / 1, reflection 320x240, gas binding none).
+MW retail presets preserve the enabled catalog: old 0/2, fixed 2/2.
+PC-only lens default and reset match authored optics: old 0/2, fixed 2/2.
 Run: tools/.venv/bin/python -I runtime/settings_pconly_rows_test.py   (exit 3 when clang is missing)"""
+import hashlib
 import os
 import shutil
 import subprocess
@@ -26,8 +29,11 @@ void graphics_reset_request(void) {}
 @@REFL@@
 int diag_on = 0;
 const char *game_dir;
-const char *app_pref(const char *key) { (void)key; return NULL; }
-void app_pref_set(const char *key, const char *value) { (void)key; (void)value; }
+static char car_pref[8]="on";
+const char *app_pref(const char *key) { return !strcmp(key,"cars.later_games") ? car_pref : NULL; }
+void app_pref_set(const char *key, const char *value) {
+    if (!strcmp(key,"cars.later_games")) snprintf(car_pref,sizeof car_pref,"%s",value);
+}
 void app_pref_batch_begin(void) {}
 void app_pref_batch_end(void) {}
 void report_note(const char *fmt, ...) { (void)fmt; }
@@ -38,10 +44,33 @@ static Setting s_refl = {.id = "graphics.road_reflection", .category = SET_WORLD
 static const char *const kType[] = {"1","2","3","4","5","6","7","8","9","10"}, *const kTypeV[] = {"1","2","3","4","5","6","7","8","9","10"};
 static Setting s_type = {.id = "controls.control_type", .category = SET_CONTROLS, .order = 105, .label = "Control type",
     .type = SET_CHOICE, .choices = kType, .values = kTypeV, .nchoices = 10, .def = 0, .env = "NFS_CONTROL_TYPE"};
-int main(void) {
+static void x360_post_set_raindrops(int mode) { (void)mode; }
+@@DROPS@@
+@@LATER@@
+@@MODE@@
+int main(int argc,char **argv) {
     settings_add(&s_refl); settings_add(&s_type);
+    settings_add(&s_drops); settings_add(&s_later_cars);
     settings_init();
     int bad = 0;
+    if (argc==2 && !strcmp(argv[1],"presets")) {
+        const int presets[]={PRESET_PC,PRESET_X360};
+        for (int i=0;i<2;++i) {
+            settings_set(&s_later_cars,1);
+            settings_look_apply(presets[i]);
+            bad += s_later_cars.value!=1 || strcmp(car_pref,"on");
+        }
+        printf("catalog preserved=%d/2 failures %d\n",2-bad,bad);
+        return bad!=0;
+    }
+    if (argc==2 && !strcmp(argv[1],"lens")) {
+        int boot_mode=lens_drops_mode(getenv(s_drops.env));
+        bad += s_drops.value!=0 || s_drops.boot_value!=0 || boot_mode!=2;
+        settings_set(&s_drops,2); settings_reset(&s_drops);
+        bad += s_drops.value!=0;
+        printf("lens authored default/reset=%d/2 failures %d\n",2-bad,bad);
+        return bad!=0;
+    }
     Setting *rows[2] = {&s_refl, &s_type};
     for (int i = 0; i < 2; ++i) {
         const char *e = getenv(rows[i]->env);
@@ -62,6 +91,15 @@ int main(void) {
 }
 '''
 OLD_LINES = ('    {"controls.control_type", "world"},\n    {"graphics.road_reflection", "world"},\n')
+OLD_CATALOG = '    {"cars.later_games", "off", "off"},\n'
+OLD_LENS = '''    // Generated optics remain opt-in; preserve the PC default without console art.
+    if (!strcmp(s->id, "graphics.raindrops") && !roots_x360_has("world")) {
+        s->def = 1;
+        if (!s->saved && !s->locked) s->value = s->boot_value = s->def;
+    }
+'''
+assert hashlib.sha256(OLD_CATALOG.encode()).hexdigest() == '40431f6f62339812cd977b863f866725ebcdc0184870684283ae183bec231d54'
+assert hashlib.sha256(OLD_LENS.encode()).hexdigest() == '3c07a3cd5f6e016ae595efe6c2834eeee6dcf36b19d2e23d17c6e149bb23a6da'
 
 
 def refl_fragment():
@@ -72,9 +110,14 @@ def refl_fragment():
     return "#include <stdint.h>\n" + src[a:b]
 
 
-def build_and_run(d, settings_src, tag):
+def build_and_run(d, settings_src, tag, case=()):
     d = Path(d)
-    (d / f"{tag}.c").write_text(C.replace("@@REFL@@", refl_fragment()))
+    rows = (RUNTIME/'settings_port.c').read_text()
+    drops = rows[rows.index('static const char *const kDrops[]'):rows.index('static const char *const kSpeedBlur[]')]
+    later = rows[rows.index('static Setting s_later_cars'):rows.index('static Setting s_traffic_pilot')].split('\n#if !defined')[0]
+    drops_source = (RUNTIME/'lens_drops.c').read_text()
+    mode = drops_source[drops_source.index('int lens_drops_mode('):drops_source.index('int lens_drops_provider(')]
+    (d / f"{tag}.c").write_text(C.replace("@@REFL@@", refl_fragment()).replace('@@DROPS@@',drops).replace('@@LATER@@',later).replace('@@MODE@@',mode))
     sc = d / f"{tag}_settings.c"
     sc.write_text(settings_src)
     exe = d / tag
@@ -83,7 +126,7 @@ def build_and_run(d, settings_src, tag):
     roots = d / "roots.txt"
     roots.write_text("pc_root=/nonexistent/pc\n")
     env = {"PATH": os.environ["PATH"], "HOME": str(d), "NFS_ROOTS": str(roots), "NFS_CONTROL_TYPE": "3"}
-    r = subprocess.run([str(exe)], env=env, capture_output=True, text=True)
+    r = subprocess.run([str(exe), *case], env=env, capture_output=True, text=True)
     sys.stdout.write(f"[{tag}]\n{r.stdout}{r.stderr}")
     return int(r.stdout.rsplit("failures", 1)[1].split()[0])
 
@@ -103,6 +146,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pconly-rows-") as d:
         new_bad = build_and_run(d, src, "new")
         old_bad = build_and_run(d, old, "old")
+        for case, old_src in [('presets',src.replace('    {"cars.traffic_pilot",',OLD_CATALOG+'    {"cars.traffic_pilot",',1)),
+                              ('lens',src.replace('    if (!x360_unavailable(s))',OLD_LENS+'    if (!x360_unavailable(s))',1))]:
+            assert old_src!=src
+            assert build_and_run(d,src,case+'-new',(case,))==0
+            assert build_and_run(d,old_src,case+'-old',(case,))==2
     print(f"new gate: {new_bad} failures (want 0); old gate lines back: {old_bad} failures (want > 0)")
     ok = new_bad == 0 and old_bad > 0
     print("PASS" if ok else "FAIL")

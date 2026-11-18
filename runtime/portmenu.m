@@ -39,7 +39,7 @@
 #include "guide.h"
 #include "replay_input.h"
 #include "cliprec.h"
-#if NFS_GAME == NFS_GAME_MW
+#if NFS_GAME == NFS_GAME_MW || (defined(NFS_PUBLIC) && NFS_PUBLIC)
 #include "report_github.h"
 #else
 #include "game_menu_report.h"
@@ -211,6 +211,8 @@ static void activate(Setting *s) {
 }
 static void set_open(int o) {
     if (o == is_open) return;
+    extern void blackbox_menu(int open);
+    blackbox_menu(o);
     feedback_poll_pause();
     feedback_suppress(FEEDBACK_MENU, o); // stop before holding the sim; independent of the game's own pause menu
     if (o) {
@@ -352,6 +354,8 @@ int portmenu_key(uint8_t vk, int down, int repeat) {
     case 0x25: change(s, -1); break;                        // Left
     case 0x27: change(s, 1); break;                         // Right
     case 0x0D: case 0x20:                                // Enter, Space
+        if (s && (repeat || was_down) &&
+            (!strcmp(s->id,"diag.quit_game") || !strcmp(s->id,"diag.restart_game"))) break;
         if(!s || strncmp(s->id,"display.stream_",15) || (!repeat && !was_down)) activate(s);
         break;
     case 0x09: set_tab(tab + (shift ? -1 : 1)); break;      // Tab
@@ -378,16 +382,7 @@ int portmenu_char(uint32_t ch) {
     if (!is_open) return 0;
     if (report_github_active()) return 1;
     Setting *s = current();
-    if (editing && s && s->type == SET_TEXT && ch >= 32 && ch != 127) {
-        // Keep every typed character (as UTF-8) so a non-digit like U+2212 reaches validation instead of vanishing.
-        NSString *typed = [[NSString alloc] initWithBytes:&ch length:sizeof ch encoding:NSUTF32LittleEndianStringEncoding];
-        const char *raw = typed.UTF8String ?: "\xEF\xBF\xBD";
-        size_t n = strlen(s->text), k = strlen(raw);
-        if (n + k < sizeof s->text) {
-            for (size_t i = 0; i < k; ++i) text_append(s->text, sizeof s->text, (unsigned char)raw[i]);
-            dirty = 1;
-        }
-    }
+    if (editing && s && s->type == SET_TEXT && text_append(s->text, sizeof s->text, ch)) dirty = 1;
     return 1;
 }
 

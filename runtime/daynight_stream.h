@@ -6,6 +6,7 @@ char *daynight_stream_shader(const uint32_t *tokens, uint32_t n, const SmResult 
 #ifdef __OBJC__
 #import <Metal/Metal.h>
 #include "d3d9_internal.h"
+int daynight_stream_wanted(uint64_t frame);
 void daynight_stream_bind(id<MTLRenderCommandEncoder> encoder, id<MTLDevice> device,
                          Obj *vb, id<MTLBuffer> identity, uint32_t stride, uint32_t offset,
                          uint64_t shader_hash, uint64_t frame);

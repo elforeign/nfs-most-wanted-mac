@@ -3,9 +3,11 @@
 Original/fixed: paste 7/0 failures, status reasons 6/0 failures.
 Before-wait Forget erasure: late-wipe control 3 failures, fixed 0 (666 checks).
 Hardening original/fixed: editor 7/0 failures, unclosed Stop 2/0, erasing Stop 3/0, quit 5/0.
-Measured good: 657 assertions/0 failures, 0 sentinel/output matches, 0 clipboard
-and preference writes; fresh process: automatic Go=0, sessions=0. Original cleanup plus legacy faults:
-stale release/OSK/plain field 1 failure each, AX 2, menu buffer 11, preferences/clipboard 1/3, cid 34;
+Remembered key on relaunch: original save 0 present/1 failure, fixed 1 present/0 failures.
+Rebuilt process: 1 present/0 failures. Both fixed launches: 0 Go and 0 sessions.
+Contention: bypassing the directory lock replaces the saved key (1 failure); the fixed write preserves it.
+Measured good: 666 assertions/0 failures, 0 sentinel/output matches, 0 clipboard and preference writes.
+Legacy faults: stale release/OSK/plain field 1 failure each, AX 2, menu buffer 11, preferences/clipboard 1/3, cid 34;
 stderr fault leaks 1 sentinel versus fixed 0 (captured and redacted in memory).
 No windows are shown; sheet presentation and event delivery are test seams.
 The production secure control, controller, validation, OSK note copies and report
@@ -13,9 +15,12 @@ sanitizer run unchanged. The real secure field editor receives plain paste from
 an injected read-only pasteboard. VoiceOver needs UI proof.
 """
 from pathlib import Path
+import fcntl
+import os
 import re
 import hashlib
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -35,6 +40,14 @@ ORIGINAL_SHOULD_TERMINATE = '- (NSApplicationTerminateReply)applicationShouldTer
 
 ORIGINAL_QUIT_SHA256 = '0b53fff009d36def307c8af6ecfbd2b6e09f4b20b96fc60a69ce7b333bae782f'
 ORIGINAL_SHOULD_TERMINATE_SHA256 = 'bb54ca9c220dd864415fff91e50fcb7607c785367ad9d1d1d6fbc2c9c6b56f91'
+
+ORIGINAL_SAVE = '''    if(valid && used==length) {
+        erase(keyBytes,sizeof keyBytes); memcpy(keyBytes,temporary,used); keySize=used; notice=NULL;
+    } else notice="Error: invalid key";
+    erase(temporary,sizeof temporary);
+    return valid && used==length;'''
+ORIGINAL_SAVE_SHA256 = 'f5ef8d49c2b58d7f2ba9204f2fac0eaffcac4653d7cd382e23d194b959c3d6a5'
+
 
 def function(text, signature):
     begin=text.index(signature)
@@ -66,6 +79,64 @@ def private_output(output,key):
     for form in sorted(forms,key=len,reverse=True):
         safe=re.sub(re.escape(form)+r'[^\s]*','[redacted]',safe)
     return safe,matches
+
+
+def storage_proof(exe, command, profile, sentinel, variant):
+    profile.mkdir()
+    bundle=profile.parent/'unused-bundle'
+
+    def run(binary, mode, failed=False):
+        result=subprocess.run([str(binary),str(bundle),str(profile),mode],input=sentinel+'\n',
+                              capture_output=True,text=True,timeout=15)
+        safe,matches=private_output(result.stdout+result.stderr,sentinel)
+        print(f'{binary.name}: {safe.strip()}',flush=True)
+        assert result.returncode==int(failed) and not matches, 'storage '+mode
+        return safe
+
+    run(exe,'remember')
+    if variant=='original-memory-only':
+        assert 'key_present=0 go=0 sessions=0' in run(exe,'relaunch',failed=True)
+        return
+
+    store=profile/'.stream-key'
+    key=store/'stream-key'
+    record=key.read_bytes()
+    unlocked=variant=='unlocked-store'
+    fd=os.open(store,os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        run(exe,'contended-save',failed=unlocked)
+        assert (key.read_bytes()!=record)==unlocked, 'contended save changed the key'
+    finally:
+        os.close(fd)
+    if unlocked:
+        return
+    assert stat.S_IMODE(store.stat().st_mode)==0o700 and stat.S_IMODE(key.stat().st_mode)==0o600
+    assert not (store/'stream-key.tmp').exists()
+    assert 'key_present=1 go=0 sessions=0' in run(exe,'relaunch')
+    rebuilt=exe.with_name('rebuilt')
+    built=subprocess.run([*command[:-1],str(rebuilt),'-O0'],capture_output=True,text=True,timeout=90)
+    assert built.returncode==0,built.stderr[-4000:]
+    assert 'key_present=1 go=0 sessions=0' in run(rebuilt,'relaunch')
+
+    key.chmod(0o644)
+    assert 'key_present=0 go=0 sessions=0 status=Saved key unavailable' in run(rebuilt,'unavailable')
+    key.chmod(0o000)
+    run(rebuilt,'unavailable')
+    key.chmod(0o600)
+    subprocess.run(['/bin/chmod','+a','everyone allow read',str(key)],check=True,capture_output=True)
+    run(rebuilt,'unavailable')
+    subprocess.run(['/bin/chmod','-N',str(key)],check=True,capture_output=True)
+    key.write_bytes(record[:-1]+bytes([record[-1] ^ 1]))
+    run(rebuilt,'unavailable')
+    key.write_bytes(record)
+    run(rebuilt,'forget')
+    assert not key.exists()
+    run(rebuilt,'missing')
+    run(exe,'remember')
+    run(exe,'session-only')
+    assert not key.exists()
+    run(rebuilt,'missing')
 
 
 def main():
@@ -121,6 +192,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix='proof-',dir=CACHE) as temp:
         d=Path(temp); (d/'osk-note.inc').write_text(osk)
         cases=[('good',source,privacy),*[(name,text,privacy) for name,text in faults.items()]]
+        assert hashlib.sha256(ORIGINAL_SAVE.encode()).hexdigest()==ORIGINAL_SAVE_SHA256
+        replace=function(source,'static BOOL replaceKey(')
+        old_replace=replace[:replace.index('    BOOL saved=NO;')]+'    (void)rememberOnMac;\n'+ORIGINAL_SAVE+'\n}'
+        cases.append(('original-memory-only',source.replace(replace,old_replace),privacy))
+        cases.append(('unlocked-store',source.replace('int dir=lockStore(YES);','int dir=storeDirectory(YES);'),privacy))
         cid=next(line for line in privacy.splitlines() if line.endswith('// privacy:cid'))
         cases.append(('cid',source,privacy.replace(cid,'    (void)cid;')))
         for name,text,header in cases:
@@ -139,7 +215,13 @@ def main():
             built=subprocess.run(cmd,capture_output=True,text=True,timeout=90)
             (CACHE/(name+'-build.log')).write_text(built.stdout+built.stderr)
             assert built.returncode==0,built.stderr[-4000:]
-            result=subprocess.run([str(exe),str(d/(name+'-bundle'))],input=sentinel+'\n',capture_output=True,text=True,timeout=30)
+            if name in ('good','original-memory-only','unlocked-store'):
+                storage_proof(exe,cmd,d/(name+'-store'),sentinel,name)
+                if name!='good':
+                    continue
+            profile=d/(name+'-profile')
+            profile.mkdir()
+            result=subprocess.run([str(exe),str(d/(name+'-bundle')),str(profile)],input=sentinel+'\n',capture_output=True,text=True,timeout=30)
             out=result.stdout+result.stderr
             # Scan raw/URL/escaped forms and long partial copies before persisting logs.
             safe,matches=private_output(out,sentinel)
@@ -147,12 +229,7 @@ def main():
             valid=result.returncode==0 and not matches
             print(f'{name}: rc={result.returncode} key_matches={matches}; '+safe.strip().replace('\n','; '),flush=True)
             assert valid==(name=='good'),name+' privacy oracle result'
-            if name=='good':
-                restarted=subprocess.run([str(exe),'restart'],input=sentinel+'\n',capture_output=True,text=True,timeout=10)
-                output=restarted.stdout+restarted.stderr
-                assert not restarted.returncode and sentinel not in output, 'restart must stay Off'
-                print(output.strip(),flush=True)
-    print('stream_key_test PASS: original paste/status and 9 independent faults rejected')
+    print('stream_key_test PASS: persistence, privacy and original failure controls')
     return 0
 
 if __name__=='__main__': raise SystemExit(main())

@@ -3,6 +3,7 @@ Proof: normal 78 checks, 0 failures; broken Off 2, front-end cleanup 6, timeout 
 pre-distance pose guard 33, diagnostic guard 1 failures; sockets 4/4, guest calls 0.
 Restored connect/input error loggers each leak one IPv4 and are rejected; normal zero leaks.
 Broken Off path polls the session controller every frame.
+MainLoop-only Create/Join: 2/2 sessions, 0 vehicle packets; original World_Service transport: 0/2.
 """
 from pathlib import Path
 import subprocess
@@ -29,21 +30,27 @@ def main():
         assert source.count(timeout) == 1
         front_end = 'void f_00663D30(Cpu *c) {\n    roam_session(c);'
         assert source.count(front_end) == 1
+        service = '    if (atomic_load(&roam_state) == 1 && roam_fd >= 0) roam_network();\n'
+        assert source.count(service) == 1
+        old_menu = source.replace(service, '').replace('    f_0075AAD0_orig(c);\n',
+                                                       '    f_0075AAD0_orig(c);\n' + service)
         for label, text in [('normal', source), ('broken_off', source.replace(old, 'if (state < 0) atomic_store(&roam_state, 2);')),
                             ('broken_off_key', source.replace('if (!v || !*v) return -1;', 'RoamAuth unused_key; roam_auth_generate(&unused_key); roam_auth_clear(&unused_key); if (!v || !*v) return -1;')),
                             ('broken_off_file', source.replace('if (!v || !*v) return -1;', '(void)userdata_dir(); if (!v || !*v) return -1;')),
-                            ('broken_front_end', source.replace(front_end, 'void f_00663D30(Cpu *c) {')),
+                            ('broken_front_end', source.replace(front_end, 'void f_00663D30(Cpu *c) {\n    if (0) roam_session(c);')),
                             ('broken_log', source.replace('"roam: bind/connect: %s\\n", strerror(errno)', '"roam: bind/connect %s: %s\\n", v, strerror(errno)')),
                             ('broken_input_log', source.replace('"roam: NFS_ROAM is not ip:port; online free roam off\\n"', '"roam: NFS_ROAM=%s is not ip:port; online free roam off\\n", v')),
                             ('broken_diag', source.replace('if (diag_on) diag_event("roam: online (wire v%d)", ROAM_VERSION)', 'diag_event("roam: online %s (wire v%d)", host, ROAM_VERSION)')),
                             ('broken_timeout', source.replace(timeout, 'if (0)')),
-                            ('broken_pose', source.replace('if (!roam_pose_valid(pos, vel)) continue;', ''))]:
+                            ('broken_pose', source.replace('if (!roam_pose_valid(pos, vel)) continue;', '')),
+                            ('old_menu', old_menu)]:
             src = td / (label + '.c'); src.write_text(text)
             test = td / (label + '_harness.c'); test.write_text(harness.replace('"roam_game.c"', '"' + str(src) + '"'))
             exe = td / label
             p = subprocess.run(CF + [str(RT / 'roam_auth.c')] + (['-framework', 'Security', '-framework', 'CoreFoundation'] if __import__('sys').platform == 'darwin' else ['-lcrypto', '-lm']) + [str(test), str(RT / 'roam_core.c'), '-o', str(exe)], capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-3000:]
-            p = subprocess.run([str(exe)], capture_output=True, text=True, timeout=15)
+            args = ['--menu-only'] if label == 'old_menu' else []
+            p = subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=15)
             print(label + ':', p.stdout.strip(), flush=True)
             leaks = re.findall(r'(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])', p.stderr)
             if label in ('broken_log', 'broken_input_log'):
@@ -52,6 +59,12 @@ def main():
             else:
                 assert not leaks, 'IPv4 leaked in ordinary game-hook logs'
                 assert p.returncode == (0 if label == 'normal' else 1), p.stderr[-2500:]
+            if label == 'old_menu':
+                assert '0/2 sessions connected' in p.stdout
+            if label == 'normal':
+                menu = subprocess.run([str(exe), '--menu-only'], capture_output=True, text=True, timeout=15)
+                print(menu.stdout.strip(), flush=True)
+                assert menu.returncode == 0 and '2/2 sessions connected' in menu.stdout, menu.stderr[-2500:]
     return 0
 
 

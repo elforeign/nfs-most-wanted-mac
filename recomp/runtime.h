@@ -125,6 +125,22 @@ static inline int x87_trig_range(Cpu *c, double v) {
     c->sw &= ~0x400;
     return 1;
 }
+static inline void x87_fscale(Cpu *c) {
+    double value = ST(0), scale = ST(1);
+    if (isnan(value)) return;
+    if (isnan(scale)) { ST(0) = scale; return; }
+    if (isinf(scale)) {
+        if ((scale > 0 && value == 0) || (scale < 0 && isinf(value))) {
+            ST(0) = -__builtin_nan("");
+            c->sw |= 1;
+        } else {
+            ST(0) = __builtin_copysign(scale > 0 ? __builtin_inf() : 0.0, value);
+        }
+        return;
+    }
+    int exponent = scale >= 0x1p31 ? INT32_MAX : scale <= -0x1p31 ? INT32_MIN : (int)scale;
+    ST(0) = ldexp(value, exponent);
+}
 static inline void x87_prem(Cpu *c, int nearest) {
     double a = ST(0), b = ST(1);
     if (!isfinite(a) || isnan(b) || b == 0) {
@@ -251,8 +267,10 @@ static inline uint64_t mmx_pmulhuw(uint64_t x, uint64_t y) {
 static inline uint64_t mmx_pmaddwd(uint64_t x, uint64_t y) {
     uint64_t o = 0;
     for (int i = 0; i < 2; ++i) {
-        int32_t s = (int32_t)(int16_t)(x >> 32 * i) * (int16_t)(y >> 32 * i) + (int32_t)(int16_t)(x >> (32 * i + 16)) * (int16_t)(y >> (32 * i + 16));
-        o |= (uint64_t)(uint32_t)s << 32 * i;
+        int32_t low = (int16_t)(x >> 32 * i) * (int16_t)(y >> 32 * i);
+        int32_t high = (int16_t)(x >> (32 * i + 16)) * (int16_t)(y >> (32 * i + 16));
+        uint32_t sum = (uint32_t)low + (uint32_t)high;
+        o |= (uint64_t)sum << 32 * i;
     }
     return o;
 }

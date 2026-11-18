@@ -18,7 +18,7 @@ const char *report_last_path(void);
 void portmenu_status(const char *fmt, ...);
 void portmenu_open_folder(const char *path);
 
-static NSString *const IssueBase = @"https://github.com/elforeign/nfs-most-wanted-mac/issues/new";
+static NSString *const IssueBase = @"https://github.com/" REPORT_GITHUB_REPOSITORY "/issues/new";
 static NSString *const DiscordInvite = @"https://discord.gg/VYKkrVhMrd";
 static const NSUInteger DiscordLimit = 2000;
 static NSString *issueURL, *issueTitle, *issueBody, *issueFolder, *issueError;
@@ -51,7 +51,6 @@ static NSString *Redact(NSString *text, NSDictionary *identity) {
     text = text ?: @"";
     NSString *home = identity[@"home"];
     if (home.length) text = [text stringByReplacingOccurrencesOfString:home withString:@"~"];
-    text = ReplacePattern(text, @"/(?:Users|home)/[^/\\s]+", @"~"); // home paths
     text = ReplacePattern(text, @"\\b[\\p{L}\\p{N}._%+!'-]+@[\\p{L}\\p{N}.-]+\\.[\\p{L}]{2,}\\b", @"[email]");
     for (NSString *key in @[@"user", @"computer", @"serial", @"wifi"]) {
         for (NSString *value in identity[key]) {
@@ -240,12 +239,15 @@ static void SendToGitHub(int discord) {
     if (!reuse) {
         NSDictionary *snapshot = PublicSnapshot(folder, identity);
         if (!snapshot) { issueError = @"Couldn't safely read the saved report. Save a new report and retry."; portmenu_status("%s", issueError.UTF8String); return; }
-        nextSubmission = [[ReportSubmission alloc] initWithSnapshot:snapshot runner:submissionRunner ?: ReportGitHubRunner()];
+        nextSubmission = [[ReportSubmission alloc] initWithSnapshot:snapshot runner:submissionRunner];
     }
     BOOL requestedDiscord = discord != 0;
     NSDictionary *issue = requestedDiscord ? DestinationSnapshot(folder, identity, YES) : nextSubmission.snapshot;
     if (!issue[@"body"]) { issueError = @"Privacy check failed. Save a new report. The previous preview is retained."; portmenu_status("%s", issueError.UTF8String); return; }
-    if (!reuse) { submission = nextSubmission; issueFolder = folder; FreezeFrame(folder); }
+    if (!reuse) {
+        [submission forgetAccount];
+        submission = nextSubmission; issueFolder = folder; FreezeFrame(folder);
+    }
     discordPreview = requestedDiscord;
     issueTitle = issue[@"title"]; issueBody = issue[@"body"]; issueURL = IssueBase;
     issueError = nil; accountSeen = NO;
@@ -259,17 +261,19 @@ static void SendToGitHub(int discord) {
         portmenu_status("%s", submission.message.UTF8String);
     };
 }
-static void SendToDiscord(int unused) { (void)unused; SendToGitHub(1); }
 static Setting s_github = {.id = "diag.report_github", .category = SET_DIAGNOSTICS, .order = 65,
     .label = "Send to GitHub", .type = SET_ACTION,
     .help = "Review saved text. Check GitHub identity separately, then explicitly post publicly, or copy text and open GitHub (may need sign-in). Screenshot sharing starts Off.",
     .apply = SendToGitHub};
 __attribute__((constructor)) static void RegisterGitHub(void) { settings_add(&s_github); }
+#if NFS_GAME == NFS_GAME_MW
+static void SendToDiscord(int unused) { (void)unused; SendToGitHub(1); }
 static Setting s_discord = {.id = "diag.report_discord", .category = SET_DIAGNOSTICS, .order = 66,
     .label = "Post on Discord", .type = SET_ACTION,
     .help = "Preview the redacted report, then copy it and open Discord. Paste it in #bug-reports and review manual attachments.",
     .apply = SendToDiscord};
 __attribute__((constructor)) static void RegisterDiscord(void) { settings_add(&s_discord); }
+#endif
 
 int report_github_active(void) { return active; }
 void report_github_close(void) {
@@ -320,6 +324,12 @@ static void Confirm(int action) {
     report_github_close();
 }
 static void Scroll(double lines) { offset = fmax(0, fmin(offset + lines * 24, fmax(0, contentHeight - viewHeight))); }
+static void MoveSelection(int step) {
+    confirmSelected = (confirmSelected + 5 + step) % 5;
+#if NFS_GAME == NFS_GAME_PRIVATE
+    if (confirmSelected == 3) confirmSelected += step;
+#endif
+}
 void report_github_key(int key) {
     if (!active) return;
     switch (key) {
@@ -330,8 +340,8 @@ void report_github_key(int key) {
     case 0x22: Scroll(viewHeight / 24 - 1); break;
     case 0x24: offset = 0; break;
     case 0x23: Scroll(contentHeight / 24); break;
-    case 0x25: confirmSelected = (confirmSelected + 4) % 5; break;
-    case 0x27: case 0x09: confirmSelected = (confirmSelected + 1) % 5; break;
+    case 0x25: MoveSelection(-1); break;
+    case 0x27: case 0x09: MoveSelection(1); break;
     case 0x0D: case 0x20: if (keyArmed) { keyArmed = NO; Confirm(confirmSelected); } break;
     }
 }
@@ -366,7 +376,9 @@ void report_github_mouse(int kind, double x, double y, double scroll) {
     if (y >= 546 && y < 582) {
         if (x >= 32 && x < 280) Confirm(1);
         else if (x >= 290 && x < 580) Confirm(2);
+#if NFS_GAME == NFS_GAME_MW
         else if (x >= 600 && x < 800) Confirm(3);
+#endif
         else if (x >= 820 && x < 950) Confirm(0);
     }
 }
@@ -397,7 +409,7 @@ void report_github_draw(CGContextRef ctx, double height, CGRect viewport, int xb
     Scroll(0);
     Label(ctx, [NSString stringWithFormat:@"Review — %@", issueTitle], 32, height - 48, 20);
     Label(ctx, discordPreview ? @"Discord: copies this exact text, then opens Discord. Paste it yourself." :
-        @"Yes posts this text PUBLICLY to github.com/elforeign/nfs-most-wanted-mac", 32, height - 82, 16);
+        @"Yes posts this text PUBLICLY to github.com/" REPORT_GITHUB_REPOSITORY, 32, height - 82, 16);
     CGContextSaveGState(ctx);
     CGContextClipToRect(ctx, CGRectMake(viewport.origin.x, height - viewport.origin.y - viewHeight, viewport.size.width, viewHeight));
     if (screenshotView && framePreview) {
@@ -420,7 +432,7 @@ void report_github_draw(CGContextRef ctx, double height, CGRect viewport, int xb
         CGContextSetRGBFillColor(ctx, 1, .62, .20, 1);
         CGContextFillRect(ctx, CGRectMake(CGRectGetMaxX(viewport) - 5, height - y - h, 4, h));
     }
-    NSString *accountLine = submission.account ? [NSString stringWithFormat:@"Verified account: %@ · github.com/elforeign/nfs-most-wanted-mac", submission.account] : @"Account unverified. Check account contacts GitHub for identity only; browser may require sign-in.";
+    NSString *accountLine = submission.account ? [NSString stringWithFormat:@"Verified account: %@ · github.com/" REPORT_GITHUB_REPOSITORY, submission.account] : @"Account unverified. Check account contacts GitHub for identity only; browser may require sign-in.";
     Label(ctx, accountLine, 32, height - 462, 14);
     if (submission.state == ReportSubmitReady) accountSeen = YES;
     NSString *shotLabel = frameWriteFailed ? @"Retry reviewed frame (attachment only)" : screenshotOn ? @"Screenshot On (manual attachment) — select to turn Off" : screenshotView ?
@@ -443,7 +455,9 @@ void report_github_draw(CGContextRef ctx, double height, CGRect viewport, int xb
     Label(ctx, confirmSelected == 1 ? [@"› " stringByAppendingString:post] : post, 32, height - 570, 18);
     NSString *fallback = submission.issueURL ? @"Copy & open created issue" : @"Copy text & open GitHub";
     Label(ctx, confirmSelected == 2 ? [@"› " stringByAppendingString:fallback] : fallback, 290, height - 570, 18);
+#if NFS_GAME == NFS_GAME_MW
     Label(ctx, confirmSelected == 3 ? @"› Post on Discord" : @"Post on Discord", 600, height - 570, 18);
+#endif
     Label(ctx, confirmSelected == 0 ? @"› Cancel" : @"Cancel", 820, height - 570, 18);
     Label(ctx, xbox ? @"↑↓ / wheel scroll · LB/RB page · ←→ choose · A/Enter select · B/Esc cancel" :
         @"↑↓ / wheel scroll · L1/R1 page · ←→ choose · ✕/Enter select · ○/Esc cancel", 32, height - 610, 15);

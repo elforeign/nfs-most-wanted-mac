@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Compile actual lifecycle paths against fake sinks and reject broken controls.
-No real AppKit, HID, GameController or audio discovery/output is invoked.
-Plan: invoke the close button with active effects; require cleanup before WM_CLOSE.
-Also remove each transport safeguard in turn and require the fake checks to fail.
-Proof: close cleanup PASS 1/1; original/broken callback FAIL 1/1 before WM_CLOSE.
-Nine source controls are rejected: rumble detach/attach/cache/retry/epoch fail
-2/10/16/14/2 of 43 checks; extended deadline fails 4/45; padfx debt/deferred
-fail 17/2 of 291; feedback model fails 3/38. Fixed transports have 0 failures.
+"""
+
+
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -57,12 +57,13 @@ def transport_controls(tmp):
     (tmp / 'padfx_roles.inc').write_text(re.search(
         r'^int padbind_trigger_role\(.*?^}', roles, re.M | re.S)[0] + '\n')
     controls = [
-        ('rumble', 'detach', 'if (dev == pad) { invalidate_motors();', 'if (dev == pad) {'),
+        ('rumble', 'detach', 'if (departing == pad) {\n            invalidate_motors();', 'if (departing == pad) {'),
         ('rumble', 'attach', 'flush();                                           // neutral before the next feedback publication', '(void)0;'),
         ('rumble', 'cache', 'if (send(heavy, light))', 'if ((send(heavy, light), 1))'),
         ('rumble', 'retry', 'neutral_pending = 1; retry_clear();', 'neutral_pending = 1; if (0) retry_clear();'),
         ('rumble', 'deadline', 'now + 250000000ull', 'now + 2500000000ull'),
         ('rumble', 'epoch', '(request >> 32) != motor_generation', '0'),
+        ('rumble', 'selection', 'applied_selection != selection_generation ||', ''),
         ('padfx', 'debt', 'if (gone && (trig_taken || light_taken))', 'if (0)'),
         ('padfx', 'deferred', 'if (is_detached(ctl)) {\n            if (owner == ctl)', 'if (0) {\n            if (owner == ctl)'),
         ('feedback', 'model', 'reset_invalid_model();', 'if (0) reset_invalid_model();'),

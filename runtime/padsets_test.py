@@ -23,6 +23,21 @@ def pinned_source(file, edits, digest):
         text = text.removeprefix('#include "save_timing.h"\n')
         text = text.replace('SAVE_TIME("stream.close", fclose(f))', 'fclose(f)')
         text = text.replace('SAVE_TIME("rename", rename(tmp, p))', 'rename(tmp, p)')
+        # These historical control-page baselines precede status and retry reporting.
+        for current, historical in (
+            ('static int sets_save(void)', 'static void sets_save(void)'),
+            ('if (!sets_dirty) return 1;                //', 'if (!sets_dirty) return;                  //'),
+            ('if (migration_backup_needed && !migration_backup()) return 0;', 'if (migration_backup_needed && !migration_backup()) return;'),
+            ('if (!f) return 0;\n    fprintf(f, "# NFSMW pad bindings', 'if (!f) return;\n    fprintf(f, "# NFSMW pad bindings'),
+            ('    return !sets_dirty;\n', ''),
+            ('int padbind_save_complete(int committed) {\n    int saved = 1;', 'void padbind_save_complete(int committed) {'),
+            ('if (row && memcmp(row->r, snapshot->r, sizeof row->r) &&\n                    (!pending_before_valid',
+             'if (row && (!pending_before_valid'),
+            ('saved = sets_save();', 'sets_save();'),
+            ('    if (saved) pending_bindings_valid = 0;\n    return saved;', '    pending_bindings_valid = 0;'),
+        ):
+            assert text.count(current) == 1, current
+            text = text.replace(current, historical)
     lines = text.splitlines(keepends=True)
     for start, end, expected, original in reversed(edits):
         assert hashlib.sha256(''.join(lines[start:end]).encode()).hexdigest() == expected, file
@@ -457,7 +472,7 @@ def main():
         ('seed-conflict', 'memset(r, 0, 12);\n        }\n    const int actions', '(void)r;\n        }\n    const int actions'),
         ('serialize-drag', 'int swapped = padbind_input_begin(PADBIND_DEFAULT);', 'int swapped = 0;'),
         ('lose-newer-edit', 'if (restore[i]) {', 'if (0) {'),
-        ('lose-retry', 'if (!f) return;\n    fprintf(f,', 'if (!f) { sets_dirty = 0; return; }\n    fprintf(f,'),
+        ('lose-retry', 'if (!f) return 0;\n    fprintf(f,', 'if (!f) { sets_dirty = 0; return 0; }\n    fprintf(f,'),
     ):
         assert before in source, name
         variants[name] = source.replace(before, after, 1)

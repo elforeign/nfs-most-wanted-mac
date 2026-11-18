@@ -1,4 +1,7 @@
 // Link proof: fixed PASS 47/47; retained transport / unkeyed old behavior each FAIL 1/47.
+// Selected B with A also connected, then unplug A: old reports (A, B before/after) 2, 0/0; fixed 0, 1/1.
+// Without the selection-generation guard an earlier queued flush sends one nonzero report to A.
+// Motor output for 0/false/OFF: old 3/3 nonzero updates; fixed 0/3.
 // Offline HID queue regression: actual rumble.m, intercepted IOHIDDeviceSetReport, no device opened.
 // cc -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp runtime/rumble_test.m \
 //   -framework Foundation -framework IOKit -lz -o /tmp/rumble_test && /tmp/rumble_test
@@ -17,12 +20,16 @@ static void __attribute__((unused)) test_after(dispatch_time_t when, dispatch_qu
 #define dispatch_after test_after
 #define IOHIDDeviceSetReport test_set_report
 #define IOHIDDeviceGetProperty test_property
+#define IOHIDDeviceGetService test_service
 #define IOHIDManagerCreate test_manager_create
 #ifndef RUMBLE_SOURCE
 #define RUMBLE_SOURCE "rumble.m"
 #endif
 #include RUMBLE_SOURCE
 #undef dispatch_after
+#ifdef RUMBLE_AUDIT_OLD
+void rumble_select(void *controller) { (void)controller; }
+#endif
 #ifdef RUMBLE_LEGACY
 // The original transport had no epoch argument; preserve its original publication path.
 static uint32_t motor_generation;
@@ -38,13 +45,31 @@ static float model_h = 0.8f, model_l = 0.4f;
 static uint64_t clock_ns = 1000000000;
 static int reject_zeros, rejected, detached, invalidations;
 static int real_opens, stale_link_test;
+static int a_reports, b_reports;
+@interface FakeRumbleController : NSObject
+@property(copy) NSString *physicalDeviceUniqueID;
+@property(copy) NSString *productCategory;
+@end
+@implementation FakeRumbleController
+@end
+static FakeRumbleController *controller(NSString *identity) {
+    FakeRumbleController *ctl = [FakeRumbleController new];
+    ctl.physicalDeviceUniqueID = identity;
+    ctl.productCategory = @"DualSense";
+    return ctl;
+}
 IOHIDManagerRef test_manager_create(CFAllocatorRef allocator, IOOptionBits options) {
     (void)allocator; (void)options; ++real_opens; abort(); // forbidden discovery trap, never a real HID manager
 }
 uint64_t host_ticks(void) { return clock_ns; }
 void feedback_levels(float *h, float *l) { *h = model_h; *l = model_l; }
 void feedback_invalidate_effects(void) { model_h = model_l = 0; ++invalidations; }
-CFTypeRef test_property(IOHIDDeviceRef d, CFStringRef key) { (void)d; (void)key; return bluetooth ? CFSTR("Bluetooth") : CFSTR("USB"); }
+CFTypeRef test_property(IOHIDDeviceRef d, CFStringRef key) {
+    if (CFEqual(key, CFSTR(kIOHIDPhysicalDeviceUniqueIDKey))) return (CFStringRef)d;
+    if (CFEqual(key, CFSTR(kIOHIDTransportKey))) return bluetooth ? CFSTR("Bluetooth") : CFSTR("USB");
+    return NULL;
+}
+io_service_t test_service(IOHIDDeviceRef d) { (void)d; return IO_OBJECT_NULL; }
 void diag_event(const char *fmt, ...) { (void)fmt; }
 #define PADLINK_HOOK_TEST
 #include "padlink_test.c"
@@ -65,7 +90,11 @@ IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType type, CFIndex id
         ++rejected; return kIOReturnError;
     }
     motor_l = c[2]; motor_h = c[3];
-    nonzero += motor_h != 0 || motor_l != 0;
+    if (motor_h || motor_l) {
+        ++nonzero;
+        if (CFEqual(device, CFSTR("fake-A"))) ++a_reports;
+        if (CFEqual(device, CFSTR("fake-B"))) ++b_reports;
+    }
     return kIOReturnSuccess;
 }
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); } } while (0)
@@ -91,12 +120,14 @@ int main(void) {
     unsetenv("NFS_RUMBLE"); rumble_off = -1;
     // A CFString stands in for a retained HID handle; discovery is never opened.
     manager = (IOHIDManagerRef)(uintptr_t)1;
-    pad = (IOHIDDeviceRef)CFRetain(CFSTR("fake-pad"));
     hid_q = dispatch_queue_create("nfsmw.rumble.test", DISPATCH_QUEUE_SERIAL);
     // Actual found/remove/send hooks: transport is specific to the HID link.
     diag_on = 1;
     padlink_select((void *)3, "framework pad");
-    padlink_hid((void *)pad, 1);
+    FakeRumbleController *gc = controller(@"fake-pad");
+    rumble_select((__bridge void *)gc);
+    bluetooth = 1;
+    found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
     removed(NULL, 0, NULL, pad); drain();
     CHECK(links[1].transport == -1 && links[0].transport == -1);
     bluetooth = 0;
@@ -160,10 +191,52 @@ int main(void) {
         CHECK(motor_h == 0 && motor_l == 0);
         model_h = .8f; model_l = .4f;
     }
+    int before = nonzero;
+    const char *false_values[] = {"0", "false", "OFF"};
+    for (size_t i = 0; i < sizeof false_values / sizeof false_values[0]; ++i) {
+        setenv("NFS_RUMBLE", false_values[i], 1);
+        rumble_off = -1;
+        update();
+    }
+    printf("NFS_RUMBLE false spellings: %d nonzero reports in 3 updates\n", nonzero - before);
+    CHECK(nonzero == before);
+    unsetenv("NFS_RUMBLE");
+    rumble_off = -1;
+
+    removed(NULL, 0, NULL, pad); drain();
+    FakeRumbleController *a = controller(@"fake-A"), *b = controller(@"fake-B");
+    IOHIDDeviceRef dev_a = (IOHIDDeviceRef)CFSTR("fake-A"), dev_b = (IOHIDDeviceRef)CFSTR("fake-B");
+    rumble_select((__bridge void *)a);
+    found(NULL, 0, NULL, dev_a);
+    found(NULL, 0, NULL, dev_b); drain();
+    dispatch_suspend(hid_q);
+    rumble_update();                            // older flush already queued on the HID thread
+    rumble_select((__bridge void *)b);
+    model_h = .8f; model_l = .4f; rumble_update();                                                        
+    dispatch_resume(hid_q); drain();
+    model_h = .8f; model_l = .4f; update();
+    int b_before_unplug = b_reports;
+    removed(NULL, 0, NULL, dev_a); drain();
+    model_h = .8f; model_l = .4f; update();
+    printf("input on B: %d nonzero on A, %d on B before and %d on B after unplugging A\n",
+           a_reports, b_before_unplug, b_reports - b_before_unplug);
+    CHECK(a_reports == 0 && b_before_unplug == 1 && b_reports - b_before_unplug == 1);
+#ifndef RUMBLE_AUDIT_OLD
+    found(NULL, 0, NULL, dev_a); drain();
+    reject_zeros = 1;
+    rumble_select((__bridge void *)a); drain();
+    CHECK(pad == dev_b && timers.count == 1);   // B's first neutral report failed
+    removed(NULL, 0, NULL, dev_b); drain();
+    CHECK(pad == dev_a);
+    retry();                                    // retire the retry for the detached pad
+    model_h = .8f; model_l = .4f; update();
+    CHECK(a_reports == 1);                      // A was retained while B was playing
+#endif
     rumble_close();
     CHECK(motor_h == 0 && motor_l == 0);
     update(); CHECK(motor_h == 0 && motor_l == 0);
-    CFRelease(pad); pad = NULL; manager = NULL;
+    if (pad) { removed(NULL, 0, NULL, pad); drain(); }
+    manager = NULL;
     CHECK(invalidations >= 2);
     CHECK(real_opens == 0);
     printf("rumble_test: %s, %d checks, %d failures, %d fake reports (USB + Bluetooth)\n",

@@ -13,6 +13,8 @@
 
 
 
+
+
 """
 import os
 import io
@@ -60,17 +62,73 @@ def compile_root(tmp, function, label):
 
 
 class PickerTests(unittest.TestCase):
+    def test_xbox_pickers_resolve_default_xex_to_its_folder(self):
+        text = SWIFT.read_text()
+        methods = [extract_function(text, name) for name in ("func chooseX360()", "func chooseCarbonX360()")]
+        if "func x360Root" in text:
+            methods.append(extract_function(text, "func x360Root"))
+        with tempfile.TemporaryDirectory(prefix="xbox-inputs-") as td:
+            scratch = Path(td)
+            source = scratch / "picker.swift"
+            binary = scratch / "picker"
+            harness = """
+import Foundation
+class Picker {
+    var x360: URL?
+    var features: Bool?
+    var x360Status = ""
+    var chosen: URL?
+    func pickFolder(message: String, files: Bool) -> URL? { chosen }
+    func runCheck(forX360: Bool) {}
+    METHODS
+}
+let picker = Picker()
+for path in CommandLine.arguments.dropFirst() {
+    picker.chosen = URL(fileURLWithPath: path)
+    picker.chooseX360()
+    print(picker.x360!.path)
+    picker.chooseCarbonX360()
+    print(picker.x360!.path)
+}
+"""
+            source.write_text(harness.replace("METHODS", "\n".join(methods)))
+            result = subprocess.run(["swiftc", "-module-cache-path", str(scratch / "modules"), str(source), "-o", str(binary)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+            executable = scratch / "DeFaUlT.XEX"
+            executable.touch()
+            archive = scratch / "game.7z"
+            archive.touch()
+            image = scratch / "game.iso"
+            image.touch()
+            folder = scratch / "folder" / "default.xex"
+            folder.mkdir(parents=True)
+            result = subprocess.run([binary, executable, archive, image, folder], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), [str(path) for path in (scratch, archive, image, folder) for _ in range(2)])
+
+    def test_mw_sevenzip_picker_and_root(self):
+        # On 7942da5b the picker filter and path check fails 1/1; with the fix it passes 1/1.
+        text = SWIFT.read_text()
+        picker = text.split("func choosePC()", 1)[1].split("url = pcRoot(url)", 1)[0].split("return\n", 1)[1]
+        with tempfile.TemporaryDirectory(prefix="mw-inputs-") as td:
+            archive = Path(td) / "game.7Z"
+            archive.touch()
+            binary = compile_root(td, extract_function(text), "mw")
+            result = subprocess.run([str(binary), str(archive)], capture_output=True, text=True, check=True)
+            self.assertEqual((Path(result.stdout.strip()), 'UTType(filenameExtension: "7z")' in picker),
+                             (archive, True))
+
     def test_carbon_pc_root_keeps_archives(self):
         with tempfile.TemporaryDirectory(prefix="carbon-inputs-") as td:
             scratch = Path(td)
             game = scratch / "game"
             game.mkdir()
-            paths = [game, game / "NFSC.exe", scratch / "game.zip", scratch / "game.7z"]
+            paths = [game, game / "NFSC.exe", scratch / "game.zip", scratch / "game.7z", scratch / "game.iso", scratch / "game.mdf"]
             for path in paths[1:]:
                 path.write_bytes(b"synthetic source")
             function = extract_function(SWIFT.read_text())
             binary = compile_root(scratch, function.replace("carbon: Bool = false", "carbon: Bool = true"), "carbon")
-            for path, expected in zip(paths, [game, game, paths[2], paths[3]]):
+            for path, expected in zip(paths, [game, game, *paths[2:]]):
                 result = subprocess.run([str(binary), str(path)], capture_output=True, text=True, check=True)
                 self.assertEqual(Path(result.stdout.strip()), expected)
 

@@ -15,6 +15,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 #import <GameController/GameController.h>
+#import <IOKit/hidsystem/IOLLEvent.h>
 #include <pthread.h>
 
 #include "host.h"
@@ -322,23 +323,63 @@ void portmenu_update(void);
 uint32_t portmenu_pad(uint32_t phys, int up, int down, int left, int right, float lx, float ly, int home, int touchpad, int has_touchpad,
                       uint32_t *inject);
 int settings_get(const char *id);
+static void key_message(uint32_t hwnd, uint8_t vk, uint8_t scan, int extended, int down) {
+    key_scan[vk] = scan;
+    uint32_t lp = 1 | (uint32_t)scan << 16 | (uint32_t)extended << 24;
+    if (down) { if (key_down[vk]) lp |= 1u << 30; else key_toggled[vk] ^= 1; }
+    else lp |= 3u << 30;
+    key_down[vk] = (uint8_t)down;
+    post(hwnd, vk == 0x12 ? (down ? 0x0104 : 0x0105) : (down ? 0x0100 : 0x0101), vk, lp);   // WM_(SYS)KEYDOWN/UP
+}
 static void key_event(uint32_t hwnd, uint8_t vk, uint8_t scan, int down, int repeat) {
     if (!vk) return;
     if (down && !key_down[vk]) prompts_input(0);
     if (portmenu_key(vk, down, repeat)) return;
-    key_scan[vk] = scan;
-    if (!(down && key_down[vk])) di_event((uint8_t)(scan | (vk_extended(vk) ? 0x80 : 0)), down);
-    uint32_t lp = 1 | (uint32_t)scan << 16 | (uint32_t)vk_extended(vk) << 24;
-    if (down) { if (key_down[vk]) lp |= 1u << 30; else key_toggled[vk] ^= 1; }
-    else lp |= 3u << 30;
-    (void)repeat;
-    key_down[vk] = (uint8_t)down;
-    post(hwnd, vk == 0x12 ? (down ? 0x0104 : 0x0105) : (down ? 0x0100 : 0x0101), vk, lp);   // WM_(SYS)KEYDOWN/UP
+    int extended = vk_extended(vk);
+    if (!(down && key_down[vk])) di_event((uint8_t)(scan | (extended ? 0x80 : 0)), down);
+    key_message(hwnd, vk, scan, extended, down);
+}
+
+// The aggregate AppKit flags are shared by both sides. DirectInput needs the six physical keys.
+static const struct {
+    NSEventModifierFlags pair, aggregate, side;
+    uint8_t vk, dik;
+} modifiers[] = {
+    {NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK, NSEventModifierFlagShift, NX_DEVICELSHIFTKEYMASK, 0x10, 0x2A},
+    {NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK, NSEventModifierFlagShift, NX_DEVICERSHIFTKEYMASK, 0x10, 0x36},
+    {NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK, NSEventModifierFlagOption, NX_DEVICELALTKEYMASK, 0x12, 0x38},
+    {NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK, NSEventModifierFlagOption, NX_DEVICERALTKEYMASK, 0x12, 0xB8},
+    {NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK, NSEventModifierFlagControl, NX_DEVICELCTLKEYMASK, 0x11, 0x1D},
+    {NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK, NSEventModifierFlagControl, NX_DEVICERCTLKEYMASK, 0x11, 0x9D},
+};
+static NSEventModifierFlags modifier_down;
+static void modifier_state(uint32_t hwnd, unsigned i, int down) {
+    NSEventModifierFlags side = modifiers[i].side, pair = modifiers[i].pair;
+    if (!!(modifier_down & side) == down) return;
+    int was_down = (modifier_down & pair) != 0;
+    modifier_down ^= side;
+    uint8_t dik = modifiers[i].dik;
+    di_event(dik, down);
+    if (was_down != !!(modifier_down & pair))
+        key_message(hwnd, modifiers[i].vk, dik & 0x7F, dik >> 7, down);
+}
+
+static void modifier_event(uint32_t hwnd, uint16_t code, NSEventModifierFlags flags) {
+    // Mac virtual codes 0x38, 0x3C (Shift), 0x3A, 0x3D (Option), 0x3B, 0x3E (Control).
+    static const int index[] = {0, -1, 2, 4, 1, 3, 5};
+    if (code == 0x39) { key_event(hwnd, 0x14, 0x3A, !!(flags & NSEventModifierFlagCapsLock), 0); return; }
+    if (code < 0x38 || code > 0x3E) return;
+    unsigned i = (unsigned)index[code - 0x38];
+    int down = (flags & modifiers[i].pair) ? !!(flags & modifiers[i].side) :
+               (flags & modifiers[i].aggregate) && !(modifier_down & modifiers[i].side);
+    if (down && !key_down[modifiers[i].vk]) prompts_input(0);
+    if (!portmenu_key(modifiers[i].vk, down, 0)) modifier_state(hwnd, i, down);
 }
 
 // On focus loss the key-ups of keys still held (Cmd-Tab while accelerating) go to the app that takes over, so they
 // are released here: on Windows the game would see them up after reacquiring its foreground DirectInput devices.
 static void release_keys(uint32_t hwnd) {
+    for (unsigned i = 0; i < sizeof modifiers / sizeof modifiers[0]; ++i) modifier_state(hwnd, i, 0);
     for (int vk = 3; vk < 256; ++vk) if (key_down[vk]) key_event(hwnd, (uint8_t)vk, key_scan[vk], 0, 0);
     key_down[0x01] = key_down[0x02] = 0;
     di_mouse_btn[0] = di_mouse_btn[1] = 0;
@@ -405,11 +446,7 @@ static void pump(int wait) {
                 continue;                                             // not forwarded: no beeps, no menu shortcuts
             }
             case NSEventTypeFlagsChanged: {
-                KeyMap k = e.keyCode < 128 ? mac_keys[e.keyCode] : (KeyMap){0, 0};
-                NSEventModifierFlags f = e.modifierFlags;
-                int down = k.vk == 0x10 ? !!(f & NSEventModifierFlagShift) : k.vk == 0x11 ? !!(f & NSEventModifierFlagControl)
-                         : k.vk == 0x12 ? !!(f & NSEventModifierFlagOption) : k.vk == 0x14 ? !!(f & NSEventModifierFlagCapsLock) : 0;
-                key_event(hwnd, k.vk, k.scan, down, 0);
+                modifier_event(hwnd, e.keyCode, e.modifierFlags);
                 break;
             }
             case NSEventTypeMouseMoved:
@@ -1838,10 +1875,17 @@ void pad_sim_enumerated(void) {
     pad_enum_ns = host_ticks();
     pad_enum_seen = 1;
 }
+#include "guide.h"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#include "game_menu_shortcut.h"
+#endif
 static uint32_t pad_activity(uint32_t buttons, const PadState *st, int has_touchpad) {
     int choice = settings_get("controls.menu_button");
-    int shortcut = choice == 0 ? ((buttons & 8192u) || (!has_touchpad && (buttons & (4096u | 64u)))) :
-                   choice == 1 ? (buttons & 4096u) : choice == 2 ? ((buttons & 768u) == 768u) : (buttons & 64u);
+#if NFS_GAME == NFS_GAME_PRIVATE
+    choice = carbon_menu_shortcut_choice(choice);
+#endif
+    uint32_t menu_buttons = guide_menu_buttons(choice, has_touchpad);
+    int shortcut = choice == 2 ? (buttons & menu_buttons) == menu_buttons : (buttons & menu_buttons) != 0;
     if (shortcut) buttons |= OSK_MENU_SHORTCUT;
     return buttons | (st->rx > .5f ? 1u << 16 : st->rx < -.5f ? 1u << 17 : 0) |
            (st->ry > .5f ? 1u << 18 : st->ry < -.5f ? 1u << 19 : 0) |
@@ -1943,7 +1987,7 @@ int pad_read_n(int idx, PadState *st) {
                              "pad: sim buttons %03X ry %.2f, %s (package in control %s)",
                        st->buttons, st->ry, pad_mode, pad_ctl ? pad_ctl : "none");
         }
-        if (!idx) rumble_update();                    // a connected DualSense still plays the rumble
+        if (!idx) rumble_update();
         // the adaptive triggers and lightbar decide as for a real pad and only log it (padfx.m never touches a pad here)
         if (!idx) padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
         return 1;
@@ -1953,6 +1997,14 @@ int pad_read_n(int idx, PadState *st) {
         @synchronized (GCController.class) {
             ctl = pad_controller_n(idx);
             if (!idx) padlink_observe(ctl);
+        }
+        if (!idx) {
+            static GCController *menu_controller;
+            if (ctl != menu_controller) {
+                pad_menu_keys(0);
+                menu_controller = ctl;
+            }
+            rumble_select((__bridge void *)ctl);
         }
         if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }
         GCExtendedGamepad *g = ctl.extendedGamepad;

@@ -8,6 +8,8 @@ Total including controls: 55 invocations, 889 parent and 84 retry-child assertio
 ASan/UBSan clean. Journal reuse regression: fixed child 21/21, predecessor fails
 8/21; file-only and directory-only omissions each fail 5/21. Retry covers both
 pending and completed records after a failed post-rename directory sync.
+Save recovery after four journal I/O faults: original 0/4 next saves, fixed 4/4.
+Alternate home root: original 0/1 saves, fixed 1/1 with descendant links refused.
 
 Stored original control: the public PASS(005ACB70)/PASS(0058FD10) wrappers
 forward directly to retail. The removed-pack case must fail refusal assertions
@@ -189,6 +191,8 @@ void f_0058FD10(Cpu *c) { carsave_public_serialize(c); }
 GENERATED
 extern void file_init(const char *);
 extern int file_publish(const char *,const void *,int);
+extern int file_payload(uint32_t,const void *);
+extern const char *fixture_userdata_dir(void);
 extern uint32_t file_begin(const char *);
 extern int file_finish(uint32_t);
 extern int file_latewrite(uint32_t);
@@ -244,12 +248,28 @@ int main(int argc,char **argv) {
     M32(0x0091CF90u)=frontend; M32(frontend+8)=0xABC123;
     int off=!strcmp(argv[2],"off");
     int cat=car_catalog_init(argv[1],!off); (void)cat;
-    carsave_public_init(argv[4],NULL); file_init(argv[4]);
+    const char *mode=argv[3], *userdir=argv[4];
+    if (!strcmp(mode,"linked-home")) {
+        assert(!unsetenv("BOOT_USERDATA") && !setenv("HOME",argv[4],1));
+        userdir=fixture_userdata_dir();
+    }
+    carsave_public_init(userdir,NULL); file_init(userdir);
     char path[4096],backups[4096],metadata[4096];
-    snprintf(path,sizeof path,"%s/TEST",argv[4]); snprintf(backups,sizeof backups,"%s/backups",argv[4]);
+    snprintf(path,sizeof path,"%s/TEST",userdir); snprintf(backups,sizeof backups,"%s/backups",userdir);
     snprintf(metadata,sizeof metadata,"%s/.car-catalog",argv[4]);
-    const char *mode=argv[3];
-    if(!strcmp(mode,"seed")) {
+    if(!strcmp(mode,"linked-home")) {
+        seed(&c,0);
+        int saved=file_publish(path,G+buffer,1);
+        printf("linked home saves=%d/1\n",saved); CHECK(saved);
+        if (saved) {
+            unsigned char out[SIZE]; readsave(path,out); CHECK(!memcmp(out,G+buffer,SIZE));
+            char link[4096], below[4096];
+            snprintf(link,sizeof link,"%s/link",userdir);
+            snprintf(below,sizeof below,"%s/link/OTHER",userdir);
+            CHECK(!symlink(userdir,link));
+            CHECK(!file_publish(below,G+buffer,1)); CHECK(access(below,F_OK));
+        }
+    } else if(!strcmp(mode,"seed")) {
         seed(&c,0); unsigned char ordinary[SIZE]; memcpy(ordinary,G+buffer,SIZE);
         CHECK(file_publish(path,G+buffer,1));
         CHECK(!files(metadata,".meta") && !files(metadata,".pending"));
@@ -318,13 +338,20 @@ int main(int argc,char **argv) {
         M32(frontend+8)^=1; invoke(&c,0,0); CHECK(!(c.eax&255));
         CHECK(carsave_public_save_allowed()); CHECK(!mutations);
     } else if(!strcmp(mode,"journal")) {
-        seed(&c,0); row(self+0x414,3,0);
+        unsigned char old[SIZE],out[SIZE];
+        seed(&c,0); memcpy(old,G+buffer,SIZE); CHECK(file_publish(path,old,1));
+        row(self+0x414,3,0);
         if(atoi(argv[2])==4) CHECK(!mkdir(metadata,0700));
         uint32_t writer=file_begin(path); CHECK(writer!=UINT32_MAX);
         fault_kind=atoi(argv[2]); invoke(&c,1,0); fault_kind=0;
-        CHECK(!carsave_public_save_allowed()); CHECK(!memcmp(G+buffer,(unsigned char[16]){0},16));
-        CHECK(!carsave_public_verify(G+buffer,SIZE)); CHECK(access(path,F_OK));
-        CHECK(!file_latewrite(writer)); CHECK(!file_latetruncate(writer)); CHECK(!file_finish(writer));
+        CHECK(!carsave_public_verify(G+buffer,SIZE));
+        if(carsave_public_save_allowed()) CHECK(file_payload(writer,G+buffer));
+        CHECK(!file_finish(writer));
+        readsave(path,out); CHECK(!memcmp(old,out,SIZE));
+        invoke(&c,1,0);
+        int recovered=file_publish(path,G+buffer,1);
+        printf("recovered saves=%d/1\n",recovered); CHECK(recovered);
+        if(recovered) { readsave(path,out); CHECK(!memcmp(out,G+buffer,SIZE)); CHECK(!carsave_public_admit(out,SIZE,NULL)); }
     } else if(!strcmp(mode,"journal-retry")) {
         seed(&c,0); unsigned char raw[SIZE],used[12]={1};
         memcpy(raw,G+buffer,SIZE); CHECK(!mkdir(metadata,0700));
@@ -456,7 +483,7 @@ extern int carsave_public_save_prepare(const char *);
 extern int carsave_public_backup_before_write(const char *,const char *);
 extern void carsave_public_save_complete(int);
 void extratrax_save_complete(int ok) { (void)ok; }
-void padbind_save_complete(int ok) { (void)ok; }
+int padbind_save_complete(int ok) { (void)ok; return 1; }
 void file_init(const char *root) { userroot=root; }
 void file_fail(int on) { fail_rename=on; }
 uint32_t file_begin(const char *path) {
@@ -469,10 +496,13 @@ uint32_t file_begin(const char *path) {
 int file_finish(uint32_t h) { return file_close(h); }
 int file_latewrite(uint32_t h) { return file_write(h,"BAD",3)>0; }
 int file_latetruncate(uint32_t h) { return file_end(h); }
+int file_payload(uint32_t h,const void *bytes) {
+    unsigned char header[36]={0};
+    return file_write(h,header,36)==36 && file_write(h,bytes,0xF848)==0xF848;
+}
 int file_publish(const char *path,const void *bytes,int complete) {
     uint32_t h=file_begin(path); if(h==UINT32_MAX) return 0;
-    unsigned char header[36]={0};
-    int ok=file_write(h,header,36)==36 && file_write(h,bytes,0xF848)==0xF848;
+    int ok=file_payload(h,bytes);
     if(!file_close(h)) ok=0;
     if(complete) carsave_public_save_complete(ok);
     return ok;
@@ -552,6 +582,12 @@ def fixture(root):
     (root / 'approval.h').write_text('#define CAR_CATALOG_POLICY_JSON ' + json.dumps(data.decode('ascii')) + '\n#define CAR_CATALOG_POLICY_SHA256 "' + hashlib.sha256(data).hexdigest() + '"\n')
 
 
+def userdata_fixture(boot):
+    source = boot.split('const char *userdata_dir(void)',1)[1].split('\n}',1)[0]
+    return ('#include <limits.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/stat.h>\n'
+            '#include "game_select.h"\nconst char *fixture_userdata_dir(void)' + source+'\n}\n')
+
+
 def main():
     code = translated()
     with tempfile.TemporaryDirectory(prefix='public-save-') as directory:
@@ -570,7 +606,10 @@ def main():
         common = ['clang', '-std=c11', '-O1', '-g', '-fsanitize=address,undefined', '-Wno-deprecated-declarations',
                   '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'recomp'), '-I', str(ROOT / 'recomp/out'),
                   '-DCAR_CATALOG_APPROVAL_HEADER="' + str(root / 'approval.h') + '"']
-        sources = [str(ROOT / 'runtime/car_grip.c'), str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'), str(ROOT / 'runtime/car_catalog.c')]
+        userdata_source = userdata_fixture((ROOT/'runtime/boot.c').read_text())
+        (root/'userdata.c').write_text(userdata_source)
+        sources = [str(ROOT / 'runtime/car_grip.c'), str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'),
+                   str(root / 'userdata.c'), str(ROOT / 'runtime/car_catalog.c')]
         def compile_native(name, options=()):
             build = subprocess.run(common + list(options) + sources + ['-o', str(root / name)], capture_output=True, text=True)
             assert not build.returncode, build.stderr[-5000:]
@@ -611,7 +650,14 @@ def main():
         for mode in ('secondary', 'backup-load', 'reconcile', 'custom', 'career', 'md5', 'class', 'frontend', 'parts', 'bad-reconcile', 'overwrite-row', 'overwrite-pool', 'legacy'):
             run(mode)
         for fault in (1, 2, 3, 4):
-            run('journal', switch=str(fault), user='journal-' + str(fault))
+            result = run('journal', switch=str(fault), user='journal-' + str(fault))
+            assert 'recovered saves=1/1' in result.stdout
+        for label in ('fixed','old'):
+            home = root/f'{label}-home'
+            home.mkdir()
+            (root/f'{label}-linked-home').symlink_to(home,target_is_directory=True)
+        result = run('linked-home', user='fixed-linked-home')
+        assert 'linked home saves=1/1' in result.stdout
         for fault in (8, 9):
             run('shortwrite', switch=str(fault), user='short-' + str(fault))
         run('journal-retry', user='journal-retry')
@@ -642,6 +688,19 @@ def main():
             run('missing', user=name)
         # Each gate has a broken control, in addition to the original public bug.
         actual = (ROOT / 'runtime/carsave_public.c').read_text()
+        previous = '    if (why) latch(why);'
+        start = actual.index('    if (why == journal_failure)')
+        end = actual.index('\n}',start)
+        (root/'mutant.c').write_text(actual[:start]+previous+actual[end:])
+        (root/'module.c').write_text(GUARD.replace('MODULE',str(root/'mutant.c')))
+        (root/'userdata.c').write_text(userdata_source.split('        // The selected root',1)[0]+'    }\n    return dir;\n}\n')
+        compile_native('pre-savefix')
+        (root/'userdata.c').write_text(userdata_source)
+        for fault in (1,2,3,4):
+            result = run('journal',switch=str(fault),user=f'journal-old-{fault}',binary='pre-savefix',expect=1)
+            assert 'recovered saves=0/1' in result.stdout
+        result = run('linked-home', user='old-linked-home',binary='pre-savefix',expect=1)
+        assert 'linked home saves=0/1' in result.stdout
         mutants = [
             ('reuse-no-sync', 'metadata_read(dir,key,&existing,1)', 'metadata_read(dir,key,&existing,0)', 'journal-retry', {}),
             ('reuse-no-dir-sync', '!memcmp(&existing,m,sizeof *m) && !durable_sync(dir)', '!memcmp(&existing,m,sizeof *m)', 'journal-retry', {}),

@@ -1767,16 +1767,21 @@ int main(int argc, char **argv) {
     CHECK(M32(pv+0x1C)!=0 && !strcmp((char *)G+M32(pv+0x1C),"TRAFFICSEDAN"));
     unsigned inserted=999;CHECK(!reconcile_stock(db,&inserted) && inserted==0);
     for(unsigned i=0;i<200;++i) CHECK(M32(db+i*20+8)!=key || M32(db+i*20)==UINT32_MAX);
-    // Frozen save masks: all 76 player bits, then the 14 own-slot swaps.
+    // The synthetic inventory has 76 slots for the capacity case; sparse IDs
+    // resolve to their inventory rows, independently of the traffic type.
     unsigned char used[PRIVATE_CARS_MASK_SIZE],expected_mask[PRIVATE_CARS_MASK_SIZE]={0};
-    for(unsigned j=0;j<players;++j) {unsigned t=addition_id(j)-84;expected_mask[t/8]|=1u<<(t%8);}
-    CHECK(!car85_profile_dependencies(&c,db,NULL,0,used)); CHECK(!memcmp(used,expected_mask,sizeof used));
+    PrivateCar inventory[90]={0};
+    for(unsigned j=0;j<players;++j) {
+        inventory[j].id=addition_id(j); inventory[j].selected=1;
+        expected_mask[j/8]|=1u<<(j%8);
+    }
+    CHECK(!car85_profile_dependencies(&c,db,inventory,players,used)); CHECK(!memcmp(used,expected_mask,sizeof used));
     CHECK(!memcmp(pinned,G+db,sizeof pinned));
     M32(db+199*20)=199;M32(db+199*20+8)=key;
-    CHECK(car85_profile_dependencies(&c,db,NULL,0,used)!=NULL);
+    CHECK(car85_profile_dependencies(&c,db,inventory,players,used)!=NULL);
     CHECK(!memcmp(used,expected_mask,sizeof used));
     // Swap mask positions remain exactly 76..89, independently of type160.
-    const char *const swaps[]={PRIVATE_CARS_SWAP_NAMES}; PrivateCar inventory[90]={0};
+    const char *const swaps[]={PRIVATE_CARS_SWAP_NAMES};
     for(unsigned j=0;j<14;++j) {
         PrivateCar *swap=&inventory[76+j];swap->swap=1;swap->selected=1;strcpy(swap->name,swaps[j]);
         unsigned type=84;
@@ -1983,7 +1988,9 @@ def main(selection_only=False):
             'fe-leak':actual.replace('if (pilot_layout) M32(pilot_layout + 0x1C) = 0;','/* leaked pilot MODEL */'),
             'namespace-leak':actual.replace('if (!a || !a->solid_count || !hash) return hash;','return hash;'),
             'lifetime-leak':actual.replace('int car85_traffic_ready(void) {','int car85_traffic_ready(void) { return traffic_active && traffic_addition.key;'),
-            'save-leak':actual.replace('if(type>=TYPES+MAX_ADDITIONS)', 'if(type>TYPES+MAX_ADDITIONS)'),
+            'save-leak':actual.replace('if(k==count) { reason="Unrecognized saved car identity."; break; }',
+                                       'if(type==TYPES+MAX_ADDITIONS) k=MAX_ADDITIONS;\n'
+                                       '            else if(k==count) { reason="Unrecognized saved car identity."; break; }'),
         }
         if selection_only:
             variants={label:variants[label] for label in ('actual','fe-predecessor')}

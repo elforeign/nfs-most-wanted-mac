@@ -5,10 +5,12 @@
 // Cmd-Q, the window's close button and Restart game all end in ExitProcess -> exit -> atexit), and the parent reads the
 // stream's format afterwards from a fake CoreAudio property layer kept in shared memory. No CoreAudio device is
 // opened: every HAL and output-unit call in media.cpp is redirected to the fake below.
-//   fixed:                                         11 checks / 0 failures (exit 0)
-//   old close_all_at_exit (d->ready not closed):   11 checks / 4 failures (exit 1): the quit during a reopen leaves
+//   fixed release:                                 11 checks / 0 failures
+//   old close_all_at_exit (d->ready not closed):   11 checks / 4 failures: the quit during a reopen leaves
 //                                                  the stream in 'mtct' 768000 Hz, mixing off (the fake keeps the
 //                                                  hog too; the real HAL drops it with the process, not the format)
+// At a 1024-frame target, old pacing queues 0/0 bytes in AC-3/E-AC-3; fixed queues 6144/24576 bytes.
+// Old passthrough starts both unconfirmed formats (2/2 IOProcs); fixed starts 0/2 and restores PCM.
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #include <sys/mman.h>
@@ -25,6 +27,7 @@ struct State {
     AudioStreamBasicDescription phys;
     int ioprocs;
     int starts;      // passthrough IOProcs started: proves a case really opened one
+    bool refuse_encoded, wrong_encoded_rate;
 };
 State *st;   // MAP_SHARED: what a child leaves behind is read by the parent
 AudioStreamBasicDescription pcm() {
@@ -74,7 +77,14 @@ OSStatus set(AudioObjectID o, const AudioObjectPropertyAddress *a, UInt32, const
     const AudioObjectPropertySelector s = a->mSelector;
     if (o == kTv && s == kAudioDevicePropertyHogMode && n == sizeof(pid_t)) { memcpy(&st->hog, src, n); return noErr; }
     if (o == kTv && s == kAudioDevicePropertySupportsMixing && n == sizeof(UInt32)) { memcpy(&st->mixing, src, n); return noErr; }
-    if (o == kStream && s == kAudioStreamPropertyPhysicalFormat && n == sizeof st->phys) { memcpy(&st->phys, src, n); return noErr; }
+    if (o == kStream && s == kAudioStreamPropertyPhysicalFormat && n == sizeof st->phys) {
+        const auto &want = *static_cast<const AudioStreamBasicDescription *>(src);
+        if (want.mFormatID == kAudioFormatLinearPCM || !st->refuse_encoded) {
+            st->phys = want;
+            if (want.mFormatID != kAudioFormatLinearPCM && st->wrong_encoded_rate) st->phys.mSampleRate /= 2;
+        }
+        return noErr;
+    }
     return kAudioHardwareUnknownPropertyError;
 }
 OSStatus listener(AudioObjectID, const AudioObjectPropertyAddress *, AudioObjectPropertyListenerProc, void *) { return noErr; }
@@ -124,7 +134,7 @@ template <class F> static bool in_child_then_exit(F body) {
     int status = 0;
     return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
-static void reset() { *fake_hal::st = {-1, 1, fake_hal::pcm(), 0, 0}; }
+static void reset() { *fake_hal::st = {-1, 1, fake_hal::pcm(), 0, 0, false, false}; }
 static void expect_released(const char *what) {
     char line[160];
     snprintf(line, sizeof line, "%s: the stream is PCM again", what);
@@ -135,6 +145,27 @@ static void expect_released(const char *what) {
     check(fake_hal::st->mixing == 1, line);
     snprintf(line, sizeof line, "%s: IOProc stopped", what);
     check(fake_hal::st->ioprocs == 0, line);
+}
+
+static void dolby_pacing(DsOutputMode mode, size_t burst_bytes) {
+    DsDevice d;
+    d.cfg.mode = mode;
+    d.cfg.block_frames = 256;
+    d.fixed_latency = true;
+    d.requested_latency = 1024;
+    d.out = std::make_unique<media::AudioOutput>();
+    bool opened = d.out->open_offline(media_mode(mode));
+    check(opened, "Dolby encoder opened offline");
+    if (!opened) return;
+    output_latency(d);
+    float pcm[256 * 6] = {};
+    for (int pushed = 0; pushed < d.cfg.latency_frames &&
+         d.out->queued_frames() + d.out->pending_frames() < (size_t)d.cfg.latency_frames; pushed += d.cfg.block_frames)
+        d.out->write(pcm, d.cfg.block_frames);
+    size_t bytes = d.out->take_callback_stats().queue_bytes;
+    printf("  %s: target=%d queued_bytes=%zu\n", mode_label(mode), d.cfg.latency_frames, bytes);
+    check(bytes == burst_bytes && d.cfg.latency_frames >= media::Ac3Spdif::kFramesPerBurst + d.cfg.block_frames,
+          "Dolby pacing queued a burst and left room for another block");
 }
 
 int main() {
@@ -173,6 +204,21 @@ int main() {
     check(fake_hal::st->starts == 1, "quit during a reopen: the opener opened the passthrough");
     show("after exit");
     expect_released("quit during a reopen");
+    printf("  release: %d checks / %d failures\n", checks, failed);
+
+    dolby_pacing(DS_OUT_DOLBY_DIGITAL, media::Ac3Spdif::kBurstBytes);
+    dolby_pacing(DS_OUT_DOLBY_DIGITAL_PLUS, media::Ac3Spdif::kEac3BurstBytes);
+
+    for (bool wrong_rate : {false, true}) {
+        reset();
+        fake_hal::st->refuse_encoded = !wrong_rate;
+        fake_hal::st->wrong_encoded_rate = wrong_rate;
+        const char *case_name = wrong_rate ? "encoded rate mismatch" : "encoded format never applied";
+        auto out = open_output(DS_OUT_TRUEHD, 48000);
+        printf("  %s: IOProc starts=%d\n", case_name, fake_hal::st->starts);
+        check(!out && fake_hal::st->starts == 0, case_name);
+        expect_released(case_name);
+    }
 
     printf("%d checks / %d failures\n", checks, failed);
     return failed ? 1 : 0;

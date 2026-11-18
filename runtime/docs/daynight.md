@@ -16,6 +16,8 @@ restores the roam hour, including across loading and replacement lighting
 objects. A changed phase while paused sets the hour through the native slider;
 other native writes do not reseed the clock.
 
+Carbon F10 Day-night mode and Fixed hour apply live while the startup Day-night lighting master is enabled.
+
 `NFS_DAYNIGHT_MODE=game|cycle|fixed` selects the policy (default `game`). In
 `game`, career events use their authored retail daylight hour, held throughout
 the event; the roam hour returns afterward. `cycle` holds the clock's current
@@ -590,3 +592,5 @@ Retail MW has no world section flares (0 records), so the switch changes nothing
 present. BOOT_DIAG: `flare_streaks: frames A..B world_lamp_polys= other_flare_polys=` and the longest streak per
 600 frames; `BOOT_DIAG_STREAK_SHOTS=<px>` shoots up to 8 frames with a streak of at least that length wholly on
 screen, clear of the lap timer and top bar, and logs `flare_streaks: shot frame= sim=` for a matched Off launch. Check: `runtime/flare_streaks_test.py`.
+
+Carbon world pools remain Off; authored linear RGB8/255 receives Y-preserving 15% D65 XYZ adaptation; `BOOT_DIAG_LOOK_AB=lamplightoff,lamplightshift` redraws held pools Off / shifted 40 m on world X.

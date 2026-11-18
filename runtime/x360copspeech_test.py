@@ -29,6 +29,14 @@ def run(args, expected=0, **kwargs):
 
 
 def main():
+    # ASan sees only the final address used by memcpy. Check the two intermediate
+    # addresses in the production expression too: old 0/2 relative, fixed 2/2.
+    source = (ROOT / 'runtime/x360copspeech.c').read_text()
+    read_at = source.split('size_t ea_big_read_at(', 1)[1].split('\n}', 1)[0]
+    read_at = re.sub(r'\s+', '', read_at)
+    relative = sum(offset in read_at for offset in ('dst+(start-pos)', 'word->bytes+(start-word->offset)'))
+    print(f'sparse overlay: {relative}/2 offsets relative before pointer addition', flush=True)
+    assert relative == 2
     with tempfile.TemporaryDirectory(prefix='nfsmw-copspeech-') as directory:
         scratch = Path(directory)
         pe = recomp.PE()

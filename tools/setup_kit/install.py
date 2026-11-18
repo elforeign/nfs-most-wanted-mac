@@ -49,8 +49,8 @@ def remove(path):
         path.unlink()
 
 
-def digest_tree(root):
-    """Content, relative names and execute bits; never follow a symlink."""
+def digest_tree(root, *, source_files=False):
+    """Hash content, names and execute bits. Game sources must use regular, singly linked files."""
     root = Path(root)
     h = hashlib.sha256()
     paths = [root] if root.is_file() else sorted(root.rglob("*"))
@@ -58,8 +58,12 @@ def digest_tree(root):
         if p.is_symlink():
             raise InstallError(f"Unexpected symbolic link: {p}", "Choose a regular installed game folder.")
         if p.is_file():
+            info = p.stat()
+            if source_files and info.st_nlink > 1:
+                raise InstallError(f"The game copy contains a file with more than one hard link: {p}",
+                                   "Choose an installed game folder with regular copies of its files.")
             h.update(str(p.relative_to(root) if p != root else p.name).encode())
-            h.update(b"\0" + str(p.stat().st_mode & 0o111).encode() + b"\0")
+            h.update(b"\0" + str(info.st_mode & 0o111).encode() + b"\0")
             with p.open("rb") as f:
                 for block in iter(lambda: f.read(1024 * 1024), b""):
                     h.update(block)

@@ -6,11 +6,13 @@ Queued writer with report capture: request 0.92 ms / sound gap 45.02 ms (84 chec
 Log budget: unbounded 11 checks / 1 failure; bounded 11 / 0.
 Regex resource error: unchecked 1 / 1 failure; fail-closed 1 / 0.
 The same fixture compares every bundle attachment byte for byte except the added position line; no game or audio device needed.
+Private attachment exclusion yields 0 key matches across 2 bundles (2 matches with the exclusion removed).
 """
 import hashlib
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import tempfile
 
@@ -175,7 +177,26 @@ assert hashlib.sha256(ORIGINAL.encode()).hexdigest() == '163318de6d9cf0d8025c589
 assert hashlib.sha256(ORIGINAL_SAVE.encode()).hexdigest() == '04ed1585e4c8bcc36baf6dc0bd5c5ee949869bf007da4eff288b0f23362a3bf3'
 
 
-def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, regex_error=False):
+def private_attachments(exe, profile, broken):
+    store = profile / '.stream-key'
+    store.mkdir(parents=True, mode=0o700)
+    sentinel = secrets.token_hex(60).encode()
+    for name in ('stream-key', 'stream-key.tmp'):
+        path = store / name
+        path.touch(mode=0o600)
+        path.write_bytes(hashlib.sha256(sentinel).digest() + sentinel)
+    result = subprocess.run([str(exe), str(profile), '--private-attachments'], capture_output=True,
+                            timeout=10, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
+    assert result.returncode == 0, 'private attachment report failed to build'
+    bundles = list((profile / 'reports').iterdir())
+    assert len(bundles) == 2 and all((bundle / 'report.txt').is_file() for bundle in bundles)
+    attachments = [path for bundle in bundles for path in bundle.rglob('*') if path.is_file()]
+    hits = sum(sentinel in path.read_bytes() for path in attachments)
+    print(f'private attachments: broken={int(broken)} bundles={len(bundles)} key_matches={hits}', flush=True)
+    assert hits == (2 if broken else 0)
+
+
+def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, regex_error=False, private_fault=False):
     work.mkdir()
     source = (RUNTIME / 'report.m').read_text()
     fixture = (RUNTIME / 'report_lock_test.m').read_text()
@@ -194,6 +215,10 @@ def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, re
     writer_start = source.index('// ---------------- writing a report ----------------')
     writer_end = source.index('// diag.c diag_report:', writer_start)
     writer = ORIGINAL if baseline else source[writer_start:writer_end]
+    if private_fault:
+        exclusion = ' && !report_private_attachment(r->attach)'
+        assert writer.count(exclusion) == 1
+        writer = writer.replace(exclusion, '')
     (work / 'report_writer.inc').write_text(('static double shot_at;\n' if baseline else '') + source[shot_start:writer_start] + writer)
     sec = next(line for line in source.splitlines() if line.startswith('typedef struct { double t;'))
     (work / 'report_sec.inc').write_text(sec + '\n')
@@ -208,12 +233,16 @@ def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, re
                '-Wno-unused-variable', '-Wno-deprecated-declarations', '-fsanitize=address,undefined', '-fobjc-arc',
                '-DREPORT_LOCK_BASELINE=' + str(int(baseline)),
                '-I' + str(ROOT / 'recomp'), '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME), '-I' + str(work),
-               str(work / 'report_lock_test.m'), '-framework', 'Cocoa', '-framework', 'Metal',
+               str(work / 'report_lock_test.m'), str(RUNTIME / 'blackbox.c'), '-framework', 'Cocoa', '-framework', 'Metal',
                '-framework', 'QuartzCore', '-framework', 'IOKit', '-framework', 'SystemConfiguration',
                '-o', str(work / 'check')]
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
     (work / 'compile.log').write_text(compiled.stdout + compiled.stderr)
     assert compiled.returncode == 0, compiled.stderr[-5000:]
+    if private_fault or not (baseline or budget or regex_error):
+        private_attachments(work / 'check', work / 'private-profile', private_fault)
+        if private_fault:
+            return
     result = subprocess.run([str(work / 'check'), str(work / 'profile')] + (['--budget'] if budget else ['--regex-error'] if regex_error else []), capture_output=True, text=True, timeout=30,
                             env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
     (work / 'result.log').write_text(result.stdout + result.stderr)
@@ -236,8 +265,8 @@ def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, re
                                      env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
         assert result_exit.returncode == 0, result_exit.stdout + result_exit.stderr
         bundles = list((drained / 'reports').iterdir())
-        assert len(bundles) == 1 and len(list(bundles[0].iterdir())) == 6
-        print('PASS: exit drains the pending report (6 attachments)', flush=True)
+        assert len(bundles) == 1 and len(list(bundles[0].iterdir())) == (6 if baseline else 7)
+        print('PASS: exit drains the pending report (including blackbox attachment)', flush=True)
     match = re.search(r'^bundle=(.+)$', result.stdout, re.M)
     assert match, result.stdout + result.stderr
     return Path(match[1])
@@ -271,14 +300,18 @@ def main():
         work = Path(temporary)
         original = run(work / 'original', True)
         fixed = run(work / 'fixed', False)
+        run(work / 'private_fault', False, private_fault=True)
         names = sorted(path.name for path in original.iterdir())
-        assert names == sorted(path.name for path in fixed.iterdir()), names
+        assert sorted(names + ['blackbox.txt']) == sorted(path.name for path in fixed.iterdir()), names
+        assert 'blackbox v1' in (fixed / 'blackbox.txt').read_text()
         for name in names:
             old, new = (original / name).read_bytes(), (fixed / name).read_bytes()
             if name == 'report.txt':
                 new = re.sub(rb'^position:.*\n', b'', new, flags=re.M)
+                new = re.sub(rb'^blackbox:.*\n', b'', new, flags=re.M)
+                new = new.replace(b', blackbox.txt', b'')
             assert old == new, name + ' differs'
-        print(f'PASS: {len(names)} attachments unchanged apart from position; old save stalls sound, queued save stays below 200 ms')
+        print(f'PASS: {len(names)} original attachments unchanged apart from position; blackbox attachment added; old save stalls sound, queued save stays below 200 ms')
         run(work / 'budget', False, budget=True)
         run(work / 'unbounded', False, budget=True, unbounded=True)
         run(work / 'regex_error', False, regex_error=True)

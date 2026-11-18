@@ -19,6 +19,16 @@ typedef struct {
     double create_at, combo_at, sticks_at, inject_until;
 } GuideShortcut;
 typedef struct { uint32_t hide, inject; int action; } GuideShortcutResult;
+// Physical menu shortcut buttons, including the separate Home and Touchpad inputs.
+static inline uint32_t guide_menu_buttons(int choice, int has_touchpad) {
+    switch (choice) {
+    case 0: return has_touchpad ? 8192u : 4096u | 64u;
+    case 1: return 4096u;
+    case 2: return 256u | 512u;
+    case 3: return 64u;
+    default: return 0;
+    }
+}
 // action: 0 none, 1 toggle F10, 2 open Guide. No game-flow or button-layout remapping here.
 GuideShortcutResult guide_shortcut(GuideShortcut *s, double now, uint32_t phys, int home, int touch,
                                   int has_touchpad, int choice, int enabled, int menu_open);

@@ -16,6 +16,7 @@
 
 #include "host.h"
 #include "game_select.h"
+#include "setting_bool.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
 #include "carbon_padfx_output.h"
 /* GameController also declares the socket send API. Keep the local HID helper. */
@@ -27,12 +28,16 @@
 // over Bluetooth or when it's slow to answer), so the game thread only posts its latest levels and never waits.
 static IOHIDManagerRef manager;
 static dispatch_queue_t hid_q;
-static IOHIDDeviceRef pad;                                  // hid_q (the match/removal callbacks hop onto it)
+static CFMutableArrayRef candidates;                        // hid_q, retains every connected HID handle
+static IOHIDDeviceRef pad, target;                           // hid_q, borrowed from candidates
+static int switching;
 static int bluetooth, seq;
 static uint8_t sent_heavy = 0xFF, sent_light = 0xFF;        // hid_q: what the controller plays
 static uint64_t sent_at;
 static _Atomic uint64_t want;                               // connection epoch << 32 | heavy | light << 8
 static _Atomic uint32_t motor_generation;
+static _Atomic uint32_t selection_generation;
+static uint32_t applied_selection;                         // hid_q
 static _Atomic int queued, closed;                          // closed: the game is quitting, the motors stay off
 static _Atomic int suppressed;                              // menu / pause / focus / app holds
 static dispatch_source_t sig_term, sig_int;                 // kept alive: a released source leaves the signal ignored
@@ -40,12 +45,14 @@ static int neutral_pending, retry_queued;                   // hid_q: neutral mu
 static uint64_t clear_until, retry_generation;
 static dispatch_semaphore_t close_done;
 static void flush(void);
+static void activate_target(void);
 static void finish_clear(void) {
     if (close_done) { dispatch_semaphore_signal(close_done); close_done = nil; }
 }
 static void cleared(void) {
     neutral_pending = 0; clear_until = 0; retry_queued = 0; ++retry_generation;
-    finish_clear();
+    if (switching) activate_target();
+    else finish_clear();
 }
 static void invalidate_motors(void) {                       // hid_q; never mutate the game-thread model here
     feedback_invalidate_effects();
@@ -55,24 +62,154 @@ static void invalidate_motors(void) {                       // hid_q; never muta
     sent_heavy = sent_light = 0xFF; sent_at = 0;
 }
 
+// GameController has no public HID handle. Where available, match its physical device ID
+// or HID service IDs to IOKit. Model alone is usable only when both frameworks see one.
+@protocol RumbleController
+@property(readonly) NSString *productCategory;
+@property(readonly) NSString *physicalDeviceUniqueID;
+@property(readonly) NSArray *hidServices;
++ (NSArray *)controllers;
+@end
+@protocol RumbleHIDService
+@property(readonly) NSNumber *registryID;
+@end
+static NSString *input_id;
+static NSSet<NSNumber *> *input_services;
+static int input_product;
+
+static void activate_target(void) {
+    switching = 0;
+    if (pad) padlink_detach((void *)pad);
+    pad = target;
+    invalidate_motors();
+    if (!pad) { finish_clear(); return; }
+    CFTypeRef t = IOHIDDeviceGetProperty(pad, CFSTR(kIOHIDTransportKey));
+    bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() &&
+                CFStringFind(t, CFSTR("Bluetooth"), 0).location != kCFNotFound;
+    seq = 0;
+    padlink_hid((void *)pad, bluetooth);
+    flush();                                           // neutral before the next feedback publication
+    if (diag_on) diag_event("rumble: DualSense over %s", bluetooth ? "Bluetooth" : "USB");
+}
+
+static void route_pad(void) {
+    IOHIDDeviceRef match = NULL;
+    CFIndex model_matches = 0, n = candidates ? CFArrayGetCount(candidates) : 0;
+    for (CFIndex i = 0; i < n; ++i) {
+        IOHIDDeviceRef dev = (IOHIDDeviceRef)CFArrayGetValueAtIndex(candidates, i);
+        if (input_services.count) {
+            uint64_t registry_id;
+            io_service_t service = IOHIDDeviceGetService(dev);
+            if (service && IORegistryEntryGetRegistryEntryID(service, &registry_id) == KERN_SUCCESS &&
+                [input_services containsObject:@(registry_id)]) { match = dev; break; }
+        }
+        if (input_id && [input_id isEqual:(__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDPhysicalDeviceUniqueIDKey))]) {
+            match = dev; break;
+        }
+        if (input_product && !input_id && !input_services.count) {
+            id product = (__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey));
+            if ([product isEqual:@(input_product)]) { ++model_matches; match = dev; }
+        }
+    }
+    if (model_matches > 1) match = NULL;
+    if (match == target && (switching || pad == match)) return;
+    target = match;
+    switching = pad != target;
+    if (!switching) return;
+    if (pad) {
+        invalidate_motors();
+        flush();                                       // clear the old motors before handing off
+    } else activate_target();
+}
+
+static int controller_product(id<RumbleController> controller) {
+    NSString *category = controller.productCategory;
+    if (![category hasPrefix:@"DualSense"]) return 0;
+    return [category rangeOfString:@"Edge" options:NSCaseInsensitiveSearch].location != NSNotFound ? 0x0DF2 : 0x0CE6;
+}
+
+static void select_input(NSString *physical_id, NSSet<NSNumber *> *services, int product) {
+    input_id = physical_id;
+    input_services = services;
+    input_product = product;
+    route_pad();
+}
+
+void rumble_select(void *controller) {
+    static id last;
+    static uint64_t retry_at;
+    static int last_product;
+    id ctl = (__bridge id)controller;
+    int same = ctl == last;
+    if (!hid_q || (same && (!retry_at || host_ticks() < retry_at))) return;
+    last = ctl;
+    retry_at = 0;
+
+    id<RumbleController> gc = ctl;
+    int product = controller_product(gc);
+    NSString *physical_id = nil;
+    NSMutableSet<NSNumber *> *services = nil;
+    if (product) {
+        if ([ctl respondsToSelector:@selector(physicalDeviceUniqueID)]) {
+            NSString *value = gc.physicalDeviceUniqueID;
+            if ([value isKindOfClass:NSString.class] && value.length) physical_id = [value copy];
+        }
+        if ([ctl respondsToSelector:@selector(hidServices)]) {
+            services = [NSMutableSet new];
+            for (id service in gc.hidServices) {
+                NSNumber *registry = [service isKindOfClass:NSNumber.class] ? service :
+                    [service respondsToSelector:@selector(registryID)] ? [(id<RumbleHIDService>)service registryID] : nil;
+                if ([registry isKindOfClass:NSNumber.class]) [services addObject:registry];
+            }
+        }
+        if (!physical_id && !services.count) {
+            retry_at = host_ticks() + 1000000000ull;    // GameController and HID notifications can arrive in either order
+            CFIndex peers = 0;
+            for (id<RumbleController> other in [(Class<RumbleController>)NSClassFromString(@"GCController") controllers])
+                if (controller_product(other) == product) ++peers;
+            if (peers != 1) product = 0;
+        }
+    }
+    if (same && !physical_id && !services.count && product == last_product) return;
+    last_product = product;
+    uint32_t selection = ++selection_generation;
+    want = 0;                                           // a queued publication cannot reach the former input pad
+    dispatch_async(hid_q, ^{
+        applied_selection = selection;
+        select_input(physical_id, services, product);
+    });
+}
+
 static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
     CFRetain(dev);
     dispatch_async(hid_q, ^{
-        if (pad) { CFRelease(dev); return; }
-        pad = dev;
-        CFTypeRef t = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
-        bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() && CFStringFind(t, CFSTR("Bluetooth"), 0).location != kCFNotFound;
-        padlink_hid((void *)dev, bluetooth);
-        invalidate_motors();
-        flush();                                           // neutral before the next feedback publication
-        if (diag_on) diag_event("rumble: DualSense over %s", bluetooth ? "Bluetooth" : "USB");
+        if (IOHIDDeviceGetProperty(dev, CFSTR("GCSyntheticDevice")) != kCFBooleanTrue) {
+            if (!candidates) candidates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+            if (!CFArrayContainsValue(candidates, CFRangeMake(0, CFArrayGetCount(candidates)), dev))
+                CFArrayAppendValue(candidates, dev);
+            route_pad();
+        }
+        CFRelease(dev);
     });
 }
 static void removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     (void)ctx; (void)r; (void)sender;
+    CFRetain(dev);
     dispatch_async(hid_q, ^{
-        if (dev == pad) { invalidate_motors(); padlink_detach((void *)dev); CFRelease(pad); pad = NULL; finish_clear(); }
+        CFIndex i = candidates ? CFArrayGetFirstIndexOfValue(candidates, CFRangeMake(0, CFArrayGetCount(candidates)), dev) : kCFNotFound;
+        IOHIDDeviceRef departing = i == kCFNotFound ? dev : (IOHIDDeviceRef)CFArrayGetValueAtIndex(candidates, i);
+        if (departing == pad) {
+            invalidate_motors();
+            padlink_detach((void *)pad);
+            pad = NULL;
+            switching = 0;
+        }
+        if (departing == target) { target = NULL; switching = 0; }
+        if (i != kCFNotFound) CFArrayRemoveValueAtIndex(candidates, i);
+        route_pad();
+        if (!pad) finish_clear();
+        CFRelease(dev);
     });
 }
 static void rumble_open(void) {
@@ -123,14 +260,14 @@ static int send(uint8_t heavy, uint8_t light) {
 static void retry_clear(void) {
     uint64_t now = host_ticks();
     if (!clear_until) clear_until = now + 250000000ull;
-    if (now >= clear_until) { finish_clear(); return; }
+    if (now >= clear_until) { if (switching) activate_target(); else finish_clear(); return; }
     if (retry_queued) return;
     retry_queued = 1;
     uint64_t token = retry_generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), hid_q, ^{
         if (token != retry_generation) return;
         retry_queued = 0;
-        if (host_ticks() >= clear_until) { finish_clear(); return; }
+        if (host_ticks() >= clear_until) { if (switching) activate_target(); else finish_clear(); return; }
         flush();
     });
 }
@@ -140,7 +277,8 @@ static void flush(void) {
     queued = 0;
     if (!pad) { finish_clear(); return; }
     uint64_t request = want;
-    uint32_t w = closed || suppressed || neutral_pending || (request >> 32) != motor_generation ? 0 : (uint32_t)request;
+    uint32_t w = closed || suppressed || neutral_pending || applied_selection != selection_generation ||
+                 (request >> 32) != motor_generation ? 0 : (uint32_t)request;
     uint8_t heavy = w & 0xFF, light = w >> 8 & 0xFF;
     uint64_t now = host_ticks();
     if (heavy == sent_heavy && light == sent_light && now - sent_at < 1000000000ull) { if (!w) cleared(); return; }
@@ -194,7 +332,7 @@ void rumble_signals(void) {                                 // once, for whichev
 }
 
 // Each frame (from pad_read): the model's motor levels for the controller.
-static int rumble_off = -1;                                  // NFS_RUMBLE=off: the controller isn't touched (unattended runs)
+static int rumble_off = -1;                                  // NFS_RUMBLE false: the controller isn't touched (unattended runs)
 void rumble_set_enabled(int on) {                           // the F10 menu (portmenu.m): off stops the motors at once
     if (!on && rumble_off != 1) rumble_stop();
     rumble_off = !on;
@@ -210,7 +348,7 @@ void rumble_update(void) {
     }
 #endif
     int off = rumble_off;
-    if (off < 0) { const char *e = getenv("NFS_RUMBLE"); rumble_off = off = e && !strcmp(e, "off"); }
+    if (off < 0) rumble_off = off = setting_bool_parse(getenv("NFS_RUMBLE")) == 0;
     if (off) { float hf, lf; feedback_levels(&hf, &lf); return; }
     if (!manager) {
         rumble_open();

@@ -215,8 +215,12 @@ int main(int argc, const char **argv) {
         prepareScript = PURPrepareScript(prepareScript);
 #endif
         if (ok && [receipt[@"state"] isEqual:@"verified"] && [receipt[@"setup_path"] isEqual:setup]) {
+            // Delivery verifies that the signed Setup's version matches this release tag.
+            NSString *tag = delivery[1];
+            ok = [tag hasPrefix:@"v"] && tag.length > 1 &&
+                PUWrite([job stringByAppendingPathComponent:@"target-version.json"], @{@"version":[tag substringFromIndex:1]});
             NSString *script = [job stringByAppendingPathComponent:@"prepare.py"];
-            ok = PUReplaceFile(script, [prepareScript dataUsingEncoding:NSUTF8StringEncoding], 0600);
+            if (ok) ok = PUReplaceFile(script, [prepareScript dataUsingEncoding:NSUTF8StringEncoding], 0600);
             if (ok) ok = Run([setup stringByAppendingPathComponent:@"Contents/Resources/python/bin/python3"],
                 @[@"-I", @"-B", @"-c", prepareScript, job, setup, profile, destination], log);
         } else ok = NO;
@@ -319,6 +323,7 @@ static void PULoad(void) {
     BOOL ready = [state isEqual:@"ready"] && PUReady() && !PUAlive() && (!pu_worker || pu_worker.terminationStatus == 0);
     // The index is published before the preparation process exits. Wait for successful exit.
     if ([state isEqual:@"ready"] && PUAlive()) return;
+    if ([state isEqual:@"ready"] && !ready) message = @"Prepared update could not be verified. Prepare it again";
     double received = [value[@"received_bytes"] isKindOfClass:NSNumber.class] ? [value[@"received_bytes"] doubleValue] : 0;
     double total = [value[@"total_bytes"] isKindOfClass:NSNumber.class] ? [value[@"total_bytes"] doubleValue] : 0;
     pu_progress(state.UTF8String, message.UTF8String, received, total, ready);
@@ -328,6 +333,53 @@ static int mac_version(char *out, size_t cap) {
     NSString *v = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
     snprintf(out, cap, "%s", v ? v.UTF8String : ""); return v != nil;
 }
+
+static const NSUInteger PUFeedCap = 1024 * 1024;
+
+@interface PUFeedDelegate : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSMutableData *body;
+@property (nonatomic, copy) void (^finished)(NSData *);
+@end
+
+@implementation PUFeedDelegate
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
+    willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request
+    completionHandler:(void (^)(NSURLRequest *))completion {
+    (void)session; (void)task; (void)response; (void)request;
+    completion(nil);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task
+    didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completion {
+    (void)session; (void)task;
+    if (![response isKindOfClass:NSHTTPURLResponse.class] || ((NSHTTPURLResponse *)response).statusCode != 200 ||
+        response.expectedContentLength > (long long)PUFeedCap) {
+        completion(NSURLSessionResponseCancel);
+        return;
+    }
+    self.body = [NSMutableData data];
+    completion(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+    (void)session;
+    if (!self.body) return;
+    // Count delivered bytes even when the length was absent or the body was compressed.
+    if (data.length > PUFeedCap - self.body.length) {
+        self.body = nil;
+        [task cancel];
+        return;
+    }
+    [self.body appendData:data];
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    (void)task;
+    self.finished(error ? nil : self.body);
+    [session finishTasksAndInvalidate];
+}
+@end
+
 static int mac_fetch(void) {
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://api.github.com/repos/%s/releases/latest", PUB_RELEASES_REPO]];
 #ifdef PUB_UPDATE_REHEARSAL
@@ -337,14 +389,9 @@ static int mac_fetch(void) {
     [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.URLCache = nil; configuration.HTTPCookieStorage = nil; configuration.URLCredentialStorage = nil;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
-#ifdef PUB_UPDATE_REHEARSAL
-    [session invalidateAndCancel];
-    session = [NSURLSession sessionWithConfiguration:configuration delegate:[PURFeedDelegate new] delegateQueue:nil];
-#endif
-    [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        BOOL ok = !error && data && [response isKindOfClass:NSHTTPURLResponse.class] && ((NSHTTPURLResponse *)response).statusCode == 200;
-        NSString *body = ok ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    PUFeedDelegate *delegate = [PUFeedDelegate new];
+    delegate.finished = ^(NSData *data) {
+        NSString *body = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         NSDictionary *release = body ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             pu_done(body != nil, body.UTF8String);
@@ -363,8 +410,9 @@ static int mac_fetch(void) {
                 }
             }
         });
-        [session finishTasksAndInvalidate];
-    }] resume];
+    };
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:delegate delegateQueue:nil];
+    [[session dataTaskWithRequest:request] resume];
     return 1;
 }
 static void PULocalError(const char *message) { pu_error(message); pu_local_error = YES; }

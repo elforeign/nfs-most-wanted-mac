@@ -1,9 +1,9 @@
 #pragma once
 #include <stddef.h>
 // Typed-text helpers for F10 text rows and the controller keyboard: the stored length and the part of a long line that is shown.
-#define TEXT_FIELD_MAX 256                       // characters a text row holds (plus the terminating NUL)
+#define TEXT_FIELD_MAX 256                       // UTF-8 bytes a text row holds (plus the terminating NUL)
 typedef double (*TextMeasure)(const char *s, void *ctx);    // drawn width of a NUL-terminated line
-int text_append(char *buf, size_t cap, unsigned ch);        // adds one typed byte; 0 when full or not printable
+int text_append(char *buf, size_t cap, unsigned ch);        // inserts one Unicode scalar; 0 when full or not printable
 // What fits in maxw: the whole line, else with an ellipsis. tail=1 keeps the end (a line being typed, caret last), tail=0 the start.
 // Cuts only on UTF-8 boundaries.
 void text_window(const char *s, int tail, double maxw, TextMeasure measure, void *ctx, char *out, size_t n);

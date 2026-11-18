@@ -1,5 +1,6 @@
-"""Fake CLI/task/clock checks: fixed 207 checks/0 failures; predecessor 188/3.
-Account-switch proof executes the production adapter with fake tasks; 16 broken controls rejected.
+"""Fake CLI/task/clock checks: fixed 260 checks/0 failures; pinned predecessor 188/3.
+Previous credential lifetime: close 259/4, POST completion 258/4, late token lookup 260/2.
+Account-switch proof executes the production adapter with fake tasks; 20 broken controls rejected.
 No real installed CLI or network. The driver prints actual good/broken counts for every control.
 """
 from pathlib import Path
@@ -29,7 +30,8 @@ def run(base, name, mutation=None):
         source = path.read_text().replace('ReportRawTaskRunner runner = ReportRawRunner(', 'ReportTaskRunner runner = ReportRunner(')
         source = source.replace('], input, 1, ReportChildEnvironment(),', '], input, 1,')
         source = source.replace('CredentialFailureTests();', '')
-        path.write_text(source)
+        source = source.replace(', &clearCredential);', ');')
+        path.write_text('#define REPORT_SUBMIT_BASELINE 1\n' + source)
     if mutation:
         old, new = mutation
         path = work / 'report_submit.m'
@@ -37,7 +39,8 @@ def run(base, name, mutation=None):
         assert source.count(old) == (2 if name == 'adapter_output_bound' else 1), (name, source.count(old))
         path.write_text(source.replace(old, new))
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-parameter',
-               '-fsanitize=address,undefined', '-fobjc-arc', '-DNFS_PUBLIC=1', str(work / 'report_submit_test.m'),
+               '-fsanitize=address,undefined', '-fobjc-arc', '-DNFS_PUBLIC=1', '-I' + str(RUNTIME),
+               str(work / 'report_submit_test.m'),
                '-framework', 'Foundation', '-o', str(work / 'check')]
     result = subprocess.run(command, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, name + result.stderr[-4000:]
@@ -54,8 +57,8 @@ def main():
         'post_without_identity': ('_state != ReportSubmitReady || !_account.length', '_state == ReportSubmitPosting'),
         'identity_recheck': ('![ReportAccount(output) isEqual:account]', 'NO'),
         'stale_identity': ('generation != self->_generation || self->_state != ReportSubmitChecking', 'NO'),
-        'late_creation': ('creationGeneration != self->_generation || self->_state != ReportSubmitPosting) return;\n                        NSString *url', 'NO) return;\n                        NSString *url'),
-        'wrong_repo': ('com/elforeign/nfs-most-wanted-mac/issues/[1-9]', 'com/(?:elforeign/nfs-most-wanted-mac|wrong/repo)/issues/[1-9]'),
+        'late_creation': ('creationGeneration != self->_generation || self->_state != ReportSubmitPosting) return;', 'NO) return;'),
+        'wrong_repo': ('" REPORT_GITHUB_REPOSITORY "/issues/[1-9]', '(?:" REPORT_GITHUB_REPOSITORY "|wrong/repo)/issues/[1-9]'),
         'stderr_leak': ('@"GitHub identity unavailable. CLI may be missing, signed out or offline. Copy text & open GitHub is available."', '[[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding]'),
         'identity_only': ('@"GH_NO_UPDATE_NOTIFIER":@"1"', '@"GH_NO_UPDATE_NOTIFIER":@"0"'),
         'prompts': ('@"GH_PROMPT_DISABLED":@"1"', '@"GH_PROMPT_DISABLED":@"0"'),
@@ -67,6 +70,10 @@ def main():
         'scripted_post': ('if (getenv("BOOT_KEYS") || _state != ReportSubmitReady', 'if (NO || _state != ReportSubmitReady'),
         'immutable': ('[snapshot[@"body"] copy]', 'snapshot[@"body"]'),
         'scripted': ('if (getenv("BOOT_KEYS") || !(_state', 'if (NO || !(_state'),
+        'pinned_after_close': ('if (_clearCredential) _clearCredential(); // Clear on preview close, including during an in-flight task.', '(void)_clearCredential;'),
+        'pinned_after_post': ('if (self->_clearCredential) self->_clearCredential(); // POST completed.', '(void)self->_clearCredential;'),
+        'late_token_lookup': ('if (request == generation) {', 'if ((void)request, YES) {'),
+        'closed_during_revalidation': ('|| !self->_account.length ||', '||'),
     }
     # Tests must not substitute a shell transport or expose child stderr/environment.
     source = (RUNTIME / 'report_submit.m').read_text()

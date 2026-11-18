@@ -55,11 +55,6 @@ static void x360_gate(Setting *s) {
         value_str(s, 2, s->env_text, sizeof s->env_text);
         if (s->env) setenv(s->env, s->env_text, 1);
     }
-    // Generated optics remain opt-in; preserve the PC default without console art.
-    if (!strcmp(s->id, "graphics.raindrops") && !roots_x360_has("world")) {
-        s->def = 1;
-        if (!s->saved && !s->locked) s->value = s->boot_value = s->def;
-    }
     if (!x360_unavailable(s)) return;
     int v = parse(s, "pc");
     if (v < 0) v = parse(s, "off");
@@ -354,7 +349,6 @@ static const struct { const char *id, *pc, *x360; } kLook[] = {
     {"graphics.detail_distance", "pc", "pc"},
     {"graphics.world_streaming", "pc", "ahead"},
     {"graphics.tunnel_shadows", "pc", "keep"},
-    {"cars.later_games", "off", "off"},
     {"cars.traffic_pilot", "off", "off"},
     {"graphics.look_later_textures", "off", "off"},
 #endif

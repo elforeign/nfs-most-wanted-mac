@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include "d3d9_internal.h"
 #include "settings.h"
+#include "blackbox.h"
 #include "report_privacy.h"
 
 static int checks, failures;
@@ -47,6 +48,8 @@ static void guest_leave(void) { guest_held = 0; pthread_mutex_unlock(&guest); }
 uint8_t *G;
 Device dev;
 int diag_on;
+const char *diag_dir;
+void diag_profile_session_write(void) {}
 const char speed_exe_fingerprint[] = "0123456789abcdef";
 static char profile[1200], status[1600];
 static int snapshot_gets, completed, export_held, exports;
@@ -101,6 +104,10 @@ static char sys_os[128] = "synthetic OS", sys_model[128] = "synthetic model", sy
 #define NOTE_LEN 176
 static char notes[NOTES][NOTE_LEN];
 static volatile uint32_t notes_head;
+static void report_notes_dump(FILE *f) {
+    uint32_t head = notes_head, start = head > NOTES ? head - NOTES : 0;
+    for (uint32_t i = start; i < head; ++i) fprintf(f, "%s\n", notes[i % NOTES]);
+}
 #define SECS 180
 #include "report_sec.inc"
 static Sec secs[SECS];
@@ -109,6 +116,7 @@ int diag_car_state(float pos[3], float *speed) {
     guest_read(); pos[0] = 12.5f; pos[1] = -34.25f; pos[2] = 56; *speed = 10; return 1;
 }
 #include "report_position.h"
+#include "stream_key.h"
 #include "report_format.inc"
 static int GatedMkdir(const char *path, mode_t mode) {
     if (image_gate && atomic_exchange(&block_image, 0))
@@ -212,6 +220,19 @@ int main(int argc, char **argv) {
         mkdir(profile, 0755);
         G = calloc(1, 0x01000000);
         reset_guest_state();
+        if (argc > 2 && !strcmp(argv[2], "--private-attachments")) {
+            const char *names[] = {STREAM_KEY_FILE, STREAM_KEY_TEMP};
+            for (size_t i = 0; i < sizeof names / sizeof *names; ++i) {
+                char path[1400];
+                snprintf(path, sizeof path, "%s/%s/%s", profile, STREAM_KEY_DIR, names[i]);
+                guest_enter();
+                const char *bundle = report_write("Crash-freeze", "", "synthetic hang", path);
+                guest_leave();
+                CHECK(*bundle);
+            }
+            free(G);
+            return failures ? 1 : 0;
+        }
         char stderr_path[1400]; snprintf(stderr_path, sizeof stderr_path, "%s/source.log", profile);
         FILE *source = fopen(stderr_path, "w"); fputs("build: log fixture\npassword=\"SyntheticSecret\"\n", source); fclose(source);
         if (!freopen(stderr_path, "a", stderr)) return 2;

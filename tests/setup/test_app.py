@@ -17,10 +17,10 @@ skip, cancellation and retry controls each fail their state oracle. Actual
 F-T events decode at one-byte boundaries, including measured per-car approval.
 Install and extras cancellation both wait for the backend's transaction boundary.
 
-Carbon product (SetupProduct=carbon): 21 checks of its backend commands (check, check with its Xbox 360 copy,
-build: --game carbon --carbon, never --pc, disc or --x360-extras), the backend accepting all three, its app name,
+Carbon product (SetupProduct=carbon): 23 checks of its backend commands (check, check with its Xbox 360 copy,
+build: --game carbon --carbon; PC discs carry --pc-update and --pc-exe), the backend accepting all three, its app name,
 its page order (Xbox 360 copy -> Review, no Most Wanted extras page) and Most Wanted's unchanged command: 0 violations.
-The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 11 of 21
+The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 13 of 23
 (the three commands, their Most Wanted inputs and five source commands). The compiled app's folder, executable,
 ZIP, 7z and ISO commands also reach the real pipeline: all five accepted with the decoded ISO tree; source digests stay fixed.
 
@@ -297,6 +297,9 @@ def carbon_product_failures(binary):
         want(key + ' has no Most Wanted inputs', not any(a.startswith('--pc') or a == '--x360-extras' for a in args))
         with tempfile.TemporaryDirectory(prefix='setup-carbon-', dir='/private/tmp') as tmp:   # outside the source tree
             want(key + ' accepted by the backend', backend_accepts(args, tmp) == '')
+    for key, mode, path in (('discCheck', '--check', '/carbon.iso'), ('discBuild', '--build', '/carbon.mdf')):
+        want(key, got[key][2:] == [mode, '--game', 'carbon', '--carbon', path,
+                                   '--pc-update', '/carbon-patch', '--pc-exe', '/NFSC.exe'] + CARBON_TAIL)
     want('Most Wanted command unchanged', got['mwBuild'][2:] == MW_BUILD)
     want('Carbon app name', got['app'] == '/dest/NFS Carbon Native.app')
     want('Most Wanted app name', got['mwApp'] == '/dest/NFS Most Wanted Native.app')
@@ -426,6 +429,43 @@ class AppTests(unittest.TestCase):
             raise unittest.SkipTest('swiftc not available')
         cls.real = compile_app(SWIFT.read_text())
 
+    def test_mw_extras_uses_the_selected_sevenzip_file_or_folder(self):
+        # On 999f865a both paths are redirected to pc_src (0/2); after the fix both selections pass (2/2).
+        source = SWIFT.read_text()
+        start = source.index('        let previous = state\n', source.index('    private func launch('))
+        end = source.index('    func consume(', start)
+        source = source[:start] + '''        print(jsonString(["arguments": arguments ?? []]))
+        exit(0)
+    }
+
+''' + source[end:]
+        harness = '''
+        if args.count == 3, args[1] == "--mw-extras-source-test" {
+            let s = Setup()
+            s.pc = s.pcRoot(URL(fileURLWithPath: args[2]))
+            s.carbon = URL(fileURLWithPath: "/carbon")
+            let choice = CarChoice(platform: "pc", slot: 1, folder: "300C", spec: [:])
+            s.carChoices = [choice]; s.selectedCarIDs = [choice.id]
+            s.state.recognition = CarRecognition(game: "carbon", platform: "pc", approval_available: true,
+                                                output_verified: false, cars: [RecognizedCar(car_hash: choice.carHash, status: "importable")])
+            s.runCars(.carsCheck)
+            exit(1)
+        }
+'''
+        source = source.replace('        let args = CommandLine.arguments', '        let args = CommandLine.arguments\n' + harness)
+        binary = compile_app(source)
+        with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+            folder = Path(tmp) / 'X.7z'
+            folder.mkdir()
+            archive = Path(tmp) / 'MW.7z'
+            archive.touch()
+            for pc in (folder, archive):
+                with self.subTest(pc=pc.name):
+                    result = subprocess.run([str(binary), '--mw-extras-source-test', str(pc)], check=True,
+                                            env=dict(os.environ, NFSMW_SETUP_HOME=tmp), capture_output=True, text=True, timeout=30)
+                    args = json.loads(result.stdout)['arguments']
+                    self.assertEqual(args[args.index('--cars-mw-pc') + 1], str(pc))
+
     def test_packaged_car_selection_arguments(self):
         sys.path.insert(0, str(ROOT / 'tools'))
         from setup_kit import car_selection, car_sources
@@ -508,8 +548,19 @@ class AppTests(unittest.TestCase):
         self.assertIn(original, SWIFT.read_text())   # still Most Wanted's command
         broken = compile_app(mutate('    if carbon {\n        // Carbon reads', '    if false {\n        // Carbon reads'))
         bad = carbon_product_failures(broken)
-        print('Original Setup command for Carbon: %d of 21 violated' % len(bad))
-        self.assertEqual(len(bad), 11)
+        print('Original Setup command for Carbon: %d of 23 violated' % len(bad))
+        self.assertEqual(len(bad), 13)
+
+    def test_carbon_disc_arguments_and_controls(self):
+        # Original Carbon argument forwarding loses both inputs: two failed commands.
+        for line in ('        if let u = pcUpdate { a += ["--pc-update", u.path] }',
+                     '        if let e = pcExe { a += ["--pc-exe", e.path] }'):
+            broken = compile_app(mutate(line, ''))
+            self.assertEqual(carbon_product_failures(broken), ['discCheck', 'discBuild'])
+        text = SWIFT.read_text()
+        self.assertIn('if s.carbonDiscSource {', text)
+        self.assertIn('Choose the official Carbon update for your PC disc edition.', text)
+        self.assertIn('Choose your compatible NFSC.exe.', text)
 
     def test_carbon_generated_source_commands_reach_real_pipeline(self):
         # The compiled app supplies every argument. Only native builds/toolchain probes are synthetic.
@@ -552,6 +603,36 @@ class AppTests(unittest.TestCase):
         finally:
             fixture.tearDown()
 
+    def test_carbon_disc_folder_has_helpers_for_check_and_build(self):
+        # On 7942da5b the mounted/copied fixture fails 1/1; with the fix it passes 1/1.
+        with tempfile.TemporaryDirectory(dir=_CACHE) as tmp:
+            root = Path(tmp)
+            disc = root / "Carbon disc"
+            disc.mkdir()
+            (disc / "AUTORUN.INF").write_text("[Special]\nDisk=1\nProductGuiID={259C0ABB-A3B2-4D70-008F-BF7EE491B70B}\n")
+            (disc / "0compressed.zip").write_bytes(b"disc archive placeholder")
+            game = root / "Installed Carbon"
+            (game / "TRACKS").mkdir(parents=True)
+            (game / "NFSC.exe").write_bytes(b"installed game")
+            for folder, helpers in ((disc, True), (game, False)):
+                with self.subTest(folder=folder.name):
+                    result = subprocess.run([str(self.real), "--carbon-product-test", str(folder)],
+                                            capture_output=True, text=True, check=True)
+                    got = json.loads(result.stdout)
+                    expected = ["--pc-update", "/carbon-patch", "--pc-exe", "/NFSC.exe"] if helpers else []
+                    self.assertEqual(
+                        (got["helpers"], got["check"][2:], got["build"][2:]),
+                        (helpers,
+                         ["--check", "--game", "carbon", "--carbon", str(folder)] + expected + CARBON_TAIL,
+                         ["--build", "--game", "carbon", "--carbon", str(folder)] + expected + CARBON_TAIL),
+                    )
+
+    def test_carbon_pc_picker_describes_only_pc_sources(self):
+        # On 7942da5b the picker copy fails 1/1; with the fix it passes 1/1.
+        picker = SWIFT.read_text().split("func choosePC()", 1)[1].split("return\n", 1)[0]
+        self.assertNotIn("Xbox 360", picker)
+        self.assertIn("mounted", picker)
+
     @unittest.skipUnless((ROOT / "tools/setup_kit/carbon_repack.py").is_file(), "public payload carries no repack reader")
     def test_carbon_iso_picker_preserves_file_and_control(self):
         # Compiled production pcRoot, with an existing ISO (the old code only
@@ -564,10 +645,10 @@ class AppTests(unittest.TestCase):
                                         capture_output=True, text=True, check=True)
                 return result.stdout.strip()
             self.assertEqual(selected(self.real), str(iso))
-            broken = compile_app(mutate('["zip", "7z", "iso"] :', '["zip", "7z"] :'))
+            broken = compile_app(mutate('["zip", "7z", "iso", "mdf"] :', '["zip", "7z"] :'))
             self.assertEqual(selected(broken), str(iso.parent))
         picker = SWIFT.read_text().split('    func choosePC() {', 1)[1].split('// The game folder', 1)[0]
-        self.assertIn('UTType(filenameExtension: "iso")', picker)
+        self.assertIn('["7z", "iso", "mdf"].compactMap { UTType(filenameExtension: $0) }', picker)
                                                                                                               
         build = BUILD.read_text()
         self.assertIn('"$sdk/LzmaDec.c" "$sdk/bridge.c"', build)
@@ -576,7 +657,7 @@ class AppTests(unittest.TestCase):
 
     def test_carbon_product_words_and_hidden_extras(self):
         text = SWIFT.read_text()
-        self.assertIn('"Your Carbon Xbox 360 copy (optional)"', text)
+        self.assertIn('"Xbox 360 files (optional)"', text)
         self.assertIn('row("Carbon Xbox 360"', text)
         # Only what Carbon reads from its console copy today: the button art and the two controller diagrams.
         benefit = text.split('? "If you own Need for Speed Carbon for Xbox 360', 1)[1].split('"', 1)[0]

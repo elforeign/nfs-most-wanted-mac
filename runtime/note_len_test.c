@@ -1,6 +1,7 @@
 // note_len_test.c - offline check that an F10 text row (Help > Report a problem > Note) holds 256 characters and shows the caret:
 //   clang -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I recomp runtime/note_len_test.c runtime/text_fit.c -o /tmp/nlt && /tmp/nlt
 // Player report: typing stopped at 95 characters (the row's buffer was 96 bytes) and the end of a long line ran off the row.
+// The UTF-8 insert/delete additions yield 3/178 failures with the old helper and 0/178 with the fixed helper.
 // Checks: 240 typed characters are all stored (the same text_append the menu's character handler calls) and 300 stop at 256; the
 // report writer prints the stored note unchanged (pinned fragment of report.m); the visible window of a long line being typed is
 // its end with the caret last and fits the row; an idle long line shows its start and an ellipsis; short lines and UTF-8 stay whole.
@@ -102,6 +103,10 @@ int main(void) {
     CHECK(text_edit_key(line, 0x08, 1, 0) == 1 && !line[0]);                        // Cmd+Backspace: all
     strcpy(line, "hello"); CHECK(text_edit_key(line, 'U', 0, 1) == 1 && !line[0]);  // Ctrl+U: all
     strcpy(line, "hello"); CHECK(text_edit_key(line, 'U', 0, 0) == 0 && !strcmp(line, "hello"));
+    strcpy(line, "A\xc3\xa9");
+    CHECK(text_edit_key(line, 0x08, 0, 0) == 1 && !strcmp(line, "A"));
+    CHECK(text_append(line, sizeof line, 0xe9) && !strcmp(line, "A\xc3\xa9"));
+    CHECK(!text_append(line, 5, 0xe9) && !strcmp(line, "A\xc3\xa9"));
     double next = 0; int total = 0, before04 = 0;
     for (int f = 0; f <= 60; ++f) {                                                 // 1.0 s held, polled at 60 Hz
         double now = f / 60.0; int d = text_delete_repeat(&next, 1, now);

@@ -172,6 +172,10 @@ static void shot_binding(Obj *vb, uint32_t stride, uint32_t offset, uint64_t has
     fputs("}\n",file);fflush(file);
 }
 
+int daynight_stream_wanted(uint64_t frame) {
+    return active() || (diag_on && diag_dir && diag_frame_wanted(frame, "BOOT_DIAG_SHOTS"));
+}
+
 void daynight_stream_bind(id<MTLRenderCommandEncoder> encoder, id<MTLDevice> device,
                          Obj *vb, id<MTLBuffer> identity, uint32_t stride, uint32_t offset,
                          uint64_t shader_hash, uint64_t frame) {

@@ -3,6 +3,8 @@
 Original Carbon: 0 host thread sections; fixed Carbon and MW: 3 each.
 The pinned reporting-only control must fail the same three-thread assertion.
 Exit suppresses both hang/stall publication while retaining crash reports.
+Event rings: original dumps emit 4 unavailable slots; guarded dumps emit 0.
+Both versions still emit the 3 completed records used as controls.
 Dependencies: diag_threads.h, diag.c, recomp/private_runtime/game_diagnostics.h.
 """
 from pathlib import Path
@@ -26,6 +28,74 @@ OLD = '''void diag_report(const char *file, const char *why) {
 }'''
 OLD_SHA = '2e8bb1bb53ef7a81e9269b6dfcfc7a70d23918e1ea191bd06dd4446ab366ec2e'
 
+RINGS = r'''
+#define _DARWIN_C_SOURCE
+#include <pthread.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+static pthread_mutex_t file_mu=PTHREAD_MUTEX_INITIALIZER;
+static FILE *events_f;
+static uint64_t frame_now=7;
+static int dump_during_call, dump_during_note, unavailable;
+static uint64_t host_ticks(void) { return 0; }
+static uint64_t diag_current_frame(void);
+static void session_note(const char *line, int audio);
+'''
+
+RINGS_MAIN = r'''
+static int rows(int report) {
+    char *text=NULL;
+    size_t size=0;
+    FILE *out=open_memstream(&text,&size);
+    if(!out) exit(2);
+    if(report) report_notes_dump(out);
+    else dump_ring(out,1);
+    fclose(out);
+    int count=0;
+    for(char *p=text; *p; ++p) if(*p=='\n' && p!=text && p[-1]!='\n') ++count;
+    // The diagnostics header is also a line.
+    free(text);
+    return report ? count : count-1;
+}
+uint32_t diag_thread_id(void) {
+    if(dump_during_call) unavailable+=rows(0);
+    return 8;
+}
+static uint64_t diag_current_frame(void) {
+    if(dump_during_note) unavailable+=rows(1);
+    return frame_now;
+}
+static void session_note(const char *line, int audio) { (void)line; (void)audio; }
+int main(void) {
+    alarm(5);
+    diag_event_ring("complete text");
+    int completed=rows(0);
+    ring_head=RING;
+    dump_during_call=1;
+    uint32_t arg=3;
+    diag_call_ring("complete raw",1,&arg,4,5);
+    dump_during_call=0;
+    completed+=rows(0);
+    ring_head=2*RING+1;
+    unavailable+=rows(0);
+
+    report_note("complete note");
+    completed+=rows(1);
+    if(!note_lock(0)) return 2;
+    unavailable+=rows(1);
+    note_unlock(0);
+    notes_head=NOTES;
+    dump_during_note=1;
+    report_note("next note");
+    printf("event rings: unavailable=%d completed=%d\n",unavailable,completed);
+    return unavailable || completed!=3;
+}
+'''
+
 
 def function(source, signature):
     start = source.index(signature)
@@ -37,8 +107,43 @@ def function(source, signature):
     return source[start:end]
 
 
+def event_rings(tmp, mw):
+    ring = mw.split('// ---------------- event ring ----------------\n')[1].split('// Only synchronous diagnostic work')[0]
+    report = (ROOT / 'runtime/report.m').read_text()
+    notes = report.split('// ---------------- notable events ----------------\n')[1].split('// ---------------- the per-second ring')[0]
+    assert 'report_notes_dump(f);' in report
+    fixed = RINGS + '\n#include <unistd.h>\n' + ring + notes + RINGS_MAIN
+    # Recreate the original readers' behavior while retaining the writer guards
+    # so the same deterministic pauses are available to both binaries.
+    old_diag = '''        if (!ring_lock(i)) continue;
+        int valid = ring_slots[i].seq == k + 1;
+        if (valid) ring_line(i, buf, sizeof buf);
+        ring_unlock(i);
+        if (valid) fprintf(f, "%s\\n", buf);'''
+    old_note = '''        if (!note_lock(i)) continue;
+        char line[NOTE_LEN];
+        int valid = notes[i].seq == k + 1;
+        if (valid) memcpy(line, notes[i].line, sizeof line);
+        note_unlock(i);
+        if (valid) fprintf(f, "%s\\n", line);'''
+    assert old_diag in fixed and old_note in fixed
+    original = fixed.replace(old_diag, '        ring_line(i, buf, sizeof buf); fprintf(f, "%s\\n", buf);')
+    original = original.replace(old_note, '        fprintf(f, "%s\\n", notes[i].line);')
+    for label, source, expected in [('guarded', fixed, 0), ('original', original, 4)]:
+        fixture = tmp / 'ring.c'
+        fixture.write_text(source)
+        binary = tmp / 'ring'
+        build = subprocess.run(['clang', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror',
+                                str(fixture), '-o', str(binary)], capture_output=True, text=True)
+        assert build.returncode == 0, build.stderr[-3000:]
+        run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=8)
+        print(f'{label}: {run.stdout.strip()}')
+        assert run.returncode == bool(expected) and f'unavailable={expected} completed=3' in run.stdout
+
+
 PRE = r'''
 #include <execinfo.h>
+#include "blackbox.h"
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -108,13 +213,14 @@ def main():
     assert init.index('if (!diag_dir) return;') < init.index('pthread_create(')
     with tempfile.TemporaryDirectory(prefix='diag-threads-') as tmp:
         tmp = Path(tmp)
+        event_rings(tmp, mw)
         for name, source in [('carbon', private), ('mw', mw), ('original', None)]:
             report = function(source, 'void diag_report(') if source else OLD
             fixture = tmp / 'fixture.c'
             fixture.write_text(PRE + shared + '\n' + report + '\n' + MAIN)
             binary = tmp / 'fixture'
             build = subprocess.run(['clang', '-O1', '-g', '-fno-omit-frame-pointer',
-                                    str(fixture), '-o', str(binary)], capture_output=True, text=True)
+                                    '-I'+str(ROOT / 'runtime'), str(fixture), str(ROOT / 'runtime/blackbox.c'), '-o', str(binary)], capture_output=True, text=True)
             assert build.returncode == 0, build.stderr[:3000]
             out = tmp / name
             out.mkdir()

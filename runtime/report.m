@@ -34,6 +34,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/sysctl.h>
@@ -43,15 +44,18 @@
 #include "d3d9_internal.h"
 #include "settings.h"
 #include "report_privacy.h"
+#include "stream_key.h"
 #include "slowlog.h"
 #include "slowclock.h"
 #include "slowlog_lumab.h"
 #include "report_position.h"
+#include "blackbox.h"
 
 #if NFS_GAME == NFS_GAME_MW
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
 #else
 uint32_t private_report_flow(void);
+void carbon_blackbox_fe(uint64_t frame, uint32_t flow, uint64_t now);
 #endif
 
 #ifndef PORT_BUILD_ID
@@ -82,18 +86,48 @@ static void session_note(const char *line, int audio);
 // ---------------- notable events ----------------
 #define NOTES 512
 #define NOTE_LEN 384
-static char notes[NOTES][NOTE_LEN];
-static volatile uint32_t notes_head;
+static struct { _Atomic uint64_t busy; uint64_t seq; char line[NOTE_LEN]; } notes[NOTES];
+static _Atomic uint64_t notes_head;
 static uint64_t t_start;                 // report_init
 static double uptime(void) { return (host_ticks() - t_start) / 1e9; }
+static int note_lock(uint32_t i) {
+    uint64_t expected = 0;
+    return atomic_compare_exchange_strong_explicit(&notes[i].busy, &expected, 1,
+                                                   memory_order_acquire, memory_order_relaxed);
+}
+static void note_unlock(uint32_t i) {
+    atomic_store_explicit(&notes[i].busy, 0, memory_order_release);
+}
 void report_note(const char *fmt, ...) {
-    uint32_t i = __atomic_fetch_add(&notes_head, 1, __ATOMIC_RELAXED) % NOTES;
-    int n = snprintf(notes[i], NOTE_LEN, "%9.2f s  f%-7llu ", uptime(), (unsigned long long)diag_current_frame());
+    uint64_t seq = atomic_fetch_add_explicit(&notes_head, 1, memory_order_relaxed) + 1;
+    uint32_t i = (seq - 1) % NOTES;
+    char line[NOTE_LEN];
+    int n = snprintf(line, sizeof line, "%9.2f s  f%-7llu ", uptime(), (unsigned long long)diag_current_frame());
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(notes[i] + n, NOTE_LEN - (size_t)n, fmt, ap);
+    vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
-    session_note(notes[i], !strncmp(fmt, "audio:", 6));
+    if (note_lock(i)) {
+        if (notes[i].seq < seq) {
+            memcpy(notes[i].line, line, strlen(line) + 1);
+            notes[i].seq = seq;
+        }
+        note_unlock(i);
+    }
+    session_note(line, !strncmp(fmt, "audio:", 6));
+}
+static void report_notes_dump(FILE *f) {
+    uint64_t head = atomic_load_explicit(&notes_head, memory_order_relaxed);
+    uint64_t start = head > NOTES ? head - NOTES : 0;
+    for (uint64_t k = start; k < head; ++k) {
+        uint32_t i = k % NOTES;
+        if (!note_lock(i)) continue;
+        char line[NOTE_LEN];
+        int valid = notes[i].seq == k + 1;
+        if (valid) memcpy(line, notes[i].line, sizeof line);
+        note_unlock(i);
+        if (valid) fprintf(f, "%s\n", line);
+    }
 }
 
 // ---------------- the per-second ring (game thread) ----------------
@@ -426,6 +460,21 @@ void report_frame(uint64_t frame, uint32_t flow) {
     if (diag_on) padlink_idle(0);
 #endif
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
+    if (blackbox_enabled()) {
+        BlackboxTiming timing = {0};
+        if (head) {
+            const PerfFrame *p = &perf_frames[(head - 1) % PERF_RING];
+            timing.frame_ms = p->frame_ms;
+            timing.busy_ms = p->busy_ms;
+            timing.wait_ms = fmaxf(0, p->frame_ms - p->busy_ms);
+            timing.draws = p->draws;
+            timing.ticks = p->ticks;
+        }
+        blackbox_game_frame(frame, flow, head ? &timing : NULL);
+    }
+#if NFS_GAME != NFS_GAME_MW
+    else if (diag_on) carbon_blackbox_fe(frame, flow, 0);  // Probe only; no recorder timing needed.
+#endif
     static uint32_t prev_causes, last_flow = ~0u;
     static uint64_t def0, last_def;
     static int sh0, pipe0;
@@ -679,6 +728,12 @@ static CFDataRef report_wait_shot(uint64_t generation) {
 }
 
 // ---------------- writing a report ----------------
+static int report_private_attachment(const char *path) {
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return !strcasecmp(base, STREAM_KEY_FILE) || !strcasecmp(base, STREAM_KEY_TEMP);
+}
+
 static void copy_tail(const char *from, const char *to, long max) {
     if (max > 0) { ReportPrivacyCopyLog(from, to, max); return; }
     FILE *in = fopen(from, "rb");
@@ -712,8 +767,8 @@ const char *report_last_path(void) {
 
 // One owned, immutable snapshot. Only capture reads guest memory/settings/rings; the writer never does.
 typedef struct {
-    char *text[4];
-    size_t size[4];
+    char *text[5];
+    size_t size[5];
     char root[1100], log[1024];
     CFDataRef shot;
     uint64_t shot_generation;
@@ -723,7 +778,7 @@ typedef struct {
 
 static void report_snapshot_free(ReportSnapshot *r) {
     if (!r) return;
-    for (int i = 0; i < 4; ++i) free(r->text[i]);
+    for (int i = 0; i < 5; ++i) free(r->text[i]);
     free(r->category);
     free(r->attach);
     if (r->shot) CFRelease(r->shot);
@@ -776,11 +831,17 @@ static ReportSnapshot *report_capture(const char *category, const char *note, co
     if (!f) goto fail;
     {
         fprintf(f, "# notable events (time since start, frame), oldest first\n");
-        uint32_t head = notes_head, start = head > NOTES ? head - NOTES : 0;
-        for (uint32_t i = start; i < head; ++i) fprintf(f, "%s\n", notes[i % NOTES]);
+        report_notes_dump(f);
         diag_ring_dump(f, 400);
         if (fclose(f)) goto fail;
     }
+    // Numeric history is copied before the asynchronous writer sees this snapshot.
+    f = open_memstream(&r->text[4], &r->size[4]);
+    if (!f) goto fail;
+    BlackboxTrigger blackbox_trigger = !attach ? BB_F10 : !strncmp(why ? why : "", "stall", 5) ? BB_STALL :
+        !strncmp(why ? why : "", "hang", 4) ? BB_HANG : BB_CRASH;
+    blackbox_export(f, blackbox_trigger);
+    if (fclose(f)) goto fail;
     // Only copy paths here. File reads, image copying and redaction belong to the writer.
     fcntl(2, F_GETPATH, r->log);
     pthread_mutex_lock(&shot_lock);
@@ -816,6 +877,7 @@ static ReportSnapshot *report_capture(const char *category, const char *note, co
         fprintf(f, "game:       %s (game-flow %u), frame %llu, %.0f s since start%s\n", flow_name(flow), flow,
                 (unsigned long long)diag_current_frame(), uptime(), diag_on ? ", BOOT_DIAG on" : "");
         report_position(f, flow);
+        blackbox_summary(f, blackbox_trigger);
         fprintf(f, "display:    %s\n", sys_display);
         fprintf(f, "display:    %s\n", sys_edr);
         fprintf(f, "render:     ");
@@ -876,17 +938,28 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
             if (fclose(image)) have_shot = 0;
         }
     }
-    if (r->log[0]) {
+    int have_log = r->log[0] && !report_private_attachment(r->log);
+    int have_attach = r->attach != NULL && !report_private_attachment(r->attach);
+    if (have_log) {
         snprintf(path, sizeof path, "%s/log.txt", dir);
         copy_tail(r->log, path, 256 * 1024);
     }
-    if (r->attach) {
+    if (have_attach) {
         snprintf(path, sizeof path, "%s/crash.txt", dir);
         copy_tail(r->attach, path, 0);
     }
-    const char *names[] = {"settings", "stats", "events", "report"};
+    int have_profile = 0;                  // BOOT_DIAG: the session's CPU profile so far (diag_profile.h)
+    if (diag_on && diag_dir) {
+        void diag_profile_session_write(void);
+        diag_profile_session_write();
+        char from[1200];
+        snprintf(from, sizeof from, "%s/profile_session.txt", diag_dir);
+        snprintf(path, sizeof path, "%s/profile.txt", dir);
+        if (!access(from, R_OK)) { copy_tail(from, path, 0); have_profile = !access(path, R_OK); }
+    }
+    const char *names[] = {"settings", "stats", "events", "report", "blackbox"};
     int ok = 1;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
         FILE *f = fopen(path, "w");
         if (!f) { ok = 0; continue; }
@@ -894,13 +967,13 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
         if (i == 3) {
             if (!r->attach && !have_shot)
                 fprintf(f, "\nscreenshot: omitted (this report's capture was unavailable or did not finish within 2 seconds)\n");
-            fprintf(f, "\nfiles: report.txt%s, stats.txt, events.txt%s, settings.txt%s\n", have_shot ? ", screenshot.png" : "",
-                    r->log[0] ? ", log.txt" : "", r->attach ? ", crash.txt" : "");
+            fprintf(f, "\nfiles: report.txt%s, stats.txt, events.txt%s, settings.txt, blackbox.txt%s%s\n", have_shot ? ", screenshot.png" : "",
+                    have_log ? ", log.txt" : "", have_attach ? ", crash.txt" : "", have_profile ? ", profile.txt" : "");
         }
         if (fclose(f)) ok = 0;
     }
     ReportRedactBundle([NSString stringWithUTF8String:dir]);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
         if (access(path, R_OK)) ok = 0;
     }
@@ -980,6 +1053,7 @@ static void *watchdog(void *p) {
     uint64_t reported = 0;
     for (;;) {
         sleep(1);
+        if (diag_is_idle()) continue;
         uint64_t last = diag_last_frame_ns(), now = host_ticks();
         if (!last || diag_is_idle() || last == reported || now - last < 15000000000ull) continue;
         reported = last;

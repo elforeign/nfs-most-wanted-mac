@@ -38,7 +38,8 @@ int private_cars_backup_before_write(const char *destination, const char *staged
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 /* Private retail v1.3 admission, MD5 checked before any retail loader writes. */
 const char *private_cars_verify_save(const void *buffer, size_t size);
-/* Frozen inventory indices (76 additions, then 14 swaps), not selected order. */
+/* Frozen inventory indices (75 additions, then 14 swaps), not selected order. */
+extern const char private_cars_journal_failure[];
 void private_cars_metadata_userdata(const char *root);
 const char *private_cars_metadata_stage(void *buffer, size_t size, const unsigned char used[PRIVATE_CARS_MASK_SIZE]);
 const char *private_cars_metadata_admit(const void *buffer, size_t size, const unsigned char used[PRIVATE_CARS_MASK_SIZE]);

@@ -902,14 +902,16 @@ class Recompiler:
         a = self.rd(i, ops[0])
         cnt = (f"{ops[1].imm & 31}" if len(ops) > 1 and ops[1].type == CS_OP_IMM else
                "(c->ecx & 31)" if len(ops) > 1 else "1")
+        left_carry = f"(a >> ({n} - k)) & 1"
+        if s < 4 and (not cnt.isdecimal() or int(cnt) >= n):
+            left_carry = f"k < {n} && ({left_carry})"
         body = {
-            "shl": f"r = ({T})(a << k); cf = (a >> ({n} - k)) & 1; of = ((r >> {n - 1}) & 1) ^ cf; {self.szp('r', s)}",
-            "sal": f"r = ({T})(a << k); cf = (a >> ({n} - k)) & 1; of = ((r >> {n - 1}) & 1) ^ cf; {self.szp('r', s)}",
+            "shl": f"r = ({T})(a << k); cf = {left_carry}; of = ((r >> {n - 1}) & 1) ^ cf; {self.szp('r', s)}",
             "shr": f"r = ({T})(a >> k); cf = (a >> (k - 1)) & 1; of = (a >> {n - 1}) & 1; {self.szp('r', s)}",
             "sar": f"r = ({T})(({STYPE[s]})a >> k); cf = (({STYPE[s]})a >> (k - 1)) & 1; of = 0; {self.szp('r', s)}",
             "rol": f"k %= {n}; r = k ? ({T})((a << k) | (a >> ({n} - k))) : a; cf = r & 1; of = ((r >> {n - 1}) & 1) ^ cf;",
             "ror": f"k %= {n}; r = k ? ({T})((a >> k) | (a << ({n} - k))) : a; cf = (r >> {n - 1}) & 1; of = ((r >> {n - 1}) ^ (r >> {n - 2})) & 1;",
-        }[m]
+        }["shl" if m == "sal" else m]
         if s < 4 and m in ("shl", "sal", "shr", "sar"):
             # for 8/16-bit operands the count can exceed the width; widen to avoid UB, keep x86 semantics
             body = body.replace("(a >> (", "((uint32_t)a >> (").replace("(a << k)", "((uint32_t)a << k)")
@@ -1080,7 +1082,7 @@ class Recompiler:
         if m in ("fprem", "fprem1"):
             return [f"x87_prem(c, {int(m == 'fprem1')});"]
         if m == "fscale":
-            return ["ST(0) = ldexp(ST(0), (int)trunc(ST(1)));"]
+            return ["x87_fscale(c);"]
         if m == "f2xm1":
             return ["ST(0) = exp2(ST(0)) - 1.0;"]   # expm1 form not shown: Unicorn computes pow(2,x)-1 too (audit 3 #10)
         if m == "fyl2x":

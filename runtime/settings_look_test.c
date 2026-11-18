@@ -236,9 +236,11 @@ int main(int argc, char **argv) {
     CHECK(settings_get("graphics.bloom_surfaces") == 2);
     CHECK(app_pref("graphics.my_picks.2") && *app_pref("graphics.my_picks.2")); // >1 KB, no truncation
     // Every affected extra participates in matching, automatic saving and restoration.
+    Setting *later_cars = settings_find("cars.later_games");
     for (int i=0;i<NEXTRAS;++i) {
-        settings_look_apply(PRESET_X360);
         Setting *s = &extras[i];
+        if (s == later_cars) continue;
+        settings_look_apply(PRESET_X360);
         int target = s->value;
         CHECK(settings_set(s, s->type == SET_SLIDER ? (target ? 0 : 100) : 1-target));
         int custom = s->value;
@@ -249,7 +251,9 @@ int main(int argc, char **argv) {
     }
     settings_look_apply(PRESET_PORT);
     CHECK(settings_look_state() == PRESET_PORT);
-    for (int i=0;i<NEXTRAS;++i) CHECK(extras[i].value == extras[i].def);
+    for (int i=0;i<NEXTRAS;++i) if (&extras[i] != later_cars) CHECK(extras[i].value == extras[i].def);
+    CHECK(later_cars->value==1 && settings_set(later_cars,0));
+    CHECK(settings_look_state()==PRESET_PORT);
     CHECK(settings_get("graphics.bloom_surfaces") == 2);
     CHECK(settings_get("audio.x360_music") == 1); // sound kept through all looks
     // A value changed elsewhere must invalidate the cached selection too.
@@ -339,7 +343,8 @@ int main(int argc, char **argv) {
 #include "settings.h"
 #include "roots.h"
 #include "carbon_port_selectors.h"
-void portmenu_status(const char *fmt, ...) { (void)fmt; }
+static char port_status[512];
+void portmenu_status(const char *fmt, ...) { va_list ap;va_start(ap,fmt);vsnprintf(port_status,sizeof port_status,fmt,ap);va_end(ap); }
 void carbon_devrows_crew(int v) { (void)v; }
 void carbon_devrows_nitrous(int v) { (void)v; }
 void carbon_devrows_speedbreaker(int v) { (void)v; }
@@ -376,7 +381,7 @@ static const struct {
 } expected[] = {
     {"graphics.carbon_coat","NFS_CARBON_COAT",{"0","1"},1,1,SET_PICTURE},
     {"graphics.carbon_materials","NFS_CARBON_MATERIALS",{"0","1"},1,1,SET_PICTURE},
-    {"graphics.carbon_ao","NFS_CARBON_AO",{"off","on"},1,1,SET_PICTURE},
+    {"graphics.carbon_ao","NFS_CARBON_AO",{"off","on"},0,1,SET_PICTURE},
     {"graphics.carbon_envcube","NFS_CARBON_ENVCUBE",{"0","1"},0,1,SET_PICTURE},
     {"graphics.carbon_reflect_hdr","NFS_CARBON_REFLECT_HDR",{"0","1"},1,1,SET_PICTURE},
     {"graphics.daynight","NFS_DAYNIGHT",{"off","on"},0,1,SET_PICTURE},
@@ -395,7 +400,7 @@ static int selected(int i) {
     switch(i) {
     case 0: return carbon_coat_shader(NULL,0,NULL)!=NULL;
     case 1: carbon_coat_shader(NULL,0,NULL); return carbon_coat_materials;
-    case 2: carbon_ao_init(); return carbon_ao_on;
+    case 2: return carbon_ao_on;
     case 3: return port_cube_selector();
     case 4: return port_reflect_selector();
     case 5: return port_daynight_selector();
@@ -403,7 +408,7 @@ static int selected(int i) {
     case 7: return (int)carbon_dn_number("NFS_DAYNIGHT_HOUR",12,0,24);
     case 8: return private_carbon_limiter_enabled();
     case 9: return carbon_posaudio_enabled();
-    case 10: return triggers_on();
+    case 10: return fx_triggers_on();
     }
     abort();
 }
@@ -432,12 +437,18 @@ int main(int argc,char **argv) {
         .type=SET_SLIDER, .min=0, .max=2, .def=2, .own_pref=1};
     settings_add(&native_aa); settings_add(&hdr); settings_add(&native_audio);
     settings_init();
+    carbon_ao_init();
     for(int i=0;i<11;++i) {
         Setting *s=settings_find(expected[i].id);
         CHECK(s!=NULL); if(!s) continue;
         CHECK(s->def==expected[i].def && s->category==expected[i].category);
         CHECK(s->env && !strcmp(s->env,expected[i].env));
-        CHECK(s->restart && !s->own_pref && !s->live_env && !s->apply && !s->get);
+        CHECK(!s->own_pref && !s->get);
+        if(strcmp(argv[2],"live")) {
+            if(i==0 || i==2 || i==3 || i==4 || i==8 || i==10) CHECK(!s->restart && s->apply);
+            else if(i==1 || i==6 || i==7) CHECK(!s->restart && s->live_env);
+            else CHECK(s->restart && !s->live_env && !s->apply);
+        }
         CHECK(!s->hidden && (!s->locked || !strcmp(argv[2],"locked")));
     }
     if(failures) { printf("missing/invalid rows=%d\n",failures); return 1; }
@@ -447,7 +458,34 @@ int main(int argc,char **argv) {
     CHECK(settings_look_apply(PRESET_X360)==-1);
     CHECK(!getenv("NFS_SIMHZ") && !getenv("NFS_CARBON_SURROUND"));
     const char *op=argv[2];
-    if(!strcmp(op,"defaults")) {
+    if(!strcmp(op,"live")) {
+        int start=atoi(argv[3]);
+        const int indices[]={0,1,2,3,4,6,7,8,10};
+        for(unsigned j=0;j<sizeof indices/sizeof *indices;++j){
+            int i=indices[j], a=start ? (i==7?19:i==6?2:1) : (i==7?12:0);
+            int b=start ? (i==7?12:0) : (i==7?19:i==6?2:1);
+            Setting *s=settings_find(expected[i].id);
+            selected(i); /* Prime first-use caches before changing the row. */
+            settings_set(s,a); CHECK(selected(i)==a);
+            settings_set(s,b); CHECK(selected(i)==b);
+            settings_set(s,a); CHECK(selected(i)==a);
+        }
+        /* Presets traverse the same live dispatcher; mode/hour reset now. */
+        settings_set(settings_find("graphics.daynight_mode"),2);
+        settings_set(settings_find("graphics.daynight_hour"),19);
+        settings_set(settings_find("graphics.carbon_ao"),1);
+        settings_set(settings_find("graphics.look_preset"),1);
+        CHECK(!strcmp(port_status,"Look applied."));
+        settings_set(settings_find("graphics.daynight"),1);
+        settings_find("graphics.daynight")->boot_value=1;
+        settings_set(settings_find("graphics.look_preset"),1);
+        CHECK(strstr(port_status,"Day-night lighting") && !strstr(port_status,"Car lacquer") && !strstr(port_status,"Physical materials") && !strstr(port_status,"Real reflections"));
+        CHECK(!strstr(port_status,"Contact shadows") && !strstr(port_status,"Day-night mode") && !strstr(port_status,"Fixed hour"));
+        CHECK(selected(2)==0 && selected(6)==0 && selected(7)==12);
+        settings_find("graphics.daynight")->boot_value=0;
+        settings_set(settings_find("graphics.look_preset"),0);
+        CHECK(!strcmp(port_status,"Look applied."));
+    } else if(!strcmp(op,"defaults")) {
         for(int i=0;i<11;++i) verify(i,expected[i].def);
         CHECK(preset->get()==0);
     } else if(!strcmp(op,"save") || !strcmp(op,"verify") || !strcmp(op,"reset")) {
@@ -458,7 +496,7 @@ int main(int argc,char **argv) {
             int before=selected(i);
             settings_set(s,value);
             CHECK(settings_get(s->id)==value);
-            CHECK(selected(i)==before);
+            CHECK(selected(i)==((i!=5 && i!=9)?value:before));
             const char *saved=app_pref(s->id);
             /* An unchanged default intentionally has no saved key. */
             CHECK(saved ? !strcmp(saved,spelling(i,value)) : value==s->def);

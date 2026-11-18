@@ -272,6 +272,13 @@ static void serve_test(int want) {
         uint8_t first[4096], cached[4096];
         CHECK(h.read_at(h.source,first,sizeof first,0)==sizeof first);
         CHECK(again.read_at(again.source,cached,sizeof cached,0)==sizeof cached && !memcmp(first,cached,sizeof first));
+#ifndef COP_TEST_BASELINE
+        CHECK(big.count > 0);
+        uint8_t partial[2];
+        const CopWord *word = &big.words[0];
+        CHECK(h.read_at(h.source,partial,sizeof partial,(size_t)word->offset+1)==sizeof partial);
+        CHECK(!memcmp(partial,word->bytes+1,sizeof partial));
+#endif
         for (unsigned i=COP_CSI;i<COP_FILES;i++) {
             X360MusicHandle side={0};
             CHECK(x360copspeech_open(names[i==COP_CSI?2:i==COP_EVT?3:0],&side));

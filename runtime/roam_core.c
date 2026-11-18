@@ -228,10 +228,9 @@ void roam_client_input(RoamClient *c, const uint8_t *b, int n, uint32_t local_ms
     switch (type) {
     case ROAM_CHALLENGE:
         if (n != 20 || id) break;
+        // A new proof renews admission for the same live client.
         memcpy(c->cookie, b, 20); c->has_cookie = 1;
-        c->welcomed = 0; c->id = 0;
         if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;
-        c->has_members = c->nmembers = 0; roam_view_init(&c->view);
         return;
     case ROAM_NAME: {
         if (n != 16) break;
@@ -242,7 +241,9 @@ void roam_client_input(RoamClient *c, const uint8_t *b, int n, uint32_t local_ms
     }
     case ROAM_WELCOME:
         if (n != 4 || !get16(b) || !b[2] || b[2] > ROAM_INTEREST_MAX || b[3] != ROAM_HZ) break;
-        if (!c->welcomed || c->id != get16(b) || (c->has_members && (uint32_t)(local_ms - c->member_ms) > 1000)) {
+        // A relay restart can reissue the same ID. Expired membership can no
+        // longer establish sequence order for the next WELCOME.
+        if (c->id != get16(b) || (c->has_members && (uint32_t)(local_ms - c->member_ms) > 1000)) {
             roam_view_init(&c->view); c->has_members = c->nmembers = 0;
         }
         c->id = get16(b); c->near = b[2]; c->welcomed = 1; c->last_err = 0;

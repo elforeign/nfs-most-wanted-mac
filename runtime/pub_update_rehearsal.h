@@ -100,15 +100,4 @@ static inline NSString *PURPrepareScript(NSString *script) {
     return [script stringByReplacingOccurrencesOfString:@"stream = Events()\n" withString:guard];
 }
 
-@interface PURFeedDelegate : NSObject <NSURLSessionTaskDelegate>
-@end
-@implementation PURFeedDelegate
-- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
-    willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request
-    completionHandler:(void (^)(NSURLRequest *))completion {
-    (void)session; (void)task; (void)response; (void)request;
-    // Feed fixtures never redirect. Refuse before any request can leave loopback.
-    completion(nil);
-}
-@end
 #endif

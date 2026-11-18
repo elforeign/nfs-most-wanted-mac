@@ -156,7 +156,8 @@ GuideShortcutResult guide_shortcut(GuideShortcut *s, double now, uint32_t phys, 
     GuideShortcutResult r={0};
     uint32_t edge=phys & ~s->last;
     int view=(phys & CREATE)!=0, r3=(phys & R3)!=0;
-    int use_view=choice==3 || (choice==0 && !has_touchpad);
+    uint32_t menu_buttons=guide_menu_buttons(choice,has_touchpad);
+    int use_view=(menu_buttons & CREATE)!=0;
     s->consumed &= phys;
     s->modified &= phys;
     int sticks=(phys & (L3|R3))==(L3|R3);
@@ -188,8 +189,9 @@ GuideShortcutResult guide_shortcut(GuideShortcut *s, double now, uint32_t phys, 
         s->pending=0; s->done=0; s->combo=0; s->ordered=0;
     }
     if (!r.action && !s->combo && !s->consumed) {
-        if ((choice==0 && touch && !s->last_touch) || ((choice==1 || (choice==0 && !has_touchpad)) && home && !s->last_home)) r.action=1;
-        if (choice==2 && sticks && !s->sticks_done && now-s->sticks_at>=0.4) { r.action=1; s->sticks_done=1; }
+        if (((menu_buttons & 8192u) && touch && !s->last_touch) ||
+            ((menu_buttons & 4096u) && home && !s->last_home)) r.action=1;
+        if (menu_buttons==(L3|R3) && sticks && !s->sticks_done && now-s->sticks_at>=0.4) { r.action=1; s->sticks_done=1; }
         if (menu_open && use_view && (edge & CREATE)) r.action=1;
     }
     if (r.action) { s->done=1; s->inject_until=0; }

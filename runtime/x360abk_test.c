@@ -764,6 +764,23 @@ static void bounds_layout(uint8_t *p, uint8_t *x) {
 }
 static int bounds(void) {
     unsigned before = checks, bad_before = failures;
+    // Sixteen samples: accept the last sample, reject equality and beyond.
+    // Old parser: 2 invalid loops accepted. Fixed parser: 0 accepted.
+    uint8_t loop[0x88];
+    bounds_fixture(loop, 0);
+    word(loop + 0x70, 0x1800ac44, 0);  // PCM, so this checks only the S10A header
+    word(loop + 0x74, 0x20000010, 0);
+    unsigned invalid = 0;
+    for (unsigned start = 15; start <= 17; ++start) {
+        word(loop + 0x78, start, 0);
+        X360Abk bank;
+        char why[160];
+        int ok = x360abk_parse(loop, sizeof loop, &bank, why, sizeof why);
+        if (start == 15) CHECK(ok && bank.s[0].loop_start == start);
+        else invalid += ok;
+    }
+    printf("S10A invalid loops accepted: %u/2\n", invalid);
+    CHECK(!invalid);
     for (int pc = 0; pc < 2; ++pc) {
         uint8_t f[0x88]; bounds_fixture(f, pc);
         CHECK(bounds_case(f, sizeof f, pc, 1));

@@ -84,7 +84,7 @@ def build_and_run(base, name, mutation=None):
     command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                '-fsanitize=address,undefined', '-fobjc-arc', '-I' + str(ROOT / 'recomp'),
                '-I' + str(ROOT / 'recomp/out'), '-I' + str(RUNTIME), str(work / 'guide_test.m'),
-               str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
+               str(RUNTIME / 'blackbox.c'), str(RUNTIME / 'settings.c'), str(RUNTIME / 'text_fit.c'), str(RUNTIME / 'offline_stubs.c'), str(RUNTIME / 'replay_input.c'),
                '-framework', 'Cocoa', '-framework', 'CoreText', '-framework', 'QuartzCore',
                '-framework', 'Metal', '-Wl,-dead_strip', '-o', str(binary)]
     compiled = subprocess.run(command, capture_output=True, text=True)

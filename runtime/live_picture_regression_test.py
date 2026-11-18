@@ -2,6 +2,7 @@
 """Live picture review regressions; production C/ObjC with counted resources and fake windows.
 
 32 rebuilds: original 33 live cubes / 51,904,512 bytes, fixed 1 / 1,572,864 bytes.
+32 ordinary retail resets: request-gated backup release 51,904,512 bytes, unconditional release 1,572,864 bytes.
 Space entry then Borderless: original Native (1), fixed Borderless (0); state checks original 3 failures, fixed 0.
 Player set: original 1 persistent write, fixed 0; public diagnostics: original 1, fixed 0.
 Original fragments are embedded and SHA-256 checked; no game, display or GPU is opened.
@@ -23,6 +24,18 @@ OLD_RESET = '''    ++resets;
     envcube_live_reconfigure();
     if (diag_on) diag_event("live picture: reset %u (requests %u)", resets, requests);
 '''
+REQUEST_GATED_RESET = '''    if (rebuild_pending) {
+        rebuild_pending = 0;
+        // 006BD620 releases the capture targets but skips this managed backup. 006BD4B0 overwrites it on recreate.
+        // Drop our live rebuild's old reference through IUnknown::Release; ordinary game resets keep their lifetime.
+        uint32_t cube = M32(0x00982A64u);
+        if (cube) {
+            Cpu saved = *c;
+            M32(0x00982A64u) = 0;
+            call_guest(c, M32(M32(cube) + 8), 1, &cube);
+            *c = saved;
+        }
+    }'''
 OLD_MODE = '''void user32_fullscreen_mode_changed(void) {
     Win *w = game_window();
     app_fullscreen_mode_reset();
@@ -162,16 +175,19 @@ static uint32_t create_cube(void) {
     ++live_cubes;
     return o->guest;
 }
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argv;
     G = calloc(1, 0x1000000);
     Cpu c = {.eax = 42, .ecx = 99, .esp = 0x80000}, saved = c;
+    live_picture_on_reset(&c);
+    CHECK(releases == 0 && live_cubes == 0);
     M32(0x00982A64u) = create_cube();
-    live_picture_on_reset(&c); // ordinary game Reset must retain the backup
-    CHECK(releases == 0 && live_cubes == 1);
     for (unsigned i = 0; i < 32; ++i) {
-        live_picture_request("test"); live_picture_request("coalesced");
-        CHECK(G[0x00982C39u] == 1);
-        G[0x00982C39u] = 0;
+        if (argc == 1) {
+            live_picture_request("test"); live_picture_request("coalesced");
+            CHECK(G[0x00982C39u] == 1);
+            G[0x00982C39u] = 0;
+        }
         live_picture_on_reset(&c);
         live_picture_on_reset(&c); // game's two Reset calls must not double-release
         CHECK(memcmp(&c, &saved, sizeof c) == 0);
@@ -339,6 +355,7 @@ int main(int argc, char **argv) {
 
 
 def main():
+    assert hashlib.sha256(REQUEST_GATED_RESET.encode()).hexdigest() == 'ae6f53a5c640629870e4049cd413bbc6ea70294498e4a439a8cefd6721ee1291'
     assert hashlib.sha256((OLD_RESET + OLD_MODE + OLD_CALLBACKS + OLD_SET).encode()).hexdigest() == BASE_SHA256
     live = (RT / 'live_picture.c').read_text()
     d3d = mw_source(RT / 'd3d9.m')
@@ -352,6 +369,15 @@ def main():
     set_body = user32[user32.index('\n', set_start) + 1:user32.index('    } else if (!strcmp(tok, "shot"))', set_start)]
     with tempfile.TemporaryDirectory(prefix='live-picture-regression-') as directory:
         tmp = Path(directory)
+        reset_backup = live[live.index('    // 006BD620'):live.index('    envcube_live_reconfigure();')]
+        request_gated = live.replace('static unsigned requests, resets;', 'static unsigned requests, resets;\nstatic int rebuild_pending;')
+        request_gated = request_gated.replace('    ++requests;', '    rebuild_pending = 1;\n    ++requests;')
+        request_gated = request_gated.replace(reset_backup, REQUEST_GATED_RESET + '\n')
+        for name, code, expected_bytes, expected_status in (
+            ('retail_old', request_gated, 51904512, 1), ('retail_fixed', live, 1572864, 0)
+        ):
+            result = compile_run(tmp, name, ALLOC_PRE + release + '\n' + code + ALLOC_POST, args=('retail',), objc=True)
+            assert result.returncode == expected_status and f'bytes={expected_bytes}' in result.stdout, result.stdout
         for original in (True, False):
             name = 'original' if original else 'fixed'
             source = live

@@ -340,7 +340,8 @@ def main():
     if sys.argv[1:2] == ['--changed']:
         names = subprocess.check_output(['git', 'diff', '--name-only', sys.argv[2], '--', 'recomp'], text=True)
         names += '\n' + subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', 'recomp'], text=True)
-        return 0 if any(production(n) for n in names.splitlines() if n) else 1
+        print('changed' if any(production(n) for n in names.splitlines() if n) else 'unchanged')
+        return 0
     if sys.argv[1:] == ['--runtime-key']:
         print(runtime_key())
         return 0

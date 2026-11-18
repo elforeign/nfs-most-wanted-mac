@@ -75,6 +75,8 @@ static void (^deliverEvent)(NSEvent *);
 - (void)sendEvent:(NSEvent *)event { ++forwarded; if(deliverEvent) deliverEvent(event); }
 @end
 static KeyApp *fakeApp;
+static const char *profile;
+const char *userdata_dir(void) { return profile; }
 #undef NSApp
 #define NSApp fakeApp
 #ifndef STREAM_KEY_SOURCE
@@ -111,7 +113,7 @@ static void hardeningProof(NSString *sentinel) {
     unsigned before=failures;
     // Hold the real control and editor after each close, instead of testing nil.
     for(unsigned action=0;action<7;++action) {
-        CHECK(replaceKey(sentinel));
+        CHECK(replaceKey(sentinel,NO));
         stream_key_edit(0);
         NSTextField *heldField=field;
         NSTextView *heldEditor=(NSTextView *)field.currentEditor;
@@ -159,7 +161,7 @@ static void hardeningProof(NSString *sentinel) {
         beforeTransportWait=nil;
         stream_key_forget(0);
     }
-    CHECK(replaceKey(sentinel));
+    CHECK(replaceKey(sentinel,NO));
     quit_now(); // the immediate-exit fallback also wipes before exit(0)
     unsigned residue=0;
     for(size_t i=0;i<sizeof keyBytes;++i) residue+=keyBytes[i]!=0;
@@ -171,22 +173,53 @@ static NSEvent *event(unsigned code,BOOL down,NSString *characters,NSEventModifi
         modifierFlags:mods timestamp:0 windowNumber:0 context:nil characters:characters
         charactersIgnoringModifiers:characters isARepeat:NO keyCode:code];
 }
-int main(int argc,char **argv) { @autoreleasepool {
-    char input[2048]; if(!fgets(input,sizeof input,stdin)) return 2;
-    input[strcspn(input,"\n")]=0;
-    char marker[33]; memcpy(marker,input,32); marker[32]=0;
-    NSString *sentinel=[NSString stringWithUTF8String:input];
-    if(argc>1 && !strcmp(argv[1],"restart")) {
-        char status[80]; stream_key_status(status,sizeof status);
-        stream_key_go(0);
-        CHECK(!keySize && !starts && !sessions && !strcmp(status,"No key"));
-        printf("restart: automatic_go=%d sessions=%d checks=%d failures=%d\n",starts,sessions,checks,failures);
-        return failures?1:0;
-    }
+static void setupSheet(void) {
     [NSApplication sharedApplication];
     fakeApp=[KeyApp new];
     fakeApp.keyWindow=[[KeyParent alloc] initWithContentRect:NSMakeRect(0,0,640,480)
         styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+}
+static int storageProof(const char *mode, NSString *sentinel, const char *input) {
+    char status[80];
+    stream_key_status(status,sizeof status);
+    if(!strcmp(mode,"remember") || !strcmp(mode,"session-only")) {
+        setupSheet();
+        stream_key_edit(0);
+        CHECK(remember.state==NSControlStateValueOn);
+        if(!strcmp(mode,"session-only")) remember.state=NSControlStateValueOff;
+        field.stringValue=sentinel;
+        [controller save:nil];
+        CHECK(!panel && keySize==strlen(input) && !memcmp(keyBytes,input,keySize));
+        [[KeyQuitDelegate new] applicationShouldTerminate:nil];
+        stream_key_status(status,sizeof status);
+        CHECK(!keySize && !strcmp(status,"No key"));
+    } else if(!strcmp(mode,"forget")) {
+        CHECK(keySize==strlen(input) && !memcmp(keyBytes,input,keySize));
+        stream_key_forget(0);
+        stream_key_status(status,sizeof status);
+        CHECK(!keySize && !strcmp(status,"No key"));
+    } else if(!strcmp(mode,"relaunch")) {
+        CHECK(keySize==strlen(input) && !memcmp(keyBytes,input,keySize) && !strcmp(status,"Ready (Off)"));
+    } else if(!strcmp(mode,"contended-save")) {
+        CHECK(!replaceKey(@"replacement",YES));
+    } else {
+        const char *expected=!strcmp(mode,"unavailable")?"Saved key unavailable":"No key";
+        CHECK(!keySize && !strcmp(status,expected));
+    }
+    CHECK(!starts && !sessions);
+    printf("%s: key_present=%d go=%d sessions=%d status=%s failures=%d\n",
+           mode,keySize!=0,starts,sessions,status,failures);
+    return failures?1:0;
+}
+int main(int argc,char **argv) { @autoreleasepool {
+    if(argc!=3 && argc!=4) return 2;
+    profile=argv[2];
+    char input[2048]; if(!fgets(input,sizeof input,stdin)) return 2;
+    input[strcspn(input,"\n")]=0;
+    char marker[33]; memcpy(marker,input,32); marker[32]=0;
+    NSString *sentinel=[NSString stringWithUTF8String:input];
+    if(argc==4) return storageProof(argv[3],sentinel,input);
+    setupSheet();
     char menu[160]={0}; stream_key_status(menu,sizeof menu); CHECK(!strcmp(menu,"No key"));
     stream_key_go(0); CHECK(!starts && !sessions);
     stream_key_edit(0); CHECK(panel && field && [field isKindOfClass:NSSecureTextField.class]);
@@ -202,9 +235,9 @@ int main(int argc,char **argv) { @autoreleasepool {
     CHECK(keySize==strlen(input) && !memcmp(keyBytes,input,keySize));
     stream_key_status(menu,sizeof menu); CHECK(!strcmp(menu,"Ready (Off)") && !strstr(menu,input));
     // Invalid input cannot truncate or overwrite a previously accepted key.
-    CHECK(!replaceKey(@"")); CHECK(!replaceKey(@"one\ntwo"));
-    unichar nul[3]={'a',0,'b'}; CHECK(!replaceKey([NSString stringWithCharacters:nul length:3]));
-    CHECK(!replaceKey([@"x" stringByPaddingToLength:513 withString:@"x" startingAtIndex:0]));
+    CHECK(!replaceKey(@"",NO)); CHECK(!replaceKey(@"one\ntwo",NO));
+    unichar nul[3]={'a',0,'b'}; CHECK(!replaceKey([NSString stringWithCharacters:nul length:3],NO));
+    CHECK(!replaceKey([@"x" stringByPaddingToLength:513 withString:@"x" startingAtIndex:0],NO));
     CHECK(keySize==strlen(input) && !memcmp(keyBytes,input,keySize));
     stream_key_edit(0); field.stringValue=@"replacement"; [controller cancel:nil];
     CHECK(!panel && keySize==strlen(input) && !memcmp(keyBytes,input,keySize));
@@ -245,7 +278,7 @@ int main(int argc,char **argv) { @autoreleasepool {
     CHECK(!stream_key_route_event(event(0,NO,@"a",0))); // its release must reach the guest
     stream_key_go(0); stream_key_go(0); CHECK(starts==1 && sessions==1);
     CHECK(passedSize==strlen(input) && !memcmp(passed,input,passedSize));
-    stream_key_edit(0); CHECK(!panel); CHECK(!replaceKey(@"replacement"));
+    stream_key_edit(0); CHECK(!panel); CHECK(!replaceKey(@"replacement",NO));
     stream_key_status(menu,sizeof menu); CHECK(!strcmp(menu,"Starting"));
     captureState=2; stream_key_status(menu,sizeof menu); CHECK(!strcmp(menu,"Live"));
     captureState=4;
@@ -294,8 +327,8 @@ int main(int argc,char **argv) { @autoreleasepool {
     CHECK(!strcmp(osk,"public note") && !strstr(osk,input));
     CHECK(!strstr(note_original,input) && !strstr(note.text,input));
     // Exact boundary and multi-byte input validation.
-    CHECK(replaceKey([@"x" stringByPaddingToLength:512 withString:@"x" startingAtIndex:0])); CHECK(keySize==512);
-    CHECK(!replaceKey([@"é" stringByPaddingToLength:257 withString:@"é" startingAtIndex:0])); CHECK(keySize==512);
+    CHECK(replaceKey([@"x" stringByPaddingToLength:512 withString:@"x" startingAtIndex:0],NO)); CHECK(keySize==512);
+    CHECK(!replaceKey([@"é" stringByPaddingToLength:257 withString:@"é" startingAtIndex:0],NO)); CHECK(keySize==512);
     stream_key_forget(0);
     hardeningProof(sentinel);
     printf("key: checks=%d failures=%d starts=%d clipboard_writes=%d preference_writes=%d\n",checks,failures,starts,clipboardWrites,prefWrites);

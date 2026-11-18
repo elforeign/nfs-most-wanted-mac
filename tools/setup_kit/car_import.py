@@ -385,7 +385,10 @@ class CarImporter:
 
     def _inspect(self, carbon, mw_pc, mw_x360, cars):
         carbon, mw_pc, optional = self._locations(carbon, mw_pc, mw_x360)
-        recognition = sources.recognise(carbon)
+        try:
+            recognition = sources.recognise(carbon)
+        except sources.SourceError as error:
+            raise ImportError(str(error)) from error
         _require(recognition['game'] == 'carbon' and recognition['platform'] in ('pc', 'x360'),
                  'only recognized Carbon PC or Carbon X360 input is supported')
         statuses = {c['car_hash']: c for c in recognition['cars']}

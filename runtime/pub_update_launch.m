@@ -10,6 +10,13 @@
 #include <CommonCrypto/CommonDigest.h>
 #include "pub_update_write.h"
 #include "bundle_roots.h"
+#include "game_select.h"
+
+#if NFS_GAME == NFS_GAME_PRIVATE
+static NSString *const PublicBundleID = @"io.github.nfs-carbon-native-mac";
+#else
+static NSString *const PublicBundleID = @"io.github.nfsmw-native-mac";
+#endif
 
 extern const char *game_dir;  // assigned only after app_start validates the PC root
 
@@ -42,6 +49,38 @@ static NSString *CanonicalPath(NSString *path) {
     // use realpath. Compare the same filesystem spelling on both sides.
     char resolved[PATH_MAX];
     return realpath(path.fileSystemRepresentation, resolved) ? [NSString stringWithUTF8String:resolved] : path;
+}
+
+static BOOL ReleaseVersion(id value) {
+    return [value isKindOfClass:NSString.class] && [value length] <= 63 &&
+        [value rangeOfString:@"\\A[0-9]+(?:\\.[0-9]+){1,3}\\z"
+                     options:NSRegularExpressionSearch].location != NSNotFound;
+}
+
+static BOOL NewerVersion(NSString *target, NSString *installed) {
+    NSArray<NSString *> *left = [target componentsSeparatedByString:@"."];
+    NSArray<NSString *> *right = [installed componentsSeparatedByString:@"."];
+    for (NSUInteger i = 0; i < MAX(left.count, right.count); ++i) {
+        NSString *a = i < left.count ? left[i] : @"0";
+        NSString *b = i < right.count ? right[i] : @"0";
+        NSComparisonResult order = [a compare:b options:NSNumericSearch];
+        if (order != NSOrderedSame) return order == NSOrderedDescending;
+    }
+    return NO;
+}
+
+static BOOL ReadyVersionMatches(NSString *job, NSString *ready, NSString *destination) {
+    // Retained apply.py is supplied by the release and may predate this check.
+    NSString *target = UpdateJSON([job stringByAppendingPathComponent:@"target-version.json"])[@"version"];
+    NSDictionary *descriptor = UpdateJSON(ready);
+    NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
+    if (!ReleaseVersion(target) || !ReleaseVersion(installed) ||
+        ![target isEqual:descriptor[@"version"]] || ![descriptor[@"app"] isEqual:destination.lastPathComponent] ||
+        !NewerVersion(target, installed)) return NO;
+    NSString *staged = [[ready.stringByDeletingLastPathComponent stringByAppendingPathComponent:destination.lastPathComponent]
+        stringByAppendingPathComponent:@"Contents/Info.plist"];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:staged];
+    return [target isEqual:info[@"CFBundleShortVersionString"]];
 }
 
 static BOOL SecurePath(NSString *path, BOOL privateDirectory) {
@@ -153,7 +192,7 @@ static void UpdateError(NSString *reason) {
 // event pump. A blocked/failed startup never acknowledges the replacement.
 void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
     if (roots_exported()) return;
-    if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"io.github.nfsmw-native-mac"]) return;
+    if (![NSBundle.mainBundle.bundleIdentifier isEqual:PublicBundleID]) return;
     NSString *profile = CanonicalPath([NSString stringWithUTF8String:profilePath]);
     NSString *destination = CanonicalPath(NSBundle.mainBundle.bundlePath);
     NSString *journal = [profile stringByAppendingPathComponent:@".install-journal.json"];
@@ -217,6 +256,12 @@ void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
     if (!TrustedJob(job, tools)) {
         UpdateError(@"The prepared update folder or its retained tools failed verification. Run Setup again.");
         if (needsRecovery) exit(1);
+        return;
+    }
+    if (ready && !ReadyVersionMatches(job, ready, destination)) {
+        fprintf(stderr, "boot: prepared update version verification failed. Prepare the update again.\n");
+        NSString *failed = [ready.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".apply-failed.json"];
+        PUReplaceFile(failed, [@"{\"state\":\"failed\"}\n" dataUsingEncoding:NSUTF8StringEncoding], 0600);
         return;
     }
     NSString *python = [job stringByAppendingPathComponent:@"python/bin/python3"];

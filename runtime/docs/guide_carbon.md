@@ -1,6 +1,10 @@
 # Guide
 
 Your Carbon installation uses your own copy of Need for Speed Carbon (PC).
+Choose the game folder containing NFSC.exe and TRACKS, a .zip/.7z of that folder,
+or your PC disc image (.iso or ISO-compatible .mdf). Disc installation also needs
+the official Carbon update for your disc edition and your compatible NFSC.exe.
+The copy-protected executable on the disc cannot be used.
 
 ## Open Help from the couch
 
@@ -24,20 +28,26 @@ shipped graphics defaults; PC retail turns off the port graphics additions. Chan
 a graphics addition remembers My picks, which you can restore after trying a preset.
 Presets leave native Video, HDR output, sound and controller choices alone.
 
-- **Car lacquer**, **Physical materials** and **Contact shadows** start On.
-  Physical materials require Car lacquer. **Sharper reflections** starts Off.
+- **Car lacquer** and **Physical materials** start On. Physical materials require
+  Car lacquer. **Contact shadows** and **Sharper reflections** start Off.
+  Car lacquer, Physical materials, Contact shadows and Sharper reflections apply live.
+  **Real reflections** starts On and applies live; street-lamp reflections require Car lacquer.
 - **Day-night lighting** starts Off. **Game** follows game progress, **Cycle** advances
   during free roam, and **Fixed** uses **Fixed hour** (initially 12:00).
-  Mode and hour take effect with day-night lighting enabled. Imported-world-only
+  Mode and hour apply live with day-night lighting enabled. Imported-world-only
   controls are absent from standalone Carbon because their world data is not installed.
-- F10 **Audio** offers **Peak limiter** (On) and **Speaker layout** (Game).
+- F10 **Audio** offers live **Surround** and **Peak limiter** (both On),
+  plus startup-only **Speaker layout** (Game).
   **ITU** opts into home 5.1 speaker geometry. Choose Stereo or Surround in the
   game's native Audio menu; Surround remains the default for a fresh profile.
 - F10 **Controls > Adaptive triggers** starts On for supported controllers.
-  Rumble keeps its separate setting.
+  Changes apply live. Rumble keeps its separate setting.
 
-These additions are saved for the next launch. Use **Restart game** under
-**Display & performance**, or quit and reopen the game. **Reset** on a row restores
+Day-night lighting and Speaker layout need **Restart game** under
+**Display & performance**. Presets apply live members
+immediately and list only the members still needing a restart. Unlimited nitrous,
+Unlimited Speedbreaker and Crew always ready turn On and Off live; Off restores
+normal consumption and readiness rules without removing charge already gained. **Reset** on a row restores
 its shipped default. A switch supplied by a launcher takes priority and locks its row.
 Native Video and Audio settings keep their own controls and saved values. The simulation
 rate is unchanged.
@@ -52,7 +62,7 @@ Under **Controls**, **Replay save key** enables F8, F7 or F6. A saved game bindi
 
 ## YouTube live
 
-Under **Display & performance > Live streaming**, choose **Enter stream key**. The secure sheet keeps the key only until quit; saving it does not start broadcasting. **Go live** explicitly starts video and stereo sound uploads. **Stop live** stops uploads while recording and replay continue. **Forget stream key** stops streaming and clears the key. Check **Stream status** for progress or errors; an error needs another explicit Go live.
+Under **Display & performance > Live streaming**, choose **Enter stream key**. **Remember on this Mac** is checked by default and keeps the key in Carbon's save folder across quits and updates. Uncheck it before saving to keep the key until quit and clear any remembered key. Choose **Go live** to start video and stereo sound uploads. **Stop live** stops uploads while recording and replay continue. **Forget stream key** also removes the key. Check **Stream status** for progress or errors. After an error, choose **Go live** again to resume.
 
 ## Controller text entry
 

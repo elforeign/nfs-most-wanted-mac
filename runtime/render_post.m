@@ -487,6 +487,8 @@ void render_post_prewarm(void) {
 #if NFS_GAME == NFS_GAME_PRIVATE
     extern void render_carbon_contact_prewarm(void);
     render_carbon_contact_prewarm();
+    extern void render_carbon_lamplight_prewarm(void);
+    render_carbon_lamplight_prewarm();
 #endif
     int failed=0;
     for (unsigned slot=0;slot<5;++slot) failed+=!x_post_library(slot);

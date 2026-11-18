@@ -220,7 +220,8 @@ void feedback_levels(float *heavy, float *light) {
 }
 
 // ---- the IFeedback methods (thiscall; RET pops the arguments like the stubs' ret N)
-static int fb_stop(Cpu *c) { COUNT(0x04); S.active = 0; padfx_stop(); rumble_stop(); RET(0, 0); }
+// The guest calls Stop every feedback tick with native Rumble Off. Pad effects have their own lifecycle.
+static int fb_stop(Cpu *c) { COUNT(0x04); S.active = 0; rumble_stop(); RET(0, 0); }
 static int fb_resume(Cpu *c) { COUNT(0x08); feedback_poll_pause(); S.active = !suppressed; RET(0, 0); }
 static int fb_reset(Cpu *c) { COUNT(0x0C); S.active = 0; S.out_l = S.out_r = 0; memset(&S.env[0], 0, sizeof S.env[0]); RET(0, 0); }
 static void dump_surfaces(Cpu *c);

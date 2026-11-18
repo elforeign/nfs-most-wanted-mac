@@ -1,5 +1,12 @@
 """Public Setup offline proofs; run with the project's Python -I.
 
+Setup input bounds: 0/7 tests pass on 972909b3 (13 failed assertions);
+7/7 pass with preflight checks for PC/Xbox/Carbon ZIPs, speed.exe, hard links and .7z listings.
+
+Carbon PC disc CLI control: base de6085c1 fails 1/1; wired Setup passes 1/1
+(CarbonSetupDiscTests.test_disc_cli_check_build_resume). Six synthetic disc
+checks cover patch/executable refusal, cache changes, remembered inputs and cancellation.
+
 Carbon PC archive control: ZIP/7z install and remember the source 2/2;
 removing Carbon archive dispatch makes the same acceptance oracle fail 2/2.
 Carbon folder/executable, changed destinations, source digests, cancellation,
@@ -28,8 +35,8 @@ Per-volume checks preserve unknown sizes and refuse either full volume.
 Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
 two real child commands sharing one log entry independent of the caller TMPDIR.
 
-Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.7.1;
-changing it to 4.7.0 fails 1/1 against the independent 4.7.1 expectations.
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.8.0;
+changing it to 4.7.0 fails 1/1 against the independent 4.8.0 expectations.
 
 Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
 broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
@@ -470,6 +477,26 @@ if tool=='ar': pathlib.Path(args[1]).write_bytes(b'archive probe')
 
 
 class PCTests(Fixture):
+    def test_folder_executable_size_checked_before_fingerprint(self):
+        with mock.patch.object(b.rtpatch, "MAX_FILE", len(self.data) - 1), \
+                mock.patch.object(b, "exe_fingerprint") as fingerprint:
+            with self.assertRaisesRegex(b.SetupError, "regular file of the expected size"):
+                b.validate_pc(self.pc, self.source)
+        fingerprint.assert_not_called()
+        self.assertTrue(b.validate_pc(self.pc, self.source)[1])
+
+    def test_folder_check_refuses_multiply_linked_file(self):
+        original = self.pc / "extra.dat"
+        original.write_bytes(b"ordinary fixture data")
+        duplicate = self.pc / "extra-copy.dat"
+        os.link(original, duplicate)
+        runner = FakeRunner(self.log, self.child_env, self.paths.work)
+        with self.pipeline_stubs():
+            with self.assertRaisesRegex(ins.InstallError, "more than one hard link"):
+                b.build(self.args(check=True), self.paths, self.events, runner, self.source)
+            duplicate.unlink()
+            b.build(self.args(check=True), self.paths, self.events, runner, self.source)
+
     def test_T4_metadata_case_regions_missing(self):
         original = self.data
         self.assertTrue(b.validate_pc(self.pc, self.source)[1])
@@ -1167,6 +1194,18 @@ class SaveMigrationTests(Fixture):
 
 
 class X360ArchiveTests(Fixture):
+    def test_sevenzip_listing_is_bounded_without_spooling(self):
+        popen = subprocess.Popen
+
+        def listing_child(command, **kwargs):
+            return popen([sys.executable, "-I", "-c", 'print("listing" * 32)'], **kwargs)
+
+        with mock.patch.object(b, "SEVENZIP_MAX_LISTING", 128, create=True), \
+                mock.patch.object(b.subprocess, "Popen", side_effect=listing_child), \
+                mock.patch.object(b.tempfile, "TemporaryFile", side_effect=AssertionError("listing spooled to disk")):
+            with self.assertRaisesRegex(b.SetupError, "too many entries"):
+                b.sevenzip_members(self.home / "game.7z")
+
     """Xbox archive regression: old guard rejects 2/2 synthetic archives; fixed passes both formats.
     The preparation stub tests routing and identical bytes, not real disc conversion."""
     def archive(self, suffix, entries=None, stem="console"):
@@ -1331,6 +1370,39 @@ class X360ArchiveTests(Fixture):
 
 
 class PCZipTests(Fixture):
+    def test_zip_byte_and_entry_caps_precede_open_for_all_standalone_routes(self):
+        import zipfile
+        from setup_kit import carbon_source
+        archive = self.home / "game.zip"
+        # Use an ordinary small ZIP64 archive to exercise the same metadata path as big ISOs.
+        with mock.patch.object(zipfile, "ZIP64_LIMIT", 1), zipfile.ZipFile(archive, "w") as out:
+            out.writestr("first.txt", b"first")
+            out.writestr("second.txt", b"second")
+        routes = (b.extract_pc_zip, b.extract_x360_archive, carbon_source.prepare)
+        for route in routes:
+            for limit, value in (("ZIP_MAX_DIRECTORY", 32), ("ZIP_MAX_FILES", 1)):
+                with self.subTest(route=route.__module__ + "." + route.__name__, limit=limit), \
+                        mock.patch.object(b, limit, value, create=True), \
+                        mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZIP opened before preflight")):
+                    with self.assertRaisesRegex(b.SetupError, "too much file listing data or too many entries"):
+                        route(archive, self.paths.work, self.events)
+
+    def test_zip_preflight_counts_directory_headers_as_well_as_end_record(self):
+        import zipfile
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("first.txt", b"first")
+            archive.writestr("second.txt", b"second")
+        end = zipfile._EndRecData(stream)
+        end[zipfile._ECD_ENTRIES_TOTAL] = 1
+        archive = self.home / "game.zip"
+        archive.write_bytes(stream.getvalue())
+        with mock.patch.object(zipfile, "_EndRecData", return_value=end), \
+                mock.patch.object(b, "ZIP_MAX_FILES", 1), \
+                mock.patch.object(zipfile, "ZipFile", side_effect=AssertionError("ZIP opened before preflight")):
+            with self.assertRaisesRegex(b.SetupError, "too many entries"):
+                b.extract_pc_zip(archive, self.paths.work, self.events)
+
     """--pc accepts a .zip of the game folder (the game one level down)."""
     def make_zip(self, path, extra=(), top="Need For Speed Most Wanted/"):
         import zipfile
@@ -1348,6 +1420,50 @@ class PCZipTests(Fixture):
     def outside_work(self):
         work = self.paths.work
         return sorted(str(p) for p in self.home.rglob("*") if work not in p.parents and p != work)
+
+    def test_sevenzip_game_at_root_or_one_level_down(self):
+        # On 7942da5b both archive layouts fail (2/2); with the fix both pass (2/2).
+        # On 999f865a both layouts pass Check and fail Extras; the fix passes both stages for both layouts.
+        from setup_kit import car_selection
+
+        spec = car_selection.spec(next(row for row in car_selection.load() if row["origin"]["platform"] == "pc"))
+        recognition = dict(game="carbon", platform="pc", cars=[
+            dict(car_hash=b.car_sources.path_hash("CARS/" + spec["folder"]), status="importable")])
+        selection = self.home / "selection.json"
+        write(selection, json.dumps([spec]))
+        carbon = self.home / "Carbon game"
+        carbon.mkdir()
+        expected = b.digest_tree(self.pc)
+
+        def plan(_carbon, *, mw_pc, **kwargs):
+            if b.digest_tree(mw_pc) != expected:
+                raise AssertionError("Extras did not receive the checked MW donor files.")
+            return dict(measured=False, approved=False, volumes=[], cars=[])
+
+        for depth, directory, names in (
+            (0, self.pc, sorted(p.name for p in self.pc.iterdir())),
+            (1, self.pc.parent, [self.pc.name]),
+        ):
+            with self.subTest(depth=depth):
+                archive = self.home / f"pc-{depth}.7z"
+                subprocess.run(["/usr/bin/bsdtar", "--format=7zip", "-cf", str(archive),
+                                "-C", str(directory), *names], check=True, capture_output=True)
+                before = b.sha_file(archive)
+                args = self.args(check=True)
+                args.pc = str(archive)
+                with self.pipeline_stubs():
+                    self.assertIsNone(b.build(args, self.paths, self.events,
+                                              FakeRunner(self.log, self.child_env, self.paths.work), self.source))
+                root = self.paths.work / "pc_src"
+                self.assertEqual(b.digest_tree(root / self.pc.name if depth else root), b.digest_tree(self.pc))
+                self.assertEqual(b.sha_file(archive), before)
+                output = io.StringIO()
+                with redirect_stdout(output), mock.patch.object(b.car_sources, "recognise", return_value=recognition), \
+                     mock.patch.object(b.car_api().CarImporter, "plan", side_effect=plan):
+                    rc = b.main(["--cars-check", "--carbon", str(carbon), "--cars-spec", str(selection),
+                                 "--cars-mw-pc", str(archive), "--work", str(self.paths.work / "extras"), "--events"])
+                self.assertEqual((rc, json.loads(output.getvalue().splitlines()[-1])["ev"]), (0, "cars-result"),
+                                 output.getvalue()[-1500:])
 
     def test_zip_validates_like_the_folder_and_source_untouched(self):
         archive = self.make_zip(self.home / "Need For Speed Most Wanted.zip")
@@ -1409,8 +1525,8 @@ class PCZipTests(Fixture):
                 self.assertFalse(Path("/tmp/escaped-nfsmw-test.txt").exists())
                 self.assertFalse((self.home / "escaped.txt").exists())
         archive = self.make_zip(self.home / "big.zip")
-        for limit in ("ZIP_MAX_BYTES", "ZIP_MAX_FILES"):
-            with self.subTest(limit), mock.patch.object(b, limit, 3), self.assertRaisesRegex(b.SetupError, "far larger"):
+        for limit, message in (("ZIP_MAX_BYTES", "far larger"), ("ZIP_MAX_FILES", "too many entries")):
+            with self.subTest(limit), mock.patch.object(b, limit, 3), self.assertRaisesRegex(b.SetupError, message):
                 b.extract_pc_zip(archive, self.paths.work, self.events)
         # Broken control: a naive extractor writes the ../ entry outside work, and the oracle sees it.
         archive = self.make_zip(self.paths.work.parent / "evil-control.zip", cases["parent"])
@@ -1565,6 +1681,27 @@ class PCDiscTests(Fixture):
     def extract(self, disc=None, update=True, exe=True):
         return b.extract_pc_disc(disc or self.disc1, self.update if update else None, self.exe if exe else None,
                                  self.paths.work, self.events, self.source)
+
+    def test_disc_window_zip_byte_cap_precedes_open(self):
+        with mock.patch.object(b, "ZIP_MAX_DIRECTORY", 32, create=True), \
+                mock.patch.object(b.zipfile, "ZipFile", side_effect=AssertionError("ZIP opened before preflight")):
+            with self.assertRaisesRegex(b.SetupError, "too much file listing data"):
+                self.extract()
+        self.assertFalse((self.paths.work / "pc_src").exists())
+
+    def test_mounted_disc_rejects_multiply_linked_root_files_and_movies(self):
+        folder = self.home / "disc folder"
+        (folder / "MOVIES").mkdir(parents=True)
+        for rel in ("server.dll", "MOVIES/intro.vp6"):
+            with self.subTest(path=rel):
+                path = folder / rel
+                path.write_bytes(b"ordinary fixture data")
+                duplicate = path.with_name("copy-" + path.name)
+                os.link(path, duplicate)
+                with self.assertRaisesRegex(b.pc_disc.DiscError, "more than one hard link"):
+                    b.pc_disc.Disc(folder)
+                duplicate.unlink()
+                self.assertIn(rel, b.pc_disc.Disc(folder))
 
     def test_discs_install_like_the_folder_any_disc_chosen_inputs_untouched(self):
         before = self.inputs()
@@ -2007,8 +2144,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], "4.7.1")
-        self.assertEqual(public["CFBundleVersion"], "4.7.1")
+        self.assertEqual(public["CFBundleShortVersionString"], "4.8.0")
+        self.assertEqual(public["CFBundleVersion"], "4.8.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -2176,6 +2313,14 @@ class PubSafetyTests(Fixture):
         b.check_locations(self.paths, self.pc, x360, self.dest, self.source)
         b.check_locations(self.paths, b.clean_path(archive), x360, self.home, self.source)
         b.check_locations(self.paths, b.clean_path(archive), x360, b.clean_path(archive.parent / "Applications"), self.source)
+
+    def test_file_destination_error_names_selected_input(self):
+        # On 7942da5b both filenames fail (2/2); with the fix both pass (2/2).
+        for name in ("Game Archive.7z", "Game Disc {1}.iso"):
+            selected = self.home / "downloads" / name
+            write(selected, b"synthetic input")
+            with self.subTest(name=name), self.assertRaisesRegex(b.SetupError, re.escape(name)):
+                b.check_locations(self.paths, selected, None, selected.parent, self.source)
 
     # F5 (MEDIUM, backend.py:222): a child started just before a Cancel is still stopped.
     def test_F5_cancel_between_spawn_and_registration_leaves_no_child(self):
@@ -3415,7 +3560,7 @@ class CarbonBuildTests(Fixture):
                 self.assertFalse((self.paths.work / "carbon_src").exists())
                 # Execute the production build with only archive dispatch removed.
                 namespace = {}
-                source = inspect.getsource(b.build).replace("carbon = carbon_source.prepare(carbon, paths.work, events)", "validate_carbon(carbon)")
+                source = inspect.getsource(b.build).replace("carbon = carbon_source.prepare(carbon, paths.work, events, pc_update, pc_exe)", "validate_carbon(carbon)")
                 self.assertNotEqual(source, inspect.getsource(b.build))
                 exec(compile(source, str(ROOT / "tools/setup_kit/backend.py"), "exec"), b.__dict__, namespace)
                 setup_kit.__path__ = self.package_path
@@ -3554,7 +3699,7 @@ class CarbonBuildTests(Fixture):
 
     def test_carbon_update_from_its_own_version_and_remembered_folder(self):
         """Carbon's updater inputs: its own version 1.0.0 (Most Wanted's stays), its sources remembered at install in
-        its own Setup state, and an update staged from those alone, bound to its app and profile <data>/Carbon.
+        its own Setup state, and a 1.0.1 update staged from those alone, bound to its app and profile <data>/Carbon.
         Proof: with main 583933e9's tools/setup_kit this fails at its first check (bundle --version 4.6.0); fixed: passes."""
         from setup_kit import apply   # the checked-in launch transaction (the builds below load the build copy's)
         installed, runner = self.carbon_build()
@@ -3571,12 +3716,13 @@ class CarbonBuildTests(Fixture):
         real = b.build
         with mock.patch.object(b, "build", lambda args, paths, events, runner, source_root=None:
                                real(args, paths, events, CarbonRunner(self.log, self.child_env, paths.work), self.source)), \
+             mock.patch.object(b, "CARBON_VERSION", "1.0.1"), \
              self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"), redirect_stdout(self.stream):
             rc = b.main(["--stage-only", "--game", "carbon", "--stage", str(stage), "--work", str(self.paths.work), "--events"])
         self.assertEqual(rc, 0, self.stream.getvalue()[-2000:])
         ready = json.loads((stage / "ready.json").read_text())
         self.assertEqual((ready["version"], ready["app"], ready["profile"], ready["destination"]["path"]),
-                         ("1.0.0", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
+                         ("1.0.1", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
         record, app, data = apply.read_ready(stage / "ready.json", self.paths.data / "Carbon", Path(installed))
         self.assertTrue((Path(app) / "Contents/MacOS/NFSCarbon").is_file())
         self.assertTrue((stage / record["roots"]["pc_root"] / "NFSC.exe").is_file())
@@ -3711,6 +3857,250 @@ class CarbonBuildTests(Fixture):
         self.assertIn("--game carbon requires --build and --carbon", json.loads(self.stream.getvalue())["msg"])
 
 
+class CarbonSetupDiscTests(Fixture):
+    """Real synthetic ISO + RTPatch + supplied executable through the CLI pipeline.
+
+    Base de6085c1: test_disc_cli_check_build_resume fails 1/1 (CLI refuses inputs).
+    Wired implementation: same oracle passes 1/1, including validated installed data.
+    Native compilers/signing are stubbed; extraction, patching and install are real.
+    """
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(Path(__file__).parent))
+        import test_carbon_patch as fixture
+        self.patch_fixture = fixture
+        self.good_exe = b"MZ compatible Carbon fixture"
+        self.exe = self.home / "player/NFSC.exe"
+        write(self.exe, self.good_exe)
+        self.pin = mock.patch.object(b, "CARBON_EXE_SHA256", b.sha_file(self.exe))
+        self.pin.start()
+        self.addCleanup(self.pin.stop)
+        self.update = self.home / "official.exe"
+        self.records = [fixture.record("GLOBAL\\data.bin", fixture.DATA, fixture.CHAIN_CODES),
+                        fixture.record("nfsc.exe", fixture.EXE)]
+        write(self.update, fixture.update_bytes(self.records))
+        import zipfile
+        def archive(files):
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w") as z:
+                for name, data in files.items():
+                    z.writestr(name, data)
+            return out.getvalue()
+        loose = {"nfsc.exe": fixture.EXE[0], "server.dll": b"server"}
+        self.files = {
+            "autorun.inf": "[Special]\r\nDisk=1\r\nProductGuiID={259C0ABB-A3B2-4D70-008F-BF7EE491B70B}\r\n".encode(),
+            "common_filelist.txt": "1,1,nfsc.exe\r\n1,1,server.dll\r\n".encode(),
+            "0compressed.zip": archive({"GLOBAL\\data.bin": fixture.DATA[0]}),
+            "1compressed.zip": archive({"TRACKS\\track.bin": b"track", "MOVIES\\intro.vp6": b"movie"}),
+            **loose}
+        self.disc = make_iso(self.home / "Carbon.iso", self.files)
+
+    def cli(self, *options, expected=0):
+        setup_kit.__path__ = self.package_path
+        real = b.build
+        def build(args, paths, events, runner):
+            return real(args, paths, events, CarbonRunner(self.log, self.child_env, paths.work), self.source)
+        self.stream.seek(0)
+        self.stream.truncate()
+        with self.pipeline_stubs(), mock.patch.object(b, "build", side_effect=build), \
+             mock.patch.object(b, "assert_not_running"), redirect_stdout(self.stream):
+            rc = b.main(["--game", "carbon", "--work", str(self.paths.work), "--events", *options])
+        self.assertEqual(rc, expected, self.stream.getvalue()[-2000:])
+
+    def selection(self):
+        return ["--carbon", str(self.disc), "--pc-update", str(self.update), "--pc-exe", str(self.exe),
+                "--dest", str(self.dest)]
+
+    def test_disc_cli_check_build_resume(self):
+        before = [b.sha_file(p) for p in (self.disc, self.update, self.exe)]
+        self.cli("--check", *self.selection())
+        self.assertEqual(b.validate_carbon(self.paths.work / "carbon_src").read_bytes(), self.good_exe)
+        self.cli("--build", *self.selection())
+        saved = b.staging.load_choices(b.carbon_state(self.paths), required=True)
+        self.assertEqual([saved[k] for k in ("pc", "pc_update", "pc_exe")],
+                         [str(p) for p in (self.disc, self.update, self.exe)])
+        stage = self.home / "update"
+        self.cli("--stage-only", "--stage", str(stage))
+        record = json.loads((stage / "ready.json").read_text())
+        self.assertEqual([record["provenance"][k] for k in ("carbon", "pc_update", "pc_exe")],
+                         [str(p) for p in (self.disc, self.update, self.exe)])
+        root = stage / record["roots"]["pc_root"]
+        self.assertEqual(b.validate_carbon(root).read_bytes(), self.good_exe)
+        self.assertEqual((root / "GLOBAL/data.bin").read_bytes(), self.patch_fixture.DATA[-1])
+        self.assertEqual(sorted(p.name for p in root.rglob("*.exe")), ["NFSC.exe"])
+        self.assertEqual(before, [b.sha_file(p) for p in (self.disc, self.update, self.exe)])
+        self.assertFalse(any((self.paths.work / "tmp").iterdir()))
+        self.assertFalse((self.paths.state / "source-choices.json").exists())
+
+    def prepare(self, update=True, exe=True):
+        return b.carbon_source.prepare(self.disc, self.paths.work, self.events,
+                                       self.update if update else None, self.exe if exe else None)
+
+    def test_disc_build_cache_tracks_patch_and_executable(self):
+        keys = []
+        real = b.cache_key
+        def key(*args, **kwargs):
+            result = real(*args, **kwargs)
+            keys.append(result)
+            return result
+        with mock.patch.object(b, "cache_key", side_effect=key):
+            self.cli("--build", *self.selection())
+            self.cli("--build", *self.selection())
+            self.assertEqual(keys[-1], keys[-2])
+            write(self.update, self.patch_fixture.update_bytes(list(reversed(self.records))))
+            self.cli("--build", *self.selection())
+            self.assertNotEqual(keys[-1], keys[-2])
+            self.exe.write_bytes(self.good_exe + b"changed")
+            with mock.patch.object(b, "CARBON_EXE_SHA256", b.sha_file(self.exe)):
+                self.cli("--build", *self.selection())
+            self.assertNotEqual(keys[-1], keys[-2])
+
+    def test_disc_cli_missing_inputs(self):
+        for flag, message in (("--pc-update", "need the official Carbon update"),
+                              ("--pc-exe", "need your compatible NFSC.exe")):
+            args = self.selection()
+            index = args.index(flag)
+            del args[index:index + 2]
+            self.cli("--check", *args, expected=1)
+            self.assertIn(message, self.stream.getvalue())
+
+    def test_xbox_iso_in_pc_slot_points_to_optional_files(self):
+        # On 7942da5b this test fails (0/1); with the fix it passes (1/1).
+        from setup_kit import xdvdfs
+        from test_car_sources import tiny_iso
+
+        for base in (0, xdvdfs.PARTITION_OFFSETS[1]):
+            xbox = self.home / f"console-{base}.iso"
+            with xbox.open("wb") as image:
+                image.seek(base)
+                image.write(tiny_iso({"default.xex": b"XEX2"}))
+            with self.subTest(base=base):
+                with xbox.open("rb") as image:
+                    self.assertIn("DEFAULT.XEX", xdvdfs.inventory(image))
+                with self.assertRaises(b.SetupError) as error:
+                    b.carbon_source.prepare(xbox, self.paths.work, self.events)
+                self.assertEqual(str(error.exception), "This is an Xbox 360 disc image.")
+                self.assertEqual(error.exception.fix,
+                                 "Add it under Xbox 360 files (optional). Choose your PC game first.")
+
+    def test_pc_disc_with_xbox_magic_in_file_data(self):
+        # On 999f865a Check fails (0/1); with PC disc recognition first it passes (1/1).
+        from setup_kit import xdvdfs
+
+        # make_iso puts its first file at sector 21. The marker lives 11 sectors into that file.
+        self.disc = make_iso(self.disc, {"pad.bin": bytes(11 * xdvdfs.SECTOR) + xdvdfs.MAGIC, **self.files})
+        with self.disc.open("rb") as image:
+            self.assertEqual(xdvdfs.find_base(image), 0)
+        self.cli("--check", *self.selection())
+
+    def test_disc_helper_fix_uses_setup_labels(self):
+        # On 7942da5b this test fails (0/1); with the fix it passes (1/1).
+        for update, exe in ((False, True), (True, False)):
+            with self.subTest(update=update, exe=exe):
+                with self.assertRaises(b.SetupError) as error:
+                    self.prepare(update, exe)
+                self.assertEqual(error.exception.fix,
+                                 "Use Carbon update to select the official update and NFSC.exe to select your compatible game executable.")
+
+    def test_missing_carbon_disc_fix_points_to_sibling_inputs(self):
+        # On 7942da5b this test fails (0/1); with the fix it passes (1/1).
+        self.disc = make_iso(self.disc, dict(self.files, **{
+            "common_filelist.txt": self.files["common_filelist.txt"] + b"2,1,\r\n"}))
+        with self.assertRaisesRegex(b.SetupError, "Disc 2 of the set") as error:
+            self.prepare()
+        self.assertEqual(error.exception.fix,
+                         "Keep all disc images together, or copy each disc into its own folder beside the others. Then choose disc 1 again.")
+
+    def test_disc_missing_inputs_and_wrong_exe(self):
+        for update, exe, message in ((False, True, "need the official Carbon update"),
+                                      (True, False, "need your compatible NFSC.exe")):
+            with self.subTest(message=message), self.assertRaisesRegex(b.SetupError, message):
+                self.prepare(update, exe)
+        for data in (b"wrong executable", self.patch_fixture.EXE[0]):
+            self.exe.write_bytes(data)
+            with self.assertRaisesRegex(b.SetupError, "NFSC.exe is not the supported PC release of Need for Speed Carbon"):
+                self.prepare()
+        self.assertFalse((self.paths.work / "carbon_src").exists())
+
+    def test_disc_wrong_edition_patch_and_cancel_cleanup(self):
+        f = self.patch_fixture
+        write(self.update, f.update_bytes([self.records[0], f.record("nfsc.exe", (b"wrong-edition", b"target"))]))
+        with self.assertRaisesRegex(b.SetupError, "wrong edition or changed file"):
+            self.prepare()
+        self.assertFalse((self.paths.work / "carbon_src").exists())
+        self.assertFalse(any((self.paths.work / "tmp").iterdir()))
+        write(self.update, f.update_bytes(self.records))
+        # Cancel during patch output, after the raw executable was extracted.
+        real = b.carbon_source.carbon_patch.Update.apply
+        def cancelled(patch, source, destination, progress=None):
+            def stop(*args):
+                raise b.Cancelled()
+            return real(patch, source, destination, progress=stop)
+        with mock.patch.object(b.carbon_source.carbon_patch.Update, "apply", cancelled), self.assertRaises(b.Cancelled):
+            self.prepare()
+        self.assertFalse((self.paths.work / "carbon_src").exists())
+        self.assertFalse((self.paths.work / "carbon_src.json").exists())
+        self.assertFalse(any((self.paths.work / "tmp").iterdir()))
+        b.validate_carbon(self.prepare())
+
+    def test_disc_cache_binds_every_input(self):
+        module = b.carbon_source.carbon_patch
+        real = module.Update.apply
+        with mock.patch.object(module.Update, "apply", autospec=True, side_effect=real) as apply:
+            self.prepare()
+            self.prepare()
+            self.assertEqual(apply.call_count, 1)
+            # Another supported patch container with the same outputs still invalidates.
+            write(self.update, self.patch_fixture.update_bytes(list(reversed(self.records))))
+            self.prepare()
+            self.assertEqual(apply.call_count, 2)
+            self.exe.write_bytes(self.good_exe + b"changed")
+            with mock.patch.object(b, "CARBON_EXE_SHA256", b.sha_file(self.exe)):
+                b.validate_carbon(self.prepare())
+            self.assertEqual(apply.call_count, 3)
+            self.files["server.dll"] = b"changed disc data"
+            make_iso(self.disc, self.files)
+            with mock.patch.object(b, "CARBON_EXE_SHA256", b.sha_file(self.exe)):
+                self.assertEqual((self.prepare() / "server.dll").read_bytes(), b"changed disc data")
+            self.assertEqual(apply.call_count, 4)
+
+
+class PrivateCarbonSetupTests(unittest.TestCase):
+    @unittest.skipUnless(all(os.environ.get(k) for k in ("CARBON_DISC_IMAGE", "CARBON_PATCH_EXE", "CARBON_PLAYER_EXE")),
+                         "private Carbon disc/update/executable paths not supplied")
+    def test_private_cli_build(self):
+        """Opt-in full CLI build; scratch outputs are confined to the worktree and deleted."""
+        selected = [Path(os.environ[k]).resolve() for k in ("CARBON_DISC_IMAGE", "CARBON_PATCH_EXE", "CARBON_PLAYER_EXE")]
+        if not all(p.is_file() for p in selected):
+            self.skipTest("private Carbon inputs absent")
+        with tempfile.TemporaryDirectory(prefix="carbon-setup-private-", dir=ROOT / ".metal-cache") as td:
+            base = Path(td)
+            # A packaged payload beside work keeps Setup's normal source protection intact.
+            payload = base / "payload"
+            b.copy_source(ROOT, payload, b.source_inventory(ROOT, b.CARBON_EXTS))
+            real_build = b.build
+            with mock.patch.dict(os.environ, {"NFSMW_SETUP_HOME": str(base / "home")}), \
+                 mock.patch.object(b, "ROOT", payload), \
+                 mock.patch.object(b, "build", side_effect=functools.partial(real_build, source_root=payload)):
+                rc = b.main(["--build", "--game", "carbon", "--carbon", str(selected[0]),
+                             "--pc-update", str(selected[1]), "--pc-exe", str(selected[2]),
+                             "--dest", str(base / "apps"), "--work", str(base / "work")])
+                paths = b.Paths(base / "work")
+                if rc == 0:
+                    roots = dict(line.split("=", 1) for line in (paths.data / "Carbon/roots.txt").read_text().splitlines())
+                    root = Path(roots["pc_root"])
+                else:
+                    root = paths.work / "carbon_src"
+                if root.is_dir():
+                    b.validate_carbon(root)
+                    files = [p for p in root.rglob("*") if p.is_file()]
+                    print("Private Carbon CLI: validate_carbon PASS; files=%d bytes=%d" %
+                          (len(files), sum(p.stat().st_size for p in files)))
+                logs = sorted(paths.logs.glob("*.log"), key=lambda p: p.stat().st_mtime)
+                tail = "\n".join(logs[-1].read_text(errors="replace").splitlines()[-30:])[-6000:] if logs else "No build log."
+                self.assertEqual(rc, 0, tail)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == '--carbon-repack-iso':
         selected = Path(sys.argv[2]).expanduser() if len(sys.argv) > 2 else Path('/absent')
@@ -3719,4 +4109,10 @@ if __name__ == "__main__":
             sys.exit(3)
         os.environ['CARBON_REPACK_ISO'] = str(selected.resolve())
         sys.argv[1:] = ['CarbonRepackTests.test_real_repack_iso']
+    if '--private-carbon-disc' in sys.argv:
+        if not all(os.environ.get(k) and Path(os.environ[k]).is_file()
+                   for k in ('CARBON_DISC_IMAGE', 'CARBON_PATCH_EXE', 'CARBON_PLAYER_EXE')):
+            print('SKIP: private Carbon inputs absent')
+            sys.exit(3)
+        sys.argv[1:] = ['PrivateCarbonSetupTests.test_private_cli_build']
     unittest.main(verbosity=2)

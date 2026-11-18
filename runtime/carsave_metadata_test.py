@@ -14,6 +14,8 @@ catalog, alongside its original stale-generation control.
 All opens use the WO2 owner-directory interposer before libc. Hard links are
 refused with EPERM by that fixture; the real metadata reader object supplies
 count/get and backup hooks. Exclusive-rename backups preserve 53/53 checks.
+Reservation removal: original dependency encoder misbinds 12/12 rows, fixed
+0/12; original reader admits 11/13 prior saves, fixed 13/13 without editing them.
 """
 from pathlib import Path
 import hashlib
@@ -45,6 +47,17 @@ static unsigned checks,failures;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; fprintf(stderr,"FAIL line %u: %s\n",__LINE__,#x); } } while(0)
 #define SIZE 0xF848u
 static unsigned char mask[12]={1};
+#define TYPES 84u
+#define MAX_ADDITIONS 76u
+#define PVEHICLE 0x4A97EC8Fu
+#define TABLE 0x200u
+#define STRIDE 0xD0u
+typedef struct { uint32_t ecx, esp, eax; } Cpu;
+static int call_guest(Cpu *c,unsigned addr,int count,const uint32_t *args) {
+    return addr==0x00455FD0 && count==2 && args[0]==PVEHICLE;
+}
+static void f_005816B0_orig(Cpu *c) { c->eax=M32(c->ecx+8); c->esp+=4; }
+DEPENDENCIES
 static void digest(unsigned char *b) { CC_MD5(b+16,SIZE-32,b+SIZE-16); }
 static void keypath(const unsigned char *b,const char *suffix,char out[4096]) {
     unsigned char hash[32]; char key[65]; CC_SHA256(b,SIZE,hash);
@@ -68,7 +81,7 @@ static int publish(const char *path,const unsigned char *b,int complete) {
     return ok;
 }
 void extratrax_save_complete(int committed) { }
-void padbind_save_complete(int committed) { }
+int padbind_save_complete(int committed) { (void)committed; return 1; }
 int main(int argc,char **argv) {
     assert(argc==4); userroot=argv[3];
     private_cars_metadata_userdata(userroot);
@@ -76,6 +89,40 @@ int main(int argc,char **argv) {
     int cat=private_cars_init(argv[1],!off,NULL,0);
     char path[4096]; snprintf(path,sizeof path,"%s/TEST",userroot);
     unsigned char b[SIZE],old[SIZE],out[SIZE];
+    if(!strcmp(argv[2],"fixed-mask")) {
+        assert(!cat);
+        for(unsigned type=148;type<=159;++type) {
+            memset(b,0,sizeof b); memset(b+0x5BA1,0xFF,200*20);
+            uint32_t row[5]={0,0,type,0,0}; memcpy(b+0x5BA1,row,sizeof row); digest(b);
+            const PrivateCar *inventory=private_cars_inventory_get(0);
+            assert(!strcmp(inventory[74].name,"LAM_GAL_SUP_08") && !inventory[75].selected);
+            memcpy(G+512,b+0x5BA1,200*20);
+            Cpu c={.esp=256}; unsigned char used[12],expected[12]={0}; unsigned k=type-85;
+            expected[k/8]=1u<<(k%8);
+            const char *why=car85_profile_dependencies(&c,512,inventory,private_cars_inventory_count(),used);
+            if(!why) why=private_cars_metadata_stage(b,SIZE,used);
+            CHECK(!why && !memcmp(used,expected,sizeof used) && !private_cars_metadata_admit(b,SIZE,expected));
+        }
+        printf("correct dependency rows=%u/12\n",checks-failures);
+        return failures?1:0;
+    }
+    if(!strncmp(argv[2],"prior",5)) {
+        assert(!cat); readsave(path,b);
+        memcpy(G+512,b+0x5BA1,200*20);
+        Cpu c={.esp=256}; unsigned char used[12];
+        const char *why=car85_profile_dependencies(&c,512,private_cars_inventory_get(0),private_cars_inventory_count(),used);
+        if(!why) why=private_cars_verify_save(b,SIZE);
+        if(!why) why=private_cars_metadata_admit(b,SIZE,NULL);
+        if(!why) why=private_cars_metadata_admit(b,SIZE,used);
+        CHECK(!why);
+        if(!why && !strcmp(argv[2],"prior-copy")) {
+            memcpy(old,b,SIZE);
+            CHECK(!private_cars_metadata_stage(b,SIZE,used)); CHECK(publish(path,b,1));
+            readsave(path,out); CHECK(!memcmp(b,out,SIZE)); CHECK(!memcmp(old+16,out+16,SIZE-16));
+        }
+        printf("prior admission checks=%u failures=%u\n",checks,failures);
+        return failures?1:0;
+    }
     // Include the selected own-slot FORDGT as well as addition 84.
     mask[10]=1;
     if(strcmp(argv[2],"seed")) {
@@ -252,6 +299,40 @@ def tree_hash(root):
             for p in root.rglob('*') if p.is_file()}
 
 
+OLD_POSITION = '''        if(type>=TYPES+MAX_ADDITIONS) { reason="Unrecognized saved car identity."; break; }
+        if(type>=TYPES) { unsigned k=type-TYPES; used[k/8]|=1u<<(k%8); continue; }'''
+OLD_SIGNATURE = '''    if (memcmp(m->compatibility,compatibility,sizeof compatibility) || (m->used[11]&0xFC))
+        return "Car catalog compatibility metadata is stale.";'''
+assert hashlib.sha256(OLD_POSITION.encode()).hexdigest() == '4fd98e977c7564105385eab8f0e9d5ba199f092ec57cf3af6bd77bfb682151ae'
+assert hashlib.sha256(OLD_SIGNATURE.encode()).hexdigest() == '08752374442b9f2a427e897d8725fecf4c2c91697d49bf45392f1c975b5a4d27'
+
+
+def prior_profile(user, catalog, type_id, reserved):
+    """Encode the old header and write-ahead record independently of the runtime."""
+    rows = catalog['cars'].copy()
+    signature = catalog['compatibility']
+    if reserved:
+        rows.insert(63, None)  # No dependency on reservation 147 in this fixture.
+        signature = 'b2b747635492d556ae9457d9fe4f6b5f97951bc04da84557efa455c6b07d9db2'
+    index = type_id - 84
+    used = (1 << index).to_bytes(12, 'little')
+    identity = bytes([index]) + b''.join(rows[index][key].encode()+b'\0' for key in ('name', 'donor', 'source', 'price_donor'))
+    compatibility = signature.encode()+b'\0'
+    record = (b'NFSCAR3\x01' + catalog['generation'].encode().ljust(64,b'\0') + compatibility + used
+              + hashlib.sha256(compatibility+used+identity).digest())
+    body = bytearray(0xF848)
+    body[0x5BA1:0x5BA1+200*20] = b'\xff'*(200*20)
+    body[0x5BA1:0x5BA1+20] = b'\0'*8+type_id.to_bytes(4,'little')+b'\0'*8
+    body[:16] = record[:8]+hashlib.sha256(record).digest()[:8]
+    body[-16:] = hashlib.md5(body[16:-16]).digest()
+    save_hash = hashlib.sha256(body)
+    record += save_hash.digest()
+    journal = user/'.car-catalog'
+    journal.mkdir(parents=True)
+    (journal/f'{save_hash.hexdigest()}.meta').write_bytes(record+hashlib.sha256(record).digest())
+    (user/'TEST').write_bytes(bytes(36)+body)
+
+
 def main():
     fixtures = saves.fixtures
     with tempfile.TemporaryDirectory(prefix='carsave-metadata-') as directory:
@@ -297,8 +378,10 @@ def main():
         assert traffic_data['cars']==fixtures.pc.verify(stale)['cars']
         scan = audit.marked('runtime/boot.c','// BEGIN offline save scan:','// END offline save scan')
         layer = audit.marked('runtime/boot.c','// BEGIN offline file layer:','// END offline file layer')
-        prefix = '#include <assert.h>\n'+audit.FILE_PREFIX
-        source = saves.GUARD+prefix+scan+layer+MAIN
+        prefix = '#include <assert.h>\n'+audit.FILE_PREFIX.replace('guest[4096]', 'guest[8192]')
+        dependencies = (ROOT/'runtime/car85.c').read_text().split('const char *car85_profile_dependencies(',1)[1].split('\n}',1)[0]
+        dependencies = 'const char *car85_profile_dependencies('+dependencies+'\n}'
+        source = saves.GUARD+prefix+scan+layer+MAIN.replace('DEPENDENCIES',dependencies)
         private = (ROOT/'runtime/private_cars.c').read_text()
         for variant in ('good','old-loader','generation','compat','journal','dependencies','prepare'):
             actual, file_source = private, source
@@ -313,11 +396,11 @@ def main():
             elif variant=='generation':
                 actual=actual.replace('if (!generation[0])\n        return "Required','if (!generation[0] || memcmp(m->generation,generation,sizeof generation))\n        return "Required')
             elif variant=='compat':
-                actual=actual.replace('memcmp(m->compatibility,compatibility,sizeof compatibility) || ','0 /* deliberately skip signature */ || ')
+                actual=actual.replace('else if (memcmp(m->compatibility,compatibility,sizeof compatibility))','else if (0) /* deliberately skip signature */')
             elif variant=='journal':
                 actual=actual.replace('if(metadata_write(&m))', 'if(0) /* deliberately omit durable journal */')
             elif variant=='dependencies':
-                actual=actual.replace('if(used && memcmp(m.used,used,sizeof m.used))','if(0) /* deliberately ignore used cars */')
+                actual=actual.replace('if (used && required!=(dependency(used,k)!=0))','if(0) /* deliberately ignore used cars */')
             elif variant=='prepare':
                 file_source=file_source.replace('!SAVE_TIME("provenance.prepare", private_cars_save_prepare(s->temp))', '0 /* deliberately publish without metadata */')
             if variant!='good': assert actual!=private or file_source!=source
@@ -338,7 +421,7 @@ def main():
             key=hashlib.sha256(payload).hexdigest()
             record=(user/'.car-catalog'/f'{key}.pending').read_bytes()
             catalog_data=json.loads((catalog/json.loads((catalog/'current.json').read_bytes())['generation']/'catalog.json').read_bytes())
-            assert len(record)==245 and record[:8]==b'NFSCAR3\x01'
+            assert len(record)==245 and record[:8]==b'NFSCAR3\x02'
             assert record[8:72].rstrip(b'\0').decode()==catalog_data['generation']
             assert record[72:137].rstrip(b'\0').decode()==catalog_data['compatibility']
             used=bytes([1]+[0]*9+[1,0]); assert record[137:149]==used
@@ -361,7 +444,7 @@ def main():
             # Forged marker: same save, different compatibility signature -> refused.
             forged=root/('forged-'+variant); (forged/'.car-catalog').mkdir(parents=True)
             rec=bytearray(record); rec[72]=ord('0') if rec[72]!=ord('0') else ord('1')
-            marker=b'NFSCAR3\x01'+hashlib.sha256(bytes(rec[:181])).digest()[:8]
+            marker=bytes(rec[:8])+hashlib.sha256(bytes(rec[:181])).digest()[:8]
             body=bytearray(payload); body[:16]=marker
             rec[181:213]=hashlib.sha256(bytes(body)).digest(); rec[213:245]=hashlib.sha256(bytes(rec[:213])).digest()
             (forged/'TEST').write_bytes((user/'TEST').read_bytes()[:36]+bytes(body))
@@ -369,6 +452,64 @@ def main():
             result=subprocess.run([str(exe),str(catalog),'refuse',str(forged)],capture_output=True,text=True)
             print(variant,'forged signature',result.stdout.strip())
             assert result.returncode==(1 if variant=='compat' else 0),result.stderr[-2000:]
+
+        high_catalog = root/'high-catalog'
+        high_src = root/'U/CARS'
+        src['UPC'] = high_src
+        for row in catalog_data['cars']:
+            if 148 <= row['id'] <= 159:
+                for base, name in ((high_src, row['name']), (mw, row['donor'])):
+                    pack = base/name
+                    pack.mkdir(parents=True,exist_ok=True)
+                    for filename in fixtures.pc.PACKS:
+                        (pack/filename).write_bytes((name+filename).encode())
+        def high_adapter(row):
+            if 148 <= row['id'] <= 159:
+                return fixtures.fixture_converter,'synthetic-contract-v1'
+            return fixtures.adapter(row)
+
+        high_data = fixtures.pc.build(high_catalog,mw,src,adapter=high_adapter)
+        high_approvals = {r['source']: dict(evidence='synthetic reservation contract', **{f:r['outputs'][f]['sha256'] for f in fixtures.pc.PACKS})
+                          for r in high_data['cars'] if r['status']=='converted'}
+        approval.write_bytes(fixtures.pc.encoded(high_approvals))
+        high_data = fixtures.pc.build(high_catalog,mw,src,approvals=approval,adapter=high_adapter)
+        assert all(r['approval']=='approved' for r in high_data['cars'] if 148<=r['id']<=159)
+        start = dependencies.index('        if(type>=TYPES)')
+        end = dependencies.index('        uint32_t table',start)
+        old_dependencies = (dependencies[:start]+OLD_POSITION+'\n'+dependencies[end:]).replace('for(size_t k=0;k<count;++k)', 'for(size_t k=76;k<count;++k)')
+        start = private.index('    enum SaveLayout layout=CURRENT;')
+        end = private.index('    unsigned char hash[32]; dependencies_hash',start)
+        old_catalog = private[:start]+'    enum SaveLayout layout=CURRENT;\n'+OLD_SIGNATURE+'\n'+private[end:]
+        (root/'metadata.c').write_text(saves.GUARD+old_catalog)
+        (root/'test.c').write_text(source.replace(dependencies,old_dependencies))
+        old_exe = root/'pre-fix'
+        build = subprocess.run(['clang',str(ROOT/'runtime/car_grip.c'),str(ROOT/'runtime/car_physics.c'),'-O1','-g','-fsanitize=address','-I'+str(ROOT/'runtime'),
+                                str(root/'test.c'),str(root/'metadata.c'),'-o',str(old_exe)],capture_output=True,text=True)
+        assert build.returncode==0,build.stderr[-3500:]
+        for binary, correct in ((old_exe,0),(root/'good',12)):
+            user = root/(binary.name+'-high'); user.mkdir()
+            result = subprocess.run([str(binary),str(high_catalog),'fixed-mask',str(user)],capture_output=True,text=True)
+            print(binary.name,result.stdout.strip())
+            assert result.returncode==(correct!=12) and f'rows={correct}/12' in result.stdout,result.stderr[-2000:]
+            admitted = 0
+            for reserved,type_id in [(True,148),*((False,t) for t in range(148,160))]:
+                career = user/f'prior-{reserved}-{type_id}'
+                prior_profile(career,high_data,type_id,reserved)
+                before = tree_hash(career)
+                result = subprocess.run([str(binary),str(high_catalog),'prior',str(career)],capture_output=True,text=True)
+                assert result.returncode in (0,1) and 'admission checks=1' in result.stdout,result.stderr[-2000:]
+                admitted += result.returncode==0
+                assert tree_hash(career)==before
+                if reserved and correct==12:
+                    original = (career/'TEST').read_bytes()
+                    result = subprocess.run([str(binary),str(high_catalog),'prior-copy',str(career)],capture_output=True,text=True)
+                    assert result.returncode==0,result.stderr[-2000:]
+                    assert (career/'TEST').read_bytes()!=original
+                    assert [p.read_bytes() for p in (career/'backups').glob('*.bak')]==[original]
+                    assert all(tree_hash(career)[p]==h for p,h in before.items() if p!='TEST')
+            expected = 13 if correct==12 else 11
+            print(binary.name,f'prior admitted={admitted}/13')
+            assert admitted==expected
     return 0
 
 if __name__=='__main__': raise SystemExit(main())

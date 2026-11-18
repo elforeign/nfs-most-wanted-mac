@@ -54,7 +54,7 @@ PRE = r'''
 @end
 static Device *mtl;
 enum {MTLResourceStorageModeShared=0,GLASS_UV1_NONE=-2};
-typedef struct {uint32_t guest,size,mem[1];} Obj;
+typedef struct {uint32_t guest,size,mem[1]; void *gpu;} Obj;
 static uint8_t G[512];
 static int diag_on=1,hashes,rows;
 static struct {unsigned long long glass_stale_mid;} ad1;
@@ -75,14 +75,14 @@ static int mat_glass_uv1(const uint8_t *b,uint32_t n,const float **y,uint32_t *m
 MAIN = r'''
 int main(int argc,char **argv){@autoreleasepool{
     (void)argv;if(argc>1)diag_on=0;
-    mtl=[Device new];Obj vb={1,288,{0}};
+    mtl=[Device new];Obj vb={.guest=1,.size=288,.mem={1}};uint8_t *bytes=G+vb.mem[0];
     for(int i=0;i<1000;i++){
-        if(i==200)G[128]=1;
-        if(i==400)G[128]=0;
-        if(i==500)G[0]=1;
-        if(i==600)G[180]=1;
-        if(i==800)G[0]=0;
-        if(i==900)G[180]=0;
+        if(i==200)bytes[128]=1;
+        if(i==400)bytes[128]=0;
+        if(i==500)bytes[0]=1;
+        if(i==600)bytes[180]=1;
+        if(i==800)bytes[0]=0;
+        if(i==900)bytes[180]=0;
         GlassUV1 *u=glass_uv1_for(&vb);
         if(!u || u->n!=8 || u->row!=-1 || u->matched)return 2;
         float *f=u->buf.contents;
@@ -91,7 +91,9 @@ int main(int argc,char **argv){@autoreleasepool{
         if(ad1.glass_stale_mid!=(diag_on?want:0))return 2;
     }
     if(glass_uv1_for(NULL))return 2;
-    Obj bad={2,37,{0}};if(glass_uv1_for(&bad))return 2;
+    Obj bad={.guest=2,.size=37,.mem={1}};if(glass_uv1_for(&bad))return 2;
+    RenderBuf *gpu=vb.gpu;
+    if(gpu){gpu->glass_uv1=nil;free(gpu);}
     printf("hashes=%d stale=%llu rows=%d\n",hashes,ad1.glass_stale_mid,rows);
     return hashes>(diag_on?7:0);
 }}
@@ -106,8 +108,9 @@ def main():
         td=Path(td)
         for label,source in (('old',BASELINE),('current',function(render,'glass_uv1_for'))):
             path=td/(label+'.m');exe=td/label
-            path.write_text(PRE+interface+POST+source+MAIN)
-            p=subprocess.run(['clang','-fobjc-arc','-Wall','-Wextra','-Werror',str(path),'-framework','Foundation','-o',str(exe)],capture_output=True,text=True)
+            payload=next(line for line in render.splitlines() if line.endswith('} RenderBuf;'))
+            path.write_text(PRE+interface+payload+POST+source+MAIN)
+            p=subprocess.run(['clang','-fobjc-arc','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',str(path),'-framework','Foundation','-o',str(exe)],capture_output=True,text=True)
             assert p.returncode==0,p.stderr[-2500:]
             p=subprocess.run([str(exe)],capture_output=True,text=True)
             expected=f'hashes={1000 if label=="old" else 7} stale=500 rows=3'

@@ -1,6 +1,18 @@
+#include "blackbox.h"
 #include "game_select.h"
 #include <stdint.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdarg.h>
+#include <string.h>
 static uint64_t diag_capture_late(uint64_t *from);
+static pthread_mutex_t file_mu = PTHREAD_MUTEX_INITIALIZER;
+void report_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // report.m
+void report_frame(uint64_t frame, uint32_t flow);
+void report_auto(const char *why, const char *diag_file);
+void portmenu_frame(void);
+static void dump_ring(FILE *f, int last);
 #if NFS_GAME == NFS_GAME_MW
 // diag.c - diagnostic mode: one run records everything needed to diagnose it afterwards.
 //
@@ -30,6 +42,7 @@ static uint64_t diag_capture_late(uint64_t *from);
 // <dir>/hd_compare/   X360 HD texture validation: PC texture | X360 level at the PC size, one PNG per texture hash
 // <dir>/timeline.log  loading and the race start in game time: events, messages, sim tasks, milestones (below)
 // <dir>/profile_N.txt  where the game thread spent a frame slower than BOOT_DIAG_PROFILE ms (default 100)
+// <dir>/profile_session.txt  where the game thread spent the whole session (diag_profile.h)
 // <dir>/probe.txt      BOOT_DIAG_PROBE=<features>: does each render feature's output reach the presented frame (probe.m)
 // <dir>/crash.txt      the same on a crash, a stop on an unimplemented import/method, or a runtime error
 //
@@ -43,9 +56,7 @@ static uint64_t diag_capture_late(uint64_t *from);
 #include <malloc/malloc.h>
 #include <math.h>
 #include <execinfo.h>
-#include <pthread.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -64,83 +75,12 @@ static FILE *events_f, *frames_f;
 static uint64_t frame_now, last_frame_ns;
 static int idle_now;                     // diag_idle
 static int exiting;
-void diag_begin_exit(void) { __atomic_store_n(&exiting, 1, __ATOMIC_RELEASE); }
+void diag_profile_session_write(void);   // diag_profile.h
+void diag_begin_exit(void) { __atomic_store_n(&exiting, 1, __ATOMIC_RELEASE); diag_profile_session_write(); }
 static int shot_every = 3600;            // periodic overview shots (frame_NNNNN.jpg, small); 0 = none
 static FILE *timeline_f;                 // timeline.log (below)
 static float timeline_race0 = -1, timeline_secs = 60;
 void diag_timeline(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-
-// ---------------- event ring ----------------
-#define RING 65536
-#define LINE 192
-static char ring[RING][LINE];
-// Call records (imports and COM methods, millions a second) are stored raw and formatted only when a report is written.
-static struct { uint64_t frame; const char *name; uint32_t v[8]; uint32_t tid; uint8_t nargs, raw; } rawrec[RING];
-static volatile uint32_t ring_head;
-static pthread_mutex_t file_mu = PTHREAD_MUTEX_INITIALIZER;
-
-uint32_t diag_thread_id(void);   // threads.c
-
-void diag_call_ring(const char *name, int nargs, const uint32_t *args, uint32_t ret, uint32_t ra) {
-    uint32_t i = __atomic_fetch_add(&ring_head, 1, __ATOMIC_RELAXED) % RING;
-    rawrec[i].frame = frame_now;
-    rawrec[i].tid = diag_thread_id();
-    rawrec[i].name = name;
-    rawrec[i].nargs = (uint8_t)(nargs < 6 ? nargs : 6);
-    for (int k = 0; k < rawrec[i].nargs; ++k) rawrec[i].v[k] = args[k];
-    rawrec[i].v[6] = ret; rawrec[i].v[7] = ra;
-    rawrec[i].raw = 1;
-}
-static const char *ring_line(uint32_t i, char *buf, size_t n) {
-    if (!rawrec[i].raw) return ring[i];
-    int k = snprintf(buf, n, "f%llu t%u %s(", (unsigned long long)rawrec[i].frame, rawrec[i].tid, rawrec[i].name);
-    for (int a = 0; a < rawrec[i].nargs && k < (int)n; ++a) k += snprintf(buf + k, n - (size_t)k, a ? ", %X" : "%X", rawrec[i].v[a]);
-    if (k < (int)n) snprintf(buf + k, n - (size_t)k, ") -> %X @%08X", rawrec[i].v[6], rawrec[i].v[7]);
-    return buf;
-}
-static uint32_t ring_put(const char *fmt, va_list ap) {
-    uint32_t i = __atomic_fetch_add(&ring_head, 1, __ATOMIC_RELAXED) % RING;
-    rawrec[i].raw = 0;
-    int n = snprintf(ring[i], LINE, "f%llu t%u ", (unsigned long long)frame_now, diag_thread_id());
-    vsnprintf(ring[i] + n, LINE - (size_t)n, fmt, ap);
-    return i;
-}
-void diag_event_ring(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    ring_put(fmt, ap);
-    va_end(ap);
-}
-void diag_event(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    va_list file_ap;
-    va_copy(file_ap, ap);
-    uint64_t frame = frame_now;
-    uint32_t tid = diag_thread_id();
-    ring_put(fmt, ap);
-    va_end(ap);
-    if (events_f) {
-        pthread_mutex_lock(&file_mu);
-        // Keep the crash ring compact, but don't truncate file events to its 192-byte slots: audiochain's byte
-        // totals grow during long runs and would otherwise lose the callback-gap/encode maxima at the end.
-        fprintf(events_f, "f%llu t%u ", (unsigned long long)frame, tid);
-        vfprintf(events_f, fmt, file_ap);
-        fputc('\n', events_f);
-        pthread_mutex_unlock(&file_mu);
-    }
-    va_end(file_ap);
-}
-void report_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // report.m
-void report_frame(uint64_t frame, uint32_t flow);
-void report_auto(const char *why, const char *diag_file);
-void portmenu_frame(void);
-static void dump_ring(FILE *f, int last) {
-    uint32_t head = ring_head, start = head > (uint32_t)last ? head - (uint32_t)last : 0;
-    fprintf(f, "\n==== last %u events ====\n", head - start);
-    char buf[LINE];
-    for (uint32_t k = start; k < head; ++k) fprintf(f, "%s\n", ring_line(k % RING, buf, sizeof buf));
-}
 
 // ---------------- symbols: the game's function names (decomp/functions.tsv) ----------------
 typedef struct { uint32_t addr; char *name; } Sym;
@@ -282,6 +222,7 @@ void diag_report(const char *file, const char *why) {
     uint32_t sn, spn, sb, spb, ssz;
     sstr_pool_stats(&sn, &spn, &sb, &spb, &ssz);
     fprintf(f, "shared string pool: %u strings, %u of %u bytes (peak %u strings, %u bytes)\n", sn, sb, ssz, spn, spb);
+    blackbox_export(f, !strncmp(file, "stall", 5) ? BB_STALL : !strncmp(file, "hang", 4) ? BB_HANG : BB_CRASH);
     report_f = f;
     fprintf(f, "\n-- reporting thread --\n");
     write_backtrace(f);
@@ -295,7 +236,6 @@ void diag_report(const char *file, const char *why) {
     fprintf(stderr, "boot: diagnostic report written: %s (%s)\n", path, why);
     if (!strcmp(file, "crash.txt") || !strncmp(file, "hang", 4)) report_auto(why, path);   // report.m: a report folder too
 }
-void diag_ring_dump(FILE *f, int last) { dump_ring(f, last); }   // report.m
 
 static void crash_signal(int sig) {
     static int once;
@@ -306,91 +246,8 @@ static void crash_signal(int sig) {
     _exit(128 + sig);
 }
 
-// ---------------- slow-frame profiler ----------------
-// <dir>/profile_N.txt: a frame that takes longer than BOOT_DIAG_PROFILE ms (default 100; 0 = off; at most 20 frames)
-// is sampled every ~2 ms (the game thread's host stack, so translated functions show as f_XXXXXXXX with the game's
-// name, host code by its own): functions by inclusive and self samples, and the most common stacks. Shows where a
-// load hitch goes without a profiler attached.
-static pthread_t game_thread;
-static int have_game_thread;
-#define PROF_SAMPLES 4096
-#define PROF_DEPTH 48
-static void *prof_pcs[PROF_SAMPLES][PROF_DEPTH];
-static uint8_t prof_depth[PROF_SAMPLES];
-static int prof_n, prof_files, prof_max = 20;   // BOOT_DIAG_PROFILE_MAX: how many profile_N.txt (default 20)
-static uint64_t prof_frame_ns, prof_frame_no;
-static void prof_name(void *pc, char *buf, size_t n) {
-    Dl_info di;
-    const char *s = dladdr(pc, &di) && di.dli_sname ? di.dli_sname : NULL;
-    if (s && !strncmp(s, "f_00", 4) && strlen(s) >= 10) {
-        uint32_t a = (uint32_t)strtoul(s + 2, NULL, 16), off = 0;
-        const char *g = diag_symbol(a, &off);
-        snprintf(buf, n, "%s %s", s, g ? g : "?");
-    } else if (s) snprintf(buf, n, "%s", s);
-    else snprintf(buf, n, "%p", pc);
-}
-typedef struct { void *pc; int incl, self; } ProfFn;
-static int cmp_incl(const void *a, const void *b) { return ((const ProfFn *)b)->incl - ((const ProfFn *)a)->incl; }
-static int cmp_self(const void *a, const void *b) { return ((const ProfFn *)b)->self - ((const ProfFn *)a)->self; }
-static void prof_write(uint64_t end_ns) {
-    if (prof_n == 0 || prof_files >= prof_max) return;
-    char path[1024], nm[256];
-    snprintf(path, sizeof path, "%s/profile_%d.txt", diag_dir, ++prof_files);
-    FILE *f = fopen(path, "w");
-    if (!f) return;
-    fprintf(f, "frame %llu took %.1f ms; %d samples of the game thread (~2 ms apart, from %d ms into the frame)\n",
-            (unsigned long long)prof_frame_no, (end_ns - prof_frame_ns) / 1e6, prof_n,
-            getenv("BOOT_DIAG_PROFILE") ? atoi(getenv("BOOT_DIAG_PROFILE")) : 100);
-    static ProfFn fns[8192];
-    int nf = 0;
-    for (int s = 0; s < prof_n; ++s) {
-        void *start[PROF_DEPTH];                     // functions by their symbol's start: counted once per sample
-        for (int d = 0; d < prof_depth[s]; ++d) {
-            Dl_info di;
-            start[d] = dladdr(prof_pcs[s][d], &di) && di.dli_saddr ? di.dli_saddr : prof_pcs[s][d];
-            int k = 0, seen = 0;
-            for (int e = 0; e < d; ++e) if (start[e] == start[d]) seen = 1;
-            for (; k < nf && fns[k].pc != start[d]; ++k) {}
-            if (k == nf) { if (nf == 8192) continue; fns[nf].pc = start[d]; fns[nf].incl = fns[nf].self = 0; ++nf; }
-            if (!seen) fns[k].incl++;
-            if (d == 0) fns[k].self++;
-        }
-    }
-    qsort(fns, (size_t)nf, sizeof *fns, cmp_incl);
-    fprintf(f, "\n-- inclusive (samples with the function on the stack) --\n");
-    for (int k = 0; k < nf && k < 60; ++k) { prof_name(fns[k].pc, nm, sizeof nm); fprintf(f, "%6d %5.1f%%  %s\n", fns[k].incl, 100.0 * fns[k].incl / prof_n, nm); }
-    qsort(fns, (size_t)nf, sizeof *fns, cmp_self);
-    fprintf(f, "\n-- self (innermost function) --\n");
-    for (int k = 0; k < nf && k < 30 && fns[k].self; ++k) { prof_name(fns[k].pc, nm, sizeof nm); fprintf(f, "%6d %5.1f%%  %s\n", fns[k].self, 100.0 * fns[k].self / prof_n, nm); }
-    fprintf(f, "\n-- every 8th sample's stack --\n");
-    for (int s = 0; s < prof_n; s += 8) {
-        fprintf(f, "sample %d:\n", s);
-        for (int d = 0; d < prof_depth[s]; ++d) { prof_name(prof_pcs[s][d], nm, sizeof nm); fprintf(f, "    %s\n", nm); }
-    }
-    fclose(f);
-}
-// Sleeps ~100 ms in 2 ms steps, sampling the game thread while its frame is late.
-static void profile_wait_100ms(void) {
-    static int ms = -1;
-    if (ms < 0) ms = getenv("BOOT_DIAG_PROFILE") ? atoi(getenv("BOOT_DIAG_PROFILE")) : 100;
-    if (ms <= 0) { usleep(100000); return; }
-    for (int step = 0; step < 50; ++step) {
-        usleep(2000);
-        uint64_t last = last_frame_ns, now = host_ticks();
-        if (prof_frame_ns && last != prof_frame_ns) { prof_write(last); prof_frame_ns = 0; prof_n = 0; }   // that frame ended
-        if (!have_game_thread || idle_now || !last || now - last < (uint64_t)ms * 1000000ull || prof_files >= prof_max) continue;
-        if (prof_frame_ns != last) { prof_frame_ns = last; prof_frame_no = frame_now; prof_n = 0; }
-        if (prof_n >= PROF_SAMPLES) continue;
-        sample_mode = 1; bt_done = 0; sample_n = 0;
-        if (pthread_kill(game_thread, SIGUSR2) == 0)
-            for (int k = 0; k < 400 && !bt_done; ++k) usleep(50);
-        sample_mode = 0;
-        if (!bt_done || sample_n < 3) continue;
-        int d = sample_n - 2 > PROF_DEPTH ? PROF_DEPTH : sample_n - 2;                  // skip the signal handler's own frames
-        for (int k = 0; k < d; ++k) prof_pcs[prof_n][k] = sample_pcs[k + 2];
-        prof_depth[prof_n++] = (uint8_t)d;
-    }
-}
+// ---------------- game-thread CPU profiles: profile_N.txt, profile_session.txt ----------------
+#include "diag_profile.h"
 
 // ---------------- GIL waits: gilwait.log ----------------
 // When the game thread waits >= BOOT_DIAG_GILWAIT ms (default 10) for the guest lock, one entry: where it waited,
@@ -1796,6 +1653,112 @@ void f_00753060(Cpu *c) {
 #include "game_overlay_diagnostics.h"
 #endif
 
+
+// ---------------- event ring ----------------
+#define RING 65536
+#define LINE 192
+static char ring[RING][LINE];
+// Call records (imports and COM methods, millions a second) are stored raw and formatted only when a report is written.
+static struct { uint64_t frame; const char *name; uint32_t v[8]; uint32_t tid; uint8_t nargs, raw; } rawrec[RING];
+static struct { _Atomic uint64_t busy; uint64_t seq; } ring_slots[RING];
+static _Atomic uint64_t ring_head;
+
+uint32_t diag_thread_id(void);   // threads.c
+
+// As in the blackbox, never wait for a slot that another thread may hold at crash time.
+static int ring_lock(uint32_t i) {
+    uint64_t expected = 0;
+    return atomic_compare_exchange_strong_explicit(&ring_slots[i].busy, &expected, 1,
+                                                   memory_order_acquire, memory_order_relaxed);
+}
+static void ring_unlock(uint32_t i) {
+    atomic_store_explicit(&ring_slots[i].busy, 0, memory_order_release);
+}
+static int ring_begin(void) {
+    uint64_t seq = atomic_fetch_add_explicit(&ring_head, 1, memory_order_relaxed) + 1;
+    uint32_t i = (seq - 1) % RING;
+    if (!ring_lock(i)) return -1;
+    if (ring_slots[i].seq >= seq) {
+        ring_unlock(i);
+        return -1;
+    }
+    ring_slots[i].seq = seq;
+    return (int)i;
+}
+
+void diag_call_ring(const char *name, int nargs, const uint32_t *args, uint32_t ret, uint32_t ra) {
+    int i = ring_begin();
+    if (i < 0) return;
+    rawrec[i].frame = frame_now;
+    rawrec[i].tid = diag_thread_id();
+    rawrec[i].name = name;
+    rawrec[i].nargs = (uint8_t)(nargs < 6 ? nargs : 6);
+    for (int k = 0; k < rawrec[i].nargs; ++k) rawrec[i].v[k] = args[k];
+    rawrec[i].v[6] = ret; rawrec[i].v[7] = ra;
+    rawrec[i].raw = 1;
+    ring_unlock(i);
+}
+static void ring_line(uint32_t i, char *buf, size_t n) {
+    if (!rawrec[i].raw) {
+        memcpy(buf, ring[i], n);
+        return;
+    }
+    int k = snprintf(buf, n, "f%llu t%u %s(", (unsigned long long)rawrec[i].frame, rawrec[i].tid, rawrec[i].name);
+    for (int a = 0; a < rawrec[i].nargs && k < (int)n; ++a) k += snprintf(buf + k, n - (size_t)k, a ? ", %X" : "%X", rawrec[i].v[a]);
+    if (k < (int)n) snprintf(buf + k, n - (size_t)k, ") -> %X @%08X", rawrec[i].v[6], rawrec[i].v[7]);
+}
+static void ring_put(const char *fmt, va_list ap) {
+    int i = ring_begin();
+    if (i < 0) return;
+    rawrec[i].raw = 0;
+    int n = snprintf(ring[i], LINE, "f%llu t%u ", (unsigned long long)frame_now, diag_thread_id());
+    vsnprintf(ring[i] + n, LINE - (size_t)n, fmt, ap);
+    ring_unlock(i);
+}
+void diag_event_ring(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    ring_put(fmt, ap);
+    va_end(ap);
+}
+void diag_event(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list file_ap;
+    va_copy(file_ap, ap);
+    uint64_t frame = frame_now;
+    uint32_t tid = diag_thread_id();
+    ring_put(fmt, ap);
+    va_end(ap);
+    if (events_f) {
+        pthread_mutex_lock(&file_mu);
+        // Keep the crash ring compact, but don't truncate file events to its 192-byte slots: audiochain's byte
+        // totals grow during long runs and would otherwise lose the callback-gap/encode maxima at the end.
+        fprintf(events_f, "f%llu t%u ", (unsigned long long)frame, tid);
+        vfprintf(events_f, fmt, file_ap);
+        fputc('\n', events_f);
+        pthread_mutex_unlock(&file_mu);
+    }
+    va_end(file_ap);
+}
+static void dump_ring(FILE *f, int last) {
+    uint64_t head = atomic_load_explicit(&ring_head, memory_order_relaxed);
+    uint64_t count = last > 0 ? (unsigned)last : 0;
+    if (count > RING) count = RING;
+    uint64_t start = head > count ? head - count : 0;
+    fprintf(f, "\n==== last %u events ====\n", (unsigned)(head - start));
+    char buf[LINE];
+    for (uint64_t k = start; k < head; ++k) {
+        uint32_t i = k % RING;
+        if (!ring_lock(i)) continue;
+        int valid = ring_slots[i].seq == k + 1;
+        if (valid) ring_line(i, buf, sizeof buf);
+        ring_unlock(i);
+        if (valid) fprintf(f, "%s\n", buf);
+    }
+}
+
+void diag_ring_dump(FILE *f, int last) { dump_ring(f, last); }   // report.m
 
 // Only synchronous diagnostic work on the game thread pauses the watchdog.
 // Background PNG encoding must never excuse a game stall. Nested texture/PNG

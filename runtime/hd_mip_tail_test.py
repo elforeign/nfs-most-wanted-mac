@@ -110,7 +110,9 @@ def main():
         skipped = False
         for mode, source in [('original', baseline.decode()), ('fixed', None)]:
             tmp = root / mode; tmp.mkdir()
-            (tmp / 'hd_gpu_generated.h').write_text('RenderTex *gpu_tex(Obj *t) {' + gpu + '\nstatic uint32_t obj_release(Obj *o) {' + release)
+            (tmp / 'hd_gpu_generated.h').write_text(
+                'enum { K_QUERY = 13 };\nRenderTex *gpu_tex(Obj *t) {' + gpu +
+                '\nstatic uint32_t obj_release(Obj *o) {' + release)
             (tmp / 'hd_tail_mode.h').write_text('#define HAVE_HD_TAIL_HELPERS ' + str(int(mode == 'fixed')) + '\n')
             exe = replay.build(tmp, source, 'hd_mip_tail_test.m')
             if mode == 'fixed':

@@ -70,6 +70,7 @@ static void deactivate(ClipSession *s) {
 static NSString *outputFolder; // injectable by the offline test; no environment start switch
 static std::shared_ptr<replay::Ring> actionReplay;
 static std::unique_ptr<replay::Export> replayExport;
+static const char *const replaySinkError = "Replay stopped: packet sink failed";
 
 // Video-range BT.709 Y'CbCr, centred 2x2 chroma. Convert the presentation
 // source directly into encoder planes, with no intermediate full-frame copy.
@@ -410,6 +411,7 @@ struct ClipFile {
     std::shared_ptr<clip::Sink> fileSink, replaySink;
     std::shared_ptr<replay::Ring> replayRing;
     std::atomic<bool> replayOnly;
+    bool replayFailed; // control
     bool outputsClosed, fileNeedsIDR;
     std::atomic<unsigned> retiringFiles;
 #ifdef CLIPREC_TESTING
@@ -451,6 +453,7 @@ struct ClipFile {
 - (void)drain;
 - (void)packet:(CMSampleBufferRef)sample status:(OSStatus)status;
 - (void)pump;
+- (void)retireFailedReplay;
 - (clip::Result)writePacket:(const clip::OwnedPacket&)packet file:(const std::shared_ptr<ClipFile>&)file;
 - (void)finishWhenDrained;
 - (void)audioTick;
@@ -595,11 +598,12 @@ static void compressed(void *context, void *, OSStatus status, VTEncodeInfoFlags
     [self attachLive];
     if(audio && !audio->attach(&outputs)) { [self fail:audio->error]; return; }
     if(!replayOnly) [self attachFile];
-    if(!replayOnly || replayRing) replayRing=replay::attach(outputs,replayRing,&replaySink);
-    if(replayRing) {
-        replayRequested=replayRing->stats().armed;
+    {
         std::lock_guard<std::mutex> lock(control);
-        if(current==self) {
+        if(current==self && replayRequested) replayRing=actionReplay;
+        if(!replayOnly || replayRing) replayRing=replay::attach(outputs,replayRing,&replaySink);
+        if(current==self && replayRing) {
+            replayRequested=replayRing->stats().armed;
             actionReplay=replayRing;
             if(!replayExport) replayExport=std::make_unique<replay::Export>();
         }
@@ -792,7 +796,25 @@ static void compressed(void *context, void *, OSStatus status, VTEncodeInfoFlags
     }
     return clip::Result::consumed;
 }
+- (void)retireFailedReplay {
+    if(!replaySink || !replaySink->failed()) return;
+    outputs.remove(replaySink);
+    replaySink.reset();
+    bool stopReplay=false;
+    {
+        std::lock_guard<std::mutex> lock(control);
+        if(current==self && actionReplay==replayRing && replayRing->stats().armed) {
+            replayFailed=true;
+            replayRequested=false;
+            stopReplay=!fileRequested && !broadcast;
+            if(stopReplay) active.store(false,std::memory_order_release);
+        }
+        replayRing->disarm();
+    }
+    if(stopReplay) [self stop];
+}
 - (void)pump {
+    [self retireFailedReplay];
     if(broadcast && ready && liveState==2) [self holdLive];
     // Live's own sound failed (its AAC encoder or a missed start): end live only.
     if(broadcast && ready && liveState==2 && audio && audio->liveError) {
@@ -891,6 +913,7 @@ static void compressed(void *context, void *, OSStatus status, VTEncodeInfoFlags
     if(audio) {
         audio->stop();
         bool drainedOK=!writing || [self pumpAudio:epoch final:true];
+        [self retireFailedReplay];
         if(!drainedOK && !error) error=audio->error;
         if(writing && drainedOK && !audio->drained(videoEnd)) {
             if(NSProcessInfo.processInfo.systemUptime<stopDeadline+2) {
@@ -1153,8 +1176,9 @@ void replay_arm_action(int unused) {
     if(!replayExport) replayExport=std::make_unique<replay::Export>();
     if(s && !s->ended && !s->stopping) {
         // Attach on the capture queue, after any pending Disarm removal.
-        if(!actionReplay) actionReplay=std::make_shared<replay::Ring>();
+        actionReplay=std::make_shared<replay::Ring>();
         auto ring=actionReplay; ring->arm();
+        s->replayFailed=false;
         s->replayRequested=true;
         dispatch_async(s->work, ^{
             if(s->replayRing!=ring) {
@@ -1187,8 +1211,9 @@ void replay_save_action(int unused) {
     std::lock_guard<std::mutex> lock(control);
     ClipSession *s=current;
     if(!s || !actionReplay || !replayExport || !actionReplay->stats().armed) {
-        fprintf(stderr,"replay: not saved - video 0 s, snapshot 0 bytes; error: Arm replay first\n");
-        dispatch_async(dispatch_get_main_queue(),^{portmenu_status("Arm replay first");}); return;
+        const char *message=s && s->replayFailed ? replaySinkError : "Arm replay first";
+        fprintf(stderr,"replay: not saved - video 0 s, snapshot 0 bytes; error: %s\n",message);
+        dispatch_async(dispatch_get_main_queue(),^{portmenu_status("%s",message);}); return;
     }
     auto ring=actionReplay;
     auto exporter=replayExport.get();
@@ -1206,7 +1231,8 @@ void replay_status(char *buf,int size) {
     auto stats=actionReplay?actionReplay->stats():replay::Stats{};
     if(!stats.armed) {
         ClipSession *s=current;
-        if(s && s->replayOnly && !dispatch_group_wait(s->finished,DISPATCH_TIME_NOW) && s->error)
+        if(s && s->replayFailed) snprintf(buf,size,"Arm replay (Error: %s)",replaySinkError);
+        else if(s && s->replayOnly && !dispatch_group_wait(s->finished,DISPATCH_TIME_NOW) && s->error)
             snprintf(buf,size,"Arm replay (Error: %s)",s->error.UTF8String);
         else snprintf(buf,size,"Arm replay (Off)");
         return;
@@ -1217,7 +1243,8 @@ void replay_status(char *buf,int size) {
 }
 void replay_save_status(char *buf,int size) {
     std::lock_guard<std::mutex> lock(control);
-    if(!replayExport) snprintf(buf,size,"Save last 30 s (arm replay first)");
+    if(current && current->replayFailed) snprintf(buf,size,"Save last 30 s; %s",replaySinkError);
+    else if(!replayExport) snprintf(buf,size,"Save last 30 s (arm replay first)");
     else snprintf(buf,size,"Save last 30 s; %s",replayExport->status().c_str());
 }
 static bool cliprec_shared_action(ClipSession *s) {

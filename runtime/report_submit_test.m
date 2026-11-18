@@ -1,5 +1,6 @@
 // Fake CLI/task/clock completions only; no installed CLI or network.
-// Proof: fixed 207 checks/0 failures; pinned predecessor 188/3; 16 broken controls rejected.
+// Proof: fixed 260 checks/0 failures; pinned predecessor 188/3; 20 broken controls rejected.
+// Previous credential lifetime: close 259/4, POST completion 258/4, late token lookup 260/2.
 #import <Foundation/Foundation.h>
 #include "report_submit.m"
 static int checks, failures, calls, creations;
@@ -34,7 +35,7 @@ static void Ready(ReportSubmission *s) { [s checkAccount]; Finish(0, @"sample-ac
 @property NSPipe *standardInput, *standardOutput;
 @property id standardError;
 @property int terminationStatus, processIdentifier, reader;
-@property BOOL live, launchOK, hang, accountMode;
+@property BOOL live, launchOK, hang, accountMode, postFailure;
 @property NSData *fakeOutput;
 @property NSMutableData *received;
 - (BOOL)launchAndReturnError:(NSError **)error;
@@ -52,6 +53,7 @@ static int credentialReads;
         if ([self.arguments containsObject:@"token"]) { ++credentialReads; value = activeCredential; }
         else if ([self.arguments containsObject:@"POST"]) {
             postedCredential = self.environment[@"GH_TOKEN"] ?: activeCredential;
+            if (self.postFailure) self.terminationStatus = 1;
             value = @"https://github.com/elforeign/nfs-most-wanted-mac/issues/42";
         } else value = [(self.environment[@"GH_TOKEN"] ?: activeCredential) isEqual:@"synthetic_A"] ? @"account-A" : @"account-B";
         self.fakeOutput = [value dataUsingEncoding:NSUTF8StringEncoding];
@@ -102,10 +104,11 @@ static NSString *PinnedCall(ReportTaskRunner runner, NSArray *args) {
 }
 static void AccountSwitchTests(void) {
     activeCredential = @"synthetic_A"; postedCredential = nil; credentialReads = 0;
+    void (^clearCredential)(void);
     ReportTaskRunner runner = ReportRunner(^{ return @"/fake/gh"; }, ^{
         ReportFakeTask *task = [ReportFakeTask new]; task.launchOK = YES; task.accountMode = YES;
         return (NSTask *)(id)task;
-    }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; });
+    }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; }, &clearCredential);
     NSArray *identity = @[@"api", @"--hostname", @"github.com", @"user", @"--jq", @".login"];
     CHECK([PinnedCall(runner, identity) isEqual:@"account-A"]);
     CHECK([PinnedCall(runner, identity) isEqual:@"account-A"]);
@@ -120,6 +123,7 @@ static void AccountSwitchTests(void) {
 static void CredentialFailureTests(void) {
     for (int mode = 0; mode < 5; ++mode) {
         __block int tasks = 0;
+        void (^clearCredential)(void);
         ReportTaskRunner runner = ReportRunner(^{ return @"/fake/gh"; }, ^{
             ++tasks;
             ReportFakeTask *task = [ReportFakeTask new]; task.launchOK = mode != 0;
@@ -128,7 +132,7 @@ static void CredentialFailureTests(void) {
             task.fakeOutput = [text dataUsingEncoding:NSUTF8StringEncoding];
             task.terminationStatus = mode == 4 ? 1 : 0;
             return (NSTask *)(id)task;
-        }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; });
+        }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; }, &clearCredential);
         dispatch_semaphore_t finished = dispatch_semaphore_create(0);
         runner(@[@"api", @"user"], nil, 15, ^(int status, NSData *output, BOOL uncertain) {
             CHECK(status == -2 && !output && !uncertain);
@@ -138,6 +142,73 @@ static void CredentialFailureTests(void) {
         CHECK(tasks == 1); // Never fall back to an unpinned API call.
     }
 }
+#ifndef REPORT_SUBMIT_BASELINE
+static void AwaitState(ReportSubmission *s, ReportSubmitState state) {
+    double deadline = ReportMonotonic() + 5;
+    while (s.state != state && ReportMonotonic() < deadline) Drain();
+    CHECK(s.state == state);
+}
+static void CredentialLifetimeTests(void) {
+    for (int result = 0; result < 3; ++result) {
+        activeCredential = @"synthetic_A"; postedCredential = nil; credentialReads = 0;
+        void (^clearCredential)(void);
+        ReportTaskRunner runner = ReportRunner(^{ return @"/fake/gh"; }, ^{
+            ReportFakeTask *task = [ReportFakeTask new]; task.launchOK = YES; task.accountMode = YES;
+            task.postFailure = result == 2;
+            return (NSTask *)(id)task;
+        }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; }, &clearCredential);
+        ReportSubmission *s = [[ReportSubmission alloc] initWithSnapshot:@{@"title":@"test", @"body":@"reviewed"}
+            runner:runner clearCredential:clearCredential];
+        [s checkAccount]; AwaitState(s, ReportSubmitReady);
+        activeCredential = @"synthetic_B";
+        if (result == 0) {
+            [s forgetAccount];
+            CHECK(!s.account && s.state == ReportSubmitIdle);
+        } else {
+            [s post]; AwaitState(s, result == 1 ? ReportSubmitCreated : ReportSubmitUnknown);
+            CHECK([postedCredential isEqual:@"synthetic_A"]);
+        }
+        CHECK([PinnedCall(runner, ReportAccountArguments()) isEqual:@"account-B"]);
+        CHECK(credentialReads == 2);
+    }
+}
+static void ClosedCredentialLookupTest(void) {
+    activeCredential = @"synthetic_A"; credentialReads = 0;
+    dispatch_semaphore_t lookup = dispatch_semaphore_create(0);
+    dispatch_semaphore_t resume = dispatch_semaphore_create(0);
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    __block BOOL first = YES;
+    __block int result;
+    void (^clearCredential)(void);
+    ReportTaskRunner runner = ReportRunner(^{ return @"/fake/gh"; }, ^{
+        if (first) {
+            first = NO;
+            dispatch_semaphore_signal(lookup);
+            if (dispatch_semaphore_wait(resume, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC))) return (NSTask *)nil;
+        }
+        ReportFakeTask *task = [ReportFakeTask new]; task.launchOK = YES; task.accountMode = YES;
+        return (NSTask *)(id)task;
+    }, ^{ return ReportMonotonic(); }, ^(double seconds) { [NSThread sleepForTimeInterval:seconds]; }, &clearCredential);
+    ReportTaskRunner observed = ^(NSArray *args, NSData *input, double seconds, ReportTaskDone done) {
+        runner(args, input, seconds, ^(int status, NSData *data, BOOL uncertain) {
+            result = status;
+            done(status, data, uncertain);
+            dispatch_semaphore_signal(finished);
+        });
+    };
+    ReportSubmission *s = [[ReportSubmission alloc] initWithSnapshot:@{@"title":@"test", @"body":@"reviewed"}
+        runner:observed clearCredential:clearCredential];
+    [s checkAccount];
+    long started = dispatch_semaphore_wait(lookup, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC));
+    [s forgetAccount]; dispatch_semaphore_signal(resume);
+    CHECK(started == 0);
+    CHECK(dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    Drain();
+    CHECK(result == -2 && !s.account && s.state == ReportSubmitIdle);
+    activeCredential = @"synthetic_B";
+    CHECK([PinnedCall(runner, ReportAccountArguments()) isEqual:@"account-B"] && credentialReads == 2);
+}
+#endif
 static void AdapterTests(void) {
     AdapterCase(NO, NO, NO, 0, nil);
     AdapterCase(YES, NO, NO, 0, nil);
@@ -205,10 +276,19 @@ static void StateTests(void) {
     NSMutableString *mutableBody = [@"frozen reviewed text" mutableCopy];
     s = [[ReportSubmission alloc] initWithSnapshot:@{@"title":@"test", @"body":mutableBody} runner:FakeRunner()];
     [mutableBody setString:@"unreviewed replacement"]; CHECK([s.snapshot[@"body"] isEqual:@"frozen reviewed text"]);
+#ifndef REPORT_SUBMIT_BASELINE
+    s = NewSession(); Ready(s); before = creations;
+    [s post]; [s forgetAccount]; Finish(0, @"sample-account", NO);
+    CHECK(creations == before && s.state == ReportSubmitFailed && !s.account);
+    [pending removeAllObjects];
+#endif
 }
 int main(void) { @autoreleasepool {
     pending = NSMutableArray.array; arguments = NSMutableArray.array; inputs = NSMutableArray.array;
     AdapterTests(); AccountSwitchTests(); CredentialFailureTests(); TransportTests(); StateTests();
+#ifndef REPORT_SUBMIT_BASELINE
+    CredentialLifetimeTests(); ClosedCredentialLookupTest();
+#endif
     printf("report submit: %d checks, %d failures; fake creations %d\n", checks, failures, creations);
     return failures ? 1 : 0;
 } }

@@ -1,13 +1,73 @@
 // Synthetic payloads only; paired driver records original, fixed and independent broken controls.
 // Compact mistyped room codes: pinned rule 25 checks/12 failures; fixed 25/0; ordinary words preserved.
-// Proof: pinned original 887 checks/830 failures; review predecessor 893/20; fixed 893/0.
-// Both destination previews covered; all 36 independent broken controls rejected; regex failure 14/0.
+// Proof: pinned original 1003 checks/941 failures; review predecessor 1009/20; fixed 1009/0.
+// Both destination previews covered; all 36 independent broken controls rejected; regex failure 16/0.
 // Userinfo 3/3 -> 3/0; encoded continuations 16/16 -> 16/0; production log copy 4/1 -> 4/0.
 // The Prefix(sanitized, cap) assertion is equivalence evidence, not log-copy regression proof.
-// Mixed Latin-1 note/UTF-8 identity: pinned decoder 893 checks/3 failures; fixed 893/0.
+// Mixed Latin-1 note/UTF-8 identity: pinned decoder 1009 checks/3 failures; fixed 1009/0.
+// Public report targets: Carbon base 5 checks/4 failures, fixed 12/0; Most Wanted base and fixed 10/0.
 #define main ReportGithubFixtureMain
 #include "report_github_test.m"
 #undef main
+
+#ifdef REPORT_TARGET_PROBE
+int main(int argc, char **argv) { @autoreleasepool {
+    if (argc != 2) return 2;
+    NSString *repo = NFS_GAME == NFS_GAME_MW ? @"elforeign/nfs-most-wanted-mac" : @"elforeign/nfs-carbon-mac";
+    NSString *newIssue = [NSString stringWithFormat:@"https://github.com/%@/issues/new", repo];
+    NSString *createdIssue = [NSString stringWithFormat:@"https://github.com/%@/issues/42", repo];
+    Setting *action = settings_find("diag.report_github");
+    CHECK(action && action->type == SET_ACTION && action->category == SET_DIAGNOSTICS &&
+          !action->hidden && !strcmp(action->label, "Send to GitHub"));
+    BOOL reviewed = NO, sent = NO;
+#ifndef REPORT_TARGET_NO_UNIT
+    if (action) {
+        fixture = [NSString stringWithUTF8String:argv[1]];
+        if (![Summary() writeToFile:[fixture stringByAppendingPathComponent:@"report.txt"]
+                           atomically:YES encoding:NSUTF8StringEncoding error:NULL]) return 2;
+        openOrder = NSMutableArray.array; drawnText = NSMutableArray.array;
+        cliPending = NSMutableArray.array; cliArguments = NSMutableArray.array; cliInputs = NSMutableArray.array;
+        submissionRunner = FakeCLI();
+        action->apply(0);
+        DrawReview();
+        NSString *labels = [drawnText componentsJoinedByString:@"\n"];
+        reviewed = report_github_active() && confirmSelected == 0 && !screenshotOn &&
+                   !cliCalls && !browserOpens && [labels containsString:repo];
+        Click(350, 560);
+        action->apply(0);
+        Click(100, 560);
+        FinishCLI(0, @"fixture-account", NO);
+        Click(100, 560);
+        FinishCLI(0, @"fixture-account", NO);
+        NSString *endpoint = [NSString stringWithFormat:@"repos/%@/issues", repo];
+        sent = [cliArguments.lastObject containsObject:endpoint] &&
+               !ReportValidIssueURL(NFS_GAME == NFS_GAME_MW ?
+                   @"https://github.com/elforeign/nfs-carbon-mac/issues/42" :
+                   @"https://github.com/elforeign/nfs-most-wanted-mac/issues/42");
+        FinishCLI(0, createdIssue, NO);
+        sent = sent && submission.state == ReportSubmitCreated && [submission.issueURL isEqual:createdIssue];
+        if (NFS_GAME != NFS_GAME_MW) {
+            report_github_key(0x27);
+            report_github_key(0x27);
+            report_github_key(0x27);
+            CHECK(confirmSelected == 4 && ![labels containsString:@"Post on Discord"]);
+            int opens = browserOpens;
+            Click(650, 560);
+            CHECK(browserOpens == opens && !discordPreview);
+        }
+    }
+#else
+    (void)argv;
+    (void)createdIssue;
+#endif
+    CHECK(reviewed);
+    CHECK([openedURL.absoluteString isEqual:newIssue]);
+    CHECK(sent);
+    CHECK((settings_find("diag.report_discord") != NULL) == (NFS_GAME == NFS_GAME_MW));
+    printf("report target: %d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+} }
+#else
 #import <objc/runtime.h>
 #include "report_copy.inc"
 
@@ -182,10 +242,10 @@ static void FailureTests(NSString *root) {
     for (unsigned i = 0; i < 20; ++i) deep = [deep stringByReplacingOccurrencesOfString:@"%" withString:@"%25"];
     for (NSString *input in @[deep, @"api%5Fkey=%FF"]) {
         CHECK(ReportEndpointRedact(input) == nil);
-        for (NSString *name in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt"])
+        for (NSString *name in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt", @"blackbox.txt"])
             CHECK([input writeToFile:[root stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         ReportRedactBundle(root);
-        for (NSString *name in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt"])
+        for (NSString *name in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt", @"blackbox.txt"])
             CHECK(![NSFileManager.defaultManager fileExistsAtPath:[root stringByAppendingPathComponent:name]]);
     }
     NSString *path = [root stringByAppendingPathComponent:@"failed-write.txt"];
@@ -248,7 +308,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     NSMutableArray *values = [NSMutableArray arrayWithObject:ordinary];
     for (NSArray *row in all) [values addObject:row[1]];
     NSString *payload = [values componentsJoinedByString:@"\n"];
-    NSArray *files = @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt"];
+    NSArray *files = @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt", @"blackbox.txt"];
     for (NSString *file in files) CHECK([payload writeToFile:[root stringByAppendingPathComponent:file]
         atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 #ifdef REPORT_PRIVACY_BASELINE
@@ -282,8 +342,13 @@ int main(int argc, char **argv) { @autoreleasepool {
     ReportPrivacyRedactBundle(root, @{@"home":@"/srv/SyntheticCustomHome"});
 #endif
     NSString *custom = [NSString stringWithContentsOfFile:customPath encoding:NSUTF8StringEncoding error:NULL];
+#ifdef REPORT_PRIVACY_BASELINE
     CHECK(custom && ![custom containsString:@"SyntheticCustomHome"] && [custom containsString:@"~/log.txt"]);
+#else
+    CHECK([custom isEqual:@"[path]"]);
+#endif
     FailureTests(root);
     printf("privacy: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 } }
+#endif

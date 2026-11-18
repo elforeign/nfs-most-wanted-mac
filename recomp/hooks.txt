@@ -35,6 +35,7 @@
 00542A40    movies.c: MoviePlayer::Play (X360 WMV instead of VP6 when the file exists)
 00525F70    movies.c: MoviePlayer::UpdateFunction (per-frame decode and texture upload)
 00517610    movies.c: MoviePlayer::Stop
+007C45F0    boot.c: _CIpow non-finite operands
 00525E60    movies.c: MoviePlayer::~MoviePlayer
 0065F7A0    movies.c: bFileExists (a movie with no PC VP6 but an X360 WMV counts as there: eahd_bumper)
 0081B4AC    dsound.c: Snd::System::SetOutputMode (discrete 5.1, mode 3)

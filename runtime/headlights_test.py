@@ -121,6 +121,7 @@ def cache_warm_fixture():
     render = (RT / 'render.m').read_text()
     warmer = function(render, 'shader_cache_warm')
     source = r'''
+#include "game_select.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

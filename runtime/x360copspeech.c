@@ -372,7 +372,7 @@ size_t ea_big_read_at(void *source, void *dst, size_t n, size_t pos) {
         const CopWord *word=&b->words[i];
         size_t start=word->offset>pos ? word->offset : pos;
         size_t end=(size_t)word->offset+4; if (end>pos+n) end=pos+n;
-        memcpy((uint8_t *)dst+start-pos,word->bytes+start-word->offset,end-start);
+        memcpy((uint8_t *)dst+(start-pos),word->bytes+(start-word->offset),end-start);
     }
     return n;
 }

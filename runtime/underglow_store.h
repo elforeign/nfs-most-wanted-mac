@@ -27,3 +27,5 @@ int ug_save_digest(const void *bytes, size_t size, unsigned char digest[32]);
  * cosmetics never gate retail saves. */
 int ug_store_load(const char *directory, const unsigned char digest[32], UGSnapshot *out);
 int ug_store_publish(const char *directory, const UGSnapshot *snapshot);
+int ug_store_load_career(const char *directory, const unsigned char career[32], const unsigned char digest[32], UGSnapshot *out);
+int ug_store_publish_career(const char *directory, const unsigned char career[32], const UGSnapshot *snapshot);

@@ -35,8 +35,7 @@ names the Intel-only tool it found. Install Apple's Command Line Tools (`xcode-s
 Update**, or run `xcode-select --install`, then build again. The macOS SDK must be version 14 or newer.
 
 **"The PC folder has no ... directory" / "is missing ..."** — choose the installed game folder that holds `speed.exe`
-together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or a `.zip` that contains that folder. A PC
-installer is not enough. For your game discs, choose **PC disc images** instead (below).
+together with `GLOBAL`, `TRACKS`, `CARS`, `FRONTEND` and `SOUND`, or pick `speed.exe` in that folder. A `.zip` or `.7z` of the folder works too. A PC installer is not enough. For original PC discs, choose **PC disc images** (an `.iso` or a mounted/inserted disc). Older discs need the official 1.3 patch and a compatible 1.3 `speed.exe`. For `.rar` or `.bin/.cue`, unpack it to a folder first. Optional Xbox 360 files (`.iso`, extracted folder, `.zip` or `.7z`) add features; they do not replace the PC game. Stuck? Ask on [Discord](https://discord.gg/d6HfMwdM9v) or [GitHub](https://github.com/elforeign/nfs-most-wanted-mac/issues).
 
 **"The .zip contains an unsafe path" / "a link" / "is far larger than the game" / "can't be read"** — Setup only
 unpacks a `.zip` that holds plain game files. Download it again, or unzip it yourself and choose the folder.
@@ -58,9 +57,8 @@ or it is damaged. Download the update again.
 interrupted download) or in a format Setup doesn't read. Make the image again, or mount it in Finder and choose the
 mounted disc.
 
-**The `speed.exe` can't be used** — the port is a translation of the PC game's version 1.3 code. Other versions contain
-different code and would not work. Any `speed.exe` that has the 1.3 code is accepted; the log shows the code region
-that differs. Setup changed nothing.
+**The `speed.exe` can't be used** — use a `speed.exe` that matches the supported PC 1.3 executable fingerprint.
+Setup checks the executable layout, code and loaded data. The log shows which parts differ. Setup changed nothing.
 
 **"There is not enough free disk space"** — free some space on the volumes you chose for the app and for Setup's
 work folder (about 12 GB while Setup builds), then build again.

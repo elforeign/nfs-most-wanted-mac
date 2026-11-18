@@ -47,6 +47,7 @@ const char *diag_dir;
 volatile uint64_t perf_nframes;
 static int checks, failures, opens, closes, original_calls, mainloop_calls, target_calls, command, guest_calls, notices;
 static int connect_error, bye_packets, endpoint_events;
+static int menu_fixture, menu_connected, menu_hellos, menu_states, menu_reply;
 uint64_t host_ticks(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
 static uint32_t wanted_room;
 static Setting *registered[16]; static int nregistered;
@@ -159,7 +160,7 @@ void roam_online_join(const char *s) { (void)s; }
 void roam_online_leave(void) {}
 void roam_online_host_code(char *s, int n) { snprintf(s, (size_t)n, ""); }
 void roam_online_status(char *s, int n) { snprintf(s, (size_t)n, "Off"); }
-void roam_online_players(int w, int p, int e) { (void)w; (void)p; (void)e; }
+void roam_online_players(int w, int p, int e) { menu_connected = w; (void)p; (void)e; }
 int roam_online_target(char host[64], int *port, uint32_t *room) {
     ++target_calls; int action = command; command = 0;
     if (action > 0) { snprintf(host, 64, "127.0.0.1"); *port = 47800; *room = wanted_room; }
@@ -177,34 +178,71 @@ static int fake_close(int fd) { (void)fd; ++closes; return 0; }
 static int fake_fcntl(int fd, int cmd, ...) { (void)fd; (void)cmd; return 0; }
 static ssize_t fake_send(int fd, const void *b, size_t n, int flags) {
     (void)fd; (void)flags; int type; uint16_t id, seq;
-    if (!roam_hdr_get(b, (int)n, &type, &id, &seq) && type == ROAM_BYE) ++bye_packets;
+    if (!roam_hdr_get(b, (int)n, &type, &id, &seq)) {
+        if (type == ROAM_BYE) ++bye_packets;
+        if (menu_fixture && type == ROAM_HELLO) {
+            menu_hellos++;
+            menu_reply = n == ROAM_HDR + ROAM_HELLO_BASE ? ROAM_CHALLENGE : ROAM_WELCOME;
+        }
+        if (menu_fixture && (type == ROAM_STATE || type == ROAM_LOOK)) menu_states++;
+    }
     return (ssize_t)n;
 }
-static ssize_t fake_recv(int fd, void *b, size_t n, int flags) { (void)fd; (void)b; (void)n; (void)flags; errno = EAGAIN; return -1; }
-int main(void) {
+static ssize_t fake_recv(int fd, void *b, size_t n, int flags) {
+    (void)fd; (void)n; (void)flags;
+    if (!menu_reply) { errno = EAGAIN; return -1; }
+    int type = menu_reply; menu_reply = 0;
+    uint8_t *data = b;
+    int header = roam_hdr_put(data, type, 0, 0);
+    if (type == ROAM_CHALLENGE) { memset(data + header, 42, 20); return header + 20; }
+    memcpy(data + header, (uint8_t[]){7, 0, ROAM_NEAR_DEFAULT, ROAM_HZ}, 4);
+    return header + 4;
+}
+static void menu_test(Cpu *c) {
+    menu_fixture = 1;
+    int completed = 0;
+    for (int room = 7; room <= 8; ++room) {
+        wanted_room = (uint32_t)room; command = 1; roam_game_wake();
+        for (int frame = 0; frame < 3; ++frame) {
+            roam_last_hello = roam_ms() - 2000;
+            f_00663D30(c);
+        }
+        completed += menu_connected && roam.room == (uint32_t)room;
+    }
+    printf("main menu: %d/2 sessions connected; HELLO=%d vehicle=%d world calls=%d\n",
+           completed, menu_hellos, menu_states, original_calls);
+    CHECK(completed == 2 && menu_hellos == 6 && menu_states == 0 && original_calls == 0);
+    command = -1; roam_game_wake(); f_00663D30(c);
+}
+int main(int argc, char **argv) {
     G = calloc(1, 16 * 1024 * 1024); if (!G) return 2;
     Cpu c = {0}; unsetenv("NFS_ROAM"); unsetenv("NFS_ROAM_GHOST"); unsetenv("NFS_ROAM_CLONES");
+    if (argc == 2 && !strcmp(argv[1], "--menu-only")) {
+        menu_test(&c);
+        free(G);
+        return failures ? 1 : 0;
+    }
     CHECK(nregistered == 7);
     for (int i = 0; i < nregistered; ++i) CHECK(strcmp(registered[i]->id,"online.public_ip"));
     for (int i = 0; i < nregistered; ++i) CHECK(registered[i]->category == SET_ONLINE);
-    f_0075AAD0(&c); int before = target_calls;
-    for (int i = 0; i < 100; ++i) f_0075AAD0(&c);
+    f_00663D30(&c); int before = target_calls;
+    for (int i = 0; i < 100; ++i) { f_00663D30(&c); f_0075AAD0(&c); }
     CHECK(key_load_calls == 0 && key_generate_calls == 0 && userdata_calls == 0);
-    CHECK(opens == 0 && guest_calls == 0 && original_calls == 101 && target_calls == before);
-    wanted_room = 1234; command = 1; roam_game_wake(); f_0075AAD0(&c);
+    CHECK(opens == 0 && guest_calls == 0 && original_calls == 100 && target_calls == before);
+    wanted_room = 1234; command = 1; roam_game_wake(); f_00663D30(&c);
     CHECK(opens == 1 && roam_fd == 100 && roam.room == 1234 && atomic_load(&roam_state) == 1);
     CHECK(atomic_load(&roam_online_active) == 1);
     roam_car[0].used = 1; roam_car[0].id = 55; roam_ghosts = 1;
     roam.view.r[0].used = 1; roam.view.r[0].id = 55;
-    wanted_room = 4567; command = 1; roam_game_wake(); f_0075AAD0(&c);
+    wanted_room = 4567; command = 1; roam_game_wake(); f_00663D30(&c);
     CHECK(opens == 2 && closes == 1 && roam.room == 4567 && !roam_car[0].used && !roam_ghosts && !roam.view.r[0].used);
     // Front-end Leave: only MainLoop runs; World_Service is never called again here.
-    int world_before = original_calls, bye_before = bye_packets;
+    int world_before = original_calls, main_before = mainloop_calls, bye_before = bye_packets;
     command = -1; roam_game_wake(); f_00663D30(&c);
     CHECK(roam_fd == -1 && closes == 2 && atomic_load(&roam_state) == -1);
     CHECK(atomic_load(&roam_online_active) == 0);
     CHECK(roam_online_limit(120, atomic_load(&roam_online_active)) == 120);
-    CHECK(original_calls == world_before && mainloop_calls == 1 && bye_packets == bye_before + 1);
+    CHECK(original_calls == world_before && mainloop_calls == main_before + 1 && bye_packets == bye_before + 1);
     for (int i = 0; i < 100; ++i) f_00663D30(&c);
     CHECK(closes == 2 && original_calls == world_before);
     before = target_calls; for (int i = 0; i < 100; ++i) f_0075AAD0(&c);
@@ -212,11 +250,14 @@ int main(void) {
     // The legacy environment path still selects its room/name/test switches.
     setenv("NFS_ROAM", "127.0.0.1:47800", 1); setenv("NFS_ROAM_ROOM", "42", 1);
     setenv("NFS_ROAM_NAME", "Tester", 1); setenv("NFS_ROAM_GHOST", "1", 1); setenv("NFS_ROAM_CLONES", "3", 1);
-    roam_env_checked = 0; atomic_store(&roam_state, 0); f_0075AAD0(&c);
+    roam_env_checked = 0; atomic_store(&roam_state, 0); f_00663D30(&c);
     CHECK(opens == 3 && roam.room == 42 && !strcmp(roam.name, "Tester") && roam_ghost_mode && roam_clones == 3);
     CHECK(!endpoint_events);
-    roam.welcomed = 1; roam_last_rx = roam_ms() - 6000; f_0075AAD0(&c); CHECK(!roam.welcomed);
-    command = -1; roam_game_wake(); f_0075AAD0(&c); CHECK(closes == 3 && roam_fd == -1);
+    roam.welcomed = 1; roam.id = 1; roam.has_members = roam.nmembers = 1;
+    roam.view.r[0].used = 1; roam.view.r[0].last_rx = roam_ms();
+    roam_last_rx = roam_ms() - 6000; f_00663D30(&c);
+    CHECK(!roam.welcomed && !roam.id && !roam.has_members && !roam.nmembers && !roam.view.r[0].used);
+    command = -1; roam_game_wake(); f_00663D30(&c); CHECK(closes == 3 && roam_fd == -1);
     // Inject snapshots after the network buffer to exercise the final pre-distance guard.
     memset(roam_car, 0, sizeof roam_car); roam_view_init(&roam.view); roam_clones = 1;
     roam_mem = 0x10000; M32(0x008EF998u) = 1; M32(0x009142D0u) = 0x1000; M32(0x1034) = 0x2000;

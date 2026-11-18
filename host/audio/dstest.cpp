@@ -1453,7 +1453,7 @@ int main(int argc, char **argv) {
         else if (argc > 2 && (std::string(argv[2]) == "dd" || std::string(argv[2]) == "ddp")) test_fake_launch_mode(argv[2]);
         else if (argc > 2 && std::string(argv[2]) == "snddrop") test_fake_snd_drop();
         else { test_fake_device(); test_fake_snd_drop(); }
-        printf("%d checks, %d failed\n", g_checks, g_fail);
+        printf("dstest fake: %d checks, %d failed\n", g_checks, g_fail);
         return g_fail ? 1 : 0;
     }
     ds_set_peak_limiter(0); // Existing cursor/sample expectations have no look-ahead; fake above exercises default On.

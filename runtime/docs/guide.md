@@ -11,7 +11,7 @@ Appearance review accepted 10 PC and 9 Xbox 360 conversions. Accepted on both:
 300C on Xbox 360, failed conversion during review. Converter fixes now exist,
 but those outputs still need appearance review.
 
-These reviewed conversions are not available for import in this package yet.
+Most Wanted Setup includes these approvals for import on its **Extras** page.
 Your Most Wanted installation works without extras.
 
 When a package provides approved cars, use Setup's Extras page to import your
@@ -54,11 +54,11 @@ After selecting a retail look, use **Display & performance > Restart game** if r
 
 The retail looks set **Colour filter to 100%** and **World lighting to Original**. Port uses a 0% filter and Neutral lighting. The PC and Xbox 360 grades are different.
 
-Both retail looks set **HDR output**, **Contact shadows** and **Soft smoke** to Off. To use those extras, change their picture settings after choosing the look; the edited combination becomes My picks. Restart to apply HDR changes.
+Both retail looks set **HDR output**, **Contact shadows** and **Soft smoke** to Off. Choose **Port (recommended)** to restore contact shadows and soft smoke. You can change **HDR output** in Picture. Restart to apply HDR changes.
 
 Named looks keep your Brightness and Anti-aliasing choices. My picks remembers those too, survives a restart and lets you return after trying another look.
 
-The full Xbox 360 look needs your Xbox 360 files installed through Setup. Missing features stay PC or are hidden; the menu warns when the look is partial.
+Console-inspired effects are included from your PC files. The full Xbox 360 look needs your own Xbox 360 files installed through Setup; the menu warns when the look is partial.
 
 These are looks, not exact console reproductions. Keep your preferred screen resolution. Audio and driving controls have their own settings.
 
@@ -66,7 +66,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 
 - **Look preset** changes the overall look. **Anti-aliasing** smooths edges: Off, 2x, 4x or 8x, as supported by your Mac.
 - **Brightness** adjusts the whole picture, including the HUD, from 0–100%. **HDR output** defaults to Auto: it decides at launch whether the display reports HDR support, using SDR otherwise. Restart to re-check after changing displays or display settings. Off forces SDR; On requests HDR with SDR fallback. Changes need a restart; **HDR status** explains the current output.
-- **Headlamp glass** offers Retail (default), keeping the original lamp shading, or Clear for transparent covers over the reflectors. Native PC glass stays unchanged.
+- **Headlamp glass** defaults to Clear for transparent covers over the reflectors. Retail keeps the original lamp shading and is used by both retail looks. Native PC glass stays unchanged.
 - **Post-processing** selects X360 effects or the PC treatment. **Tone curve** changes the brightness curve; **Tone curve glow** changes its spread.
 - **Bloom strength** runs from 0–200%; 100% is the normal strength. **Bloom style** changes the glare's shape, and **Highlights** chooses soft Roll off or flat-white Clip. These last two affect X360 post-processing.
 - **Colour filter** blends from natural colours at 0% to the game's full grade at 100%. **Banding > Smooth** softens steps in sky gradients. **Speed blur** offers Off, X360 or Strong.
@@ -75,7 +75,7 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 
 - **World lighting** chooses Neutral daylight or Original lighting. **Lighting data** selects PC or X360 scene lighting; **Scenery lights** adds the matching console lamps.
 - **Tunnel shadows** either fade as in the PC game or stay visible with Keep. **Shadow fit** changes how sun shadows cover the scene; shadow quality is in the game's Video options.
-- **Grass**, **Tree shading**, **Water**, **Building glass**, **Smoke and dust shading**, and **Wall and kerb depth** choose PC or X360 surface detail and lighting.
+- **Grass**, **Tree shading**, **Water**, **Building glass**, and **Wall and kerb depth** choose PC or X360 surface detail and lighting. **Particles** offers Retail, Physical, PC and X360.
 - **Road reflection** changes wet-road sharpness. **Rain ripples** adds rings to wet roads; **Raindrops on the lens** chooses console drops or PC drops, including their original placement before post-processing.
 - **Detail distance** offers PC, Far (2x) or Max (4x). **World streaming > Ahead** loads scenery earlier. **HD textures** and **UI textures** choose PC or installed X360 textures and need a restart.
 - **Smooth cut-out edges** softens fence, leaf and grass cut-outs. It is Off by default and requires **Picture > Anti-aliasing** at **2x or higher**; it has no effect with anti-aliasing Off.
@@ -104,10 +104,13 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 - **Quit game** and **Restart game** need a second press within four seconds. Settings are saved; race progress since your last save is lost.
 - **Online** holds update actions and **Discord status**. Discord status is off by default and needs Discord running on this Mac.
 - **Video clip** starts recording the game picture and its sound; select it again to stop and wait for **Clip saved**. Clips go to Movies/NFSMW (**Show clips in Finder** opens it); **Clip resolution** picks 1080p, 1440p or 4K. Recording always starts Off and works with HDR on; the F10 panel is not recorded.
+- **Live streaming** lets you enter a YouTube stream key. **Remember on this Mac** is checked by default and keeps the key in this game's save folder across quits and updates. Uncheck it before saving to keep the key until quit and clear any remembered key. Choose **Go live** to start streaming. **Stop live** ends the broadcast, and **Forget stream key** also removes the key.
 
 ## Online (beta)
 
-Online free roam is an early beta, Off until you choose **Create room** or **Join**. Access is free. Use the same game version on both Macs. Online races are not included. Begin with two players on different internet connections.
+Online free roam is unavailable in this build. **Create room** and **Join** require a configured shared relay.
+
+**Walkthrough for the early beta (unavailable in this build).** These steps apply once a shared relay is configured. Access is free. Use the same game version on both Macs. Online races are not included. Begin with two players on different internet connections.
 
 Create: enter career free roam, then open **F10 > Online (beta) > Create room**. Both Create and Join connect to the release's shared relay. Send the displayed room code privately to your friend. Codes look like **R-XXXX-XXXXX** and identify rooms rather than passwords; they contain no player's internet address. Anyone with a room code can try joining it.
 
@@ -239,13 +242,18 @@ It uses the PC game's original colour treatment at full strength. Choose **Port 
 
 ## FAQ: Why are some Xbox 360 settings missing?
 
-They need files from your own Xbox 360 copy. A PC-only installation can still play, but cannot show every console effect. Setup accepts a complete Xbox 360 folder or an Xbox 360 .iso, from the USA or the European (PAL) retail disc.
+Some need files from your own Xbox 360 copy. Setup accepts an .iso, extracted folder, .zip or .7z of the USA or European (PAL) retail game.
 
-## FAQ: Which PC folder does Setup need?
+## FAQ: What can I use in Setup?
 
-Choose the installed folder containing **speed.exe**, GLOBAL, TRACKS, CARS, FRONTEND and SOUND, or a .zip of that folder. Choose the folder from one level up if the Choose button is grey.
+Best of all worlds: The PC game on your Mac, with console-inspired bloom, colour and car detail already included, plus more Xbox 360 features from your own console files.
 
-A PC installer is not an installed game folder. Your game discs work too: choose **PC disc images** in Setup, then disc 1 (as an .iso, with the other discs beside it), the official 1.3 update and a speed.exe with the 1.3 code. The executable must contain the PC game's version 1.3 code.
+- Choose your own installed PC game folder, or pick its speed.exe. You need version 1.3.
+- Or choose a .zip or .7z of that folder, or your original PC discs as .iso images or mounted/inserted discs. For older discs, choose the official 1.3 patch and a compatible 1.3 speed.exe when Setup asks; the disc executable is copy-protected.
+- Optional: add your own Xbox 360 files as an .iso, extracted folder, .zip or .7z for more console features. They do not replace the PC game.
+- Have a .rar or .bin/.cue? Unpack it to a folder first.
+
+Stuck? See Troubleshooting or ask on Discord or GitHub.
 
 ## FAQ: Why does macOS block Setup?
 

@@ -23,6 +23,11 @@ R = Path(__file__).resolve().parent
 
 def pinned_source(file, edits, digest):
     """Restore stored historical text; hashes pin both edited spans and full C."""
+    if file == 'padbind.c':
+        spec = importlib.util.spec_from_file_location('padsets', R/'padsets_test.py')
+        padsets = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(padsets)
+        return padsets.pinned_source(file, edits, digest)
     source = (R/file).read_text()
     if file == 'controltype.c':
         # Restore only provenance comments in this historical baseline. Keep
@@ -33,11 +38,6 @@ def pinned_source(file, edits, digest):
                                 '   // all-empty (every type keeps the player\'s buttons) with no X360 copy\n')
         source = source.replace('// port-authored action/control recipes, also in PC-only builds',
                                 '// tools/gen_tables.py, from the player\'s X360 ATTRIBUTES.BIN')
-    # Timing wrappers do not alter the stored binding baseline or its line offsets.
-    if file == 'padbind.c':
-        source = source.removeprefix('#include "save_timing.h"\n')
-        source = source.replace('SAVE_TIME("stream.close", fclose(f))', 'fclose(f)')
-        source = source.replace('SAVE_TIME("rename", rename(tmp, p))', 'rename(tmp, p)')
     lines = source.splitlines(keepends=True)
     for start, end, expected, original in reversed(edits):
         assert hashlib.sha256(''.join(lines[start:end]).encode()).hexdigest() == expected, file

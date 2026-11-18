@@ -71,7 +71,7 @@ def original_builder():
     exec(PIN_MAKE_MODELS, env)
     builder = env['make_models']
     # The mount control predates the independent global wheel-palette import.
-    def without_mounts(*args, wheel_images=(), **kwargs):
+    def without_mounts(*args, metal_images=(), reflector=False, **kwargs):
         return builder(*args, **kwargs)
     return without_mounts
 

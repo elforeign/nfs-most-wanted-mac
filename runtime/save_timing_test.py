@@ -46,7 +46,7 @@ static void no_report_yet(void) {
     char path[4096]; snprintf(path,sizeof path,"%s/save_000001.txt",diag_dir);
     assert(access(path,F_OK)!=0);
 }
-void padbind_save_complete(int ok) { assert(ok); no_report_yet(); ++callback_count; }
+int padbind_save_complete(int ok) { assert(ok); no_report_yet(); ++callback_count; return 1; }
 void underglow_save_complete(int ok) { assert(ok); no_report_yet(); ++callback_count; }
 enum { MAX_LIST=4, MW_SONGS=2 };
 typedef struct { int32_t idx; uint8_t play; } TraxRow;

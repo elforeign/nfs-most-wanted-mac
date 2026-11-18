@@ -7,8 +7,16 @@
 
 int text_append(char *buf, size_t cap, unsigned ch) {
     size_t n = strlen(buf);
-    if (ch < 32 || ch >= 256 || ch == 127 || n + 1 >= cap) return 0;
-    buf[n] = (char)ch; buf[n + 1] = 0;
+    if (ch < 32 || ch == 127 || ch > 0x10ffff || (ch >= 0xd800 && ch <= 0xdfff)) return 0;
+    unsigned bytes = ch < 0x80 ? 1 : ch < 0x800 ? 2 : ch < 0x10000 ? 3 : 4;
+    if (n + bytes >= cap) return 0;
+    static const unsigned prefix[] = {0, 0, 0xc0, 0xe0, 0xf0};
+    for (unsigned i = bytes - 1; i > 0; --i) {
+        buf[n + i] = (char)(0x80 | (ch & 63));
+        ch >>= 6;
+    }
+    buf[n] = (char)(prefix[bytes] | ch);
+    buf[n + bytes] = 0;
     return 1;
 }
 
@@ -51,6 +59,10 @@ int text_delete_repeat(double *next, int held, double now) {
 int text_edit_key(char *buf, unsigned vk, int cmd, int ctrl) {
     size_t n = strlen(buf);
     if ((vk == 0x08 && cmd) || (vk == 'U' && ctrl)) { buf[0] = 0; return n != 0; }
-    if (vk == 0x08 && n) { buf[n - 1] = 0; return 1; }
+    if (vk == 0x08 && n) {
+        do { --n; } while (n && !boundary(buf, n));
+        buf[n] = 0;
+        return 1;
+    }
     return 0;
 }

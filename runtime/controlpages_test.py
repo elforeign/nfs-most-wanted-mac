@@ -12,32 +12,19 @@ Historical source is stored as text/hash deltas; verified PASS with Git unavaila
 """
 from pathlib import Path
 import importlib.util
-import hashlib
 import re
 import subprocess
 import tempfile
 
 R = Path(__file__).resolve().parent
 
-def pinned_source(file, edits, digest):
-    """Restore stored historical text; hashes pin both edited spans and full C."""
-    text = (R/file).read_text()
-    # Timing wrappers do not alter the stored binding baseline or its line offsets.
-    if file == 'padbind.c':
-        text = text.removeprefix('#include "save_timing.h"\n')
-        text = text.replace('SAVE_TIME("stream.close", fclose(f))', 'fclose(f)')
-        text = text.replace('SAVE_TIME("rename", rename(tmp, p))', 'rename(tmp, p)')
-    lines = text.splitlines(keepends=True)
-    for start, end, expected, original in reversed(edits):
-        assert hashlib.sha256(''.join(lines[start:end]).encode()).hexdigest() == expected, file
-        lines[start:end] = original.splitlines(keepends=True)
-    source = ''.join(lines)
-    assert hashlib.sha256(source.encode()).hexdigest() == digest, file
-    return source
+spec = importlib.util.spec_from_file_location('padsets', R/'padsets_test.py')
+h = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(h)
 
 
 # 769cf707777678101f30ee142bbdf4669fd145cf:runtime/padbind.c; SHA-256 verifies the stored source.
-PINNED_JOB3 = pinned_source('padbind.c', (
+PINNED_JOB3 = h.pinned_source('padbind.c', (
     (46, 53, 'cc46e4663ce4af6db2072f46e7d03996b527396f8051e15575dfadd9d0611c4c', r'''// user32.m's P_* (the PlayStation pad's DirectInput buttons)
 enum { P_CROSS, P_CIRCLE, P_SQUARE, P_TRIANGLE, P_L1, P_R1, P_CREATE, P_OPTIONS, P_L3, P_R3, P_L2, P_R2, P_PS, P_TOUCHPAD,
        P_LPADDLE, P_RPADDLE };
@@ -81,7 +68,7 @@ void f_0056E180_orig(Cpu *c);
 ), 'f31a2d3c37587a4abfbe8ab3ac9dc3d4b3a1041a9f7240b4d18ba7afd1e572ea')
 
 # abd117e2c91b16e96fd7b501b5a7717f7467f833:runtime/padbind.c; SHA-256 verifies the stored source.
-PINNED_JOB4 = pinned_source('padbind.c', (
+PINNED_JOB4 = h.pinned_source('padbind.c', (
     (46, 53, 'cc46e4663ce4af6db2072f46e7d03996b527396f8051e15575dfadd9d0611c4c', r'''// user32.m's P_* (the PlayStation pad's DirectInput buttons)
 enum { P_CROSS, P_CIRCLE, P_SQUARE, P_TRIANGLE, P_L1, P_R1, P_CREATE, P_OPTIONS, P_L3, P_R3, P_L2, P_R2, P_PS, P_TOUCHPAD,
        P_LPADDLE, P_RPADDLE };
@@ -117,9 +104,6 @@ static int input_race_drag;
 '''),
     (612, 613, '18fd0d21fe24c959645b483527a7b449533e58f77800379fb96921698c009bb7', '    Set base = {0}, drag;\n'),
 ), '68d72018ae806eebe4acc1814cc3a94079a547581c8ecc1254ba042ad3b6d4c1')
-spec = importlib.util.spec_from_file_location('padsets', R/'padsets_test.py')
-h = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(h)
 
 EXTRA = r'''
 #define SCREEN 0x400000u

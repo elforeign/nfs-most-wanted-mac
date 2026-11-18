@@ -3,7 +3,9 @@ Core proof: 27 good checks (12 UI, 15 preparation/launch); 17 broken controls re
 (9 UI, 8 preparation/launch), including automatic fetch and false-success controls.
 Launch fixture: inherited BOOT_BACKGROUND=1 skipped the normal-launch guard
 (broken rc=0); clear launch-mode flags in this stub child (good rc=0, broken rc=99).
-No network, game, or desktop app is started. The normal offline discovery runs this file.
+Uses only loopback networking. No game or desktop app is started.
+Release feed: original followed the redirect (1 destination hit) and accepted the chunked cap+1 body.
+Fixed: zero destination hits, cap+1 rejected, at-cap accepted.
 Transport compilation: production UI good=2 has the fixed release URL and no
 fixture environment; the fixture-enabled build fails that same release oracle (2/2).
 Detach proof: first-phase order good=2 (fresh/existing marker), original-order
@@ -15,6 +17,7 @@ Cleanup regression requires original detach/rmtree EBUSY (16), then successful
 retry/force unmount with the same file still open (1 broken / 1 good control).
 """
 import io
+import http.server
 import json
 import os
 from pathlib import Path
@@ -25,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+import threading
 import time
 from unittest import mock
 
@@ -423,19 +427,25 @@ def bridge_cases(root):
         native.write_text(source.replace(before, 'if (YES)', 1) if broken else source)
         preparer = root/('broken-preparer' if broken else 'preparer')
         run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, '-DPUB_UPDATE_WORKER=1', native, '-framework', 'Cocoa', '-o', preparer])
-        for reason in ('helper failed', 'SHA256 checksum mismatch'):
+        for reason in ('helper failed', 'SHA256 checksum mismatch') + (() if broken else ('verified',)):
             job = root/(('broken-' if broken else 'good-')+reason.replace(' ', '-')); job.mkdir(mode=0o700)
             setup=job/'mount/NFS Most Wanted Native Setup.app'
             python=setup/'Contents/Resources/python/bin/python3'; python.parent.mkdir(parents=True)
             python.write_text('#!/bin/sh\nprintf \'{"state":"ready","message":"false success"}\' > "$PWD/progress.json"\ntouch "$PWD/executed"\n')
             python.chmod(0o700)
             helper=job/'pub_update_helper'
-            helper.write_text('#!/bin/sh\nprintf %s '+shlex.quote(json.dumps(dict(state='verified', message=reason, setup_path=str(setup))))+' > "$1/progress.json"\nexit 1\n')
+            verified = reason == 'verified'
+            helper.write_text('#!/bin/sh\nprintf %s '+shlex.quote(json.dumps(dict(state='verified', message=reason, setup_path=str(setup))))+f' > "$1/progress.json"\nexit {0 if verified else 1}\n')
             helper.chmod(0o700)
             result=subprocess.run([str(preparer), str(job), 'v4.2.0', 'fixture.dmg', 'fixture.sha256', '10', str(root/'good/profile'), str(root/'app')], capture_output=True, text=True)
             value=json.loads((job/'progress.json').read_text())
-            assert (value['state']=='ready') == broken, (result.stderr, value)
-            assert (job/'executed').exists() == broken
+            assert (value['state']=='ready') == (broken or verified), (result.stderr, value)
+            assert (job/'executed').exists() == (broken or verified)
+            binding = job/'target-version.json'
+            if verified:
+                assert json.loads(binding.read_text()) == {'version': '4.2.0'}
+            elif not broken:
+                assert not binding.exists()
     print('Native failed-helper/checksum controls good=2 rejected broken=2 false successes detected')
 
 
@@ -473,7 +483,7 @@ def cancelled_launch(root):
     source=(ROOT/'pub_update_launch.m').read_text()
     a=source.index('static void UpdateError('); b=source.index('// Called exactly once', a)
     source=source[:a]+'static void UpdateError(NSString *reason) { fprintf(stderr, "UpdateError: %s\\n", reason.UTF8String); exit(99); }\n'+source[b:]
-    source=source.replace('if (![NSBundle.mainBundle.bundleIdentifier isEqual:@"io.github.nfsmw-native-mac"]) return;', '')
+    source=source.replace('if (![NSBundle.mainBundle.bundleIdentifier isEqual:PublicBundleID]) return;', '')
     source=source.replace('CanonicalPath(NSBundle.mainBundle.bundlePath)', 'profile')
     main='const char *game_dir; int main(int argc, char **argv) { @autoreleasepool { const char *profile=argv[1]; argc=1; pub_update_launch(&argc,&argv,profile); return 0; } }'
     guard=' ||\n                [files fileExistsAtPath:[job stringByAppendingPathComponent:@"cancel"]]'
@@ -531,6 +541,84 @@ int main(void) { return 0; }
     print('Update folders and rebuild product good=2 (Most Wanted, Carbon)')
 
 
+def feed_transport(root):
+    """Real URLSession, with only the production endpoint replaced by loopback."""
+    root.mkdir()
+    source = (ROOT / 'pub_update.m').read_text()
+    endpoint = '    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url'
+    assert source.count(endpoint) == 1
+    source = source.replace(endpoint, '    url = [NSURL URLWithString:NSProcessInfo.processInfo.environment[@"FIXTURE_FEED"]];\n'
+                            + endpoint, 1)
+    path = root / 'feed.m'
+    path.write_text(source + r'''
+void settings_add(Setting *setting) { (void)setting; }
+const char *userdata_dir(void) { return "/unused"; }
+int main(void) { @autoreleasepool {
+    snprintf(pu_current, sizeof pu_current, "4.0.0");
+    pu_state = PU_CHECKING;
+    mac_fetch();
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
+    while (pu_state == PU_CHECKING && [deadline timeIntervalSinceNow] > 0)
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    printf("%s\n", pu_state == PU_NEWER ? "newer" : pu_state == PU_FAILED ? "failed" : "unexpected");
+    return 0;
+} }
+''')
+    executable = root / 'feed'
+    run(['clang', '-fobjc-arc', '-I', ROOT, path, '-framework', 'Cocoa', '-o', executable])
+
+    cap = 1024 * 1024
+    release = b'{"tag_name":"v4.2.0"}'
+    requests = []
+
+    class Feed(http.server.BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == '/redirect':
+                self.send_response(302)
+                self.send_header('Location', '/redirect-target')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            self.send_response(200)
+            try:
+                if self.path in ('/at-cap', '/over-cap'):
+                    self.send_header('Transfer-Encoding', 'chunked')
+                    self.end_headers()
+                    body = release.ljust(cap + (self.path == '/over-cap'))
+                    for i in range(0, len(body), 16384):
+                        chunk = body[i:i + 16384]
+                        self.wfile.write(f'{len(chunk):x}\r\n'.encode() + chunk + b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n')
+                else:
+                    self.send_header('Content-Length', str(len(release)))
+                    self.end_headers()
+                    self.wfile.write(release)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The bounded client cancels the oversized stream.
+
+    with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Feed) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            outcomes = {}
+            for route in ('/normal', '/redirect', '/at-cap', '/over-cap'):
+                outcome = run([executable], env=dict(os.environ,
+                    FIXTURE_FEED=f'http://127.0.0.1:{server.server_port}{route}'))
+                outcomes[route] = outcome.stdout.strip()
+        finally:
+            server.shutdown()
+            thread.join()
+    expected = {'/normal': 'newer', '/redirect': 'failed', '/at-cap': 'newer', '/over-cap': 'failed'}
+    assert outcomes == expected and '/redirect-target' not in requests, (outcomes, requests)
+    print('Release feed accepts valid and exact-cap responses, rejects redirect without following and streamed cap+1')
+
+
 def carbon_selection():
     """Carbon's runtime links the update rows and the next-launch apply instead of its empty stub.
     Main 583933e9: neither unit selected, the stub kept (fails); fixed: passes."""
@@ -561,6 +649,7 @@ def main():
         ready_while_playing(root/"locked-profile")
         cancelled_launch(root/"cancelled-launch")
         production_transport(root/'production-transport')
+        feed_transport(root/'feed-transport')
         carbon_selection()
         detach_order_cases(root)
         retry=root/'detach-retry'; retry.mkdir(); detach_retry_cases(retry)

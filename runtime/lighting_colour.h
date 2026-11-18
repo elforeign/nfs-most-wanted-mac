@@ -11,6 +11,22 @@ static inline void lighting_colour_desaturate(float rgb[3], float factor) {
     for (int i = 0; i < 3; ++i) rgb[i] += factor * (y - rgb[i]);
 }
 
+// Authored linear Rec.709 colour: mix 85% source + 15% D65 in XYZ at
+// Y=1, then restore the input luminance. Intensity remains separate.
+static inline void lighting_colour_adapt(float rgb[3]) {
+    float y = lighting_colour_luminance(rgb);
+    if (!(y > 0)) return;
+    float X = (0.4124564f*rgb[0] + 0.3575761f*rgb[1] + 0.1804375f*rgb[2]) / y;
+    float Z = (0.0193339f*rgb[0] + 0.1191920f*rgb[1] + 0.9503041f*rgb[2]) / y;
+    X = 0.85f*X + 0.15f*0.95047f;
+    Z = 0.85f*Z + 0.15f*1.08883f;
+    rgb[0] = 3.2404542f*X - 1.5371385f - 0.4985314f*Z;
+    rgb[1] = -0.9692660f*X + 1.8760108f + 0.0415560f*Z;
+    rgb[2] = 0.0556434f*X - 0.2040259f + 1.0572252f*Z;
+    float scale = y / lighting_colour_luminance(rgb);
+    for (int i = 0; i < 3; ++i) rgb[i] *= scale;
+}
+
 // Source temperature in kelvin (2222..25000), separate from any sun curve.
 // Planckian xy(T), 85% source + 15% D65 XYZ at Y=1, then linear Rec.709
 // normalized to Rec.709 Y=1. Output may exceed 1; apply intensity separately.

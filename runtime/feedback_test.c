@@ -3,6 +3,7 @@
 //   cc -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I recomp runtime/feedback_test.c -o /tmp/feedback_test && /tmp/feedback_test
 // Lifecycle proof: PASS 38/38; original source and omitted model reset each FAIL 3/38.
 // Invalidation clears sustained oscillators and timed envelopes; a fresh BeginFrame can resume immediately.
+// Native Rumble Off over 8 ticks: original 8 pad effect clears, fixed 0; 8 motor stops in both.
 // Round 2: PASS 33/33, 0 failures; --broken-padfx FAIL 4/33 (suppression/stop forwarding removed).
 // Original rumble regression: PASS 29/29, 20 transition logs (ASan/UBSan).
 // Original pre-fix baseline: FAIL, 19/29 checks, including immediate menu stop / rumble while open / stale resume.
@@ -132,8 +133,13 @@ int main(int argc, char **argv) {
     diag_on = 1;
 
     int fx_before = fx_stops;
-    Cpu c = {0}; fb_stop(&c);
-    CHECK(fx_stops == fx_before + 1);
+    int stops_before = stop_calls;
+    M32(0x008F86E0u) = 0;                 // native Rumble Off calls Stop every feedback tick
+    Cpu c = {0};
+    for (int tick = 0; tick < 8; ++tick) fb_stop(&c);
+    printf("native Rumble Off: %d pad effect clears, %d motor stops over 8 ticks\n",
+           fx_stops - fx_before, stop_calls - stops_before);
+    CHECK(fx_stops == fx_before && stop_calls == stops_before + 8);
     CHECK(motor_l == 0 && motor_r == 0);  // native IFeedback::Stop, before next pad read
     quiet();
     output_off = 1; motor_l = 0.17f; motor_r = 0.23f; // NFS_RUMBLE=off transport leaves the pad alone

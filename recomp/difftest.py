@@ -758,8 +758,10 @@ def main():
                 crashed += 1
             failed += 1
             fail_list.append((a, name, bad))
+    inventory = f", {len(cases)} synthetic cases" if args.synth else ""
     print(f"differential test: {len(sample)} functions sampled, {passed} pass, {failed} fail "
-          f"({crashed} crash/timeout), {len(xfail)} expected-fail, {len(no_verdict)} no-verdict, states skipped because the original faulted: {skipped}")
+          f"({crashed} crash/timeout), {len(xfail)} expected-fail, {len(no_verdict)} no-verdict, "
+          f"states skipped because the original faulted: {skipped}{inventory}")
     for a, name, why in xfail:
         print(f"  XFAIL {a:08x} {name}: {AUDIT_XFAIL[name]}: {why[:160]}")
     for a, name, why in fail_list[:40 if not args.synth else 400]:
@@ -767,6 +769,7 @@ def main():
     if args.synth and no_verdict:
         print(f"  no state ran to the end in the original ({len(no_verdict)}): {', '.join(no_verdict)}")
     print("generated C:", cfile)
+    return int(bool(failed) or (args.synth and not (passed or xfail)))
 
 
 if __name__ == "__main__":

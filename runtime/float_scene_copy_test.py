@@ -4,6 +4,7 @@
 Recovered native two-mip fixture: 257x129 BGRA8 -> FP16, levels=2.
 Production: format=115 (FP16), failures=0; single-level-eligibility mutant:
 format=80 (BGRA8), failures=1. Both retain 2 mip levels; exits 0/1.
+Lockable screenshot target: unguarded promotion format=115, fixed format=80.
 The full offline suite autodiscovers this driver. Metal unavailable exits 3.
 No private assets or spatial fixtures required.
 """
@@ -150,7 +151,11 @@ static int native_copy_fixture(void){@autoreleasepool{
  copies[4].tex=[mtl newTextureWithDescriptor:d];copies[4].bytes=copies[4].tex.allocatedSize;objects[4].levels=2;objects[3].level=1;
  cmd=[queue commandBuffer];clear_native();render_float_scene_begin();render_stretch(1,0,3,0,1);
  CHECK(copies[4].tex.pixelFormat==MTLPixelFormatRGBA16Float && copies[4].tex.mipmapLevelCount==2,"native preserves float mip-surface promotion");
- render_float_scene_final(1);finish();printf("GPU native float_mip_levels=%lu format=%lu failures=%d\n",(unsigned long)copies[4].tex.mipmapLevelCount,(unsigned long)copies[4].tex.pixelFormat,failures);return failures!=0;
+ objects[5]=(Obj){.kind=K_SURFACE,.fmt=21,.lockable_rt=1,.w=257,.h=129,.gpu=&copies[5]};
+ copies[5].rt=1;copies[5].tex=texture(257,129,MTLPixelFormatBGRA8Unorm,1);
+ render_stretch(1,0,5,0,1);
+ CHECK(copies[5].tex.pixelFormat==MTLPixelFormatBGRA8Unorm,"lockable keeps guest BGRA8 format");
+ render_float_scene_final(1);finish();printf("GPU native float_mip_levels=%lu format=%lu lockable_format=%lu failures=%d\n",(unsigned long)copies[4].tex.mipmapLevelCount,(unsigned long)copies[4].tex.pixelFormat,(unsigned long)copies[5].tex.pixelFormat,failures);return failures!=0;
 }}
 
 int main(void){@autoreleasepool{
@@ -190,6 +195,8 @@ def main():
     good = make_harness(source)
     broken = mutate(good)
     assert broken != good, 'mutation did not apply'
+    assert good.count(' || o->lockable_rt') == 1
+    promoted_lock = good.replace(' || o->lockable_rt', '')
     with tempfile.TemporaryDirectory(prefix=PREFIX) as directory:
         tmp = Path(directory)
         fixture, executable = tmp / 'fixture.m', tmp / 'fixture'
@@ -210,6 +217,13 @@ def main():
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=120)
         print('MUTANT ' + result.stdout + result.stderr, end='', flush=True)
         assert result.returncode == 1 and FAILURE in result.stderr, result.stdout + result.stderr
+        proof += 'MUTANT ' + result.stdout + result.stderr
+        fixture.write_text(promoted_lock)
+        checked_run(build)
+        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=120)
+        print('MUTANT ' + result.stdout + result.stderr, end='', flush=True)
+        assert result.returncode == 1 and 'lockable_format=115' in result.stdout, result.stdout + result.stderr
+        assert 'FAIL lockable keeps guest BGRA8 format' in result.stderr, result.stderr
         proof += 'MUTANT ' + result.stdout + result.stderr
         report = Path(os.environ.get('NFS_METAL_CACHE', ROOT.parent / '.metal-cache')) / (Path(__file__).stem + '.log')
         report.parent.mkdir(parents=True, exist_ok=True)

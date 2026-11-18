@@ -20,6 +20,8 @@
 #define PVEHICLE 0x4A97EC8Fu
 #define FRONTEND 0x85885722u
 static const unsigned char magic[8] = {'N','F','S','C','A','R','4',1};
+static const char journal_failure[] = "Car compatibility journal could not be saved.";
+static const char failed_save[16] = "NFS-CAR-UNSAVED";
 /* Byte-only structure: no host padding/endian dependence. Unused signatures
  * must be zero. SHA256 binds identity AND ordered part compatibility per slot. */
 typedef struct {
@@ -196,7 +198,7 @@ const char *carsave_public_stage(void *buffer,size_t size,const unsigned char *u
     unsigned char tag[16],old[16]; marker(&m,tag);
     memcpy(old,buffer,16); memcpy(buffer,tag,16);
     CC_SHA256(buffer,(CC_LONG)size,m.save_hash); checksum(&m);
-    if (!metadata_write(&m)) { memcpy(buffer,old,16); return "Car compatibility journal could not be saved."; }
+    if (!metadata_write(&m)) { memcpy(buffer,old,16); return journal_failure; }
     return NULL;
 }
 static const char *read_metadata(const void *buffer,size_t size,Metadata *m) {
@@ -348,7 +350,12 @@ void carsave_public_serialize(Cpu *c) {
         why=references(c,buffer+FE_OFFSET,used,0);
         if (!why) why=carsave_public_stage(G+buffer,size,used);
     }
-    if (why) latch(why);
+    if (why == journal_failure) {
+        // Fail this staged payload through the file layer, including an open
+        // writer, without preventing the next serialization from trying again.
+        memcpy(G+buffer,failed_save,sizeof failed_save);
+        fprintf(stderr,"Profile save failed: %s\n",why);
+    } else if (why) latch(why);
 }
 
 /* The file layer calls prepare before any rename and calls allowed at every
@@ -367,6 +374,7 @@ int carsave_public_save_prepare(const char *path) {
     unsigned char bytes[CARSAVE_PUBLIC_SIZE]; struct stat st;
     if (read_payload(path,bytes,&st)) { latch("Cannot read staged save."); return 0; }
     if (st.st_size!=CARSAVE_PUBLIC_SIZE+36) return 1; /* other userdata files */
+    if (!memcmp(bytes,failed_save,sizeof failed_save)) return 0;
     const char *why=carsave_public_admit(bytes,sizeof bytes,NULL);
     if (why) { latch(why); return 0; }
     if (memcmp(bytes,magic,8)) return 1;

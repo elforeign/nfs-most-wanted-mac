@@ -39,7 +39,7 @@ def review_build(td, name, baseline=None):
     if baseline=='backoff': hello=HELLO_BASELINE
     if baseline=='sticky_ban':
         for fixed, original in [
-            ('c->welcomed = 0; c->id = 0;\n        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;',CHALLENGE_BASELINE),
+            ('if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;',CHALLENGE_BASELINE),
             ('if (c->last_err != ROAM_ERR_BANNED) c->last_err = b[0];',ERROR_BASELINE),
         ]:
             assert core.count(fixed)==1,('sticky ban anchor',fixed)
@@ -83,8 +83,8 @@ def main():
         for baseline in [None,'backoff','sticky_ban','ban_signature']:
             review_run(td,'review_'+(baseline or 'fixed'),baseline)
         # Cookie recovery must survive process-local key changes, without replacing installation credentials.
-        mutants={'normal':None,'recovery':('roam_core.c','c->welcomed = 0; c->id = 0;\n        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;',
-                                          'c->has_cookie = 0; c->welcomed = 0; c->id = 0;\n        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;'),
+        mutants={'normal':None,'recovery':('roam_core.c','memcpy(c->cookie, b, 20); c->has_cookie = 1;',
+                                          'memcpy(c->cookie, b, 20); c->has_cookie = 0;'),
                  'silent_ban':('roam_relay.c','r->st.ban_rejected++; banned_reply(r, from, now);',
                                'r->st.ban_rejected++;'),
                  'live_ban':('roam_relay.c','banned_reply(r, &r->c[i].addr, r->now);','(void)r->now;'),

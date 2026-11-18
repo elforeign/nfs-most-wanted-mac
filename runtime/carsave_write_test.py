@@ -24,7 +24,7 @@ MAIN = r'''
 static unsigned checks, failures;
 extern int cosmetic_fail;
 void extratrax_save_complete(int committed) { (void)committed; }
-void padbind_save_complete(int committed) { (void)committed; }
+int padbind_save_complete(int committed) { (void)committed; return 1; }
 extern int refused;
 #define CHECK(x) do { ++checks; if(!(x)) { ++failures; fprintf(stderr,"FAIL line %u: %s\n",__LINE__,#x); } } while(0)
 static void seed(const char *p) { FILE *f=fopen(p,"wb"); assert(f); fputs("ORIGINAL",f); fclose(f); }

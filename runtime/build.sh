@@ -210,6 +210,8 @@ clang \
     portmenu.m \
     guide.m \
     report.m \
+    blackbox.c \
+    blackbox_mw.c \
     onscreen_keyboard.c \
     gpuclients.m \
     slowlog.m \

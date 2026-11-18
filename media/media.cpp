@@ -1136,13 +1136,10 @@ bool AudioOutput::Impl::open_passthrough() {
                 device_name(dev).c_str(), was.c_str(), saved_format.mFormatID ? format_text(saved_format).c_str() : "nothing");
     }
     passthrough = true;                                          // from here on close_passthrough() undoes it
-    if (AudioObjectSetPropertyData(stream, &pf, 0, nullptr, sizeof ac3, &ac3) != noErr) { close_passthrough(); return false; }
-    for (int i = 0; i < 50; ++i) {                               // the switch is asynchronous: wait for it (<= 1 s)
-        AudioStreamBasicDescription now = {};
-        n = sizeof now;
-        AudioObjectGetPropertyData(stream, &pf, 0, nullptr, &n, &now);
-        if (now.mFormatID == ac3.mFormatID) break;
-        usleep(20000);
+    if (AudioObjectSetPropertyData(stream, &pf, 0, nullptr, sizeof ac3, &ac3) != noErr ||
+        !wait_physical_format(stream, ac3, 1000)) {
+        close_passthrough();
+        return false;
     }
     if (AudioDeviceCreateIOProcID(dev, io, this, &proc) != noErr || AudioDeviceStart(dev, proc) != noErr) {
         close_passthrough();

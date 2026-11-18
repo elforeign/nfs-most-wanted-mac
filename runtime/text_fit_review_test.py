@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regression checks against pinned reviewed text helpers, under ASan/UBSan.
-Fixed: 175 checks/0 failures. Original window: 175/6; original repeat: 175/4.
+Fixed: 178 checks/0 failures. Original window: 178/6, repeat: 178/4, byte edits: 178/3.
 The original repeat deletes 48/71/75 characters at 10/30/60 Hz over five seconds;
 the fixed helper deletes 94/93/93 (30 vs 60 Hz differ by zero characters).
 """
@@ -40,9 +40,30 @@ REPEAT_BASELINE = '''int text_delete_repeat(double *next, int held, double now) 
     if (now >= *next) { *next = now + .05; return 1; }
     return 0;
 }'''
+APPEND_BASELINE = '''int text_append(char *buf, size_t cap, unsigned ch) {
+    size_t n = strlen(buf);
+    if (ch < 32 || ch >= 256 || ch == 127 || n + 1 >= cap) return 0;
+    buf[n] = (char)ch; buf[n + 1] = 0;
+    return 1;
+}'''
+EDIT_BASELINE = '''int text_edit_key(char *buf, unsigned vk, int cmd, int ctrl) {
+    size_t n = strlen(buf);
+    if ((vk == 0x08 && cmd) || (vk == 'U' && ctrl)) { buf[0] = 0; return n != 0; }
+    if (vk == 0x08 && n) { buf[n - 1] = 0; return 1; }
+    return 0;
+}'''
 
 assert hashlib.sha256(WINDOW_BASELINE.encode()).hexdigest() == '32e9699d176510316345b3327ded5beb5539fd86e2c36ecfab2742b7c53a6a4b'
 assert hashlib.sha256(REPEAT_BASELINE.encode()).hexdigest() == 'aad3e621e2a813d8017ca9541e38753cba2c086991762f8d89ccb4ce329f9ba5'
+assert hashlib.sha256(APPEND_BASELINE.encode()).hexdigest() == '2baf09ff2aed462995805a33e045864488e4286bb0bf676549eb62951e01d52d'
+assert hashlib.sha256(EDIT_BASELINE.encode()).hexdigest() == 'e936d78ddc13f6227e05cbbd40ce9eecee989a6d614e5653c3442642d677b5bb'
+
+
+def restore(source, name, baseline):
+    pattern = r'(?:void|int) ' + name + r'\([^\n]+\) \{.*?\n\}'
+    original = re.search(pattern, source, re.S)
+    assert original and original.group() != baseline
+    return source[:original.start()] + baseline + source[original.end():]
 
 
 def main():
@@ -50,10 +71,9 @@ def main():
     variants = {'fixed': (source, 0)}
     for name, baseline, failures in [('text_window', WINDOW_BASELINE, 6),
                                      ('text_delete_repeat', REPEAT_BASELINE, 4)]:
-        pattern = r'(?:void|int) ' + name + r'\([^\n]+\) \{.*?\n\}'
-        original = re.search(pattern, source, re.S)
-        assert original and original.group() != baseline
-        variants[name] = (source[:original.start()] + baseline + source[original.end():], failures)
+        variants[name] = (restore(source, name, baseline), failures)
+    old_edit = restore(restore(source, 'text_append', APPEND_BASELINE), 'text_edit_key', EDIT_BASELINE)
+    variants['byte_edits'] = (old_edit, 3)
     with tempfile.TemporaryDirectory(prefix='text-fit-review-') as scratch:
         for name, (code, failures) in variants.items():
             path = Path(scratch)/'text_fit.c'; exe = Path(scratch)/'check'
@@ -64,7 +84,7 @@ def main():
             assert c.returncode == 0, c.stderr[-4000:]
             p = subprocess.run([str(exe)], cwd=ROOT, capture_output=True, text=True)
             count = re.search(r'(?:PASS|FAIL): (\d+) checks, (\d+) failures', p.stdout)
-            assert count and tuple(map(int, count.groups())) == (175, failures), p.stdout + p.stderr
+            assert count and tuple(map(int, count.groups())) == (178, failures), p.stdout + p.stderr
             assert p.returncode == int(failures != 0), p.stdout + p.stderr
             print(name + ': ' + p.stdout.splitlines()[-1])
 

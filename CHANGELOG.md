@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.8.0
+
+- **Rumble Off is fully off:** the triggers and the controller light are left alone too. Rumble goes to the controller you are playing with and moves to another one if you unplug it.
+- **No stuck keys:** Shift, Ctrl and Alt are released when you switch away from the game, and menu keys are released when you change controller.
+- **120 Hz screens:** the game speed follows the screen when you move it between a 60 Hz and a 120 Hz display.
+- **YouTube stream key:** one entry is remembered on this Mac across quits and updates (a tick box lets you turn it off).
+- **Setup takes a .7z of your PC game,** like a folder or .zip, and checks unusual files, archives and free space before it starts.
+- **Safer Update:** Update checks that the new version is the one announced and newer than yours, and ignores redirects from the version feed.
+- **Fixed:** F12 screenshots no longer contain unrelated pixels; Dolby output is no longer silent at the lowest audio latency; movie sound stays in step after a stall; the TV output falls back to normal sound if it cannot open; a failed settings or career save can be tried again and no longer blocks the next one; saving works from a symlinked home folder; holding Enter or Space no longer confirms quit or restart; problem reports hide your home folder paths; replay saving recovers from a full buffer.
+
 ## 4.7.1
 
 - **Update now fixed:** Update now could stop with "The prepared update folder or its retained tools failed verification" when your game files were copied from a USB stick, network share or another computer.
@@ -7,18 +17,17 @@
 ## 4.7.0
 
 - **More console looks without console files:** without your own Xbox 360 files, wall and kerb depth, the console's particle shading and size, extra tyre smoke, the console's shadow fit and distant fog without the PC's cut-off are now On too. With your Xbox 360 files the console versions are still used.
-- **Tyre tread detail:** tread grooves generated from the PC files, On by default (F10 > Cars > Tyre and badge detail: Port); with your Xbox 360 files the console's tread is used.
+- **Tyre tread detail:** tread grooves generated from the PC files, On by default (F10 > Cars & cutscenes > Tyre and badge detail: Port); with your Xbox 360 files the console's tread is used.
 - **Car glass:** Physical car materials now default to Glass (F10 > Picture); Chrome stays opt-in and a saved choice is kept.
 - **Zipped Xbox 360 copy:** Setup also takes a .zip or .7z of your Xbox 360 files.
 - **Fixed:** underglow in the garage and customise screens draws over the car's shadow; Setup copies all of the cop speech files so the console cop voices play; live streaming rides through a short slow upload; quitting while the TV audio output reopens no longer leaves the TV unable to play normal sound.
 
 ## 4.6.0
 
-- **Console looks without console files:** without your own Xbox 360 files the game now draws its own post-processing chain, car paint, tyre and badge detail, metallic flake, building-window glass, lens rain drops, sea and road reflection size, all On. With your Xbox 360 files the console versions are still used.
-- **Clear coat:** a glossy lacquer layer on car paint, On by default (F10 > Cars > Clear coat).
+- **Console looks without console files:** without your own Xbox 360 files the game now draws its own post-processing chain, car paint, tyre and badge detail, metallic flake, building-window glass, sea and road reflection size, all On. With your Xbox 360 files the console versions are still used. With PC files alone, choose **World > Raindrops on the lens > X360** to use the port's lens drops.
+- **Clear coat:** a glossy lacquer layer on car paint, On by default (F10 > Cars & cutscenes > Clear coat).
 - **Rain cover:** rain stays out from under roofs and bridges, On by default; it follows your world detail setting.
 - **Tunnel shadows:** the default is now Keep + sky light, so a car in a cast shadow keeps its sky light.
-- **Tyre tread detail:** tread grooves generated from the PC files, On by default (F10 > Cars > Tyre and badge detail: Port); with your Xbox 360 files the console's tread is used.
 - **Underglow:** the shop preview lifts the car, the light reaches the car's sides, and the light on the road follows the road surface.
 - **Added cars:** six more approved cars can be imported by Setup.
 - **Fixed:** rain under roofs no longer costs about 25 fps; the hood-view slowdown is gone; post-processing is cheaper (0.24 ms less GPU time a frame) with an identical picture and the brightness read-back never waits; a controller input no longer hides the pointer repeatedly; Setup imports your added cars again; the live-stream key leaves no readable copies after Stop, Forget or quit.
@@ -107,7 +116,7 @@ If 4.0.0 is already built and running for you, nothing changes: 4.0.1 only fixes
 4.0.0 replaces 3.x. It is a new native recompilation and runtime, not an update of 3.x, so there is nothing to patch:
 download the 4.0.0 Setup and build again.
 
-**What 3.x users should do:** download the 4.0.0 Setup from the
+**What 3.x users should do:** download the current Setup from the
 [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest), run it, and build. Your game folder
 is only read. 4.0.0 installs as "NFS Most Wanted Native.app", replacing the 3.x app in place so the Dock icon carries over, and
 Setup keeps the 3.x app as "NFS Most Wanted Native 3.x.app" (never deleted) until you are happy with 4.0.0.
@@ -118,8 +127,8 @@ See [Getting started](GETTING_STARTED.md#coming-from-3x).
 
 ### New
 
-- **Setup builds the game on your Mac** from your own PC game folder, or a `.zip` of that folder, version 1.3. Any `speed.exe` with the 1.3 code is
-  accepted. Setup checks it first and changes nothing if it can't be used. No game files are shipped.
+- **Setup builds the game on your Mac** from your own PC game folder, or a `.zip` of that folder. Use a `speed.exe` that matches
+  the supported 1.3 executable fingerprint. Setup checks it first and changes nothing if it can't be used. No game files are shipped.
 - **Optional Xbox 360 features from your own Xbox 360 copy** (a folder or an `.iso`): world, audio, reverb, music,
   police, nis (cutscenes), vinyls, textures and movies. Setup reports which it could add. Without the copy the PC game
   alone is used.

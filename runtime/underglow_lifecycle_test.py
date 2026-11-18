@@ -3,6 +3,8 @@ Public-only export: fixed 1/1, predecessor 540af7d2 0/1 (FileNotFoundError).
 No game or emulation. Good 92/92 + restart 4/4 per build, including independent Light and colour.
 Changed default assertions on ORIGINAL On core: 90/92 (2 failures); fixed 92/92.
 Colour alone stays Off; explicit Light On persists across save/load and restart.
+Per-career retention after 17 unrelated writes, current and legacy snapshots:
+original 0/2, fixed 2/2 in each profile wrapper. Old history remains capped at 16.
 Original omission fails 24; explicit requested roundtrip 7/7 vs omitted callbacks
 6/7; load 12; save/completion 9; default 16; create 1; delete 10.
 Helpers for audio, catalog and customization allocation are contract fixtures.
@@ -96,6 +98,7 @@ const char *private_cars_verify_save(const void *b,size_t size) {
 }
 const char *private_cars_metadata_admit(const void *b,size_t n,const unsigned char *used) { return NULL; }
 const char *private_cars_metadata_stage(void *b,size_t n,const unsigned char *used) { return NULL; }
+const char private_cars_journal_failure[]="fixture journal failure";
 const char *car85_profile_dependencies(Cpu *c,uint32_t db,const PrivateCar *cars,size_t n,unsigned char *used) { memset(used,0,12); return NULL; }
 const char *car85_profile_preflight(Cpu *c,uint32_t db,const PrivateCar *cars,size_t n) { return NULL; }
 int car85_profile_scratch(void) { return 1; }
@@ -112,7 +115,7 @@ static void sidecar_stage(uint32_t p) { abort(); }
 static void xlog(const char *fmt,...) { }
 static unsigned save_fail_seq,save_commit_seq;
 void extratrax_save_complete(int ok) { }
-void padbind_save_complete(int ok) { }
+int padbind_save_complete(int ok) { (void)ok; return 1; }
 void private_cars_save_complete(int ok) { }
 static int fail_creation;
 void f_005AB450_orig(Cpu *c) { c->eax=0xABCDEF12; c->esp+=12; }
@@ -205,6 +208,24 @@ int main(int argc,char **argv) {
     uint32_t p=0x100000, other=0x120000, b=0x200000, baseline=0x220000, second=0x240000;
     M32(FEDB)=0x800000; M32(0x800008)=0xC0DEC0DE; M32(0x800010)=p;
     seed(p,"ALPHA"); seed(other,"BETA");
+    if(!strncmp(argv[2],"history",7)) {
+        defaults(p); CHECK(underglow_set(p,1,2)); invoke(p,b,1);
+        if(!strcmp(argv[2],"history-legacy")) {
+            UGSnapshot legacy={.count=1,.entries={{{1,0x1234,0x5678,1,2},2}}};
+            CHECK(ug_save_digest(G+b,SAVE_SIZE,legacy.digest)); CHECK(ug_store_publish(root,&legacy));
+        } else complete(1);
+        defaults(other); CHECK(underglow_set(other,1,7));
+        for(unsigned i=0;i<=UG_MAX_SNAPSHOTS;++i) {
+            G[other+0x324]=(unsigned char)i;
+            invoke(other,second,1); complete(1);
+            if(!i) memcpy(G+baseline,G+second,SAVE_SIZE);
+        }
+        invoke(p,b,0); int retained=underglow_get(p,1)==2; CHECK(retained);
+        invoke(other,baseline,0); CHECK(underglow_get(other,1)==0);
+        invoke(other,second,0); CHECK(underglow_get(other,1)==7);
+        printf("%s untouched current retained=%d/1 failures=%u\n",argv[2],retained,failures);
+        free(G); return failures?1:0;
+    }
     if(!strcmp(argv[2],"restart")) {
         char path[4096]; snprintf(path,sizeof path,"%s/retail",root);
         FILE *f=fopen(path,"rb"); assert(f); assert(fread(G+b,1,SAVE_SIZE,f)==SAVE_SIZE); fclose(f);
@@ -305,7 +326,7 @@ def main():
         assert len(public_only)==1 and public_only[0][0]=='public'
         print('public-only export: 1/1')
         for variant,wrappers in wrapper_variants(ROOT/'runtime'):
-            for mutation in ('good','original','load','save','default','completion','create','delete'):
+            for mutation in ('good','shared-history','original','load','save','default','completion','create','delete'):
                 w=wrappers; hook=(ROOT/'runtime/underglow.c').read_text(); done=completion
                 if mutation=='original': w=re.sub(r'underglow_\w+\([^;]*;', '(void)0;',w)
                 if mutation in ('load','save','default'):
@@ -313,11 +334,24 @@ def main():
                 if mutation=='completion': done=done.replace('underglow_save_complete(ok);','(void)ok;')
                 if mutation=='create': hook=hook.replace('forget(M32(row));','(void)row;')
                 if mutation=='delete': hook=hook.replace('forget(handle);','(void)handle;')
+                if mutation=='shared-history':
+                    hook=hook.replace('ug_store_load_career(userdata_dir(),active_name,digest,&loaded)',
+                                      'ug_store_load(userdata_dir(),digest,&loaded)')
+                    hook=hook.replace('ug_store_publish_career(userdata_dir(),pending_name,&pending)',
+                                      'ug_store_publish(userdata_dir(),&pending)')
                 hookfile=d/(variant+mutation+'-hook.c'); hookfile.write_text(hook)
                 source=PREFIX+'\n'.join(generated)+w+done+MAIN
                 path=d/(variant+mutation+'.c'); path.write_text(source); exe=path.with_suffix('')
                 r=subprocess.run(['clang',*(['-DNFS_PUBLIC=1'] if variant=='public' else []),'-O1','-g','-fsanitize=address','-Wno-deprecated-declarations','-I',str(ROOT/'runtime'),'-I',str(ROOT/'recomp'),'-I',str(ROOT/'recomp/out'),str(path),str(hookfile),str(ROOT/'runtime/underglow_store.c'),'-o',str(exe)],capture_output=True,text=True)
                 assert r.returncode==0,r.stderr[-4000:]
+                if mutation in ('good','shared-history'):
+                    for mode in ('history','history-legacy'):
+                        data=d/(variant+mutation+'-'+mode); data.mkdir()
+                        r=subprocess.run([str(exe),str(data),mode],capture_output=True,text=True)
+                        retained=int(mutation=='good')
+                        print(variant,mutation,r.stdout.strip())
+                        assert r.returncode==1-retained and f'retained={retained}/1' in r.stdout,r.stderr[-3000:]
+                    if mutation!='good': continue
                 data=d/(variant+mutation+'-data'); data.mkdir()
                 r=subprocess.run([str(exe),str(data),'seed'],capture_output=True,text=True)
                 print(variant,mutation,r.stdout.strip())

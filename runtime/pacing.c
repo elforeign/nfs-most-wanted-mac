@@ -71,6 +71,8 @@ int pacing_lockstep(void) {
 int pacing_lockstep_now(void) { return pacing_lockstep() && M32(0x00925E90u) == 6; }   // racing (GAMEFLOW_STATE)
 #define lockstep_now pacing_lockstep_now
 static int sim_hz;
+static int sim_auto;
+static uint64_t sim_refresh_at;
 static uint32_t presents, presents_adv;    // Presents so far (pacing_present), and at the last AdvanceRealTime
 static int lock_tick;                      // NFS_LOCKSTEP: the last pass presented a frame and wasn't held, so the next
                                            // pass gets one tick of real time (decided at its AdvanceRealTime)
@@ -107,14 +109,20 @@ void f_0064CF00(Cpu *c) {
 // keep up still keeps time: the Scheduler runs several ticks in a slow frame.
 int user32_display_hz(void);
 int pacing_sim_hz(void) { return sim_hz; }
+static int display_sim_hz(void) {
+    int hz = user32_display_hz();
+    return hz < 30 ? 60 : hz > 480 ? 480 : hz;
+}
 void f_006484E0(Cpu *c) {
     if (!sim_hz) {
         const char *e = getenv("NFS_SIMHZ");
         int hz = e ? atoi(e) : 0;
         if (!pace_on()) hz = 60;
-        else if (hz < 30 || hz > 480) hz = user32_display_hz();
-        if (hz < 30) hz = 60;
-        if (hz > 480) hz = 480;
+        else if (hz < 30 || hz > 480) {
+            sim_auto = 1;
+            hz = display_sim_hz();
+            sim_refresh_at = host_ticks() + 1000000000ull;
+        }
         sim_hz = hz;
         fprintf(stderr, "boot: sim at %d Hz%s\n", hz, e ? " (NFS_SIMHZ)" : pace_on() ? " (display refresh)" : "");
     }
@@ -149,11 +157,13 @@ void f_006ECCD0(Cpu *c) {
 // GO (timeline.log, BOOT_DIAG). Here the count advances by 60/hz per call, so the wait is 31/60 s at any tick rate.
 void f_006F58D0(Cpu *c) {
     if (!sim_hz || sim_hz == 60) { f_006F58D0_orig(c); return; }
-    static uint32_t owner, written, acc;      // acc: fraction of a 60 Hz count, in 1/sim_hz units
+    static uint32_t owner, written, acc, rate; // acc: fraction of a 60 Hz count, in 1/rate units
     uint32_t self = c->ecx, state = M32(self + 0x2EC), n = M32(self + 0x3D4);
     f_006F58D0_orig(c);
     if (state != 3 || M32(self + 0x3D4) != n + 1) return;          // not counting (playing, or started now)
-    if (self != owner || n != written) { owner = self; acc = 0; }    // another NIS, or the game reset the count
+    if (!rate || self != owner || n != written) { owner = self; acc = 0; }  // another NIS, or the game reset the count
+    else if (rate != (uint32_t)sim_hz) acc = acc * (uint32_t)sim_hz / rate;
+    rate = (uint32_t)sim_hz;
     acc += 60;
     uint32_t whole = acc / (uint32_t)sim_hz;
     acc -= whole * (uint32_t)sim_hz;
@@ -254,6 +264,41 @@ static void hold_real_time(Cpu *c) {
     M32(0x00925680u) = call_guest(c, 0x0045CE40u, 0, NULL);          // the main loop's ticker = bGetTicker()
     c->esp = esp;
 }
+// Between scheduler passes. Keep elapsed time and retime live tasks before the next step.
+static void refresh_sim_rate(uint32_t scheduler, int lockstep) {
+    if (!sim_auto || !scheduler) return;
+    uint64_t now = host_ticks();
+    if (now < sim_refresh_at) return;
+    sim_refresh_at = now + 1000000000ull;
+    int hz = display_sim_hz();
+    if (hz == sim_hz) return;
+
+    float step = 1.0f / (float)hz, ratio = (float)sim_hz / (float)hz;
+    if (!lockstep) MF32(scheduler + 0x1C) /= ratio;    // this remainder is measured in ticks
+    MF32(scheduler + 0x20) = step;
+    uint32_t sim = M32(0x009885E0u);                  // Sim::_mSystem
+    if (sim) {
+        MF32(sim + 0x18) = step;
+        MF32(sim + 0x1C) *= ratio;                    // keep the game's sim speed multiplier
+    }
+    for (uint32_t task = M32(0x009885D0u); task; task = M32(task + 0x14)) { // SimTask::mRoot
+        float rate = MF32(task);
+        if (rate > 0 && rate < 1) {
+            float next = fminf(rate * ratio, 1.0f);
+            if (MF32(task + 8) < 1.0f)
+                MF32(task + 8) = 1.0f - (1.0f - MF32(task + 8)) * (next / (rate * ratio));
+            MF32(task) = next;
+        } else if (rate == 1 && MF32(task + 8) < 0)
+            MF32(task + 8) /= ratio;                 // remaining startup delay, measured in ticks
+    }
+    if (hud_frames) {
+        uint32_t ticks = M32(scheduler + 0x28);
+        int32_t elapsed = (int32_t)(ticks - hud_tick0);
+        if (elapsed >= 0) hud_tick0 = ticks - (uint32_t)((uint64_t)elapsed * hz / sim_hz);
+    }
+    sim_hz = hz;
+    fprintf(stderr, "boot: sim at %d Hz (display refresh)\n", hz);
+}
 void f_0065C6D0(Cpu *c) {
     void portmenu_pass(Cpu *c);
     int portmenu_hold(void);
@@ -269,6 +314,7 @@ void f_0065C6D0(Cpu *c) {
     if (held) hold_real_time(c);
     uint32_t s = M32(SCHEDULER);
     int frame_pass = presents != presents_adv, lock = sim_hz && s && lockstep_now();
+    refresh_sim_rate(s, lock);
     presents_adv = presents;
     if (lock) {                            // NFS_LOCKSTEP: this pass's real time is one tick if it was a frame, else none
         lock_tick = frame_pass && !held;   // (the pass that enters the race was timed by the wall clock before: dropped)

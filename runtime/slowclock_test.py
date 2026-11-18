@@ -5,6 +5,7 @@ Compiles the production unit against a filled frame ring and drives five seconds
 P13, P13, P1 (entry), P2 (stays), P13 (exit). Expects eight values in every row, clock_low 0 0 1 1 0,
 one clock_1.tsv with the ring's 1023 frames newest first, one "entered" and one "left" note.
 Broken control: the same sequence with the low states renamed P4/P5 writes no file and no note.
+Host send rights over 5 CPU samples: original leaks 5, fixed leaks 0.
 """
 import subprocess
 import sys
@@ -14,6 +15,8 @@ from pathlib import Path
 RT = Path(__file__).resolve().parent
 HARNESS = r'''
 #include <stdarg.h>
+#include <assert.h>
+#include <mach/mach.h>
 #include <stdio.h>
 #include <time.h>
 #include "host.h"
@@ -35,12 +38,18 @@ int main(int argc, char **argv) {
     snprintf(st[2], 64, "OFF:2.00,%s:61.00,%s:37.00", low1, low2); snprintf(st[3], 64, "%s:40.00,%s:60.00", low1, low2);
     snprintf(st[4], 64, "P12:20.00,P13:80.00");
     volatile double burn = 0;
+    mach_port_t host = mach_host_self();
+    mach_port_urefs_t refs_before, refs_after;
+    assert(mach_port_get_refs(mach_task_self(), host, MACH_PORT_RIGHT_SEND, &refs_before) == KERN_SUCCESS);
     for (int s = 0; s < 5; ++s) {
         for (int i = 0; i < 3000000; ++i) burn += i;
         printf("ROW");
         slowclock_second(stdout, 1, 100 * (uint64_t)(s + 1), st[s], 1, argv[1], 10.0 + s, note);
         putchar('\n');
     }
+    assert(mach_port_get_refs(mach_task_self(), host, MACH_PORT_RIGHT_SEND, &refs_after) == KERN_SUCCESS);
+    assert(mach_port_deallocate(mach_task_self(), host) == KERN_SUCCESS);
+    printf("HOST_REFS %d\n", (int)refs_after - (int)refs_before);
     printf("ROW"); slowclock_second(stdout, 0, 600, st[2], 1, argv[1], 15, note); putchar('\n');
     struct timespec t0, t1;
     FILE *sink = fopen("/dev/null", "w");
@@ -71,6 +80,7 @@ def main():
             files = sorted(p.name for p in d.iterdir())
             results.append((rows, notes, files, out, d))
         rows, notes, files, out, d = results[0]
+        assert 'HOST_REFS 0' in out, next(l for l in out.splitlines() if l.startswith('HOST_REFS'))
         assert all(len(r) == 8 for r in rows), rows
         assert [r[7] for r in rows[:5]] == ['0', '0', '1', '1', '0'], rows
         assert rows[5] == ['-'] * 8, rows[5]
@@ -88,7 +98,7 @@ def main():
         assert cost < 1000, cost                                                    # microseconds per once-a-second call
         brows, bnotes, bfiles, _, _ = results[1]
         assert [r[7] for r in brows[:5]] == ['0'] * 5 and not bnotes and not bfiles, (brows, bnotes, bfiles)
-        print('PASS slowclock: clock_low 0 0 1 1 0, 1 frame file of 1023 rows, 2 notes; broken control (P4/P5): 0 low rows, 0 files, 0 notes; one call costs %.1f microseconds' % cost)
+        print('PASS slowclock: 0 leaked host rights in 5 samples, clock_low 0 0 1 1 0, 1 frame file of 1023 rows, 2 notes; broken control (P4/P5): 0 low rows, 0 files, 0 notes; one call costs %.1f microseconds' % cost)
 
 
 if __name__ == '__main__':

@@ -393,10 +393,10 @@ def compile_binary(directory, name, source, packets=None, driver=None, process_s
             'scanString(text,"port.url-text"); NSURL *url=[[NSURL alloc] initWithString:text]; '
             'scanString((__bridge NSString *)CFURLGetString((__bridge CFURLRef)url),"port.url");')
         key_source = (RT/'stream_key.m').read_text()
-        assert key_source.count('replaceKey(field.stringValue)')==1
+        assert key_source.count('replaceKey(field.stringValue,')==1
         assert key_source.count('NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];')==1
-        key_source = key_source.replace('replaceKey(field.stringValue)',
-            'replaceKey(scanString(field.stringValue,"port.save"))')
+        key_source = key_source.replace('replaceKey(field.stringValue,',
+            'replaceKey(scanString(field.stringValue,"port.save"),')
         key_source = key_source.replace('volatile unsigned char *p=bytes;', 'volatile unsigned char *p=(unsigned char *)bytes;')
         key_source = key_source.replace('NSString *text=[NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];',
             'NSString *text=scanString([NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString],"port.paste");')
@@ -592,7 +592,7 @@ def main():
         assert not re.search(r'\b(?:NSLog|fprintf|printf|os_log|diag_\w+)\s*\(', text)
         assert not re.search(r'\.(?:localizedDescription|debugDescription|userInfo)\b', text)
     report=(RT/'report.m').read_text()
-    assert 'session_note(notes[i],' in report and r'fprintf(sess_f, "%s\n", buf);' in report
+    assert 'session_note(line,' in report and r'fprintf(sess_f, "%s\n", buf);' in report
     assert 'fflush(sess_f);' in report
     def attached(text):
         assert text.count(hook) == 1, 'segment callback is attached'

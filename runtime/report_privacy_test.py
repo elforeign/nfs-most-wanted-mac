@@ -1,11 +1,11 @@
-"""Synthetic shared/preview/six-attachment privacy regression and independent removal proofs.
+"""Synthetic shared/preview/seven-attachment privacy regression and independent removal proofs.
 
 Compact mistyped room codes: pinned rule 25 checks/12 failures; fixed 25/0; ordinary words preserved.
-Merged proof: pinned original 887 checks/830 failures; review predecessor 893/20; fixed 893/0.
+Merged proof: pinned original 1003 checks/941 failures; review predecessor 1009/20; fixed 1009/0.
 Userinfo 3/3 -> 3/0; encoded continuations 16/16 -> 16/0; production log copy 4/1 -> 4/0.
 The original 31 broken controls plus four review controls and mixed decoding are retained (36 total).
-Mixed Latin-1 note/UTF-8 identity: pinned decoder 893 checks/3 failures; fixed 893/0.
-Injected regex failure: 14 checks/0 failures.
+Mixed Latin-1 note/UTF-8 identity: pinned decoder 1009 checks/3 failures; fixed 1009/0.
+Injected regex failure: 16 checks/0 failures.
 Pinned original and review-predecessor proofs run without Git history in the offline suite.
 All compilation, profiles, logs and temporary directories stay under .metal-cache in this checkout.
 Coverage: explicit GitHub forms, labelled credentials/auth, personal path roots, JSON-style escapes
@@ -22,6 +22,7 @@ Wall time (same load, back to back): 130 s with the broken controls in sequence,
 """
 import concurrent.futures
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -402,11 +403,20 @@ def pinned_source(revision, name):
     return PINNED_SOURCES[revision, name]
 
 
-def run(name, header, *, baseline=False, expected_failure=False, fixture=None, report=None, copy_source=None, review=None, expected_counts=None):
+def run(name, header, *, baseline=False, expected_failure=False, fixture=None, report=None, copy_source=None,
+        review=None, expected_counts=None, game=None):
     work = SCRATCH / name
     work.mkdir(parents=True, exist_ok=True)
     for file in ('report_github_test.m', 'report_github.m', 'report_github.h', 'portmenu.m', 'report_submit.m', 'report_submit.h'):
         shutil.copyfile(RUNTIME / file, work / file)
+    if baseline:
+        # The original shared rules relied on the preview to mask absolute home names.
+        path = work / 'report_github.m'
+        source = path.read_text()
+        home = '    if (home.length) text = [text stringByReplacingOccurrencesOfString:home withString:@"~"];'
+        old_path_rule = r'    text = ReplacePattern(text, @"/(?:Users|home)/[^/\\s]+", @"~"); // home paths'
+        assert source.count(home) == 1
+        path.write_text(source.replace(home, home + '\n' + old_path_rule))
     (work / 'report_privacy.h').write_text(header)
     # Compile the actual log-copy function, including its truncation order, not a fixture substitute.
     report = report if report is not None else (RUNTIME / 'report.m').read_text()
@@ -426,13 +436,21 @@ def run(name, header, *, baseline=False, expected_failure=False, fixture=None, r
                '-framework', 'SystemConfiguration', '-framework', 'IOKit', '-Wl,-dead_strip', '-o', str(work / 'check')]
     if baseline:
         command.insert(1, '-DREPORT_PRIVACY_BASELINE=1')
+    if game:
+        manifest = json.loads((RUNTIME / 'runtime_sources.json').read_text())
+        public_carbon = game == 'carbon'
+        command[1:1] = ['-DREPORT_TARGET_PROBE=1', '-DNFS_GAME=' + ('2' if public_carbon else '1'),
+                        '-I' + str(ROOT / 'recomp/private_runtime')]
+        if public_carbon and 'report_github.m' not in manifest['targets']['private']['units']:
+            command.insert(1, '-DREPORT_TARGET_NO_UNIT=1')
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
     (work / 'compile.log').write_text(compiled.stdout + compiled.stderr)
     assert compiled.returncode == 0, name + ' compile failed:\n' + compiled.stderr[-5000:]
     result = subprocess.run([str(work / 'check'), str(profile)], capture_output=True, text=True, timeout=60,
                             env=dict(os.environ, TMPDIR=str(work), ASAN_OPTIONS='detect_leaks=0'))
     (work / 'result.log').write_text(result.stdout + result.stderr)
-    count = re.search(r'privacy: (\d+) checks, (\d+) failures', result.stdout)
+    label = 'report target' if game else 'privacy'
+    count = re.search(rf'{label}: (\d+) checks, (\d+) failures', result.stdout)
     assert count, name + ' did not finish:\n' + result.stderr[-4000:]
     checks, failures = map(int, count.groups())
     print(f'{name}: {checks} checks, {failures} failures', flush=True)
@@ -467,13 +485,15 @@ def main():
     if '--prove-room-code-premise' in sys.argv:
         room_code_proof(header,premise=True)
         return
+    run('public_carbon', header, game='carbon', expected_counts=(12, 0))
+    run('public_mw', header, game='mw', expected_counts=(10, 0))
     room_code_proof(header)
     original = pinned_source('13984ab7', 'report_privacy.h').encode()
     assert hashlib.sha256(original).hexdigest() == ORIGINAL
     print('original SHA256 ' + ORIGINAL, flush=True)
     run('original', original.decode(), baseline=True, expected_failure=True,
         report=pinned_source('13984ab7', 'report.m'),
-        expected_counts=(887, 830))
+        expected_counts=(1003, 941))
     if '--prove-original' in sys.argv:
         return
     # Recreate the reviewed predecessor by restoring only the three changed protections.
@@ -492,8 +512,8 @@ def main():
     review = {'userinfo': (3, 3), 'encoded_continuations': (16, 16), 'production_log_copy': (4, 1)}
     print('review predecessor ' + PREDECESSOR + ' protections', flush=True)
     run('review_predecessor', predecessor, expected_failure=True, report=predecessor_report, review=review,
-        expected_counts=(893, 20))
-    run('fixed', header, review={name: (total, 0) for name, (total, _) in review.items()}, expected_counts=(893, 0))
+        expected_counts=(1009, 20))
+    run('fixed', header, review={name: (total, 0) for name, (total, _) in review.items()}, expected_counts=(1009, 0))
     mutants = {}
     assert header.count('NSString *text = ReportPrivacyDecodeData(data);') == 2
     mutants['mixed_encoding'] = header.replace('NSString *text = ReportPrivacyDecodeData(data);', LATIN1_BASELINE)
@@ -525,7 +545,7 @@ def main():
     for name, broken in mutants.items():
         assert broken != header, name + ' did not mutate production code'
         jobs.append(('broken_' + name, broken, dict(expected_failure=True,
-                     expected_counts=(893, 3) if name == 'mixed_encoding' else None)))
+                     expected_counts=(1009, 3) if name == 'mixed_encoding' else None)))
     # Restore each partial-token rule independently without reverting other protections.
     for protection in ('github', 'bearer'):
         marker = '// privacy:' + protection
@@ -544,10 +564,10 @@ def main():
     start = fixture.index('    NSArray *rows = PrivacyCases();')
     end = fixture.index('    printf("privacy:')
     fixture = fixture[:start] + '''    CHECK(ReportEndpointRedact(@"SyntheticRegexInput") == nil);
-    for (NSString *file in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt"])
+    for (NSString *file in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt", @"blackbox.txt"])
         CHECK([@"SyntheticRegexInput" writeToFile:[root stringByAppendingPathComponent:file] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     ReportRedactBundle(root);
-    for (NSString *file in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt"])
+    for (NSString *file in @[@"report.txt", @"events.txt", @"log.txt", @"crash.txt", @"settings.txt", @"stats.txt", @"blackbox.txt"])
         CHECK(![NSFileManager.defaultManager fileExistsAtPath:[root stringByAppendingPathComponent:file]]);
 ''' + fixture[end:]
     run('regex_failure_closed', invalid, fixture=fixture)

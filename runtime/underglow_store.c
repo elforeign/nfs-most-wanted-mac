@@ -129,11 +129,10 @@ static unsigned read_all(const char *path, UGSnapshot *snapshots) {
     if(zero_extension) for(unsigned i=0;i<ZERO_BYTES;++i) if(zeros[32+i]) return 0;
     return at==size ? count : 0;
 }
-int ug_store_load(const char *dir, const unsigned char digest[32], UGSnapshot *out) {
+static int load_file(const char *path, const unsigned char digest[32], UGSnapshot *out) {
     if (!out) return 0;
     memset(out,0,sizeof *out);
-    char path[4096];
-    if (!digest || !path_for(dir,path,sizeof path)) return 0;
+    if (!path || !digest) return 0;
     UGSnapshot *all=calloc(UG_MAX_SNAPSHOTS,sizeof *all);
     if (!all) return 0;
     unsigned count=read_all(path,all); int found=0;
@@ -141,9 +140,9 @@ int ug_store_load(const char *dir, const unsigned char digest[32], UGSnapshot *o
     free(all);
     return found;
 }
-int ug_store_publish(const char *dir, const UGSnapshot *s) {
-    char path[4096], temp[4096];
-    if (!valid(s) || !path_for(dir,path,sizeof path)) return 0;
+static int publish_file(const char *dir, const char *path, const UGSnapshot *s) {
+    char temp[4096];
+    if (!valid(s)) return 0;
     UGSnapshot *all=calloc(UG_MAX_SNAPSHOTS,sizeof *all);
     unsigned char *bytes=calloc(1,CAPACITY);
     if (!all || !bytes) { free(all); free(bytes); return 0; }
@@ -185,4 +184,41 @@ int ug_store_publish(const char *dir, const UGSnapshot *s) {
     }
     free(bytes); free(all);
     return ok;
+}
+
+int ug_store_load(const char *dir, const unsigned char digest[32], UGSnapshot *out) {
+    char path[4096];
+    return load_file(path_for(dir,path,sizeof path)?path:NULL,digest,out);
+}
+int ug_store_publish(const char *dir, const UGSnapshot *s) {
+    char path[4096];
+    return path_for(dir,path,sizeof path) && publish_file(dir,path,s);
+}
+
+static int career_path(const char *dir,const unsigned char career[32],char *path,size_t size) {
+    if (!dir || !*dir || !career) return 0;
+    unsigned char name[32], digest[32];
+    size_t n=0;
+    while (n<sizeof name && career[n]) {
+        unsigned char ch=career[n];
+        name[n++]=ch>='A' && ch<='Z'?ch+'a'-'A':ch;
+    }
+    CC_SHA256(name,(CC_LONG)n,digest);
+    char key[65];
+    for (unsigned i=0;i<sizeof digest;++i) snprintf(key+i*2,3,"%02x",digest[i]);
+    int len=snprintf(path,size,"%s/underglow-%s.bin",dir,key);
+    return len>0 && (size_t)len<size;
+}
+int ug_store_load_career(const char *dir,const unsigned char career[32],const unsigned char digest[32],UGSnapshot *out) {
+    char path[4096];
+    if (!career_path(dir,career,path,sizeof path)) return load_file(NULL,digest,out);
+    // Untouched careers may still have their snapshot in the old shared file.
+    // Once a career has its own history, its pruned digests stay pruned.
+    struct stat st;
+    if (lstat(path,&st) && errno==ENOENT) return ug_store_load(dir,digest,out);
+    return load_file(path,digest,out);
+}
+int ug_store_publish_career(const char *dir,const unsigned char career[32],const UGSnapshot *s) {
+    char path[4096];
+    return career_path(dir,career,path,sizeof path) && publish_file(dir,path,s);
 }

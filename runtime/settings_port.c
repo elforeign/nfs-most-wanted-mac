@@ -197,16 +197,16 @@ static Setting s_clips_open = {.id = "display.clips_open", .category = SET_DISPL
 static Setting s_stream_heading = {.id="display.stream_heading", .category=SET_DISPLAY, .order=60,
     .label="Live streaming", .type=SET_HEADING, .pref=""};
 static Setting s_stream_key = {.id="display.stream_key", .category=SET_DISPLAY, .order=61,
-    .label="Enter stream key", .help="Opens a secure entry sheet. Save keeps the key in memory until quit. Entering a key does not broadcast.",
+    .label="Enter stream key", .help="Opens a secure entry sheet. Remember on this Mac keeps the key for future launches.",
     .type=SET_ACTION, .pref="", .apply=stream_key_edit};
 static Setting s_stream_forget = {.id="display.stream_forget", .category=SET_DISPLAY, .order=62,
-    .label="Forget stream key", .help="Stops live streaming and clears the key from this session.",
+    .label="Forget stream key", .help="Stops live streaming and removes the key from memory and disk.",
     .type=SET_ACTION, .pref="", .apply=stream_key_forget};
 static Setting s_stream_go = {.id="display.stream_go", .category=SET_DISPLAY, .order=63,
     .label="Go live", .help="Starts sending video and stereo sound to YouTube using the entered key. Always starts Off; errors require another explicit Go live.",
     .type=SET_ACTION, .pref="", .apply=stream_key_go};
 static Setting s_stream_stop = {.id="display.stream_stop", .category=SET_DISPLAY, .order=64,
-    .label="Stop live", .help="Stops uploads. Keeps the key until quit or Forget. Recording and replay continue.",
+    .label="Stop live", .help="Stops uploads and keeps the key for another Go live. Recording and replay continue.",
     .type=SET_ACTION, .pref="", .apply=stream_key_stop};
 static Setting s_stream_status = {.id="display.stream_status", .category=SET_DISPLAY, .order=65,
     .label="Stream status", .type=SET_INFO, .pref="", .value_text=stream_key_status};

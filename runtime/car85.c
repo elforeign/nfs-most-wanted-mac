@@ -1820,15 +1820,20 @@ const char *car85_profile_dependencies(Cpu *c, uint32_t db, const PrivateCar *in
         // while frontend data is loaded, before any retail profile writes.
         c->ecx=row; c->esp-=4; M32(c->esp)=0; f_005816B0_orig(c);
         uint32_t type=c->eax;
-        if(type>=TYPES+MAX_ADDITIONS) { reason="Unrecognized saved car identity."; break; }
-        if(type>=TYPES) { unsigned k=type-TYPES; used[k/8]|=1u<<(k%8); continue; }
+        if(type>=TYPES) {
+            size_t k=0;
+            while(k<count && (inventory[k].swap || inventory[k].id!=type)) ++k;
+            if(k==count) { reason="Unrecognized saved car identity."; break; }
+            used[k/8]|=1u<<(k%8);
+            continue;
+        }
         uint32_t table=M32(TABLE); if(!table) continue;
         const char *name=NULL;
         for(unsigned j=0;j<TYPES;++j) if(M32(table+j*STRIDE+0x90)==type) {
             name=(const char *)G+table+j*STRIDE; break;
         }
         if(!name) continue;
-        for(size_t k=76;k<count;++k) {
+        for(size_t k=0;k<count;++k) {
             const PrivateCar *car=&inventory[k];
             if(car->swap && car->selected && !strncmp(name,car->name,16)) used[k/8]|=1u<<(k%8);
         }

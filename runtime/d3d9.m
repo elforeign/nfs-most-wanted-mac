@@ -164,7 +164,7 @@ static uint32_t obj_release(Obj *o) {
     if (!o) return 0;
     if (--o->refs == 0 && o == dev.self) mat_bone_reset();
     if (o->refs == 0 && o != dev.self && (o->kind == K_TEXTURE || o->kind == K_CUBE || o->kind == K_VOLUME || o->kind == K_VB ||
-                                            o->kind == K_IB || (o->kind == K_SURFACE && !o->parent))) {
+                                            o->kind == K_IB || o->kind == K_QUERY || (o->kind == K_SURFACE && !o->parent))) {
         if (o->guest != dev.backbuffer && o->guest != dev.autodepth) {
             if (diag_on) diag_event("d3d free %08X kind %d fmt %X %ux%u", o->guest, o->kind, o->fmt, o->w, o->h);
             for (int i = 0; i < 16 * 6; ++i) { gfree(o->mem[i]); o->mem[i] = 0; }
@@ -238,6 +238,7 @@ static int s_GetDesc(Cpu *c) {
 static int s_LockRect(Cpu *c) {        // (this, D3DLOCKED_RECT*, RECT*, flags)
     Obj *s = THIS;
     uint32_t pitch, m = surface_mem(s, &pitch), r = arg(c, 2), lr = arg(c, 1);
+    if (s->lockable_rt && (arg(c, 3) & 0x10) && !render_lock_readback(s, m, pitch)) RET(D3DERR_INVALIDCALL, 4);
     uint32_t off = 0;
     if (r) off = (is_dxt(s->fmt) ? M32(r + 4) / 4 : M32(r + 4)) * pitch + (is_dxt(s->fmt) ? M32(r) / 4 : M32(r)) * fmt_bpp(s->fmt);
     M32(lr) = pitch;
@@ -912,6 +913,7 @@ static void set_multisample(Obj *s, uint32_t type, uint32_t quality) {
 static int v_CreateRenderTarget(Cpu *c) {      // (this, w, h, fmt, ms, msq, lockable, pp, shared)
     Obj *s = make_surface(arg(c, 1), arg(c, 2), arg(c, 3), 1, 0, 0);
     set_multisample(s, arg(c, 4), arg(c, 5));
+    s->lockable_rt = arg(c, 6) != 0;
     M32(arg(c, 7)) = s->guest;
     RET(D3D_OK, 9);
 }

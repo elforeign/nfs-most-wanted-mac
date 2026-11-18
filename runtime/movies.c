@@ -407,7 +407,13 @@ static void *feeder_main(void *p) {
         uint32_t play, write;
         if (ds_buffer_get_current_position(mv.buf, &play, &write) < 0) { __atomic_store_n(&mv.lost, 1, __ATOMIC_RELEASE); break; }
         uint32_t ahead = (mv.wpos + mv.dsbytes - write) % mv.dsbytes;
-        if (ahead > mv.dsbytes / 2) { mv.wpos = write; ahead = 0; }          // fell behind the mixer
+        if (ahead > mv.dsbytes / 2) {                                      // fell behind the mixer
+            pthread_mutex_lock(&mv_mu);
+            mv.apos += (mv.dsbytes - ahead) / 24;                          // drop the content the mixer passed
+            pthread_mutex_unlock(&mv_mu);
+            mv.wpos = write;
+            ahead = 0;
+        }
         if (ahead < lead && !write_ds(lead - ahead)) { __atomic_store_n(&mv.lost, 1, __ATOMIC_RELEASE); break; }
         struct timespec ts = {0, 5000000};
         nanosleep(&ts, NULL);

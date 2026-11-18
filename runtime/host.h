@@ -108,6 +108,7 @@ int render_target_msaa(uint32_t texture, uint32_t depth, int samples);   // rend
 int x360_reflection_target(uint32_t guest, uint32_t w, uint32_t h);
 int x360_shadow_border(void);
 void rumble_update(void);
+void rumble_select(void *controller);
 void feedback_setup(void);
 void feedback_levels(float *heavy, float *light);
 enum { FEEDBACK_MENU = 1, FEEDBACK_PAUSE = 2, FEEDBACK_FOCUS = 4, FEEDBACK_APP = 8 };

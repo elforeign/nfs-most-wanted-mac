@@ -50,6 +50,8 @@ NAME_PATTERN = re.compile(r"[A-Za-z0-9_\\/%.\-]+\.[A-Za-z0-9]{2,4}".encode())
 SHADER_WINDOW = (0x09BB7000, 0x09C1C000)
 SHADER_FILE = "NFS/zzdata0_09bb7000.bin"
 XEX_TITLE = "0x454107D9"
+XEX_MAX_BYTES = 256 << 20  # file limit in xex_read.c
+ZDIR_MAX_BYTES = 24 * 100000
 XEX_BUILDS = {   # the supported executables: SHA-256 of the whole decoded image (tools_snapshot/pubtables_gen.py XEX_BUILDS)
     "USA": "e0002893223a1425e9cd760171921689007093b03ad3d597e156d4c15de09618",
     "PAL": "027c50f93d9015f2f20683bed65b188952b49d73519e926bceb5bd220b7ab146",   # European retail disc
@@ -90,6 +92,8 @@ def _files(folder):
                 raise X360Error(f"X360 folder contains a link or special file: {p}")
         for name in files:
             p = Path(dp) / name
+            if p.stat().st_nlink > 1:
+                raise X360Error(f"The X360 folder contains a file with more than one hard link: {p.relative_to(folder)}")
             rel = xdvdfs.safe_path(p.relative_to(folder).as_posix()).upper()
             if rel in result or len(result) >= xdvdfs.MAX_FILES:
                 raise X360Error("X360 folder has duplicate names or too many files")
@@ -159,6 +163,12 @@ def _run(command, work, env=None, timeout=3600):
                         "Check that both game copies are complete and reinstall Setup if its tools are missing.")
 
 
+def _require_space(work, size):
+    if shutil.disk_usage(work).free < size:
+        raise X360Error("There is not enough free disk space to unpack the Xbox 360 copy.",
+                        "Free space on the work volume, then try again.")
+
+
 def _game_names(xex, pc_root, work):
     """Decode the player's supported executable with the shipped, bounded XEX tool."""
     data = xex.read_bytes()
@@ -172,6 +182,7 @@ def _game_names(xex, pc_root, work):
     size = struct.unpack_from(">I", data, sec + 4)[0]
     if base is None or not 0 < size <= 256 << 20:
         raise X360Error("X360 executable has an invalid image range")
+    _require_space(work, size)
     tool = work / "xex_read"
     _run(["clang", "-O2", "-w", SNAPSHOT / "xex_read.c", "-o", tool], work, timeout=120)
     image = work / "xex-image.bin"
@@ -217,7 +228,7 @@ def _candidates(pc_paths, game_names):
 
 
 def _entries(data):
-    if not data or len(data) % 24 or len(data) > 24 * 100000:
+    if not data or len(data) % 24 or len(data) > ZDIR_MAX_BYTES:
         raise X360Error("Invalid X360 ZDIR entry table")
     entries = {}
     for row in struct.iter_unpack("<6I", data):
@@ -250,20 +261,29 @@ def _extract(source, stage, pc_root, work, progress, extras=None):
     raw, movies = stage / "files", stage / "Movies"
     raw.mkdir()
     prefix = "FILES/" if "FILES/GLOBAL/GLOBALB.BUN" in source.files else ""
-    retained = (("DEFAULT.XEX", "default.xex", 0, None),
-                ("NFS/ZDIR.BIN", "NFS/ZDIR.BIN", 0, None),
-                ("NFS/ZZDATA0.BIN", SHADER_FILE, SHADER_WINDOW[0], SHADER_WINDOW[1] - SHADER_WINDOW[0]))
-    retained_sizes = {}
-    for name, rel, offset, size in retained:
+    retained = []
+    for name, rel, limit in (("DEFAULT.XEX", "default.xex", XEX_MAX_BYTES),
+                             ("NFS/ZDIR.BIN", "NFS/ZDIR.BIN", ZDIR_MAX_BYTES),
+                             ("NFS/ZZDATA0.BIN", SHADER_FILE, None)):
         key = name if name in source.files else prefix + name
         if key not in source.files:
             raise X360Error(f"X360 copy lacks {name}")
+        if limit is None:
+            offset, end = SHADER_WINDOW
+            size = end - offset
+        else:
+            offset, size = 0, source.size(key)
+            if not 0 < size <= limit or (name == "NFS/ZDIR.BIN" and size % 24):
+                raise X360Error(f"{name} in the Xbox 360 copy is not the expected size.")
+        retained.append((rel, key, offset, size))
+    _require_space(work, sum(size for _, _, _, size in retained))
+    for rel, key, offset, size in retained:
         source.copy(key, raw / rel, offset, size)
-        retained_sizes[rel] = size if size is not None else source.size(key)
     _validate_shaders(raw / SHADER_FILE)
     pc_paths = _pc_paths(pc_root)
     candidates = _candidates(pc_paths, _game_names(raw / "default.xex", pc_root, work))
-    entries = _entries((raw / "NFS/ZDIR.BIN").read_bytes())
+    zdir = (raw / "NFS/ZDIR.BIN").read_bytes()
+    entries = _entries(zdir)
     named = {candidates[h]: e for h, e in entries.items() if h in candidates}
     required = set(REQUIRED)
     if need_nis:
@@ -299,19 +319,21 @@ def _extract(source, stage, pc_root, work, progress, extras=None):
     movie_names = sorted(k for k in source.files if k.startswith("MOVIES/") and k.endswith(".WMV"))
     if not movie_names:
         raise X360Error("X360 copy lacks Movies/*.wmv")
+    movie_sizes = {name: source.size(name) for name in movie_names}
+    _require_space(work, sum(size for _, _, _, size in plan) + sum(movie_sizes.values()))
     for i, (name, key, off, size) in enumerate(plan, 1):
         source.copy(key, raw / name, off, size)
         if progress:
             progress(i, len(plan) + len(movie_names))
     for i, key in enumerate(movie_names, len(plan) + 1):
-        source.copy(key, movies / key[len("MOVIES/"):])
+        source.copy(key, movies / key[len("MOVIES/"):], size=movie_sizes[key])
         if progress:
             progress(i, len(plan) + len(movie_names))
-    all_rows = list(struct.iter_unpack("<6I", (raw / "NFS/ZDIR.BIN").read_bytes()))
+    all_rows = list(struct.iter_unpack("<6I", zdir))
     coverage = {"names_found": sum(r[0] in candidates for r in all_rows), "entries": len(all_rows), "selected": len(plan),
                 "required": sorted(required), "files": [n for n, *_ in plan],
-                "sizes": dict(retained_sizes, **{name: size for name, _, _, size in plan}),
-                "movie_files": {name[len("MOVIES/"):]: source.size(name) for name in movie_names}}
+                "sizes": {name: size for name, _, _, size in retained + plan},
+                "movie_files": {name[len("MOVIES/"):]: size for name, size in movie_sizes.items()}}
     (stage / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
     return coverage
 

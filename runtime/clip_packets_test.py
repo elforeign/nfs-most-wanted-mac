@@ -18,6 +18,8 @@ fixed retained 72000/72000, lost 0 (half-ring mutant exits 1).
 Compressed ownership: control sample copies/format retains 12/12 each;
 sample-reference-drop 0/12 copies, format-reference-drop 0/12 retains.
 Both drop mutants exit 1 at the lifetime check before dereferencing freed data.
+Replay overflow: fixed 0 armed, 0 attached and 0 save timeouts; original 1 armed,
+1 attached and 1 watermark timeout. The healthy sink delivers 1 packet in both.
 """
 from pathlib import Path
 import subprocess
@@ -175,7 +177,58 @@ static void tracks() {
     printf("track readiness: audio=%u/1 video=%u/1\n",audio.load(),video.load()); fflush(stdout);
     check(audio==1 && video==1,"blocked video prevented ready audio from draining");
 }
-int main(int argc,char**) { @autoreleasepool {
+static void replayOverflow() {
+    ClipSession *s=[ClipSession new];
+    current=s; active=true;
+    s->fileRequested=true; s->ready=true; s->replayRequested=true;
+    s->replayEpoch=CACurrentMediaTime()-31;
+    actionReplay=std::make_shared<replay::Ring>();
+    replayExport=std::make_unique<replay::Export>();
+    s->replayRing=actionReplay; actionReplay->arm();
+    actionReplay->consume(packet(0)); actionReplay->consume(packet(1800));
+    char status[120];
+    replay_status(status,sizeof status);
+    check(strstr(status,"ready"),"original replay span is ready");
+    auto point=actionReplay->reserve(CMTimeMake(31,1),0.05);
+    check(point.error.empty(),"save reserved before overflow");
+    auto replayRing=actionReplay;
+    auto healthy=std::make_shared<clip::Sink>([](const clip::OwnedPacket&) { return clip::Result::consumed; });
+    dispatch_sync(s->work,^{
+        s->replaySink=std::make_shared<clip::Sink>([replayRing](const clip::OwnedPacket& p) {
+            return replayRing->consume(p);
+        },4096,1);
+        s->outputs.add(s->replaySink);
+        s->outputs.add(healthy);
+        s->outputs.publish(packet(1802));
+        check(s->replaySink->failed(),"overflow exercised the packet sink");
+        [s pump];
+    });
+    bool timedOut=actionReplay->snapshot(point).error=="Replay encoder watermark timed out";
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    while(!healthy->delivered() && std::chrono::steady_clock::now()<deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    bool armed=actionReplay->stats().armed;
+    bool attached=bool(s->replaySink);
+    printf("replay overflow: armed=%d attached=%d save timeouts=%d healthy=%llu\n",
+           armed,attached,timedOut,(unsigned long long)healthy->delivered()); fflush(stdout);
+    check(!armed && !attached && !timedOut && healthy->delivered()==1,"failed replay sink retired");
+    replay_status(status,sizeof status);
+    check(strstr(status,"Replay stopped: packet sink failed"),"arm row shows the failure");
+    replay_save_status(status,sizeof status);
+    check(strstr(status,"Replay stopped: packet sink failed"),"save row shows the failure");
+    replay_save_action(0);
+    check(!replayExport->busy(),"later save does not start an export");
+    replay_arm_action(0);
+    dispatch_sync(s->work,^{
+        check(s->replaySink && s->replayRequested && s->replayRing==actionReplay,"can rearm after overflow");
+        s->ended=true;
+        s->outputs.cancel();
+        dispatch_group_leave(s->finished);
+    });
+    current=nil; active=false; actionReplay.reset(); replayExport.reset();
+}
+int main(int argc,char **argv) { @autoreleasepool {
+    if(argc==2 && !strcmp(argv[1],"replay-overflow")) { replayOverflow(); return 0; }
     if(argc==1) ClipAudioProof::run(); else if(argc==2) sinks(); else if(argc==3) tracks(); else ClipAudioProof::pause();
     puts("clip_packets PASS"); return 0;
 } }
@@ -334,6 +387,11 @@ with tempfile.TemporaryDirectory(dir=CACHE) as scratch:
     source=(RT/'cliprec.mm').read_text()
     fixed=build(d,'fixed',RT/'cliprec.mm',RT/'clip_packets.mm')
     results=[run(fixed,[],0),run(fixed,['sinks'],0),run(fixed,['tracks','only'],0),run(fixed,['pause','only','now'],0)]
+    assert 'armed=0 attached=0 save timeouts=0 healthy=1' in run(fixed,['replay-overflow'],0)
+    old_replay=d/'old-replay-source.mm'
+    old_replay.write_text(source.replace('    [self retireFailedReplay];\n',''))
+    old=build(d,'old-replay',old_replay,RT/'clip_packets.mm')
+    assert 'armed=1 attached=1 save timeouts=1 healthy=1' in run(old,['replay-overflow'],1)
     # Pinned original half-ring trim, independent of revision history.
     old_trim='        uint64_t queued=write.load(std::memory_order_acquire);\n        if(queued-read.load(std::memory_order_relaxed)>capacity/2) read.store(queued-capacity/2,std::memory_order_release);\n'
     assert hashlib.sha256(old_trim.encode()).hexdigest()=='cdc92c766780badea3f0cd0d1925cf3ba7ea933d7e353c1506763b00bc9654be'

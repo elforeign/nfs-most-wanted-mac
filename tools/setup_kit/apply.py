@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import plistlib
 import re
 import shutil
 import stat
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -112,6 +114,39 @@ def verify_app(app, bundle_id=ins.PUBLIC_BUNDLE_ID):
         raise ins.InstallError("The update app is incomplete or its signature is invalid.")
 
 
+def _version_parts(version):
+    if not isinstance(version, str) or len(version) > 63 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version):
+        raise ValueError("invalid app version")
+    parts = tuple(map(int, version.split(".")))
+    return parts + (0,) * (4 - len(parts))
+
+
+def _app_version(app):
+    with (app / "Contents/Info.plist").open("rb") as info:
+        return plistlib.load(info)["CFBundleShortVersionString"]
+
+
+def _check_versions(ready, descriptor, app, destination):
+    target = descriptor["version"]
+    # In-app preparation pins the signed Setup version independently of the staged output.
+    # Direct Setup transaction callers supply their target in the ready descriptor.
+    job = ready.parent.parent if ready.parent.name == "staged" else ready.parent
+    binding = job / "target-version.json"
+    try:
+        metadata = binding.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384:
+            raise ValueError("invalid verified version binding")
+        if json.loads(binding.read_bytes())["version"] != target:
+            raise ins.InstallError("The prepared update does not match the verified release version.",
+                                   "Prepare the update again.")
+    if _app_version(app) != target or _version_parts(target) <= _version_parts(_app_version(destination)):
+        raise ins.InstallError("The staged app must match the target version and be newer than the installed app.",
+                               "Prepare the update again.")
+
+
 def _check_ready_location(ready, profile, job=None):
     ready, profile = Path(ready), Path(profile)
     if (not ready.is_absolute() or ready.name != "ready.json"
@@ -153,7 +188,8 @@ def read_ready(ready, profile, destination):
         hashes = dict(app=ins.digest_tree(app), data=ins.digest_tree(data), roots=hashlib.sha256(body).hexdigest())
         if record["hashes"] != hashes:
             raise ins.InstallError("The staged update failed hash verification.", "Discard this update and prepare it again.")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        _check_versions(ready, record, app, destination)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ExpatError) as e:
         raise ins.InstallError("The ready descriptor is invalid: " + str(e)) from e
     return record, app, data
 

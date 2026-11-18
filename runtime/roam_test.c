@@ -168,6 +168,16 @@ static void membership_checks(void) {
     uint32_t bad=c.rx_bad;
     roam_client_input(&c,b,members_packet(b,5,2,3,50000),3400);
     CHECK(c.rx_bad==bad+1 && c.member_seq==4,"membership: invalid tier mutated snapshot");
+    int n = roam_hdr_put(b, ROAM_WELCOME, 0, 0);
+    memcpy(b+n, (uint8_t[]){1, 0, ROAM_NEAR_DEFAULT, ROAM_HZ}, 4);
+    roam_client_input(&c, b, n+4, 3400);
+    CHECK(!c.has_members && !roam_view_find(&c.view,2),"membership: expired view survived same-ID relay restart");
+    roam_client_input(&c,b,members_packet(b,0,2,0,1),3400);
+    CHECK(c.has_members && c.member_seq==0,"membership: expired sequence blocked relay restart");
+    n = roam_hdr_put(b, ROAM_WELCOME, 0, 0);
+    memcpy(b+n, (uint8_t[]){3, 0, ROAM_NEAR_DEFAULT, ROAM_HZ}, 4);
+    roam_client_input(&c, b, n+4, 3400);
+    CHECK(c.id==3 && !c.has_members,"membership: ID change kept old members");
     uint16_t pins[5]={2,3,4,5,6};
     CHECK(roam_client_pins(&c,pins,4,b)==ROAM_HDR+9 && !roam_client_pins(&c,pins,5,b),"pins: bound");
     puts("membership: wrap, reordering, leave/rejoin, map tier, promotion, stale state and bounded pins checked");
@@ -213,6 +223,44 @@ static void interest_boundaries(int rfd,uint32_t *clock) {
     puts("interest boundaries: 100 m hysteresis, approach promotion, distant pin/unpin, stale LOOK-only peer checked");
 }
 
+static void renewal_checks(int fd) {
+    RoamRelay *relay = roam_relay_new(fd, ROAM_NEAR_DEFAULT, 8);
+    Peer peers[2] = {0};
+    for (int i = 0; i < 2; ++i) {
+        peers[i].fd = mksock(&peers[i].a);
+        roam_client_init(&peers[i].c, 7, i ? "friend" : "renewing");
+    }
+    uint32_t start = 1000;
+    hello_all(relay, fd, peers, 2, &start);
+    RoamClient *client = &peers[0].c;
+    uint16_t id = client->id, friend = peers[1].c.id;
+    CHECK(id && friend, "renewal: missing initial admission");
+    uint64_t initial_challenges = roam_relay_stats(relay).challenges;
+    int drops = 0, was_live = 0;
+    for (uint32_t dt = 0; dt <= 60000; dt += 100) {
+        uint32_t now = start + dt;
+        if (dt && dt % 2000 == 0) {
+            uint8_t b[ROAM_MAX_DGRAM];
+            psend(&peers[0], b, roam_client_hello(client, b));
+        }
+        for (int i = 0; i < 2; ++i) if (peers[i].c.welcomed) send_static(&peers[i], now, 10 * i, 0);
+        relay_rx(relay, fd, now);
+        prx(&peers[0], now);
+        // Drain the second socket as its packets are still real loopback traffic.
+        prx(&peers[1], now);
+        const RoamRemote *remote = roam_view_find(&client->view, friend);
+        int live = client->welcomed && client->id == id && client->has_members && remote && remote->n;
+        if (was_live && !live) ++drops;
+        was_live = live;
+    }
+    unsigned renewals = (unsigned)(roam_relay_stats(relay).challenges - initial_challenges);
+    printf("renewal: 60 s, %u challenges, %d state drops\n", renewals, drops);
+    CHECK(renewals >= 5 && renewals <= 6, "renewal: expected a challenge every 10–12 s");
+    CHECK(was_live && drops == 0, "renewal: active session dropped");
+    for (int i = 0; i < 2; ++i) close(peers[i].fd);
+    roam_relay_free(relay);
+}
+
 int main(int argc, char **argv) {
     membership_checks();
     if (argc == 2 && !strcmp(argv[1], "--membership-only")) return fails ? 1 : 0;
@@ -222,6 +270,11 @@ int main(int argc, char **argv) {
     if (rfd < 0) { printf("FAIL: relay socket %d\n", rfd); return 1; }
     relay_addr = ra;
     printf("roam relay on %s:%d (loopback)\n", inet_ntoa(ra.sin_addr), ntohs(ra.sin_port));
+    if (argc == 2 && !strcmp(argv[1], "--renewal-only")) {
+        renewal_checks(rfd);
+        close(rfd);
+        return fails ? 1 : 0;
+    }
 
     // ---- phase 1: interpolation through loss and reordering, LOOK forwarding
     RoamRelay *r = roam_relay_new(rfd, ROAM_NEAR_DEFAULT, 64);

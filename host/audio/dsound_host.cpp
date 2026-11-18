@@ -353,10 +353,12 @@ void launch_opened(DsDevice &d) {
 // TrueHD's 16-unit restart interval plus a 960-frame MAT frame) and whose devices take whole bursts.
 int default_latency(DsOutputMode m) { return m == DS_OUT_TRUEHD ? 4096 : bitstream(m) ? 3072 : 1024; }
 // Apply after every open/reuse and while mixing: device timing can change without a reopen.
-// Even an explicit PCM target must cover the hardware callback period.
+// PCM must cover the hardware callback period. Dolby Digital (Plus) needs a complete encoded burst plus a mix block.
 void output_latency(DsDevice &d) {
     int target = d.fixed_latency ? d.requested_latency : default_latency(d.cfg.mode);
     if (d.out && !bitstream(d.cfg.mode)) target = std::max(target, d.out->minimum_queue_frames());
+    if (d.out && (d.cfg.mode == DS_OUT_DOLBY_DIGITAL || d.cfg.mode == DS_OUT_DOLBY_DIGITAL_PLUS))
+        target = std::max(target, media::Ac3Spdif::kFramesPerBurst + d.cfg.block_frames);
     d.cfg.latency_frames = target;
 }
 DsOutputMode ds_mode(media::OutputMode m) {

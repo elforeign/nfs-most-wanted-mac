@@ -68,14 +68,21 @@ static int clipboardWrites, clipboardOK = 1;
 #define NSWorkspace GHWorkspace
 #define NSURLSession GHSession
 #define NSPasteboard GHPasteboard
+#ifndef REPORT_TARGET_NO_UNIT
 #include "report_github.m"
 #ifndef REPORT_ORIGINAL_PROBES
 #include "report_submit.m"
+#endif
 #endif
 #include "stream_key.h"
 int stream_key_editing(void) { return 0; }
 void stream_key_close(void) {}
 #include "portmenu.m"
+#if NFS_GAME == NFS_GAME_PRIVATE
+#undef feedback_poll_pause
+#undef feedback_suppress
+#undef guide_shortcut
+#endif
 
 uint8_t *G;
 int diag_on;
@@ -118,7 +125,7 @@ GuideShortcutResult guide_shortcut(GuideShortcut *s, double n, uint32_t p, int h
 }
 const char *report_last_path(void) { return fixture ? fixture.fileSystemRepresentation : ""; }
 
-#if defined(NFS_PUBLIC) && NFS_PUBLIC
+#if defined(NFS_PUBLIC) && NFS_PUBLIC && !defined(REPORT_TARGET_NO_UNIT)
 static NSDictionary *Identity(void) {
     return @{@"home":@"/Volumes/TestHomes/playerone", @"user":@[@"playerone", @"Example Player"],
         @"computer":@[@"My Test Mac", @"test-mac.local"], @"serial":@[@"C02TEST12345"], @"wifi":@[@"Secret Network"]};
@@ -146,7 +153,10 @@ static void RedactionTests(void) {
     for (NSString *secret in @[@"playerone", @"otheruser", @"Example Player", @"My Test Mac", @"test-mac.local", @"C02TEST12345",
         @"12345678-abcd", @"PRIVATE123", @"PRIVATE456", @"PRIVATE789", @"192.168", @"2001:db8", @"fe80::1", @"::1", @"::ffff",
         @"example.person", @"Some Wifi Name", @"Another Name", @"Secret Network"]) CHECK(![all containsString:secret]);
-    CHECK([all containsString:@"~/file"] && [all containsString:@"~/log"]);
+    CHECK(![all containsString:@"~/file"] && ![all containsString:@"~/log"]);
+#ifndef REPORT_ORIGINAL_PROBES
+    CHECK([Redact(@"/srv/TestHomes/playerone/private.txt", @{@"home":@"/srv/TestHomes/playerone"}) isEqual:@"[path]"]);
+#endif
     CHECK([Redact(@"playerone@example.invalid someone@test-mac.local", idn) isEqual:@"[email] [email]"]);
     CHECK([Redact(@"josé@例え.invalid", idn) isEqual:@"[email]"]);
     for (NSString *secret in @[@"R-2622-2223S", @"r-2622-2223s", @"R-2622-2223N", @"Room code: invalid-room", @"TE29-43A2W", @"TE2943A2W", @"te2943a2w", @"tE29-43a2W", @"ABCDEFGAU", @"ABCD-EFGAU", @"Join code: bad-0O1I!", @"online.code=invalid", @"Host code = 'wrong input'"]) {
@@ -333,10 +343,23 @@ static void FlowTests(NSString *directory) {
     CHECK(!strcmp(s->label, "Send to GitHub"));
     s->apply(0); CHECK(!report_github_active() && browserOpens == 0 && cliCalls == 0);
     fixture = directory; WriteFixture(); set_tab(SET_DIAGNOSTICS); set_open(1);
+    NSString *summaryPath = [fixture stringByAppendingPathComponent:@"report.txt"];
+    NSString *absolute = [NSString pathWithComponents:@[@"/", @"Users", @"Example Person", @"AbsoluteCanary.txt"]];
+    NSString *note = [NSString stringWithFormat:@"Sound cuts out near _~/RelativeCanary.txt_; also \"%@\"", absolute];
+    NSString *withPaths = [Summary() stringByReplacingOccurrencesOfString:@"Sound cuts out" withString:note];
+    for (NSString *value in @[@"4.0.0 fixture", @"Version 15.0", @"Mac16,1", @"3840x2160, 120 Hz",
+                              @"Built-in speakers", @"Example pad", @"audio.output PCM"]) {
+        withPaths = [withPaths stringByReplacingOccurrencesOfString:value
+            withString:[value stringByAppendingString:@"; ~/FieldCanary.txt"]];
+    }
+    CHECK([withPaths writeToFile:summaryPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     [@"gpu: frame_ms=16.7\nprocess: OtherApp peer=SecretPlayer\napi_key=SecretCanary\n/Volumes/Private/Data\n" writeToFile:[fixture stringByAppendingPathComponent:@"log.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     FreshSession();
     CHECK(report_github_active() && browserOpens == 0 && cliCalls == 0 && !screenshotOn);
     CHECK([issueBody containsString:@"16.7"] && [issueBody containsString:@"4.0.0 fixture"]);
+    CHECK([issueBody containsString:@"Player note: Sound cuts out near _[path]; also [path]"]);
+    CHECK([[issueBody componentsSeparatedByString:@"[path]"] count] == 10);
+    CHECK(![issueBody containsString:@"Canary.txt"] && ![issueBody containsString:@"Example Person"]);
     for (NSString *secret in @[@"OtherApp", @"SecretPlayer", @"SecretCanary", @"/Volumes/Private"]) CHECK(![issueBody containsString:secret]);
     DrawReview(); NSString *labels = [drawnText componentsJoinedByString:@"\n"];
     CHECK(visiblePreviewTop > 0);
@@ -365,7 +388,7 @@ static void FlowTests(NSString *directory) {
     FinishCLI(0, @"fixture-account", NO); CHECK(fakeIssues == 1);
     NSString *reviewed = issueBody;
     NSDictionary *payload = [NSJSONSerialization JSONObjectWithData:cliInputs.lastObject options:0 error:NULL];
-    CHECK([payload[@"body"] isEqual:reviewed]);
+    CHECK([payload[@"body"] isEqual:reviewed] && [payload[@"title"] isEqual:issueTitle]);
     FinishCLI(0, @"https://github.com/elforeign/nfs-most-wanted-mac/issues/42", NO);
     CHECK(submission.state == ReportSubmitCreated && fakeIssues == 1);
     Click(100, 560); CHECK(fakeIssues == 1 && cliCalls == 3); // no repeat creation
@@ -532,7 +555,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     (void)argv;
     CHECK(argc == 2); [NSURLProtocol registerClass:GHProtocol.class]; openOrder = [NSMutableArray array]; drawnText = [NSMutableArray array];
     G = calloc(1, 0x1000000); CHECK(G != NULL);
-#if defined(NFS_PUBLIC) && NFS_PUBLIC
+#if defined(NFS_PUBLIC) && NFS_PUBLIC && !defined(REPORT_TARGET_NO_UNIT)
     #ifdef REPORT_ORIGINAL_PROBES
     OriginalProbes([NSString stringWithUTF8String:argv[1]]);
 #else
