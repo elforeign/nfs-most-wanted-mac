@@ -24,18 +24,19 @@ def validate(rows, policy=None):
         catalog._integer(slot, 0, catalog.ADDITION_COUNT - 1)
         reservations[slot] = row
         catalog.make_catalog(reservations, policy)
-        key = (row['origin']['platform'], slot)
+        key = (row['origin']['game'], row['origin']['platform'], slot)
         catalog._require(key not in seen, 'duplicate packaged selection')
         seen.add(key)
         contracts.add((slot, catalog.contract_hash(row)))
-    expected = {(r['slot'], v['contract']) for r in approved['slots'] for v in r['variants']}
+    expected = {(r['slot'], v['contract']) for r in approved['slots'] for v in r['variants']
+                if 'legacy' not in v}
     catalog._require(contracts == expected, 'packaged selections do not cover the approved contracts')
-    return sorted(rows, key=lambda r: (r['origin']['platform'], r['slot']))
+    return sorted(rows, key=lambda r: (r['origin']['game'], r['origin']['platform'], r['slot']))
 
 
-def load(path=METADATA):
+def load(path=METADATA, *, policy=None):
     data = Path(path).read_bytes()
-    rows = validate(catalog._decode(data))
+    rows = validate(catalog._decode(data), policy)
     catalog._require(data == catalog.encoded(rows), 'noncanonical car selections')
     return rows
 
@@ -51,7 +52,8 @@ def available_specs(specs, recognition):
     for row in specs:
         status = statuses.get(car_sources.path_hash('CARS/' + row['folder']), 'missing')
         if status == 'missing':
-            skipped.append(row['display']['name'] + ': missing from this Carbon copy; skipped.')
+            game = car_sources.GAME_NAMES[recognition['game']]
+            skipped.append(row['display']['name'] + f': missing from this {game} copy; skipped.')
         else:
             available.append(row)
     return available, skipped

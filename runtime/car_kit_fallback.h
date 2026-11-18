@@ -97,6 +97,13 @@ static int car_kit_fallback(FILE *f, const char *space, uint32_t *map, unsigned 
                     !memchr(name, 0, size) || hash != r[0] || car_kit_hash(name) != hash) goto done;
                 if (strncmp(name, stock_prefix, (size_t)prefix_size)) break;
                 const char *suffix = name + prefix_size;
+                // Some packs end their separate hood geometry at LOD C.
+                // Keep the hood visible at D using that pack's own stock hood.
+                int alias_hood_d = 0;
+                if (!strcmp(suffix, "HOOD_C")) {
+                    snprintf(candidate, sizeof candidate, "%sHOOD_D", stock_prefix);
+                    alias_hood_d = !car_kit_present(rows, solids, car_kit_hash(candidate));
+                }
                 // Random donor parts also request STYLE models. Preserve the
                 // entire slot/LOD suffix, including multiword slots; authored
                 // targets win over the pack's own stock model.
@@ -105,15 +112,18 @@ static int car_kit_fallback(FILE *f, const char *space, uint32_t *map, unsigned 
                     int length = snprintf(candidate, sizeof candidate, "%s_%s%02u_%s", space,
                                           kind, kit, suffix);
                     if (length < 0 || (unsigned)length >= sizeof candidate) goto done;
-                    uint32_t missing = car_kit_hash(candidate);
-                    if (car_kit_present(rows, solids, missing)) continue;
-                    unsigned lo = 0, hi = count;
-                    while (lo < hi) {
-                        unsigned mid = lo + (hi - lo) / 2;
-                        if (sorted[mid].target < missing) lo = mid + 1; else hi = mid;
+                    for (int alias = 0; alias <= alias_hood_d; ++alias) {
+                        if (alias) candidate[length - 1] = 'D';
+                        uint32_t missing = car_kit_hash(candidate);
+                        if (car_kit_present(rows, solids, missing)) continue;
+                        unsigned lo = 0, hi = count;
+                        while (lo < hi) {
+                            unsigned mid = lo + (hi - lo) / 2;
+                            if (sorted[mid].target < missing) lo = mid + 1; else hi = mid;
+                        }
+                        for (; lo < count && sorted[lo].target == missing; ++lo)
+                            resolved[sorted[lo].row] = hash;
                     }
-                    for (; lo < count && sorted[lo].target == missing; ++lo)
-                        resolved[sorted[lo].row] = hash;
                 }
                 break;
             }

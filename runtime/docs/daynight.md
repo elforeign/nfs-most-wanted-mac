@@ -61,8 +61,13 @@ cast: the Rockport noon road goes from R/B 1.07 before it to 0.84 after it, Most
 Wanted shows 1.08). With the switch on, both treatment programs (plain and enhanced)
 blend that grade toward neutral (`saturate` of its input) by pixel c31.z, uploaded
 just before the treatment draw (hook 0071D4E0): the day weight 1 - night while the
-imported Rockport dome is selected with an overlay, else 0. Bloom, vignette,
+camera visibility row contains imported section 2100 with an overlay, else 0. Bloom, vignette,
 desaturation and fades stay native; weight 0 runs the retail grade exactly.
+Carbon’s native global dome, clouds and moon draw in both cities. The combined
+writer omits the source dome, its scenery instance and cloud texture. The grade
+region now comes from the camera row. The native alternate dome retains its
+previous zero grade weight. The native dome’s day/night gradient,
+cloud scroll and moon sampling are unchanged.
 `recomp/private_daynight_grade_test.py` checks both programs. BOOT_DIAG logs
 `carbon_daynight_grade: weight=... draws day=... zero=...` every 2 s.
 
@@ -539,6 +544,43 @@ Live career-event handover, online races, the other game, a 10-minute soak,
 frame cost and visual approval remain unproven. The feature remains Off.
 
 ## Optional lamp bake
+
+The combined-world builder also has an independent `--street-lamps` option,
+**Off by default**. It appends Carbon-native type-6 position markers to the
+imported Rockport lamp solids on every referenced LOD, including C. Markers
+follow each LOD's bulb geometry and pivot; the wall lamp uses its globe mesh.
+Solids without a named luminous draw use the existing upper-arm geometry recipe.
+No native Palmont solid or lamp bytes change. Without the option the builder
+keeps its existing output byte for byte.
+
+The option also clears only bits 0 and 1 of the affected imported scenery
+models' word at +60. Carbon's native eligibility function uses these as a
+lazy marker cache; the source hash in that word can falsely cache "no markers"
+(Cb: `925F2389`, repaired to `925F2388`). The checker rejects stale cache bits,
+restores only their independently read source values, then verifies provenance.
+
+Build a separate overlay with `tools_snapshot/worldmerge/c1_world.py
+--street-lamps` and select it through `NFS_CARBON_TRACK_OVERLAY`. Keep the current
+overlay for comparison. With `NFS_DAYNIGHT=on`, the existing scene-flare clock
+suppresses the new lamps at noon and gives full strength from dusk. With the
+clock off they follow Carbon's retail behavior. This adds native glow flares;
+it does not generate road illumination or change lamp textures.
+
+Independent coverage is 120/120 imported bulbs in coast row 1833, compared with
+0/120 without the option, and 69 referenced LOD solids across 2,558 named lamp
+placements. The densest imported row, 1203, has 265 imported and 365 total
+C-LOD markers available before culling; the native scene allocator caps at 300.
+That loaded-row upper bound is not a simultaneous flare count. The independent
+checker validates marker identities, positions and LOD coverage before stripping
+only their exact suffixes and running the unchanged world provenance checker.
+The native marker producer/iterator/allocator and clock submission path have
+offline missing-C, missing-pivot, daylight and capacity controls.
+
+The [comparison sheet](../../run_shots/c3coast_rockport_lamps_sheet.jpg) shows
+matched Rockport midnight Off/On near node 784, unchanged Palmont near midnight,
+Palmont noon and Rockport daylight. The exact Rockport noon still is pending:
+the sweep reached that city at about 16:00. No street flares were submitted
+in either daylight city capture. Appearance remains under review, default Off.
 
 `NFS_DAYNIGHT_LAMPS=1` (Off by default, restart required) adds private generated Rockport section flare packs through LoaderLights; missing packs/public builds keep the original world, and these flares currently remain lit during the day.
 

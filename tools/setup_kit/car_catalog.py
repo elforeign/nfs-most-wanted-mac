@@ -6,8 +6,9 @@ and the trust boundary required of callers and runtime readers.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 from dataclasses import dataclass
+import errno
 import fcntl
 import hashlib
 import json
@@ -22,11 +23,15 @@ ADDITION_COUNT = 76
 FIRST_ID = 84
 INPUT_GROUPS = ('source', 'dependencies', 'donor', 'converter')
 REQUIRED_OUTPUTS = frozenset(('GEOMETRY.BIN', 'TEXTURES.BIN', 'SOLIDMAP.BIN'))
+IMPORT_SOURCES = frozenset((('carbon', 'pc'), ('carbon', 'x360'), ('prostreet', 'pc'), ('undercover', 'pc')))
 MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
+PACKAGED_POLICY_SHA256 = '54d1cae330a4e6313541fdc24805849b2b2ad0f1710bbc89817a44f2eaff1f5e'
+# Public Setup 4.7.1 catalog and retained preparation receipts.
+LEGACY_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
+LEGACY_POLICY_REVISION = 2
 POLICY_PATH = Path(__file__).with_name('car_approvals.json')
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Z0-9_]{1,31}\Z')
@@ -108,6 +113,177 @@ def _bound(path, fd):
         _require((a.st_dev, a.st_ino) == (b.st_dev, b.st_ino), 'directory changed')
 
 
+def _entry_stat(base, name):
+    try:
+        return os.stat(name, dir_fd=base, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _identity(st):
+    return st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode)
+
+
+def _new_stage_dir(base, name):
+    os.mkdir(name, 0o700, dir_fd=base)
+    current = _entry_stat(base, name)
+    _require(current is not None and stat.S_ISDIR(current.st_mode), 'stage directory changed: ' + repr(name))
+    return _identity(current)
+
+
+def _remove_stage(base, name, fd, entries, path, unexpected):
+    """Use the creation records, never a discovered entry, as authority to delete."""
+    def bound():
+        current = _entry_stat(base, name)
+        if current is None:
+            return False
+        if _identity(current) == _identity(os.fstat(fd)):
+            return True
+        unexpected.append(path)
+        return False
+
+    if not bound():
+        return
+    os.fchmod(fd, 0o700)
+    before = len(unexpected)
+    for child in os.listdir(fd):
+        child_path = path + '/' + child
+        current = _entry_stat(fd, child)
+        if current is None:
+            continue
+        owned = entries.get(child)
+        if owned is None or _identity(current) != owned[0]:
+            unexpected.append(child_path)
+        elif owned[1] is None:
+            try:
+                os.unlink(child, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            except IsADirectoryError:
+                unexpected.append(child_path)
+        else:
+            try:
+                sub = os.open(child, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                unexpected.append(child_path)
+                continue
+            try:
+                if _identity(os.fstat(sub)) == owned[0]:
+                    _remove_stage(fd, child, sub, owned[1], child_path, unexpected)
+                else:
+                    unexpected.append(child_path)
+            finally:
+                os.close(sub)
+    if len(unexpected) == before and bound():
+        try:
+            os.rmdir(name, dir_fd=base)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR):
+                raise
+            unexpected.append(path)
+
+
+class _Stage:
+    def __init__(self, base, name, fd):
+        self.base, self.name, self.fd = base, name, fd
+        self.entries = {}
+        self.published = False
+
+    @contextmanager
+    def directory(self, path):
+        fd, entries = os.dup(self.fd), self.entries
+        try:
+            for name in _relative(path) if path else ():
+                if name not in entries:
+                    entries[name] = (_new_stage_dir(fd, name), {})
+                identity, children = entries[name]
+                child = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+                _require(children is not None and _identity(os.fstat(fd)) == identity,
+                         'stage directory changed: ' + repr(path))
+                entries = children
+            yield fd, entries
+        finally:
+            os.close(fd)
+
+    def open_file(self, path):
+        parent, _, name = path.rpartition('/')
+        _relative(path)
+        with self.directory(parent) as (fd, entries):
+            leaf = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            try:
+                entries[name] = (_identity(os.fstat(leaf)), None)
+            except BaseException:
+                os.close(leaf)
+                raise
+            return leaf
+
+    def write(self, path, data):
+        fd = self.open_file(path)
+        try:
+            _write_durable(fd, data)
+        finally:
+            os.close(fd)
+
+    def seal(self):
+        self._seal(self.fd, self.entries)
+
+    def _seal(self, fd, entries):
+        _require(set(os.listdir(fd)) == entries.keys(), 'unexpected entry in the transaction stage')
+        for name, (identity, children) in entries.items():
+            current = _entry_stat(fd, name)
+            _require(current is not None and _identity(current) == identity,
+                     'stage entry changed: ' + repr(name))
+            flags = _DIR_FLAGS if children is not None else os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            leaf = os.open(name, flags, dir_fd=fd)
+            try:
+                opened = os.fstat(leaf)
+                _require(_identity(opened) == identity, 'stage entry changed: ' + repr(name))
+                if children is None:
+                    _require(opened.st_nlink == 1, 'hardlinked stage file: ' + repr(name))
+                    os.fchmod(leaf, 0o444)
+                    os.fsync(leaf)
+                else:
+                    self._seal(leaf, children)
+            finally:
+                os.close(leaf)
+        os.fchmod(fd, 0o555)
+        os.fsync(fd)
+
+    def publish(self, name):
+        current = _entry_stat(self.base, self.name)
+        _require(current is not None and _identity(current) == _identity(os.fstat(self.fd)),
+                 'stage directory changed: ' + repr(self.name))
+        os.rename(self.name, name, src_dir_fd=self.base, dst_dir_fd=self.base)
+        self.published = True
+
+
+@contextmanager
+def _stage(base, name):
+    identity = _new_stage_dir(base, name)
+    fd = os.open(name, _DIR_FLAGS, dir_fd=base)
+    try:
+        _require(_identity(os.fstat(fd)) == identity, 'stage directory changed: ' + repr(name))
+        stage = _Stage(base, name, fd)
+        try:
+            yield stage
+        finally:
+            if not stage.published:
+                unexpected = []
+                _remove_stage(base, name, fd, stage.entries, name, unexpected)
+                _require(not unexpected, 'left unexpected stage entries untouched: ' +
+                         ', '.join(repr(path) for path in sorted(unexpected)))
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def _file(base, name):
     parts = _relative(name)
@@ -129,7 +305,7 @@ def _file(base, name):
         os.close(fd)
 
 
-def _record(fd, sink=None):
+def _record(fd, sink=None, *, limit=MAX_FILE):
     before = os.fstat(fd)
     h, size = hashlib.sha256(), 0
     while True:
@@ -137,7 +313,7 @@ def _record(fd, sink=None):
         if not data:
             break
         size += len(data)
-        _require(size <= MAX_FILE, 'file grew beyond limit')
+        _require(size <= limit, 'file grew beyond limit')
         h.update(data)
         if sink is not None:
             _write_all(sink, data)
@@ -232,7 +408,11 @@ def _policy(policy):
             identities.add(row['identity'])
         seen = set()
         for variant in row['variants']:
-            _keys(variant, ('contract', 'compatibility'))
+            if type(variant) is dict and 'legacy' in variant:
+                _keys(variant, ('contract', 'compatibility', 'legacy'))
+                _integer(variant['legacy'], 1, 1)
+            else:
+                _keys(variant, ('contract', 'compatibility'))
             _hex(variant['contract'])
             _hex(variant['compatibility'])
             _require(variant['contract'] not in seen, 'duplicate policy variant')
@@ -290,7 +470,8 @@ def _row(row, expected, policy):
     _require(row['state'] == 'ready' and row['role'] == 'addition', 'unsupported car state or swap import')
     _keys(row['origin'], ('game', 'platform', 'folder'))
     origin = row['origin']
-    _require(origin['game'] == 'carbon' and origin['platform'] in ('pc', 'x360') and
+    _require(type(origin['game']) is str and type(origin['platform']) is str and
+             (origin['game'], origin['platform']) in IMPORT_SOURCES and
              type(origin['folder']) is str and _TOKEN.fullmatch(origin['folder']), 'unsupported source')
     _hex(row['identity'])
     _require(row['identity'] == source_identity(**origin) == policy['identity'], 'unapproved or reassigned identity')
@@ -326,7 +507,8 @@ def _row(row, expected, policy):
     _pins(row['outputs'])
     _require(REQUIRED_OUTPUTS <= row['outputs'].keys() and
              all(_OUTPUT.fullmatch(name) for name in row['outputs']), 'missing required output or invalid filename')
-    _require(dict(contract=contract_hash(row), compatibility=slot_compatibility(row)) in policy['variants'],
+    contract, compatibility = contract_hash(row), slot_compatibility(row)
+    _require(any(v['contract'] == contract and v['compatibility'] == compatibility for v in policy['variants']),
              'conversion contract is not approved')
 
 
@@ -351,7 +533,10 @@ def make_catalog(rows, policy):
 def _catalog(doc, policy):
     _keys(doc, ('schema', 'policy_sha256', 'compatibility', 'cars'))
     _require(type(doc['schema']) is int and doc['schema'] == 1, 'unsupported catalog schema')
-    _require(doc == make_catalog(doc['cars'], policy), 'catalog policy or compatibility mismatch')
+    _require(doc['policy_sha256'] in (policy.sha256, LEGACY_POLICY_SHA256),
+             'catalog policy or compatibility mismatch')
+    _require(dict(doc, policy_sha256=policy.sha256) == make_catalog(doc['cars'], policy),
+             'catalog policy or compatibility mismatch')
     return doc
 
 
@@ -451,12 +636,16 @@ def _write_all(fd, data):
 def _write(base, name, data):
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=base)
     try:
-        _write_all(fd, data)
-        os.fsync(fd)
-        os.fchmod(fd, 0o444)
-        os.fsync(fd)
+        _write_durable(fd, data)
     finally:
         os.close(fd)
+
+
+def _write_durable(fd, data):
+    _write_all(fd, data)
+    os.fsync(fd)
+    os.fchmod(fd, 0o444)
+    os.fsync(fd)
 
 
 @contextmanager
@@ -489,14 +678,21 @@ def _publish_pointer(root, base, pointer, fault, precommit=None):
     pending, backup = '.pointer-' + token, '.previous-' + token
     if previous is not None:
         _write(base, backup, previous)
-    _write(base, pending, data)
-    os.fsync(base)
-    _hit(fault, 'pointer_ready')
-    _hit(fault, 'before_publish')
-    if precommit is not None:
-        precommit()
-    _bound(root, base)
-    os.replace(pending, 'current.json', src_dir_fd=base, dst_dir_fd=base)
+    try:
+        _write(base, pending, data)
+        os.fsync(base)
+        _hit(fault, 'pointer_ready')
+        _hit(fault, 'before_publish')
+        if precommit is not None:
+            precommit()
+        _bound(root, base)
+        os.replace(pending, 'current.json', src_dir_fd=base, dst_dir_fd=base)
+    except BaseException:
+        try:
+            os.unlink(pending, dir_fd=base)
+        except FileNotFoundError:
+            pass
+        raise
     try:
         os.fsync(base)
     except OSError:
@@ -545,10 +741,17 @@ def publish(root, rows, output_dirs, input_dirs, *, policy=None, selection=None,
     _require(len(data) <= MAX_JSON, 'catalog exceeds limit')
     sha = hashlib.sha256(data).hexdigest()
     generation = 'g-' + sha
-    with _writer(root) as base, ExitStack() as stack:
-        sources = {s: stack.enter_context(_directory(p)) for s, p in output_dirs.items()}
-        inputs = {s: {g: stack.enter_context(_directory(p)) for g, p in groups.items()}
-                  for s, groups in input_dirs.items()}
+    with _writer(root) as base:
+        directory_ids = {}
+
+        @contextmanager
+        def source_directory(path):
+            with _directory(path) as fd:
+                st = os.fstat(fd)
+                identity = (st.st_dev, st.st_ino)
+                _require(identity == directory_ids.setdefault(path, identity), 'directory changed')
+                yield fd
+                _bound(path, fd)
 
         def check_inputs():
             for row in rows:
@@ -556,15 +759,15 @@ def publish(root, rows, output_dirs, input_dirs, *, policy=None, selection=None,
                 if s not in ready:
                     continue
                 for group, pins in row['inputs'].items():
-                    _bound(input_dirs[s][group], inputs[s][group])
-                    for name, pin in pins.items():
-                        with _file(inputs[s][group], name) as fd:
-                            _require(_record(fd) == pin, 'changed ' + group + ' input')
-                _bound(output_dirs[s], sources[s])
-                _require(_inventory(sources[s]) == set(row['outputs']), 'missing output pin or extra output')
-                for name, pin in row['outputs'].items():
-                    with _file(sources[s], name) as fd:
-                        _require(_record(fd) == pin, 'changed converter output')
+                    with source_directory(input_dirs[s][group]) as source:
+                        for name, pin in pins.items():
+                            with _file(source, name) as fd:
+                                _require(_record(fd) == pin, 'changed ' + group + ' input')
+                with source_directory(output_dirs[s]) as source:
+                    _require(_inventory(source) == set(row['outputs']), 'missing output pin or extra output')
+                    for name, pin in row['outputs'].items():
+                        with _file(source, name) as fd:
+                            _require(_record(fd) == pin, 'changed converter output')
 
         check_inputs()
         _hit(fault, 'inputs_verified')
@@ -572,46 +775,34 @@ def publish(root, rows, output_dirs, input_dirs, *, policy=None, selection=None,
             os.stat(generation, dir_fd=base, follow_symlinks=False)
         except FileNotFoundError:
             stage = '.stage-' + uuid.uuid4().hex
-            os.mkdir(stage, 0o700, dir_fd=base)
-            os.fsync(base)
-            staged = os.open(stage, _DIR_FLAGS, dir_fd=base)
-            try:
-                os.mkdir('cars', 0o700, dir_fd=staged)
-                cars = os.open('cars', _DIR_FLAGS, dir_fd=staged)
-                try:
+            with _stage(base, stage) as staged:
+                with staged.directory('cars') as (cars, _):
                     for row in rows:
                         if row['state'] != 'ready':
                             continue
                         s = row['slot']
-                        os.mkdir(str(s), 0o700, dir_fd=cars)
-                        car = os.open(str(s), _DIR_FLAGS, dir_fd=cars)
-                        try:
-                            for name, pin in row['outputs'].items():
-                                target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                                 0o600, dir_fd=car)
-                                try:
-                                    with _file(sources[s], name) as source:
-                                        _require(_record(source, target) == pin, 'output changed during copy')
-                                    os.fchmod(target, 0o444)
-                                    os.fsync(target)
-                                finally:
-                                    os.close(target)
-                                _hit(fault, 'output_durable')
+                        path = f'cars/{s}'
+                        with staged.directory(path) as (car, _):
+                            with source_directory(output_dirs[s]) as output:
+                                for name, pin in row['outputs'].items():
+                                    target = staged.open_file(f'{path}/{name}')
+                                    try:
+                                        with _file(output, name) as source:
+                                            _require(_record(source, target) == pin, 'output changed during copy')
+                                        os.fchmod(target, 0o444)
+                                        os.fsync(target)
+                                    finally:
+                                        os.close(target)
+                                    _hit(fault, 'output_durable')
                             os.fchmod(car, 0o555)
                             os.fsync(car)
-                        finally:
-                            os.close(car)
                     os.fchmod(cars, 0o555)
                     os.fsync(cars)
-                finally:
-                    os.close(cars)
-                _write(staged, 'catalog.json', data)
-                os.fchmod(staged, 0o555)
-                os.fsync(staged)
+                staged.write('catalog.json', data)
+                os.fchmod(staged.fd, 0o555)
+                os.fsync(staged.fd)
                 _hit(fault, 'catalog_durable')
-            finally:
-                os.close(staged)
-            os.rename(stage, generation, src_dir_fd=base, dst_dir_fd=base)
+                staged.publish(generation)
             os.fsync(base)
         _verify_generation(base, generation, sha, policy)
         _hit(fault, 'generation_verified')

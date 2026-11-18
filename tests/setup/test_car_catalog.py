@@ -554,6 +554,8 @@ class CatalogTests(unittest.TestCase):
                     raise OSError('injected storage failure at ' + point)
             self.reject(lambda: self.publish(rows=newer, fault=fault))
             self.assertEqual(self.verify().generation, first['generation'])
+            self.assertFalse(list(self.store.glob('.stage-*')))
+            self.assertFalse(list(self.store.glob('.pointer-*')))
         print('broken: 6/6 publication phase failures preserve exact pointer/source hashes')
 
     def test_no_previous_pointer_on_failed_first_import(self):
@@ -565,6 +567,31 @@ class CatalogTests(unittest.TestCase):
             self.reject(lambda: self.publish(fault=fault))
             self.assertFalse((self.store / 'current.json').exists())
             self.zero()
+
+    def test_failed_stage_preserves_foreign_directory(self):
+        """At 265b530a zero foreign files survive cleanup. One survives with ownership tracking."""
+        player = self.root / 'player'
+        player.mkdir()
+        (player / 'save').write_bytes(b'player data')
+        moved = []
+
+        def interrupt(point):
+            if point == 'output_durable':
+                stage, = self.store.glob('.stage-*')
+                foreign = stage / 'cars/foreign'
+                player.rename(foreign)
+                moved.append(foreign)
+                (stage / 'unexpected-link').symlink_to(foreign, target_is_directory=True)
+                raise OSError('injected interruption')
+
+        with self.assertRaises((OSError, cc.CatalogError)) as failure:
+            self.publish(fault=interrupt)
+        self.assertEqual(sum((path / 'save').is_file() for path in moved), 1)
+        self.assertEqual((moved[0] / 'save').read_bytes(), b'player data')
+        self.assertTrue((moved[0].parents[1] / 'unexpected-link').is_symlink())
+        self.assertIn('foreign', str(failure.exception))
+        self.assertIn('unexpected-link', str(failure.exception))
+        self.assertFalse((self.store / 'current.json').exists())
 
     def test_post_replace_flush_failure_rolls_back_exact_pointer(self):
         self.publish()
@@ -683,6 +710,9 @@ class CatalogTests(unittest.TestCase):
                          set(cc.make_catalog(self.rows, self.policy)))
         self.assertEqual(set(schema['$defs']['pointer']['required']), set(cc.disabled_pointer()))
         self.assertEqual(set(schema['$defs']['policy']['required']), set(self.policy_doc))
+        variants = schema['$defs']['policy']['properties']['slots']['items']['properties']['variants']['items']
+        self.assertEqual(variants['properties']['legacy'], {'type': 'integer', 'const': 1})
+        self.assertNotIn('legacy', variants['required'])
         self.assertEqual(schema['$defs']['catalog']['properties']['cars']['minItems'], 90)
         type(self).good += 1
 

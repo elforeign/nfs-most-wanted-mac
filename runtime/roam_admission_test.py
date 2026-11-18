@@ -11,6 +11,11 @@ parse/error/restart paths fail named assertions: 39/3/3921/4004/1/1999/2/2/1/5/1
 Service-clock proof: the original sleeping flood let the 200 ms mutant pass 11/0
 under load; a 300 us/packet fixture clock gives normal 11/0 and mutant 11/5.
 The production 2 ms deadline and packet-count assertions are unchanged.
+A renewal challenge preserves admission and the current membership snapshot.
+The restarted relay's same-ID WELCOME clears the expired snapshot. Client
+checks: 4/0, with the old challenge reset rejected at 4/1.
+Key retirement is checked on the wire: the retired proof gets CHALLENGE
+without another WELCOME, then the renewed proof gets WELCOME.
 """
 from pathlib import Path
 import subprocess
@@ -42,7 +47,12 @@ MUTANTS = {
     'service': ('service', 'if (elapsed >= 2000)', 'if (elapsed >= 200000)', 'service_elapsed_bound'),
     'parse': ('parse', 'if (len != ROAM_HELLO_BASE && len != ROAM_HELLO_PROOF)', 'if (0 && (len != ROAM_HELLO_BASE && len != ROAM_HELLO_PROOF))', 'malformed_trailing_hello'),
     'client_error': ('client', 'c->welcomed = 1; c->last_err = 0;', 'c->welcomed = 1;', 'client_restart_recovery', 'roam_core.c'),
-    'client_restart': ('client', 'c->welcomed = 0; c->id = 0;\n        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;', 'if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;', 'client_restart_challenge', 'roam_core.c'),
+    'client_restart': ('client', 'memcpy(c->cookie, b, 20); c->has_cookie = 1;\n        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;',
+                       'memcpy(c->cookie, b, 20); c->has_cookie = 1;\n'
+                       '        c->welcomed = 0; c->id = 0;\n'
+                       '        if (c->last_err != ROAM_ERR_BANNED) c->last_err = 0;\n'
+                       '        c->has_members = c->nmembers = 0; roam_view_init(&c->view);',
+                       'client_restart_challenge', 'roam_core.c'),
     'isolation': ('isolation', 'if (!admitted) {', 'if (1) {', 'isolation_state_progress'),
     'spoof': ('spoof', 'if (!cookie_keys(r))',
               'Source *untrusted = source(r, from, now); if (!untrusted) return; untrusted->last = now;\n        if (!cookie_keys(r))',

@@ -34,26 +34,48 @@ NATIVE = r'''
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 static unsigned io_calls;
+static int track_peak;
+static int deny_tmp;
+static unsigned peak_fds;
+static int tracked(int fd) {
+    if (track_peak) {
+        int saved=errno;
+        unsigned count=0;
+        for (int candidate=0;candidate<256;++candidate)
+            if (fcntl(candidate,F_GETFD)>=0) ++count;
+        if (count>peak_fds) peak_fds=count;
+        errno=saved;
+    }
+    return fd;
+}
 static int counted_open(const char *p,int flags,...) {
     ++io_calls;
-    if (flags&O_CREAT) { va_list a; va_start(a,flags); int mode=va_arg(a,int); va_end(a); return open(p,flags,mode); }
-    return open(p,flags);
+    if (flags&O_CREAT) { va_list a; va_start(a,flags); int mode=va_arg(a,int); va_end(a); return tracked(open(p,flags,mode)); }
+    return tracked(open(p,flags));
 }
 static int counted_openat(int fd,const char *p,int flags,...) {
     ++io_calls;
-    if (flags&O_CREAT) { va_list a; va_start(a,flags); int mode=va_arg(a,int); va_end(a); return openat(fd,p,flags,mode); }
-    return openat(fd,p,flags);
+    if (flags&O_CREAT) { va_list a; va_start(a,flags); int mode=va_arg(a,int); va_end(a); return tracked(openat(fd,p,flags,mode)); }
+    return tracked(openat(fd,p,flags));
 }
+static int counted_mkstemp(char *path) {
+    if (deny_tmp) { errno=ENOSPC; return -1; }
+    return tracked(mkstemp(path));
+}
+static int counted_dup(int fd) { return tracked(dup(fd)); }
 static ssize_t counted_read(int fd,void *p,size_t n) { ++io_calls; return read(fd,p,n); }
 static ssize_t counted_pread(int fd,void *p,size_t n,off_t at) { ++io_calls; return pread(fd,p,n,at); }
 static int counted_stat(int fd,struct stat *st) { ++io_calls; return fstat(fd,st); }
 static int counted_statat(int fd,const char *p,struct stat *st,int flags) { ++io_calls; return fstatat(fd,p,st,flags); }
 #define open counted_open
 #define openat counted_openat
+#define mkstemp counted_mkstemp
+#define dup counted_dup
 #define read counted_read
 #define pread counted_pread
 #define fstat counted_stat
@@ -61,6 +83,8 @@ static int counted_statat(int fd,const char *p,struct stat *st,int flags) { ++io
 #include "READER_SOURCE"
 #undef open
 #undef openat
+#undef mkstemp
+#undef dup
 #undef read
 #undef pread
 #undef fstat
@@ -76,7 +100,32 @@ static void text(const char *s) {
 }
 int main(int argc,char **argv) {
     if (argc<3) return 2;
+    track_peak=argc>3 && !strcmp(argv[3],"limited");
     int rc=car_catalog_init(argv[1],atoi(argv[2]));
+    if (track_peak) {
+        deny_tmp=1;
+        size_t complete=0;
+        for (size_t pos=0;pos<car_catalog_count();++pos) {
+            const CarCatalogSlot *slot=car_catalog_get(pos);
+            for (unsigned k=CAR_CATALOG_SOLID_MAP;k<CAR_CATALOG_OUTPUTS;++k) {
+                const CarCatalogOutput *o=&slot->outputs[k];
+                if (!o->present || (k==CAR_CATALOG_GRIP && !o->version)) continue;
+                FILE *stream=car_catalog_open_sidecar(slot->slot,(CarCatalogOutputKind)k);
+                if (!stream) return 15;
+                CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx);
+                unsigned char block[4096]; size_t got, size=0;
+                while ((got=fread(block,1,sizeof block,stream))) {
+                    CC_SHA256_Update(&ctx,block,(CC_LONG)got); size+=got;
+                }
+                char digest[65]; hash_end(&ctx,digest);
+                if (ferror(stream) || size!=o->size || strcmp(digest,o->sha256)) return 16;
+                fclose(stream);
+            }
+            ++complete;
+        }
+        printf("{\"count\":%zu,\"streamed\":%zu,\"peak\":%u,\"error\":",car_catalog_count(),complete,peak_fds);
+        text(car_catalog_error()); puts("}"); return 0;
+    }
     unsigned initial_io=io_calls;
     if (argc>3 && !strcmp(argv[3],"race")) { puts("READY"); fflush(stdout); if (getchar()!='!') return 4; }
     int again=car_catalog_init("/invalid/repeated-init-must-not-open",!atoi(argv[2]));
@@ -106,23 +155,30 @@ int main(int argc,char **argv) {
             const CarCatalogOutput *o=&s->outputs[k];
             printf("{\"present\":%d,\"version\":%u,\"hash\":",o->present,o->version); text(o->sha256);
             printf(",\"bytes_hash\":");
-            int fd=car_catalog_open_output((unsigned)i,(CarCatalogOutputKind)k);
+            int fd=-1;
+            FILE *stream=NULL;
+            if (k<CAR_CATALOG_SOLID_MAP) {
+                fd=car_catalog_open_output((unsigned)i,(CarCatalogOutputKind)k);
+                if (fd>=0) stream=fdopen(fd,"rb");
+            } else stream=car_catalog_open_sidecar((unsigned)i,(CarCatalogOutputKind)k);
             char h[65]="";
             if (o->present) {
-                if(fd<0) return 8;
-                CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx); unsigned char b[65536]; ssize_t got; uint64_t n=0;
-                while((got=read(fd,b,sizeof b))>0) { CC_SHA256_Update(&ctx,b,(CC_LONG)got); n+=(uint64_t)got; }
-                if(got<0 || n!=o->size) return 9;
+                if(!stream) return 8;
+                CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx); unsigned char b[65536]; size_t got; uint64_t n=0;
+                while((got=fread(b,1,sizeof b,stream))) { CC_SHA256_Update(&ctx,b,(CC_LONG)got); n+=(uint64_t)got; }
+                if(ferror(stream) || n!=o->size) return 9;
                 hash_end(&ctx,h);
-                if (write(fd,"X",1)!=-1) return 10;
-                close(fd);
-                /* Existing pathname consumers must see the same anonymous bytes. */
-                FILE *f=fopen(o->path,"rb"); if(!f || fseek(f,0,SEEK_SET)) return 11;
-                CC_SHA256_Init(&ctx); size_t z;
-                while ((z=fread(b,1,sizeof b,f))) CC_SHA256_Update(&ctx,b,(CC_LONG)z);
-                if (ferror(f)) return 12;
-                fclose(f); char other[65]; hash_end(&ctx,other); if(strcmp(h,other)) return 13;
-            } else if (fd!=-1 || o->path[0] || o->size || o->version || o->sha256[0]) return 14;
+                if (fd>=0 ? write(fd,"X",1)!=-1 : fputc('X',stream)!=EOF) return 10;
+                fclose(stream);
+                if (k<CAR_CATALOG_SOLID_MAP) {
+                    /* Existing pathname consumers must see the same anonymous bytes. */
+                    FILE *f=fopen(o->path,"rb"); if(!f || fseek(f,0,SEEK_SET)) return 11;
+                    CC_SHA256_Init(&ctx); size_t z;
+                    while ((z=fread(b,1,sizeof b,f))) CC_SHA256_Update(&ctx,b,(CC_LONG)z);
+                    if (ferror(f)) return 12;
+                    fclose(f); char other[65]; hash_end(&ctx,other); if(strcmp(h,other)) return 13;
+                }
+            } else if (stream || o->path[0] || o->size || o->version || o->sha256[0]) return 14;
             text(h); putchar('}');
         }
         printf("]}");
@@ -197,7 +253,15 @@ class NativeCatalogTests(unittest.TestCase):
         self.store = self.root / 'catalog'
         self.rows, self.outputs, self.inputs = cc.reservations(), {}, {}
         self.serial = 0
-        for s in (0, 11, 75):
+        self.add_rows((0, 11, 75))
+        self.policy_doc = dict(schema=1, revision=1, slots=[dict(slot=s, identity=None, variants=[]) for s in range(90)])
+        self.approve_rows()
+        self.policy = self.load_policy()
+        self.catalog = cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
+        self.exe = self.compile()
+
+    def add_rows(self, slots):
+        for s in slots:
             folder, donor = f'MODEL_{s}', 'MODEL_DONOR'
             base = self.root / f'local-{s}'
             base.mkdir()
@@ -224,11 +288,6 @@ class NativeCatalogTests(unittest.TestCase):
                        outputs={name: cc.fingerprint(out / name) for name in os.listdir(out)})
             row['identity'] = cc.source_identity(**row['origin'])
             self.rows[s], self.outputs[s], self.inputs[s] = row, out, groups
-        self.policy_doc = dict(schema=1, revision=1, slots=[dict(slot=s, identity=None, variants=[]) for s in range(90)])
-        self.approve_rows()
-        self.policy = self.load_policy()
-        self.catalog = cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
-        self.exe = self.compile()
 
     def approve_rows(self, rows=None):
         for r in rows or self.rows:
@@ -364,6 +423,33 @@ class NativeCatalogTests(unittest.TestCase):
         self.good_result(selected=(159,))
         cc.set_selection(self.store, [], policy=self.policy)
         self.good_result(selected=())
+
+    def test_full_roster_at_app_fd_limit(self):
+        """At limit 256, c4b98837 admits 0/75 (peak 256), fixed admits 75/75 (peak 162)."""
+        slots = set(range(76)) - {1}
+        self.assertEqual(len(slots), 75)
+        self.add_rows(sorted(slots - self.outputs.keys()))
+        self.approve_rows()
+        self.policy = self.load_policy()
+        cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
+        exe = self.compile()
+        process = subprocess.run(['sh', '-c', 'ulimit -n 256 && exec "$@"', 'sh',
+                                  str(exe), str(self.store), '1', 'limited'],
+                                 check=True, capture_output=True, text=True, timeout=30)
+        result = json.loads(process.stdout)
+        print(f'full-roster descriptor limit 256: {result["count"]}/75 admitted, '
+              f'{result["streamed"]}/75 sidecars verified, peak {result["peak"]}')
+        self.assertEqual(result['count'], 75, result['error'])
+        self.assertEqual(result['streamed'], 75)
+        self.assertLess(result['peak'], 256)
+
+    def test_legacy_policy_envelope_still_checks_contract_and_outputs(self):
+        digest = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
+        self.rewrite(lambda doc: doc.update(policy_sha256=digest))
+        self.good_result()
+        self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
+        self.rewrite(lambda doc: doc['cars'][0]['display'].update(name='Changed name'))
+        self.zero()
 
     def test_original_bug(self):
         d = self.root / 'original'
@@ -624,6 +710,8 @@ class NativeCatalogTests(unittest.TestCase):
         p=base/'cars/0/GEOMETRY.BIN'
         p.parent.chmod(0o700)
         old=p.read_bytes()
+        side=p.with_name('SOLIDMAP.BIN')
+        old_side=side.read_bytes()
         def replace():
             replacement=p.with_name('replacement')
             replacement.write_bytes(b'forged replacement')
@@ -634,8 +722,11 @@ class NativeCatalogTests(unittest.TestCase):
         def inplace():
             p.chmod(0o600)
             p.write_bytes(b'X'*len(old))
+            side.chmod(0o600)
+            side.write_bytes(b'X'*len(old_side))
         self.good_result(self.native(mutate=inplace))
         p.write_bytes(old)
+        side.write_bytes(old_side)
         def directory():
             moved=base.with_name('moved-generation')
             base.rename(moved)
@@ -661,7 +752,7 @@ class NativeCatalogTests(unittest.TestCase):
         # Retaining the installed file descriptor survives renames but still
         # admits later in-place writes. The correct reader copies the bytes.
         mutant=original.replace('    close(source);\n    if (!rc) rc=sidecar', '    /* retain installed descriptor */\n    if (!rc) rc=sidecar')
-        mutant=mutant.replace('r->fd=ro;', 'close(ro); r->fd=source;')
+        mutant=mutant.replace('packs[slot][kind]=ro;', 'close(ro); packs[slot][kind]=source;')
         mutant=mutant.replace('snprintf(o->path,sizeof o->path,"/dev/fd/%d",ro);', 'snprintf(o->path,sizeof o->path,"/dev/fd/%d",source);')
         self.assertNotEqual(mutant,original)
         p=self.generation_dir()/'cars/0/GEOMETRY.BIN'

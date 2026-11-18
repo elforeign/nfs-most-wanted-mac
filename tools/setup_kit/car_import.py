@@ -40,6 +40,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import sys
 import time
 import uuid
@@ -49,6 +50,7 @@ from . import car_x360_inputs as xenon
 from .x360 import Source
 
 REVISION = 1
+LATER_PC_INPUT_LIMIT = 64 << 20
 MW_SHARED = ('GLOBAL/GLOBALA.BUN', 'GLOBAL/GLOBALB.LZC', 'GLOBAL/INGAMEA.BUN',
              'GLOBAL/INGAMEB.BUN', 'GLOBAL/DYNTEX.BIN', 'CARS/TEXTURES.BIN',
              'CARS/WHEELS/TEXTURES.BIN')
@@ -120,17 +122,11 @@ def _mkdir(path):
         pass
 
 
-def _write(path, data):
-    _mkdir(path.parent)
-    with catalog._directory(path.parent) as base:
-        catalog._write(base, path.name, data)
-
-
 def _pin(row):
     return {k: row[k] for k in ('size', 'sha256')}
 
 
-def _range(path, offset, size, *, target=None, tick=lambda: None):
+def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None):
     _require(type(size) is int and 0 <= size <= converter.MAX_FILE, 'logical range too large')
     with _asset(path) as fd, ExitStack() as stack:
         before = os.fstat(fd)
@@ -140,10 +136,7 @@ def _range(path, offset, size, *, target=None, tick=lambda: None):
         os.lseek(fd, offset, os.SEEK_SET)
         sink = None
         if target is not None:
-            parent = stack.enter_context(catalog._directory(target.parent, create=True))
-            leaf = os.open(target.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                           0o600, dir_fd=parent)
-            sink = stack.enter_context(os.fdopen(leaf, 'wb'))
+            sink = stack.enter_context(os.fdopen(stage.open_file(target), 'wb'))
         try:
             while left:
                 tick()
@@ -186,9 +179,30 @@ def _open_source(path):
         source.close()
 
 
-def _source_names(platform, folder, identities):
-    names = [f'CARS/{folder}/GEOMETRY.BIN', f'CARS/{folder}/TEXTURES.BIN',
-             'GLOBAL/GLOBALB.LZC', 'GLOBAL/ATTRIBUTES.BIN']
+def _car_packs(folder):
+    return (f'CARS/{folder}/GEOMETRY.BIN', f'CARS/{folder}/TEXTURES.BIN')
+
+
+def _mw_names(game, donor):
+    packs = _car_packs(donor)
+    if game == 'carbon':
+        return (*packs, *MW_SHARED)
+    from .ps_namespace import TEMPLATE
+    shared = ('GLOBAL/GLOBALB.LZC', 'GLOBAL/ATTRIBUTES.BIN') if game == 'prostreet' else ()
+    return tuple(dict.fromkeys((*packs, *_car_packs(TEMPLATE), *shared)))
+
+
+def _mw_asset(root, name, game):
+    path = root / name
+    if game != 'carbon' and name.startswith('GLOBAL/') and not path.exists():
+        retail = root / ('GLOBAL/GlobalB.lzc' if name.endswith('.LZC') else 'GLOBAL/attributes.bin')
+        if retail.exists():
+            return retail
+    return path
+
+
+def _source_names(platform, folder, identities, game='carbon'):
+    names = [*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game]]
     if platform == 'x360':
         names += ['GLOBAL/GLOBALB.BUN', 'CARS/TEXTURES.BIN', 'GLOBAL/INGAMEA.BUN']
     known = {sources.path_hash(n): n for n in names}
@@ -212,17 +226,6 @@ def _inventory(root):
                     _require(st.st_nlink == 1, 'hardlinked managed file')
                     result[path.relative_to(root).as_posix()] = st
     return result
-
-
-def _seal(root):
-    for name in _inventory(root):
-        with _asset(root / name) as fd:
-            os.fchmod(fd, 0o444)
-            os.fsync(fd)
-    for base, _, _ in os.walk(root, topdown=False):
-        with catalog._directory(base) as fd:
-            os.fchmod(fd, 0o555)
-            os.fsync(fd)
 
 
 def _volume(root):
@@ -276,9 +279,28 @@ class _Code:
         self.pins[path.name] = dict(size=len(neutral), sha256=hashlib.sha256(neutral).hexdigest())
 
 
-def _code(platform, absent):
+def _later_route(game):
+    from . import ps_namespace, v25_batch, v25_car
+    modules = [ps_namespace, v25_batch, v25_car]
+    if game == 'prostreet':
+        from . import ps_attrib
+        return ps_namespace, modules + [ps_attrib]
+    _require(game == 'undercover', 'unsupported PC converter')
+    from . import ps_attrib, uc_batch, ucpc_car
+    return ucpc_car, modules + [ps_attrib, uc_batch, ucpc_car]
+
+
+def _code(platform, absent, game='carbon'):
     code = _Code()
-    policy, _ = converter._converter_policy(platform, None, code)
+    if game == 'carbon':
+        policy, _ = converter._converter_policy(platform, None, code)
+    else:
+        from . import car_texture_namespace, huff, x360, xdvdfs
+        _, route_modules = _later_route(game)
+        for module in (converter, car_texture_namespace, huff, x360, xdvdfs, *route_modules):
+            code.read(Path(module.__file__))
+        policy = dict(revision=1, game=game, platform=platform, modules=code.pins.copy())
+        policy['sha256'] = catalog.digest(policy)
     for path in (Path(__file__), sources.MANIFEST,
                  Path(__file__).resolve().parents[2] / 'runtime/huff.h'):
         code.read(path)
@@ -378,7 +400,7 @@ class CarImporter:
                      'managed directories overlap an input tree')
         for i, path in enumerate(protected):
             _require(not any(_overlaps(path, other) for other in protected[i + 1:]),
-                     'Carbon and MW input roles must be separate')
+                     'Later-game and MW input roles must be separate')
         if not mw_pc.is_dir():
             raise MissingAssets('required MW PC directory is missing')
         return carbon, mw_pc, optional
@@ -389,8 +411,9 @@ class CarImporter:
             recognition = sources.recognise(carbon)
         except sources.SourceError as error:
             raise ImportError(str(error)) from error
-        _require(recognition['game'] == 'carbon' and recognition['platform'] in ('pc', 'x360'),
-                 'only recognized Carbon PC or Carbon X360 input is supported')
+        game, platform = recognition['game'], recognition['platform']
+        _require(not cars or (game, platform) in catalog.IMPORT_SOURCES,
+                 'this game and platform have no approved conversion route')
         statuses = {c['car_hash']: c for c in recognition['cars']}
         for car in cars:
             row = statuses.get(sources.path_hash('CARS/' + car['folder']))
@@ -400,7 +423,10 @@ class CarImporter:
             for name in ('GEOMETRY.BIN', 'TEXTURES.BIN'):
                 if not (mw_pc / 'CARS' / car['donors']['model'] / name).is_file():
                     raise MissingAssets('required MW PC donor pack is missing')
-        if not (mw_pc / 'GLOBAL/GLOBALB.LZC').is_file():
+            if game != 'carbon' and any(not _mw_asset(mw_pc, name, game).is_file()
+                                        for name in _mw_names(game, car['donors']['model'])):
+                raise MissingAssets('required MW PC material template or shared pack is missing')
+        if game == 'carbon' and not (mw_pc / 'GLOBAL/GLOBALB.LZC').is_file():
             raise MissingAssets('required MW PC shared pack is missing')
         return carbon, mw_pc, optional, recognition
 
@@ -410,10 +436,11 @@ class CarImporter:
         source, mw, optional, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
         try:
             policy = catalog.packaged_policy()
-            approval = dict(available=True, sha256=policy.sha256)
+            approval = dict(available=(recognition['game'], recognition['platform']) in catalog.IMPORT_SOURCES,
+                            sha256=policy.sha256)
         except catalog.CatalogError as exc:
             approval = dict(available=False, reason=str(exc))
-        return dict(inputs=dict(carbon=dict(path=str(source), game='carbon', platform=recognition['platform']),
+        return dict(inputs=dict(carbon=dict(path=str(source), game=recognition['game'], platform=recognition['platform']),
             mw_pc=dict(path=str(mw), required=True),
             mw_x360=dict(path=str(optional) if optional else None, required=False, used=False)),
             recognition=recognition, approval=approval, output_verified=False)
@@ -434,9 +461,37 @@ class CarImporter:
             progress(dict(phase=phase, seconds=time.monotonic() - receipt.start))
         self._tick(cancel)
 
-    def _prepare(self, source, mw, recognition, car, policy, receipt, cancel, progress, measure,
-                 repair_cache=False):
-        platform, folder = recognition['platform'], car['folder']
+    @staticmethod
+    def _later_rows(recognition, policy):
+        if recognition['game'] == 'carbon':
+            return {}
+        _require(policy is not None, 'No packaged approvals for this car source.')
+        from . import car_selection
+        return {row['slot']: row for row in car_selection.load(policy=policy)
+                if (row['origin']['game'], row['origin']['platform']) ==
+                   (recognition['game'], recognition['platform'])}
+
+    @staticmethod
+    def _later_mw_pins(paths, reviewed, car, source_bytes):
+        from .car_selection import spec
+        mismatch = 'The selected MW donor or template files do not match the approved copies for this car.'
+        oversized = 'The selected car and MW files exceed the conversion size limit.'
+        _require(reviewed is not None and spec(reviewed) == car, mismatch)
+        expected = reviewed['inputs']['donor'] | reviewed['inputs']['dependencies']
+        _require(paths.keys() == expected.keys(), mismatch)
+        remaining = LATER_PC_INPUT_LIMIT - source_bytes
+        for name, path in paths.items():
+            with _asset(path) as fd:
+                size = os.fstat(fd).st_size
+                remaining -= size
+                _require(remaining >= 0, oversized)
+                _require(size == expected[name]['size'] and
+                         catalog._record(fd, limit=size) == expected[name], mismatch)
+        return expected
+
+    def _prepare(self, source, mw, recognition, car, policy, receipt, cancel, progress,
+                 *, later_rows, repair_cache=False):
+        game, platform, folder = recognition['game'], recognition['platform'], car['folder']
         by_car = {c['car_hash']: c for c in recognition['cars']}
         expected = recognition['shared'] + by_car[sources.path_hash('CARS/' + folder)]['files']
         tick = lambda: self._tick(cancel)
@@ -448,21 +503,25 @@ class CarImporter:
                 source_pins = {key: _pin(row) for key, row in bundle.inputs.items()}
                 names = _source_names(platform, folder, source_pins)
             else:
-                names = {sources.path_hash(n): n for n in
-                         (f'CARS/{folder}/GEOMETRY.BIN', f'CARS/{folder}/TEXTURES.BIN',
-                          'GLOBAL/GLOBALB.LZC', 'GLOBAL/ATTRIBUTES.BIN')}
+                names = {sources.path_hash(n): n for n in (*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game])}
                 allowed = {r['path_hash']: r for r in expected}
                 _require(names.keys() <= allowed.keys(), 'PC dependency missing from recognition')
                 source_pins = {key: _pin(allowed[key]) for key in names}
             for key, pin in source_pins.items():
                 _require(key in logical and _logical(reader, logical[key], tick=tick) == pin,
                          'selected logical source changed')
-            mw_names = list(MW_SHARED) + [f'CARS/{car["donors"]["model"]}/{n}'
-                                         for n in ('GEOMETRY.BIN', 'TEXTURES.BIN')]
-            mw_pins = {name: catalog.fingerprint(mw / name) for name in mw_names if (mw / name).exists()}
+            mw_names = _mw_names(game, car['donors']['model'])
+            mw_paths = {name: _mw_asset(mw, name, game) for name in mw_names}
+            extraction = sum(p['size'] for p in source_pins.values())
+            reviewed = later_rows.get(car['slot'])
+            if game == 'carbon':
+                mw_pins = {name: catalog.fingerprint(path) for name, path in mw_paths.items() if path.exists()}
+            else:
+                mw_pins = self._later_mw_pins(mw_paths, reviewed, car, extraction)
             absent = sorted(set(mw_names) - mw_pins.keys())
-            code, conversion_policy, environment = _code(platform, absent)
-            identity = dict(schema=REVISION, car=car, platform=platform, source=source_pins,
+            code, conversion_policy, environment = _code(platform, absent, game)
+            dependencies = sum(p['size'] for p in mw_pins.values()) + sum(p['size'] for p in code.pins.values())
+            identity = dict(schema=REVISION, car=car, game=game, platform=platform, source=source_pins,
                 mw=mw_pins, converter=code.pins, conversion_policy=conversion_policy,
                 approval=None if policy is None else dict(sha256=policy.sha256,
                                                          revision=catalog._policy(policy)['revision']))
@@ -477,9 +536,11 @@ class CarImporter:
                         _require(current.get(name) == logical[name] and
                                  _logical(fresh, current[name], tick=tick) == pin, 'source changed before activation')
                 for name, pin in mw_pins.items():
-                    _require(catalog.fingerprint(mw / name) == pin, 'MW dependency changed before activation')
-                _require(all(not (mw / name).exists() for name in absent), 'MW dependency inventory changed')
-                current_code, current_policy, _ = _code(platform, absent)
+                    path = _mw_asset(mw, name, game)
+                    _require(path == mw_paths[name] and catalog.fingerprint(path) == pin,
+                             'MW dependency changed before activation')
+                _require(all(not _mw_asset(mw, name, game).exists() for name in absent), 'MW dependency inventory changed')
+                current_code, current_policy, _ = _code(platform, absent, game)
                 _require(current_code.pins == code.pins and current_policy == conversion_policy,
                          'converter dependency changed before activation')
 
@@ -501,116 +562,141 @@ class CarImporter:
                     unchanged()
                     return dict(row=row, entry=entry, reused=True, approved=True, unchanged=unchanged,
                                 extraction_bytes=0, output_bytes=sum(p['size'] for p in row['outputs'].values()))
-            if not measure:
-                return dict(row=None, entry=None, reused=False, approved=False, unchanged=unchanged,
-                            extraction_bytes=sum(p['size'] for p in source_pins.values()), output_bytes=None,
-                            dependency_bytes=sum(p['size'] for p in mw_pins.values()) +
-                                             sum(p['size'] for p in code.pins.values()))
+        input_pins = dict(source={names[k]: v for k, v in source_pins.items()},
+                          donor={n: v for n, v in mw_pins.items() if n.startswith('CARS/' + car['donors']['model'] + '/')},
+                          dependencies={n: v for n, v in mw_pins.items() if not n.startswith('CARS/' + car['donors']['model'] + '/')},
+                          converter=code.pins)
+        expected_output = sum(p['size'] for p in reviewed['outputs'].values()) if reviewed else 0
+        planned_row = reviewed if reviewed and reviewed['inputs'] == input_pins else None
 
+        def finish():
+            _require(shutil.disk_usage(self.work).free >= extraction + dependencies + expected_output + self.margin,
+                     'There is not enough free disk space to prepare the selected car.')
             stage = self.work / ('.txn-' + uuid.uuid4().hex)
-            _mkdir(stage)
-            for group in ('source', 'mw', 'converter'):
-                _mkdir(stage / group)
-            extraction = 0
-            for name, pin in source_pins.items():
-                actual = _logical(reader, logical[name], target=stage / 'source' / names[name], tick=tick)
-                _require(actual == pin, 'source changed during selected extraction')
-                extraction += pin['size']
-            for name, pin in mw_pins.items():
-                actual = _range(mw / name, 0, pin['size'], target=stage / 'mw' / name, tick=tick)
-                _require(actual == pin, 'MW dependency changed during snapshot')
-            for name, path in code.files.items():
-                pin = code.pins[name]
-                if name in code.neutral:
-                    _write(stage / 'converter' / name, code.neutral[name])
-                    continue
-                _require(_range(path, 0, pin['size'], target=stage / 'converter' / name, tick=tick) == pin,
-                         'converter dependency changed during snapshot')
-            _write(stage / 'converter/environment.json', environment)
-            self._boundary('extracted', receipt, cancel, progress)
-            donor = stage / 'mw/CARS' / car['donors']['model']
-            with catalog._directory(stage) as stage_fd:
-                report = self._convert(platform, folder, car, recognition, stage, stage_fd, donor)
-            self._boundary('converted', receipt, cancel, progress)
-            self._report(report, stage, identity, names)
-            pins = {n: catalog.fingerprint(stage / 'outputs' / n) for n in _inventory(stage / 'outputs')}
-            row = dict(catalog.reservations()[car['slot']], state='ready',
-                origin=dict(game='carbon', platform=platform, folder=folder),
-                display=car['display'], bindings=car['bindings'], donors=car['donors'], parts=car['parts'],
-                converter=dict(revision=report['converter_revision'], policy=conversion_policy['sha256']),
-                inputs=dict(source={names[k]: v for k, v in source_pins.items()},
-                    donor={n: v for n, v in mw_pins.items() if n.startswith('CARS/' + car['donors']['model'] + '/')},
-                    dependencies={n: v for n, v in mw_pins.items() if not n.startswith('CARS/' + car['donors']['model'] + '/')},
-                    converter=code.pins), outputs=pins)
-            row['identity'] = catalog.source_identity(**row['origin'])
-            approved, reason = False, 'no packaged approvals'
-            if policy is not None:
-                try:
-                    rows = catalog.reservations()
-                    rows[car['slot']] = row
-                    catalog.make_catalog(rows, policy)
-                    approved, reason = True, ''
-                except catalog.CatalogError as exc:
-                    reason = str(exc)
-            unchanged()
-            _write(stage / 'receipt.json', catalog.encoded(dict(schema=REVISION, key=key, identity=identity, row=row)))
-            if approved:
-                _seal(stage)
-                with catalog._directory(self.work) as fd:
-                    os.rename(stage.name, entry.name, src_dir_fd=fd, dst_dir_fd=fd)
-                    os.fsync(fd)
-                self._cached(entry, identity, policy)
-            else:
-                entry = stage
-            self._boundary('prepared', receipt, cancel, progress)
-            return dict(row=row, entry=entry, reused=False, approved=approved, reason=reason,
-                        unchanged=unchanged, extraction_bytes=extraction,
-                        dependency_bytes=sum(p['size'] for p in mw_pins.values()) +
-                                         sum(p['size'] for p in code.pins.values()),
-                        output_bytes=sum(p['size'] for p in pins.values()))
+            with catalog._directory(self.work) as work_fd, catalog._stage(work_fd, stage.name) as owned:
+                for group in ('source', 'mw', 'converter'):
+                    with owned.directory(group):
+                        pass
+                with _open_source(source) as fresh:
+                    for name, pin in source_pins.items():
+                        actual = _logical(fresh, logical[name], stage=owned, target='source/' + names[name], tick=tick)
+                        _require(actual == pin, 'source changed during selected extraction')
+                for name, pin in mw_pins.items():
+                    actual = _range(mw_paths[name], 0, pin['size'], stage=owned, target='mw/' + name, tick=tick)
+                    _require(actual == pin, 'MW dependency changed during snapshot')
+                for name, path in code.files.items():
+                    pin = code.pins[name]
+                    if name in code.neutral:
+                        owned.write('converter/' + name, code.neutral[name])
+                        continue
+                    _require(_range(path, 0, pin['size'], stage=owned, target='converter/' + name, tick=tick) == pin,
+                             'converter dependency changed during snapshot')
+                owned.write('converter/environment.json', environment)
+                self._boundary('extracted', receipt, cancel, progress)
+                donor = stage / 'mw/CARS' / car['donors']['model']
+                catalog._bound(stage, owned.fd)
+                report = self._convert(platform, folder, car, recognition, stage, owned, donor, names, identity)
+                self._boundary('converted', receipt, cancel, progress)
+                self._report(report, stage, identity, names)
+                pins = {n: catalog.fingerprint(stage / 'outputs' / n) for n in _inventory(stage / 'outputs')}
+                row = dict(catalog.reservations()[car['slot']], state='ready',
+                    origin=dict(game=game, platform=platform, folder=folder),
+                    display=car['display'], bindings=car['bindings'], donors=car['donors'], parts=car['parts'],
+                    converter=dict(revision=report['converter_revision'], policy=conversion_policy['sha256']),
+                    inputs=input_pins, outputs=pins)
+                row['identity'] = catalog.source_identity(**row['origin'])
+                approved, reason = False, 'no packaged approvals'
+                if policy is not None:
+                    try:
+                        rows = catalog.reservations()
+                        rows[car['slot']] = row
+                        catalog.make_catalog(rows, policy)
+                        approved, reason = True, ''
+                    except catalog.CatalogError as exc:
+                        reason = str(exc)
+                unchanged()
+                owned.write('receipt.json', catalog.encoded(dict(schema=REVISION, key=key, identity=identity, row=row)))
+                self._boundary('prepared', receipt, cancel, progress)
+                if approved:
+                    owned.seal()
+                    catalog._bound(stage, owned.fd)
+                    owned.publish(entry.name)
+                    os.fsync(work_fd)
+                    self._cached(entry, identity, policy)
+                return dict(row=row, entry=entry if approved else None, approved=approved, reason=reason,
+                            output_bytes=sum(p['size'] for p in pins.values()))
+
+        return dict(row=None, entry=None, reused=False, approved=False, unchanged=unchanged,
+                    extraction_bytes=extraction, output_bytes=None, dependency_bytes=dependencies,
+                    known_output_bytes=expected_output, planned_row=planned_row, slot=car['slot'], finish=finish)
 
     @staticmethod
-    def _convert(platform, folder, car, recognition, stage, stage_fd, donor):
-        """Write converter output only beneath the held, link-free stage.
+    def _convert(platform, folder, car, recognition, stage, owned, donor, names, identity):
+        """Track the converter's output entries when they are created."""
+        _require(catalog._entry_stat(owned.fd, 'outputs') is None, 'unexpected entry in the transaction stage')
 
-        The converter resolves its output path once and then opens every
-        component without following links. A fresh, unpublished leaf name means
-        nothing can be planted at it before that resolution; a link planted at
-        any other name, including 'outputs', is refused before a byte is written.
-        A stage swapped during conversion fails the bind check and is rejected.
-        """
-        def absent(name):
-            try:
-                os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                return True
-            return False
+        def write(out, files, protected):
+            converter.check_output_path(out, protected)
+            catalog._bound(stage, owned.fd)
+            for name, data in files.items():
+                _require(Path(name).name == name, 'output filename must be a basename')
+                if data is not None:
+                    owned.write('outputs/' + name, data)
 
-        _require(absent('outputs'), 'unexpected entry in the transaction stage')
-        leaf = '.outputs-' + uuid.uuid4().hex
-        if platform == 'pc':
+        out = stage / 'outputs'
+        game = recognition['game']
+        if game != 'carbon':
+            report = CarImporter._convert_later_pc(game, stage, folder, donor.name, names, identity, write)
+        elif platform == 'pc':
             report = converter.convert(stage / 'source/CARS' / folder, donor,
                 dict(carbon_global=stage / 'source/GLOBAL/GLOBALB.LZC',
-                     attributes=stage / 'source/GLOBAL/ATTRIBUTES.BIN', mw_root=stage / 'mw'), stage / leaf)
+                     attributes=stage / 'source/GLOBAL/ATTRIBUTES.BIN', mw_root=stage / 'mw'), out, writer=write)
         else:
             # Resolve again from the bounded, verified logical snapshot.
             # Conversion never needs the ISO's containing directory as an
             # output exclusion root, nor any unselected archive bytes.
             with _open_source(stage / 'source') as snapshot:
                 frozen = xenon.resolve(snapshot, folder, car['donors']['model'], recognition=recognition)
-                report = converter.convert_x360(frozen, donor, stage / leaf, mw_root=stage / 'mw')
-        catalog._bound(stage, stage_fd)
-        _require(stat.S_ISDIR(os.stat(leaf, dir_fd=stage_fd, follow_symlinks=False).st_mode) and absent('outputs'),
-                 'unexpected entry in the transaction stage')
-        os.rename(leaf, 'outputs', src_dir_fd=stage_fd, dst_dir_fd=stage_fd)
-        os.fsync(stage_fd)
+                report = converter.convert_x360(frozen, donor, out, mw_root=stage / 'mw', writer=write)
+        catalog._bound(stage, owned.fd)
         return report
+
+    @staticmethod
+    def _convert_later_pc(game, stage, car, donor, names, identity, write):
+        policy = identity['conversion_policy']
+
+        def read(path, pin):
+            with _asset(path) as fd, os.fdopen(os.dup(fd), 'rb') as stream:
+                size = os.fstat(fd).st_size
+                _require(size == pin['size'] and size <= LATER_PC_INPUT_LIMIT,
+                         'A verified car input changed before conversion.')
+                data = stream.read(size + 1)
+            digest = hashlib.sha256(data).hexdigest()
+            _require(len(data) == size and digest == pin['sha256'],
+                     'A verified car input changed before conversion.')
+            inputs[str(path)] = digest
+            return data
+
+        inputs = {}
+        source = {name: read(stage / 'source' / name, identity['source'][key]) for key, name in names.items()}
+        mw = {name: read(stage / 'mw' / name, pin) for name, pin in identity['mw'].items()}
+        route, _ = _later_route(game)
+        try:
+            outputs = route.convert(car, donor, source, mw)
+        except (converter.ConversionError, IndexError, KeyError, StopIteration, OverflowError, struct.error) as error:
+            raise ImportError('Setup could not convert the selected car. Check the game files and retry.') from error
+        write(stage / 'outputs', outputs, (stage / 'source', stage / 'mw'))
+        return dict(car=car, donor=donor, game=game, platform='pc', converter_revision=policy['revision'],
+                    converter_policy=policy, inputs=inputs,
+                    source_inputs={key: dict(size=len(source[name]), sha256=inputs[str(stage / 'source' / name)])
+                                   for key, name in names.items()},
+                    outputs={name: hashlib.sha256(data).hexdigest() for name, data in outputs.items()})
 
     @staticmethod
     def _report(report, stage, identity, names):
         _require(report['car'] == identity['car']['folder'] and
                  report['donor'] == identity['car']['donors']['model'] and
-                 report['platform'] == identity['platform'] and
+                 report.get('game', 'carbon') == identity['game'] and report['platform'] == identity['platform'] and
                  report['converter_revision'] == identity['conversion_policy']['revision'] and
                  report['converter_policy'] == identity['conversion_policy'], 'converter identity differs from plan')
         _require({n: _pin(p) for n, p in report['source_inputs'].items()} == identity['source'],
@@ -629,10 +715,12 @@ class CarImporter:
         return dict(source=entry / 'source', donor=entry / 'mw', dependencies=entry / 'mw',
                     converter=entry / 'converter')
 
-    def _cached(self, entry, identity, policy):
+    def _cached(self, entry, identity, policy, *, retained=False):
         try:
             _require(policy is not None, 'cache requires packaged approval')
-            _require(identity['approval'] == dict(sha256=policy.sha256,
+            legacy = retained and identity['approval'] == dict(
+                sha256=catalog.LEGACY_POLICY_SHA256, revision=catalog.LEGACY_POLICY_REVISION)
+            _require(legacy or identity['approval'] == dict(sha256=policy.sha256,
                 revision=catalog._policy(policy)['revision']), 'cache approval revision is stale')
             with catalog._directory(entry) as base:
                 doc = catalog._decode(catalog._read(base, 'receipt.json'))
@@ -643,11 +731,12 @@ class CarImporter:
                      entry.name == 'c-' + doc['key'], 'stale cache identity')
             row = doc['row']
             car = identity['car']
+            game = identity.get('game', 'carbon') if legacy else identity['game']
             _require(all(row[k] == car[k] for k in ('slot', 'display', 'bindings', 'donors', 'parts')) and
-                     row['origin'] == dict(game='carbon', platform=identity['platform'], folder=car['folder']) and
+                     row['origin'] == dict(game=game, platform=identity['platform'], folder=car['folder']) and
                      row['converter'] == dict(revision=identity['conversion_policy']['revision'],
                                               policy=identity['conversion_policy']['sha256']), 'cache contract mismatch')
-            source_names = _source_names(identity['platform'], car['folder'], identity['source'])
+            source_names = _source_names(identity['platform'], car['folder'], identity['source'], game)
             prefix = 'CARS/' + car['donors']['model'] + '/'
             _require(row['inputs'] == dict(
                 source={source_names[n]: p for n, p in identity['source'].items()},
@@ -684,32 +773,36 @@ class CarImporter:
             return 0
         return sum(p['size'] for r in rows if r['state'] == 'ready' for p in r['outputs'].values())
 
-    def _planned_publication(self, preparations, policy):
-        current = self._current(policy) if policy is not None else None
-        rows = _clone(current.catalog['cars']) if current is not None and current.catalog else catalog.reservations()
-        unknown, compatible = False, True
+    def _planned_publication(self, preparations, policy, current):
+        absent = catalog.reservations()
+        rows = _clone(current.catalog['cars']) if current is not None and current.catalog else absent.copy()
+        unknown, compatible, known_bytes = False, True, 0
         for item in preparations:
-            row = item['row']
+            row = item['row'] or item.get('planned_row')
             if row is None:
                 unknown = True
+                slot = item['slot']
+                rows[slot] = absent[slot]
+                known_bytes += item['known_output_bytes']
                 continue
             previous = rows[row['slot']]
             if previous['state'] == 'ready' and catalog.slot_compatibility(previous) != catalog.slot_compatibility(row):
                 compatible = False
             rows[row['slot']] = row
+        known_bytes += sum(p['size'] for r in rows if r['state'] == 'ready' for p in r['outputs'].values())
         if unknown:
-            return None, compatible
-        if policy is not None and all(p['approved'] for p in preparations):
-            return self._publication_bytes(rows, policy), compatible
-        return sum(p['size'] for r in rows if r['state'] == 'ready' for p in r['outputs'].values()), compatible
+            return None, known_bytes, compatible
+        if policy is not None and all(p['approved'] or p.get('planned_row') is not None for p in preparations):
+            known_bytes = self._publication_bytes(rows, policy)
+        return known_bytes, known_bytes, compatible
 
-    def _space(self, preparations, receipt, publication_bytes):
+    def _space(self, preparations, receipt, publication_bytes, publication_minimum=0):
         volumes = {}
         for role, root in (('work', self.work), ('catalog', self.root)):
             device, available = _volume(root)
             row = volumes.setdefault(device, dict(device=device, paths=[], extraction_bytes=0,
                 staging_bytes=0, output_bytes=0, retention_bytes=0, margin_bytes=self.margin,
-                available_bytes=available))
+                minimum_bytes=self.margin, available_bytes=available))
             row['paths'].append(str(root))
             initial = receipt.volumes.get(device, {})
             row['retention_bytes'] = initial.get('initial_bytes', 0)
@@ -718,16 +811,36 @@ class CarImporter:
                 if role == 'work':
                     row['extraction_bytes'] += item['extraction_bytes']
                     extra = 0 if item['reused'] else item.get('dependency_bytes', 0)
+                    row['minimum_bytes'] += item['extraction_bytes'] + extra
+                    if not item['reused']:
+                        row['minimum_bytes'] += (item['known_output_bytes'] if item['output_bytes'] is None
+                                                 else item['output_bytes'])
                     if row['staging_bytes'] is not None:
                         row['staging_bytes'] = (None if item['output_bytes'] is None else
                                                 row['staging_bytes'] + extra + (0 if item['reused'] else item['output_bytes']))
             if role == 'catalog':
                 row['output_bytes'] = publication_bytes
+                row['minimum_bytes'] += publication_minimum if publication_bytes is None else publication_bytes
         for row in volumes.values():
             values = [row[n] for n in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes')]
             row['required_bytes'] = None if None in values else sum(values)
             row['sufficient'] = None if row['required_bytes'] is None else row['required_bytes'] <= row['available_bytes']
         return list(volumes.values())
+
+    def _finish_preparations(self, preparations, receipt, policy, current):
+        cold = [item for item in preparations if not item['reused']]
+        if not cold:
+            return
+        work_minimum = self.margin + sum(p['extraction_bytes'] + p['dependency_bytes'] + p['known_output_bytes']
+                                         for p in cold)
+        _require(_volume(self.work)[1] >= work_minimum,
+                 'There is not enough free disk space to prepare the selected car.')
+        publication_bytes, minimum, _ = self._planned_publication(preparations, policy, current)
+        for volume in self._space(preparations, receipt, publication_bytes, minimum):
+            if _volume(Path(volume['paths'][0]))[1] < volume['minimum_bytes']:
+                raise OSError(errno.ENOSPC, 'insufficient space for durable catalog publication')
+        for item in cold:
+            item.update(item.pop('finish')())
 
     def plan(self, carbon, *, mw_pc, cars, mw_x360=None, measure=False, cancel=None, progress=None):
         """Plan without publishing. Unknown sizes are null, never extrapolations."""
@@ -736,12 +849,17 @@ class CarImporter:
         with self._transaction(cancel) as receipt:
             source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
             policy = self._policy(False)
-            preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress, measure)
+            later_rows = self._later_rows(recognition, policy)
+            preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress,
+                                          later_rows=later_rows)
                             for car in cars]
-            publication_bytes, compatible = self._planned_publication(preparations, policy)
+            current = self._current(policy) if policy is not None else None
+            if measure:
+                self._finish_preparations(preparations, receipt, policy, current)
+            publication_bytes, minimum, compatible = self._planned_publication(preparations, policy, current)
             receipt.sample('planned')
             return dict(measured=measure, approved=all(p['approved'] for p in preparations), compatible=compatible,
-                platform=recognition['platform'], volumes=self._space(preparations, receipt, publication_bytes),
+                platform=recognition['platform'], volumes=self._space(preparations, receipt, publication_bytes, minimum),
                 cars=[dict(slot=c['slot'], reused=p['reused'], approved=p['approved'],
                            reason=p.get('reason', ''), contract=p['row']) for c, p in zip(cars, preparations)],
                 receipt=receipt.result())
@@ -777,7 +895,7 @@ class CarImporter:
                 rejected.append(str(exc))
                 continue
             if doc.get('row') == row:
-                self._cached(entry, doc['identity'], policy)
+                self._cached(entry, doc['identity'], policy, retained=True)
                 return entry
         if rejected:
             raise CacheError('retained dependency cache rejected; reimport required packs')
@@ -792,9 +910,11 @@ class CarImporter:
             policy = self._policy(True)
             current, baseline = self._snapshot(policy)
             source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
-            preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress, True,
-                                          repair_cache=repair_cache)
+            later_rows = self._later_rows(recognition, policy)
+            preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress,
+                                          later_rows=later_rows, repair_cache=repair_cache)
                             for car in cars]
+            self._finish_preparations(preparations, receipt, policy, current)
             _require(all(p['approved'] for p in preparations),
                      'converted output is not approved by the packaged policy')
             rows = _clone(current.catalog['cars']) if current.catalog else catalog.reservations()

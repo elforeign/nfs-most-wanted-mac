@@ -291,9 +291,9 @@ int main(int argc,char **argv) {
     CarGripLive live={1,8,0,NULL,0}; CarGripSelected out;
     CHECK(car85_grip_select(&owner,&live,&out)==expected);
     if(expected) CHECK(car_grip_selected_field(&out,0xC51EB1A1)!=NULL);
-    int fd=car_catalog_open_output(0,CAR_CATALOG_GRIP);
-    CHECK((fd>=0)==expected);
-    if(fd>=0) close(fd);
+    FILE *sidecar=car_catalog_open_sidecar(0,CAR_CATALOG_GRIP);
+    CHECK((sidecar!=NULL)==expected);
+    if(sidecar) fclose(sidecar);
     CHECK(car_catalog_inventory_get(0)->outputs[CAR_CATALOG_GRIP].version==expected);
     const char *replace=getenv("GRIP_REPLACE");
     if(expected && replace) {

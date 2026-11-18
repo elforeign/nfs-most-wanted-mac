@@ -21,6 +21,11 @@ MAX_EXECUTABLE = 128 << 20
 CARBON_TITLE = "0x454107EC"
 UNDERCOVER_TITLE = "0x45410876"
 GAME_NAMES = {"carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"}
+PC_CONVERSION_SHARED = {
+    "carbon": ("GLOBAL/GLOBALB.LZC", "GLOBAL/ATTRIBUTES.BIN"),
+    "prostreet": ("GLOBAL/GLOBALB.LZC", "GLOBAL/ATTRIBUTES.BIN", "GLOBAL/INGAMEA.BUN"),
+    "undercover": ("GLOBAL/GLOBALB.LZC", "GLOBAL/ATTRIBUTES.BIN"),
+}
 
 
 class SourceError(ValueError):
@@ -225,7 +230,8 @@ def _logical(source, files):
 
 
 SHARED_NAMES = {path_hash(name): name for name in (
-    "GLOBAL/GLOBALB.LZC", "GLOBAL/GLOBALB.BUN", "GLOBAL/ATTRIBUTES.BIN", "CARS/TEXTURES.BIN")}
+    "GLOBAL/GLOBALB.LZC", "GLOBAL/GLOBALB.BUN", "GLOBAL/ATTRIBUTES.BIN", "GLOBAL/INGAMEA.BUN",
+    "CARS/TEXTURES.BIN")}
 
 
 def _executable(source, files, platform, selected):
@@ -288,7 +294,7 @@ def _match(source, files, logical, release, selected, releases):
         title = UNDERCOVER_TITLE if game == "undercover" else CARBON_TITLE
         _require(exe is None or exe["title_id"] == title,
                  f"default.xex is not Need for Speed {label} (title ID must be {title})")
-    if game == "undercover":
+    if (game, release["platform"]) == ("undercover", "x360"):
         _require(exe is not None and "NFS/ZDIR.BIN" in files and "NFS/00GLOBAL.BIN" in files,
                  "Choose an Undercover disc image or extracted folder containing default.xex and NFS archives")
     shared, problems = [], []
@@ -360,7 +366,7 @@ def _folder(path):
 
 
 def recognise(path):
-    """Inventory Carbon, ProStreet PC or Undercover X360 conversion inputs.
+    """Inventory Carbon, ProStreet PC, or Undercover PC and Xbox 360 inputs.
 
     Accept a PC folder or any selected .exe, X360 ISO, extracted archive or
     logical files. Shared fingerprints identify the platform; executable hashes

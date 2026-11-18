@@ -16,8 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FAIL = 'fail() { echo "GATE FAIL: $*"; exit 1; }\n'
-LEGACY = {
-    'mix': ('3e80458ead9765748ac654f8294727afecc0716627efc6acf0eaf5bc2e49cf98', r'''refused=$(grep -c 'x360audio: bank load .*result -4' "$d/events.log" 2>/dev/null)
+MIX_LEGACY = r'''refused=$(grep -c 'x360audio: bank load .*result -4' "$d/events.log" 2>/dev/null)
 overflow=$(grep -c 'SLOT OVERFLOW' "$d/events.log" 2>/dev/null)
 [ "${overflow:-0}" = 0 ] || { echo "MIXSMOKE FAIL: $overflow bank slot overflows ($(grep -m1 'SLOT OVERFLOW' "$d/events.log" | cut -c1-160); $d)"; exit 1; }
 ingame=$(grep -c ' flow 6 ' "$d/stats.log" 2>/dev/null)
@@ -30,14 +29,14 @@ if [ "${refused:-0}" != 0 ] || [ "$(echo "$med < 0.01" | bc)" = 1 ]; then
     exit 1
 fi
 echo "MIXSMOKE PASS: FE -> free roam with the X360 mix: 0 refused bank loads, in-game FL+FR median $med"
-'''),
-    'diff': ('1dd1ca922f524345a90ac6997a936b32bc7467602a578efeab9fb0a84da652d5', r'''if "$py" -I "$here/recomp/build_inputs.py" --changed "$base"; then
+'''
+DIFF_LEGACY = r'''if "$py" -I "$here/recomp/build_inputs.py" --changed "$base"; then
     (cd "$NFS_PARENT" && "$py" -I "$here/recomp/difftest.py" --synth) > "$log/difftest.log" 2>&1
     grep -q " 0 fail" "$log/difftest.log" || fail "difftest: $(grep -m1 'differential' "$log/difftest.log")"
     note="$note difftest $(grep -o '[0-9]* pass' "$log/difftest.log")"
 fi
-'''),
-    'ui': ('d9afd4ecdbaa750300c1f1e7f802b28a8161d96f7b5f82f6cfdb59b8d686f36a', r'''capture() {
+'''
+UI_LEGACY = r'''capture() {
     out=$1; mkdir -p "$out"
     race_launch
     run ui frame_01800.png 60 BOOT_REG=g_RacingResolution=0 BOOT_DIAG_SHOTS=900,1800 BOOT_DIAG_FIXED_STEP=1 \
@@ -54,10 +53,15 @@ fi
     rm -rf "$out/ui" "$out/ui.user"
 }
 
-'''),
-    'audio': ('1306fe52fd159f75fcb742f6c2c69d357be92a5b5cb0cdf5692fbbb3d6344e92', r'''wait "$dstest_pid"; dstest_pid=
+'''
+AUDIO_LEGACY = r'''wait "$dstest_pid"; dstest_pid=
 grep -q " 0 failed" "$log/dstest.txt" || fail "audio: dstest fake: $(grep -m1 -E 'FAIL|failed' "$log/dstest.txt")"
-'''),
+'''
+LEGACY = {
+    'mix': ('3e80458ead9765748ac654f8294727afecc0716627efc6acf0eaf5bc2e49cf98', MIX_LEGACY),
+    'diff': ('1dd1ca922f524345a90ac6997a936b32bc7467602a578efeab9fb0a84da652d5', DIFF_LEGACY),
+    'ui': ('d9afd4ecdbaa750300c1f1e7f802b28a8161d96f7b5f82f6cfdb59b8d686f36a', UI_LEGACY),
+    'audio': ('1306fe52fd159f75fcb742f6c2c69d357be92a5b5cb0cdf5692fbbb3d6344e92', AUDIO_LEGACY),
 }
 
 

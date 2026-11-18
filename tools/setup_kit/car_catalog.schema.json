@@ -39,9 +39,11 @@
           "type": "object", "additionalProperties": false,
           "required": ["game", "platform", "folder"],
           "properties": {
-            "game": {"const": "carbon"}, "platform": {"enum": ["pc", "x360"]},
+            "game": {"enum": ["carbon", "prostreet", "undercover"]}, "platform": {"enum": ["pc", "x360"]},
             "folder": {"$ref": "#/$defs/token"}
-          }
+          },
+          "if": {"properties": {"platform": {"const": "x360"}}},
+          "then": {"properties": {"game": {"const": "carbon"}}}
         },
         "display": {
           "type": "object", "additionalProperties": false,
@@ -153,7 +155,11 @@
                 "type": "array", "maxItems": 256, "uniqueItems": true,
                 "items": {
                   "type": "object", "additionalProperties": false, "required": ["contract", "compatibility"],
-                  "properties": {"contract": {"$ref": "#/$defs/hash"}, "compatibility": {"$ref": "#/$defs/hash"}}
+                  "properties": {
+                    "contract": {"$ref": "#/$defs/hash"},
+                    "compatibility": {"$ref": "#/$defs/hash"},
+                    "legacy": {"type": "integer", "const": 1}
+                  }
                 }
               }
             },

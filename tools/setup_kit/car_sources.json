@@ -3850,6 +3850,12 @@
           "car_hash": "24d958bd"
         },
         {
+          "path_hash": "5a914411",
+          "size": 805472,
+          "sha256": "49f4fed3bd485b45ff37218894adf256bf233988493c2605a354479552a0d74a",
+          "role": "shared"
+        },
+        {
           "path_hash": "5b7fa915",
           "size": 482880,
           "sha256": "ec481273b62e6bdac71e32696be726b151a2821c7c2ab66174184085d8b6fcb7",
@@ -6067,6 +6073,222 @@
           "archive": 17
         }
       ]
+    },
+    {
+      "platform": "pc",
+      "edition": "standard",
+      "executable": {},
+      "files": [
+        {
+          "path_hash": "0441d089",
+          "size": 668480,
+          "sha256": "48a5787ecd0c89633b83bd6ae10c6c04b7af975e7bc9def3358c4be5ccd76b9f",
+          "role": "textures",
+          "car_hash": "0a654f42"
+        },
+        {
+          "path_hash": "0e536d96",
+          "size": 524928,
+          "sha256": "c008887c693ad0399cf046bf79d1ed5dd8cf66ce7be73dcc72ad8c7f5688a0b8",
+          "role": "textures",
+          "car_hash": "c0d8b32f"
+        },
+        {
+          "path_hash": "0e955055",
+          "size": 1001984,
+          "sha256": "b109181432073923c9ef6f0772d90885529cd03c9a8f70037bfef18202717fff",
+          "role": "textures",
+          "car_hash": "b9f5338e"
+        },
+        {
+          "path_hash": "0eb06663",
+          "size": 10829012,
+          "sha256": "d08f70fda1fc531edff335d2b4bc1e325337f1a6875a6072d87ddd2800c35622",
+          "role": "geometry",
+          "car_hash": "83745854"
+        },
+        {
+          "path_hash": "0f75424f",
+          "size": 722048,
+          "sha256": "d38e2831d0c305217c519aea39ab47240eb498816b01021fe6f1c1d40fe00c12",
+          "role": "textures",
+          "car_hash": "16d06748"
+        },
+        {
+          "path_hash": "1b56e5ff",
+          "size": 411520,
+          "sha256": "d8df2911d2b64b1116ddb2afc7e4b5dd76563cce726f5a7a1cf3fd50f6cd5de0",
+          "role": "textures",
+          "car_hash": "a5de4cf8"
+        },
+        {
+          "path_hash": "1f2b8979",
+          "size": 871680,
+          "sha256": "07d237613881dc9ad6778f306c1f3c3a0e33c2e57c748cdb22d7fb5f86116de1",
+          "role": "textures",
+          "car_hash": "072fc232"
+        },
+        {
+          "path_hash": "2309efcf",
+          "size": 769408,
+          "sha256": "ece688ff001daf1cb14b6f5eb120c527a1b52b06912ff3041de2f796bf83a521",
+          "role": "textures",
+          "car_hash": "303d24c8"
+        },
+        {
+          "path_hash": "28b6b011",
+          "size": 2623572,
+          "sha256": "4a178b0fc3bcec52aa7c47b9ac1a8d940571df2bb4025e6e0fe5c51cd35c2d43",
+          "role": "geometry",
+          "car_hash": "0a654f42"
+        },
+        {
+          "path_hash": "32c84d1e",
+          "size": 2497360,
+          "sha256": "fa959c528085c521f5738def7ab1503296feb8ae172bed0151edf828e8df9e6e",
+          "role": "geometry",
+          "car_hash": "c0d8b32f"
+        },
+        {
+          "path_hash": "330a2fdd",
+          "size": 7187848,
+          "sha256": "239548311f087cb755692073d774aaf841c50702887ec9d7e7737ea225a75ba3",
+          "role": "geometry",
+          "car_hash": "b9f5338e"
+        },
+        {
+          "path_hash": "33ea21d7",
+          "size": 9787456,
+          "sha256": "18c984a24cd87277ad68f52212768a5b2fd015872425709cc5850bc08880964d",
+          "role": "geometry",
+          "car_hash": "16d06748"
+        },
+        {
+          "path_hash": "3fcbc587",
+          "size": 8041644,
+          "sha256": "2619cc6913e4a2f912fa9773dfc61f0e8121a50e4fa160386e090875436ada2f",
+          "role": "geometry",
+          "car_hash": "a5de4cf8"
+        },
+        {
+          "path_hash": "41395992",
+          "size": 678976,
+          "sha256": "e2ee272a58fc5414a17e3a908846fdf4a8b2ed554c1719d20eb5e58c7acba00c",
+          "role": "textures",
+          "car_hash": "8c3775ab"
+        },
+        {
+          "path_hash": "43a06901",
+          "size": 9058200,
+          "sha256": "8b9029b3a056626e4fff072cbb4cfcaede706a5994dbdac6aa0b71300a47cbae",
+          "role": "geometry",
+          "car_hash": "072fc232"
+        },
+        {
+          "path_hash": "477ecf57",
+          "size": 9441944,
+          "sha256": "5afbef486e2252c40cd1b6ef65c32217295501faf7c9325128c4a820ece7207b",
+          "role": "geometry",
+          "car_hash": "303d24c8"
+        },
+        {
+          "path_hash": "4c939b36",
+          "size": 6134885,
+          "sha256": "462c1c22882e48c4a3cc671cfc521bb7cea3704506b396675b929247bd01af27",
+          "role": "shared"
+        },
+        {
+          "path_hash": "6011497a",
+          "size": 529216,
+          "sha256": "ee79f5e91334099e918ecdd4a90672bd6513d6be51f83b4ed94c71ddd88a5f5c",
+          "role": "textures",
+          "car_hash": "789b6c93"
+        },
+        {
+          "path_hash": "65ae391a",
+          "size": 11082132,
+          "sha256": "71fedb63a3f6c2976dfb6ca5683feca359150b2496012f2454e8a2d3d0b20f71",
+          "role": "geometry",
+          "car_hash": "8c3775ab"
+        },
+        {
+          "path_hash": "7c2e7c4b",
+          "size": 728128,
+          "sha256": "c4c2d9cfe803ab84dc7e889e6120f072ea8975440b3ef0ef6d3e3cc412f9f2c2",
+          "role": "textures",
+          "car_hash": "468bb7c4"
+        },
+        {
+          "path_hash": "84862902",
+          "size": 10791972,
+          "sha256": "c7e1e891c7bdd1220787a106e888f8056d875a2459ded19fddcc6d6caf9cafa7",
+          "role": "geometry",
+          "car_hash": "789b6c93"
+        },
+        {
+          "path_hash": "9775379a",
+          "size": 4286272,
+          "sha256": "1ae36cd4e9efd9ccc94e33594c753681028ab45ce2cfb1ed3b8feaa5785b8971",
+          "role": "shared"
+        },
+        {
+          "path_hash": "a0a35bd3",
+          "size": 11847260,
+          "sha256": "34b4587e66c4ffe87d14ece3fe78f1df61e2d5d4f12e2504f5cbb60ef78629dd",
+          "role": "geometry",
+          "car_hash": "468bb7c4"
+        },
+        {
+          "path_hash": "b17753c4",
+          "size": 553216,
+          "sha256": "504510a109423671cc9185bd78b6026981552211d3c5632e031844af8ea49154",
+          "role": "textures",
+          "car_hash": "678ef69d"
+        },
+        {
+          "path_hash": "b74326af",
+          "size": 398208,
+          "sha256": "a6d2ad5659001a70f3cfca9ac42652bd21feb07a13c2215047cbc13ed0721c4a",
+          "role": "textures",
+          "car_hash": "0573afa8"
+        },
+        {
+          "path_hash": "d5ec334c",
+          "size": 12800260,
+          "sha256": "11773faa5d438377734f09c66c6150655af788c71fd059026d7489ce415eca51",
+          "role": "geometry",
+          "car_hash": "678ef69d"
+        },
+        {
+          "path_hash": "d8bbf180",
+          "size": 664704,
+          "sha256": "5326bacf7b1eb5fd0528f773db1d3093d50a355a9241203df3f07a41ab63ba23",
+          "role": "textures",
+          "car_hash": "cc0892d9"
+        },
+        {
+          "path_hash": "dbb80637",
+          "size": 10907096,
+          "sha256": "6744bc141c382ad28e7f334b151f6f61d4a85916dbdb8a0f4cd0ce55cb2dbc64",
+          "role": "geometry",
+          "car_hash": "0573afa8"
+        },
+        {
+          "path_hash": "ea3b86db",
+          "size": 930304,
+          "sha256": "8eb924b4b0f2ade4c611323798d7998156f621d146d2d6e7afb23c91f99e3d42",
+          "role": "textures",
+          "car_hash": "83745854"
+        },
+        {
+          "path_hash": "fd30d108",
+          "size": 11588972,
+          "sha256": "e6f438c51c1b7610d3e3142ed9bbab3148feda04c2cbae0bd87e4e27e62906f6",
+          "role": "geometry",
+          "car_hash": "cc0892d9"
+        }
+      ],
+      "game": "undercover"
     }
   ]
 }

@@ -1532,8 +1532,9 @@ def check_space(paths, pc=None, dest=None, stage_only=False, car_plan=None, x360
         # volume. Unknown conversion sizes stay unknown until measured.
         for volume in car_plan['volumes']:
             required = volume['required_bytes']
-            minimum = (required if required is not None else
-                       sum(volume.get(key) or 0 for key in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes')))
+            minimum = required if required is not None else volume.get('minimum_bytes')
+            if minimum is None:
+                minimum = sum(volume.get(key) or 0 for key in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes'))
             if minimum > volume['available_bytes']:
                 raise SetupError("There is not enough free disk space for the selected extras.",
                                  "Free space on the listed extras volumes and retry.")
@@ -2088,7 +2089,7 @@ def carbon_input(value, *, picked=False):
     if path.is_file() and (path.suffix.lower() == '.exe' or path.name.casefold() == 'default.xex'):
         if not picked:
             return path.parent
-        raise SetupError("Choose the Carbon game folder instead of its executable.",
+        raise SetupError("Choose the game folder instead of its executable.",
                          "Choose the folder containing CARS and GLOBAL, or an Xbox 360 ISO.")
     return car_sources._folder(path)
 
@@ -2098,11 +2099,11 @@ def car_specs(path):
         return []
     car_import = car_api()
     path = car_import._path(path)
-    with car_import._asset(path) as fd:
-        if os.fstat(fd).st_size > 1 << 20:
-            raise SetupError("The car selection JSON is too large.")
-        with os.fdopen(os.dup(fd), 'r') as stream:
-            value = json.load(stream)
+    with car_import._asset(path) as fd, os.fdopen(os.dup(fd), 'rb') as stream:
+        data = stream.read(car_catalog.MAX_JSON + 1)
+    if len(data) > car_catalog.MAX_JSON:
+        raise SetupError("The car selection JSON is too large.")
+    value = json.loads(data)
     if type(value) is not list:
         raise SetupError('The car selection must be a JSON array of car metadata.')
     return car_import._specs(value)
@@ -2167,7 +2168,11 @@ def car_plan_event(events, plan, specs):
                          car_hash=car_sources.path_hash('CARS/' + spec['folder']), approved=car['approved'],
                          reused=car['reused'], reason=car.get('reason', '') or
                          ('' if car['approved'] else 'Output has not passed packaged approval.')))
-    events.emit('cars-plan', measured=plan['measured'], approved=plan['approved'], volumes=plan['volumes'], cars=rows)
+    # The lower bound is used for preflight. The UI wire format keeps its
+    # existing exact-or-unknown sizes.
+    volumes = [{key: value for key, value in volume.items() if key != 'minimum_bytes'}
+               for volume in plan['volumes']]
+    events.emit('cars-plan', measured=plan['measured'], approved=plan['approved'], volumes=volumes, cars=rows)
 
 
 def car_result(events, operation, result):
@@ -2190,7 +2195,7 @@ def cars_command(args):
     if any((args.pc, args.x360, args.dest, args.stage, args.app, args.pc_update, args.pc_exe, args.pc_disc)):
         raise SetupError("Car commands use the installed data root; omit PC build and destination arguments.")
     if operation in ('check', 'import') and not args.carbon:
-        raise SetupError("--cars-check and --cars-import require --carbon.")
+        raise SetupError("Supply a later-game source with --carbon for car check or import.")
     if args.cars_measure and operation != 'check':
         raise SetupError('--cars-measure requires --cars-check.')
     if args.cars_repair and operation != 'import':
@@ -2246,11 +2251,9 @@ def cars_command(args):
                         carbon = extract_x360_archive(carbon, paths.work, events)
                     recognition = car_sources.recognise(carbon)
                 engine._tick(cancel)
-                if recognition['game'] != 'carbon':
-                    raise SetupError("Choose a Carbon source for these extras.")
                 try:
                     car_catalog.packaged_policy()
-                    approval = True
+                    approval = (recognition['game'], recognition['platform']) in car_catalog.IMPORT_SOURCES
                 except (OSError, car_catalog.CatalogError):
                     approval = False
                 events.emit('cars-recognition', game=recognition['game'], platform=recognition['platform'],
@@ -2293,8 +2296,13 @@ def cars_command(args):
                 # Imports plan without conversion, then convert once inside
                 # the activation transaction. Explicit measured checks stay dry.
                 try:
-                    plan = engine.plan(carbon, mw_pc=mw, cars=specs,
-                                       measure=args.cars_measure and operation == 'check', cancel=cancel, progress=progress)
+                    preflight = engine.plan(carbon, mw_pc=mw, cars=specs, cancel=cancel)
+                    if args.cars_measure and operation == 'check':
+                        check_space(paths, car_plan=preflight)
+                        plan = engine.plan(carbon, mw_pc=mw, cars=specs,
+                                           measure=True, cancel=cancel, progress=progress)
+                    else:
+                        plan = preflight
                 except car_import.CacheError:
                     if not args.cars_repair:
                         raise
@@ -2336,7 +2344,7 @@ def cars_command(args):
                     pass
                 if plan is None and result.get('volumes'):
                     try:
-                        events.emit('cars-plan', measured=True, approved=True, volumes=result['volumes'], cars=[])
+                        car_plan_event(events, dict(result, measured=True, approved=True), [])
                     except OSError:
                         pass
                 car_result(events, operation, result)
@@ -2362,7 +2370,8 @@ def main(argv=None):
         mode.add_argument('--cars-' + name, action='store_true', help='standalone extras ' + name)
     mode.add_argument('--cars-remove', nargs='+', type=int, help='deselect permanent slots; retain packs')
     mode.add_argument('--cars-restore', help='restore a verified retained generation')
-    ap.add_argument('--carbon', help='Carbon folder, X360 ISO or .zip/.7z; --game carbon also accepts a PC disc .iso/ISO-compatible .mdf with --pc-update and --pc-exe')
+    ap.add_argument('--carbon', help='For car extras, the Carbon, ProStreet or Undercover folder, Xbox 360 ISO or archive. '
+                    'For --game carbon, a Carbon folder or PC disc image with the required update and executable.')
     ap.add_argument('--game', choices=('mw', 'carbon'), default='mw',
                     help='carbon: --check or --build Carbon from --carbon alone, with an optional --x360 (no --pc, no Most Wanted copy)')
     ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')

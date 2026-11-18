@@ -305,15 +305,17 @@ static void rotation_test(void) {
     roam_relay_input(r,b,ROAM_HELLO_BYTES,&a,6000);
     CHECK(c.welcomed,"cookie_previous_key");
     CHECK(r->st.source_records==1,"retention_validated_record");
+    uint64_t welcomes=out.types[ROAM_WELCOME], challenges=out.types[ROAM_CHALLENGE];
     out.now=10999; roam_relay_input(r,b,ROAM_HELLO_BYTES,&a,10999);
-    CHECK(c.welcomed && r->st.clients==1,"cookie_previous_window");
+    CHECK(c.welcomed && r->st.clients==1 && out.types[ROAM_WELCOME]==welcomes+1,"cookie_previous_window");
     Source *src=NULL;
     for (int i=0;i<ROAM_SOURCES;++i) if (r->sources[i].used) src=&r->sources[i];
     CHECK(src && src->last==6000,"source_retry_no_refresh");
     out.now=11000; roam_relay_input(r,b,ROAM_HELLO_BYTES,&a,11000);
-    CHECK(!c.welcomed && c.has_cookie,"cookie_retired_key");
+    CHECK(c.welcomed && c.has_cookie && out.types[ROAM_CHALLENGE]==challenges+1 &&
+          out.types[ROAM_WELCOME]==welcomes+1,"cookie_retired_key");
     roam_relay_input(r,b,roam_client_hello(&c,b),&a,11000);
-    CHECK(c.welcomed && r->st.clients==1,"cookie_rotation_recovery");
+    CHECK(c.welcomed && r->st.clients==1 && out.types[ROAM_WELCOME]==welcomes+2,"cookie_rotation_recovery");
     CHECK(src && src->last==6000,"source_recovery_no_refresh");
     // Check absolute age independently of key retirement, including a recent wrap.
     uint8_t cookie[20], body[ROAM_HELLO_BASE]={0}; uint64_t issued=UINT32_MAX-500;
@@ -432,16 +434,22 @@ static void client_test(void) {
     RoamClient c; roam_client_init(&c,7,"peer"); c.last_err=ROAM_ERR_FULL;
     RoamRelay *r=roam_relay_new(-1,32,4); struct sockaddr_in a=address(0x7f000001,10000);
     CHECK(roam_test_join(r,&c,&a,1000) && !c.last_err,"client_error_resolved");
+    uint16_t id=c.id;
+    uint8_t b[1200]; int n=roam_hdr_put(b,ROAM_MEMBERS,0,42);
+    b[n++]=0;
+    roam_client_input(&c,b,n,1000);
     roam_relay_free(r); r=roam_relay_new(-1,32,4);
-    uint8_t b[1200]; Capture out={.client=&c,.now=1000}; roam_relay_sender(r,capture,&out);
+    Capture out={.client=&c,.now=1000}; roam_relay_sender(r,capture,&out);
     roam_relay_input(r,b,roam_client_hello(&c,b),&a,1000);
-    CHECK(!c.welcomed && !c.id && !c.has_members && c.has_cookie,"client_restart_challenge");
+    CHECK(out.types[ROAM_CHALLENGE]==1 && c.has_cookie && !memcmp(c.cookie,out.last+ROAM_HDR,sizeof c.cookie) &&
+          c.welcomed && c.id==id && c.has_members && c.member_seq==42,"client_restart_challenge");
     uint32_t bad=c.rx_bad;
     roam_client_input(&c,out.last,27,1000); roam_client_input(&c,out.last,29,1000);
     CHECK(c.rx_bad==bad+2,"client_challenge_exact_length");
     c.last_err=ROAM_ERR_VERSION;
-    roam_relay_input(r,b,roam_client_hello(&c,b),&a,1000);
-    CHECK(c.welcomed && !c.last_err,"client_restart_recovery"); roam_relay_free(r);
+    out.now=2001;
+    roam_relay_input(r,b,roam_client_hello(&c,b),&a,out.now);
+    CHECK(c.welcomed && c.id==id && !c.has_members && !c.last_err,"client_restart_recovery"); roam_relay_free(r);
 }
 int main(int argc, char **argv) {
     if (argc!=2) return 2;

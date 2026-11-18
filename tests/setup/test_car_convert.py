@@ -626,6 +626,19 @@ class CarConversion(unittest.TestCase):
         self.assertEqual(len(cc.read_vpak(attributes())), 1)
         print('good: valid VPAK; broken: 3/3 invalid directories rejected with zero payload bytes copied')
 
+    def test_vpak_name_budgets(self):
+        """c4b98837 decodes both oversized cases. The fixed parser rejects both."""
+        for count, width in ((1, 257), (257, 256)):
+            with self.subTest(count=count, width=width):
+                strings = b''.join(f'{i:04}'.encode().ljust(width, b'x') + b'\0' for i in range(count))
+                start = 16 + count * 20
+                data = start + len(strings)
+                directory = b''.join(struct.pack('<5I', i * (width + 1), 1, 1, data + 2*i, data + 2*i + 1)
+                                     for i in range(count))
+                raw = b'VPAK' + struct.pack('<3I', count, start, len(strings)) + directory + strings + bytes(2*count)
+                with self.assertRaisesRegex(cc.FormatError, 'VPAK name'):
+                    cc.read_vpak(raw)
+
     def test_material_ids_from_local_records(self):
         names = ('DAMAGE', 'DOORLINE', 'MAGMATTE', 'CARBONFIBER', 'MAGLIP', 'GRILLCHROME')
         targets = ('HOSES', 'DIABLOHP', 'CARBON_MAGMATTE', 'CARBONFIBER2', 'CHROME', 'CHROME')

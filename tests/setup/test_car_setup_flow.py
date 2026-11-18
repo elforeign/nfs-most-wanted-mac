@@ -263,6 +263,22 @@ class CarSetupLifecycle(unittest.TestCase):
         self.assertEqual(listed[-1]['selection'], [11])
         self.assertEqual(self.f.snapshot(), self.f.before_sources)
 
+    def test_measured_check_preflights_known_bytes_before_conversion(self):
+        """c4b98837 requests conversion first. The fixed Setup stops at the dry plan."""
+        from setup_kit import car_import
+        volume = dict(extraction_bytes=8, staging_bytes=None, output_bytes=None, margin_bytes=2,
+                      minimum_bytes=20, available_bytes=15, required_bytes=None)
+
+        def plan(engine, *args, measure=False, **kwargs):
+            self.assertFalse(measure, 'conversion started despite insufficient disk space')
+            return dict(volumes=[volume])
+
+        with mock.patch.object(car_import.CarImporter, 'plan', plan):
+            _, events = self.call('--cars-check', '--cars-measure', '--carbon', str(self.f.carbon),
+                                  '--cars-spec', str(self.selection), success=False)
+        self.assertEqual(events[-1]['msg'], 'There is not enough free disk space for the selected extras.')
+        self.assertFalse(self.pointer.exists())
+
     def test_measured_check_never_activates_and_retry_reuses_cache(self):
         _, measured = self.call('--cars-check', '--carbon', str(self.f.carbon), '--cars-spec', str(self.selection), '--cars-measure')
         plan = next(e for e in measured if e['ev'] == 'cars-plan')

@@ -2,6 +2,7 @@
 #define NFS_CAR_CATALOG_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include "car_grip.h"
 
 /* Version 1 wire contract: runtime/docs/added-car-catalog.md.
@@ -15,6 +16,7 @@
  */
 #define CAR_CATALOG_SLOTS 90
 #define CAR_CATALOG_ADDITIONS 76
+#define CAR_CATALOG_FIRST_ID 84
 #define CAR_CATALOG_OUTPUTS 8
 typedef enum {
     CAR_CATALOG_GEOMETRY, CAR_CATALOG_TEXTURES, CAR_CATALOG_SOLID_MAP,
@@ -32,12 +34,10 @@ typedef struct {
     unsigned version; /* zero for opaque geometry/texture packs */
     uint64_t size;
     char sha256[65];
-    /* Anonymous verified snapshot, retained for process lifetime. This path is
-     * independent of the installed pathname, even after replacement or writes.
-     * Do not derive sibling paths, close its descriptor or write through it.
-     * Existing fopen/read consumers may use this path. Use open_output for a
-     * caller-owned read descriptor positioned at zero. Descriptor paths can
-     * share a file offset: serialize streams for one output, or use pread.
+    /* Geometry and texture packs have a lifetime descriptor path for the
+     * game's path-based loader. Sidecars use car_catalog_open_sidecar instead.
+     * Do not derive sibling paths or close this descriptor. Descriptor paths
+     * can share a file offset: serialize streams for one output, or use pread.
      */
     char path[64];
 } CarCatalogOutput;
@@ -64,7 +64,7 @@ typedef struct {
  * Disabled, absent and explicitly disabled pointer states return zero. All
  * errors expose zero inventory and zero selected rows. Successful inventory
  * includes every reservation: absent slots never compact. All returned data
- * remains valid and immutable until process exit; accessors perform no I/O.
+ * remains valid until process exit; inventory accessors perform no I/O.
  */
 int car_catalog_init(const char *root, int enabled);
 size_t car_catalog_count(void);
@@ -75,9 +75,11 @@ const char *car_catalog_generation(void);
 const char *car_catalog_compatibility(void);
 const char *car_catalog_error(void);
 const char *car_catalog_output_name(CarCatalogOutputKind kind);
-/* Never opens an installed path. Caller closes returned fd. Returns -1 for an
- * absent output or invalid index. Output access is allowed for deselected ready
- * slots as well (inventory/save admission consumers need their exact identity).
+/* Never opens an installed path. Caller closes the returned pack descriptor or
+ * forward-only sidecar stream. Deselected ready slots are readable too.
  */
 int car_catalog_open_output(unsigned slot, CarCatalogOutputKind kind);
+FILE *car_catalog_open_sidecar(unsigned slot, CarCatalogOutputKind kind);
+/* Exclude a selected slot after a runtime sidecar I/O or decode failure. */
+void car_catalog_unselect(unsigned slot);
 #endif

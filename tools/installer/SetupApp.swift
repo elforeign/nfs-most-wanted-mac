@@ -164,8 +164,9 @@ func parseEvent(_ line: String) -> SetupEvent? {
         return .done(app: app)
     case "cars-recognition":
         guard exactKeys(obj, "ev game platform approval_available output_verified cars"),
-              let row = try? decoder.decode(CarRecognition.self, from: data), row.game == "carbon",
-              ["pc", "x360"].contains(row.platform), !row.output_verified,
+              let row = try? decoder.decode(CarRecognition.self, from: data),
+              carGameNames[row.game] != nil, ["pc", "x360"].contains(row.platform),
+              !(row.game == "prostreet" && row.platform == "x360"), !row.output_verified,
               let raw = obj["cars"] as? [[String: Any]], raw.allSatisfy({ exactKeys($0, "car_hash status") }),
               row.cars.allSatisfy({ $0.car_hash.count == 8 && $0.car_hash.allSatisfy { "0123456789abcdef".contains($0) }
                   && ["importable", "missing", "unknown"].contains($0.status) }) else { return nil }
@@ -520,14 +521,20 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "9580c7e7412fec75a81e721d82bfa2b0e7d132e32082c59fc7f92d77d0926ac0"
+let carSelectionsSHA256 = "b1a831e40115d3f096be1a263ac4083d8664cc5cd12ca16e381ab7736240241e"
+let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
+
+func carSourceName(_ game: String, _ platform: String) -> String {
+    (carGameNames[game] ?? game) + (platform == "pc" ? " PC" : " Xbox 360")
+}
 
 struct CarChoice: Identifiable {
+    let game: String
     let platform: String
     let slot: Int
     let folder: String
     let spec: [String: Any]
-    var id: String { platform + ":" + String(slot) }
+    var id: String { (game == "carbon" ? "" : game + ":") + platform + ":" + String(slot) }
     var name: String {
         let names = ["300C": "Chrysler 300C", "997GT3RS": "Porsche 911 GT3 RS",
                      "BRERA": "Alfa Romeo Brera", "CCX": "Koenigsegg CCX",
@@ -536,7 +543,8 @@ struct CarChoice: Identifiable {
                      "240SX": "Nissan 240SX", "997TT": "Porsche 911 Turbo",
                      "CAMARON": "Chevrolet Camaro Concept", "G35": "Infiniti G35",
                      "MAZDASPEED3": "Mazdaspeed3", "MUSTANGSHLBYN": "Shelby GT500"]
-        return names[folder] ?? folder
+        let display = spec["display"] as? [String: String]
+        return names[folder] ?? display?["name"] ?? folder
     }
     var carHash: String {
         var hash: UInt32 = 0xffffffff
@@ -546,13 +554,15 @@ struct CarChoice: Identifiable {
         return String(format: "%08x", hash)
     }
     func reason(_ recognition: CarRecognition?) -> String? {
-        guard let recognition else { return "Choose a Carbon source to check availability." }
-        guard recognition.platform == platform else {
-            return "Needs a Carbon " + (platform == "pc" ? "PC" : "Xbox 360") + " source; skipped."
+        guard let recognition else { return "Choose a source to check availability." }
+        guard recognition.game == game && recognition.platform == platform else {
+            return "Needs a " + carSourceName(game, platform) + " source; skipped."
         }
+        guard recognition.approval_available else { return "Packaged approval is unavailable." }
         let status = recognition.cars.first { $0.car_hash == carHash }?.status
         if status == "importable" { return nil }
-        return status == "unknown" ? "Source files differ from the reviewed copy; skipped." : "Missing from this Carbon copy; skipped."
+        return status == "unknown" ? "Source files differ from the reviewed copy; skipped."
+            : "Missing from this " + (carGameNames[game] ?? game) + " copy; skipped."
     }
     static func load(_ url: URL) throws -> [CarChoice] {
         let data = try Data(contentsOf: url)
@@ -561,13 +571,13 @@ struct CarChoice: Identifiable {
             throw NSError(domain: "Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "The bundled car selections failed verification."])
         }
         return try rows.map { row in
-            guard let origin = row["origin"] as? [String: String], let platform = origin["platform"],
+            guard let origin = row["origin"] as? [String: String], let game = origin["game"], let platform = origin["platform"],
                   let folder = origin["folder"], let slot = row["slot"] as? Int else {
                 throw NSError(domain: "Setup", code: 1, userInfo: [NSLocalizedDescriptionKey: "The bundled car selections are incomplete."])
             }
             var spec = row.filter { ["slot", "display", "bindings", "donors", "parts"].contains($0.key) }
             spec["folder"] = folder
-            return CarChoice(platform: platform, slot: slot, folder: folder, spec: spec)
+            return CarChoice(game: game, platform: platform, slot: slot, folder: folder, spec: spec)
         }
     }
 }
@@ -606,7 +616,7 @@ struct ExtrasFlow {
     var busy = false
     var skipped = false
     var completed = false
-    var message = "Choose a Carbon source, or skip extras."
+    var message = "Choose a later-game source, or skip extras."
     mutating func begin() { busy = true; skipped = false; completed = false; message = "Checking extras…" }
     mutating func finish(_ outcome: Outcome) {
         busy = false
@@ -895,7 +905,7 @@ final class Setup: ObservableObject {
     }
 
     func chooseCarbon() {
-        guard !busy, let url = pickFolder(message: "Choose your Carbon game folder, its Xbox 360 .iso, or a .zip/.7z of it.", files: true) else { return }
+        guard !busy, let url = pickFolder(message: "Choose your Carbon, ProStreet or Undercover game folder, or an Xbox 360 disc image or archive.", files: true) else { return }
         carbon = url
         state.recognition = nil
         runCars(.carsCheck)
@@ -951,7 +961,7 @@ final class Setup: ObservableObject {
                 if let result = state.carResult, mode == .carsList { self.installedCars = result }
                 if mode == .carsCheck, let recognition = state.recognition {
                     let count = recognition.cars.filter { $0.status == "importable" }.count
-                    self.extras.message = "Recognized Carbon \(recognition.platform.uppercased()): \(count) verified source pairs. "
+                    self.extras.message = "Recognized \(carSourceName(recognition.game, recognition.platform)): \(count) verified source pairs. "
                         + (state.carPlan?.approved == true ? "Selected outputs passed packaged approval. Import to activate them."
                            : recognition.approval_available ? "Packaged approval is available; selected outputs must still verify."
                            : "No packaged output approval is available. Import is unavailable.")
@@ -1359,13 +1369,13 @@ struct ContentView: View {
                         }
                     }
                     Text("Extras from your other games").font(.headline)
-                    Text("Optional cars from your own Carbon PC or Xbox 360 copy. Choose this independently of your Most Wanted copies. Later-game cars remain Off until enabled in game settings.")
+                    Text("Import cars from your own Carbon PC or Xbox 360, ProStreet PC, or Undercover PC copy. Enable later-game cars in game settings.")
                         .font(.caption).foregroundStyle(.secondary)
-                    choice("Carbon source", s.carbon, "Folder or ISO", s.chooseCarbon)
-                    ForEach(["pc", "x360"], id: \.self) { platform in
-                        GroupBox(platform == "pc" ? "Carbon PC cars" : "Carbon Xbox 360 cars") {
+                    choice("Later-game source", s.carbon, "Folder or ISO", s.chooseCarbon)
+                    if let recognition = s.state.recognition, recognition.approval_available {
+                        GroupBox(carSourceName(recognition.game, recognition.platform) + " cars") {
                             VStack(alignment: .leading, spacing: 4) {
-                                ForEach(s.carChoices.filter { $0.platform == platform }) { car in
+                                ForEach(s.carChoices.filter { $0.game == recognition.game && $0.platform == recognition.platform }) { car in
                                     Toggle(car.name, isOn: Binding(get: { s.selectedCarIDs.contains(car.id) },
                                                                   set: { s.selectCar(car, enabled: $0) }))
                                     if let reason = car.reason(s.state.recognition) {

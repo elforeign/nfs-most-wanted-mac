@@ -188,8 +188,10 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(result['approved'])
         self.assertFalse((self.engine.root / 'current.json').exists())
         volume = result['volumes'][0]
-        for key in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'retention_bytes', 'margin_bytes'):
+        for key in ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes'):
             self.assertGreater(volume[key], 0, key)
+        self.assertEqual(volume['retention_bytes'], 0)
+        self.assertFalse(list(self.engine.work.glob('.txn-*')))
         self.assertEqual(volume['required_bytes'], sum(volume[k] for k in
             ('extraction_bytes', 'staging_bytes', 'output_bytes', 'margin_bytes')))
         receipt = result['receipt']
@@ -375,9 +377,11 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.before_sources, self.snapshot())
         self.run_import()
 
-    def test_interruption_leaves_only_unselected_stage_then_retry_completes(self):
+    def test_interruption_cleans_unselected_stage_then_retry_completes(self):
+        """An interruption leaves one new stage at c4b98837 and zero with cleanup."""
         self.run_import(self.x360)
         pointer = self.pointer()
+        previous_stages = set(self.engine.work.glob('.txn-*'))
 
         def interrupt(event):
             if event['phase'] == 'converted':
@@ -386,10 +390,22 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.run_import(progress=interrupt)
         self.assertEqual(self.pointer(), pointer)
-        self.assertTrue(list(self.engine.work.glob('.txn-*')))
+        self.assertEqual(set(self.engine.work.glob('.txn-*')), previous_stages)
         self.assertEqual(self.before_sources, self.snapshot())
         self.assertEqual(self.run_import()['reused'], 0)
         self.assertEqual([r['id'] for r in self.ready().selected], [95])
+
+    def test_snapshot_space_checked_before_extraction(self):
+        """c4b98837 starts extraction with zero free bytes. The fixed engine starts none."""
+        self.run_import(self.x360)
+        pointer = self.pointer()
+        with mock.patch.object(ci.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(1, 1, 0)), \
+             mock.patch.object(ci, '_range', wraps=ci._range) as read:
+            with self.assertRaisesRegex(ci.ImportError, 'not enough free disk space'):
+                self.run_import()
+        self.assertFalse(any(call.kwargs.get('target') for call in read.call_args_list))
+        self.assertFalse(list(self.engine.work.glob('.txn-*')))
+        self.assertEqual(self.pointer(), pointer)
 
     def test_corrupt_cache_rejected_before_plan_or_activation(self):
         self.run_import()
@@ -538,6 +554,33 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.pointer(), pointer)
         self.assertEqual(self.before_sources, self.snapshot())
 
+    def test_cold_publication_minimum_is_checked_before_conversion(self):
+        """At 265b530a a full catalog volume reaches one conversion. Fixed reaches zero."""
+        row = self.engine.plan(self.carbon, mw_pc=self.mw, cars=[self.car], measure=True)['cars'][0]['contract']
+        for entry in self.engine.work.glob('c-*'):
+            force_remove(entry)
+        usage = shutil.disk_usage(self.engine.root)
+        minimum = self.engine.margin + sum(p['size'] for p in row['outputs'].values())
+
+        def disk_usage(path):
+            return usage._replace(free=minimum - 1) if path == self.engine.root else usage
+
+        def volume(path):
+            return str(path), disk_usage(path).free
+
+        with mock.patch.object(self.engine, '_later_rows', return_value={row['slot']: row}), \
+             mock.patch.object(ci.shutil, 'disk_usage', side_effect=disk_usage), \
+             mock.patch.object(ci, '_volume', side_effect=volume), \
+             mock.patch.object(converter, 'convert', wraps=converter.convert) as writer:
+            plan = self.engine.plan(self.carbon, mw_pc=self.mw, cars=[self.car])
+            with self.assertRaises(OSError) as failure:
+                self.run_import()
+        self.assertEqual(failure.exception.errno, errno.ENOSPC)
+        self.assertEqual(writer.call_count, 0)
+        catalog_volume = next(v for v in plan['volumes'] if str(self.engine.root) in v['paths'])
+        self.assertEqual(catalog_volume['minimum_bytes'], minimum)
+        self.assertFalse((self.engine.root / 'current.json').exists())
+
     def test_identical_generation_needs_no_additional_payload_space(self):
         self.run_import()
         with mock.patch.object(converter, 'convert', side_effect=AssertionError('unexpected writer')):
@@ -623,23 +666,27 @@ class Lifecycle(unittest.TestCase):
             self.run_import()
 
     def test_parent_swap_cannot_redirect_selected_extraction_into_source(self):
-        original = catalog._directory
-        target = self.root / 'target/UNEXPECTED.BIN'
-        moved = self.root / 'original-target'
         source = self.carbon / 'GLOBAL/GLOBALB.LZC'
+        parent = self.root / 'stage/target'
+        moved = self.root / 'original-target'
+        with catalog._directory(self.root) as base:
+            with self.assertRaisesRegex(catalog.CatalogError, 'left unexpected stage entries'):
+                with catalog._stage(base, 'stage') as stage:
+                    original = stage.directory
 
-        @contextmanager
-        def swapped(path, create=False):
-            with original(path, create=create) as fd:
-                if Path(path) == target.parent and create:
-                    target.parent.rename(moved)
-                    target.parent.symlink_to(self.carbon, target_is_directory=True)
-                yield fd
+                    @contextmanager
+                    def swapped(path):
+                        with original(path) as directory:
+                            if path == 'target':
+                                parent.rename(moved)
+                                parent.symlink_to(self.carbon, target_is_directory=True)
+                            yield directory
 
-        with mock.patch.object(catalog, '_directory', side_effect=swapped):
-            ci._range(source, 0, source.stat().st_size, target=target)
+                    with mock.patch.object(stage, 'directory', side_effect=swapped):
+                        ci._range(source, 0, source.stat().st_size, stage=stage, target='target/UNEXPECTED.BIN')
         self.assertFalse((self.carbon / 'UNEXPECTED.BIN').exists(), 'extraction escaped into source tree')
-        self.assertEqual((moved / target.name).read_bytes(), source.read_bytes())
+        self.assertTrue(parent.is_symlink())
+        self.assertEqual((moved / 'UNEXPECTED.BIN').read_bytes(), source.read_bytes())
         self.assertEqual(self.before_sources, self.snapshot())
 
     def test_writers_serialize_across_independent_instances(self):
@@ -795,6 +842,7 @@ class Lifecycle(unittest.TestCase):
         self.assertFalse(self.engine.list_cars()['generations'][0]['verified'])
 
     def test_incremental_import_merges_other_slots_and_retains_old_generation(self):
+        """With no room for the retained pack, 265b530a converts once. Fixed converts zero cars."""
         other = spec('OTHER', 0)
         second = self.root / 'other-carbon'
         data = {'CARS/OTHER/GEOMETRY.BIN': pc_fixture.geometry('OTHER', True),
@@ -810,6 +858,29 @@ class Lifecycle(unittest.TestCase):
             self.approve(result['cars'][0]['contract'])
         self.save_policy()
         first = self.run_import()
+        pointer = self.pointer()
+        retained = sum(p['size'] for p in self.ready().selected[0]['outputs'].values())
+        minimum = self.engine.margin + retained
+        usage = shutil.disk_usage(self.engine.root)
+
+        def disk_usage(path):
+            return usage._replace(free=minimum - 1) if path == self.engine.root else usage
+
+        def volume(path):
+            return str(path), disk_usage(path).free
+
+        with mock.patch.object(ci.shutil, 'disk_usage', side_effect=disk_usage), \
+             mock.patch.object(ci, '_volume', side_effect=volume), \
+             mock.patch.object(converter, 'convert', wraps=converter.convert) as writer:
+            plan = self.engine.plan(second, mw_pc=self.mw, cars=[other])
+            with self.assertRaises(OSError) as failure:
+                self.run_import(second, other)
+        self.assertEqual(failure.exception.errno, errno.ENOSPC)
+        self.assertEqual(writer.call_count, 0)
+        catalog_volume = next(v for v in plan['volumes'] if str(self.engine.root) in v['paths'])
+        self.assertIsNone(catalog_volume['output_bytes'])
+        self.assertEqual(catalog_volume['minimum_bytes'], minimum)
+        self.assertEqual(self.pointer(), pointer)
         self.run_import(second, other)
         self.assertEqual([r['id'] for r in self.ready().selected], [84, 95])
         self.assertEqual(len(self.engine.list_cars()['generations']), 2)

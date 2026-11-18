@@ -24,15 +24,19 @@
 
 #define JSON_LIMIT (4u << 20)
 #define FILE_LIMIT (UINT64_C(2) << 30)
+/* The public 4.7.1 catalog envelope. Each row is still checked against the
+ * compiled policy, which carries the reviewed contracts for that release. */
+#define LEGACY_POLICY_SHA256 "cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c"
 #define DIR_FLAGS (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
 #define FILE_FLAGS (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
 #define NEED(test, why) do { if (!(test)) return bad(why); } while (0)
 
 typedef struct { size_t begin, end; int next, count; char type; } Token;
 typedef struct { char *s; size_t size, pos, capacity; Token *t; int n; } Json;
-typedef struct { int fd; uint64_t size; char hash[65]; } Retained;
 static CarCatalogSlot inventory[CAR_CATALOG_SLOTS];
-static Retained retained[CAR_CATALOG_SLOTS][CAR_CATALOG_OUTPUTS];
+static int packs[CAR_CATALOG_SLOTS][CAR_CATALOG_SOLID_MAP];
+static off_t sidecar_offsets[CAR_CATALOG_SLOTS][CAR_CATALOG_OUTPUTS];
+static int sidecars=-1;
 static size_t nslots, nselected;
 static int initialized, result;
 static char generation[67], compatibility[65], problem[512];
@@ -334,7 +338,9 @@ static int policy_load(Json *p, int slots[CAR_CATALOG_SLOTS], char digest[65]) {
         char contracts[256][65]; unsigned used=0;
         for (int v=variants+1;v<p->t[variants].next;v=p->t[v].next) {
             char c[65];
-            NEED(FIELDS(p,v,"contract","compatibility") && !hash_field(p,v,"contract",contracts[used]) &&
+            NEED((FIELDS(p,v,"contract","compatibility") ||
+                  (FIELDS(p,v,"contract","compatibility","legacy") && integer(p,field(p,v,"legacy"),1))) &&
+                 !hash_field(p,v,"contract",contracts[used]) &&
                  !hash_field(p,v,"compatibility",c),"invalid approval variant");
             for (unsigned k=0;k<used;++k) NEED(strcmp(contracts[k],contracts[used]),"duplicate approval variant");
             ++used;
@@ -411,7 +417,7 @@ static int parts_load(Json *j, int at, CarCatalogSlot *slot) {
     free(sorted); slot->part_count=index; slot->part_key_count=flat; return rc;
 }
 static int row_load(Json *j, int at, unsigned s, Json *policy, int approval) {
-    CarCatalogSlot *out=&inventory[s]; out->slot=s; out->id=s<76 ? 84+s : 0; out->swap_index=s<76 ? -1 : (int)s-76;
+    CarCatalogSlot *out=&inventory[s]; out->slot=s; out->id=s<76 ? CAR_CATALOG_FIRST_ID+s : 0; out->swap_index=s<76 ? -1 : (int)s-76;
     NEED(integer(j,field(j,at,"slot"),s) && integer(j,field(j,at,"id"),out->id) &&
          equal(j,field(j,at,"role"),s<76 ? "addition":"swap") &&
          (s<76 ? null(j,field(j,at,"swap_index")) : integer(j,field(j,at,"swap_index"),s-76)),"duplicate, reordered or reassigned catalog slot/ID");
@@ -421,11 +427,14 @@ static int row_load(Json *j, int at, unsigned s, Json *policy, int approval) {
     NEED(s<76 && equal(j,field(j,at,"state"),"ready") && FIELDS(j,at,"slot","id","role","swap_index","state",
         "identity","origin","display","bindings","donors","parts","converter","inputs","outputs"),"unsupported state, swap import or unexpected ready fields");
     int origin=field(j,at,"origin"), display=field(j,at,"display"), bindings=field(j,at,"bindings"), donors=field(j,at,"donors");
-    NEED(FIELDS(j,origin,"game","platform","folder") && equal(j,field(j,origin,"game"),"carbon") &&
-         (equal(j,field(j,origin,"platform"),"pc") || equal(j,field(j,origin,"platform"),"x360")) &&
+    int game=field(j,origin,"game"), platform=field(j,origin,"platform");
+    int carbon=equal(j,game,"carbon"), pc=equal(j,platform,"pc");
+    NEED(FIELDS(j,origin,"game","platform","folder") &&
+         ((carbon && (pc || equal(j,platform,"x360"))) ||
+          (pc && (equal(j,game,"prostreet") || equal(j,game,"undercover")))) &&
          !binding(j,origin,"folder",out->source_folder),"unsupported source game/platform/folder");
-    strcpy(out->source_game,"carbon");
-    NEED(!string(j,field(j,origin,"platform"),out->source_platform,sizeof out->source_platform,0),"invalid source platform");
+    NEED(!string(j,game,out->source_game,sizeof out->source_game,0) &&
+         !string(j,platform,out->source_platform,sizeof out->source_platform,0),"invalid source game/platform");
     static const char *const identity_keys[]={"folder","game"}; char identity[65];
     object_hash(j,origin,identity_keys,2,identity);
     NEED(!hash_field(j,at,"identity",out->identity) && !strcmp(identity,out->identity),"source identity mismatch");
@@ -604,7 +613,27 @@ static int readonly_snapshot(int fd) {
     if (lseek(ro,0,SEEK_SET)<0) { close(ro); return io_bad("cannot rewind verified snapshot"); }
     return ro;
 }
-static int output_verify(int base, unsigned slot, unsigned kind) {
+/* Copy between anonymous files without changing the source's offset. */
+static int snapshot_copy(int source, off_t offset, int dest, uint64_t size) {
+    unsigned char block[65536];
+    uint64_t copied=0;
+    while (copied<size) {
+        size_t want=size-copied<sizeof block ? (size_t)(size-copied):sizeof block;
+        ssize_t got=pread(source,block,want,offset+(off_t)copied);
+        if (got<0 && errno==EINTR) continue;
+        if (got<=0) return bad("cannot read verified sidecar snapshot");
+        size_t used=0;
+        while (used<(size_t)got) {
+            ssize_t written=write(dest,block+used,(size_t)got-used);
+            if (written<0 && errno==EINTR) continue;
+            if (written<=0) return io_bad("cannot copy verified output snapshot");
+            used+=(size_t)written;
+        }
+        copied+=(uint64_t)got;
+    }
+    return 0;
+}
+static int output_verify(int base, unsigned slot, unsigned kind, int *sidecar_writer) {
     CarCatalogOutput *o=&inventory[slot].outputs[kind]; char path[100];
     snprintf(path,sizeof path,"cars/%u/%s",slot,output_names[kind]);
     int source=open_relative(base,path,0); if (source<0) return io_bad("cannot open pinned output (missing or unsafe path)");
@@ -632,13 +661,21 @@ static int output_verify(int base, unsigned slot, unsigned kind) {
     if (!rc && (fstat(source,&after) || !unchanged(&before,&after) || n!=o->size || strcmp(actual,o->sha256))) rc=bad("output changed or SHA-256 mismatch; reimport");
     close(source);
     if (!rc) rc=sidecar(&inventory[slot],kind,temp);
-    if (!rc && lseek(ro,0,SEEK_SET)<0) rc=io_bad("cannot rewind verified snapshot");
+    if (!rc && kind>=CAR_CATALOG_SOLID_MAP && (kind!=CAR_CATALOG_GRIP || o->version==1)) {
+        if (*sidecar_writer<0) *sidecar_writer=anonymous_file(&sidecars);
+        if (*sidecar_writer<0) rc=-1;
+        else {
+            off_t offset=lseek(*sidecar_writer,0,SEEK_CUR);
+            if (offset<0) rc=io_bad("cannot locate verified sidecar snapshot");
+            else if (!(rc=snapshot_copy(temp,0,*sidecar_writer,o->size))) sidecar_offsets[slot][kind]=offset;
+        }
+    }
     close(temp);
-    if (rc) { if (ro>=0) close(ro); return -1; }
-    Retained *r=&retained[slot][kind]; r->fd=ro; r->size=o->size; strcpy(r->hash,o->sha256);
-    if (kind!=CAR_CATALOG_GRIP || o->version==1)
+    if (!rc && kind<CAR_CATALOG_SOLID_MAP) {
+        packs[slot][kind]=ro;
         snprintf(o->path,sizeof o->path,"/dev/fd/%d",ro);
-    return 0;
+    } else close(ro);
+    return rc;
 }
 /* Exact inventory at each level; no recursive traversal of untrusted trees.
  * Extra empty directories are rejected too. Every leaf has already been read
@@ -694,12 +731,13 @@ static int inventory_check(int fd, int level, int slot) {
 static void clear_inventory(void) {
     for (unsigned s=0;s<CAR_CATALOG_SLOTS;++s) {
         free((void *)inventory[s].parts); free((void *)inventory[s].part_keys);
-        for (unsigned k=0;k<CAR_CATALOG_OUTPUTS;++k) if (retained[s][k].fd>=0) { close(retained[s][k].fd); retained[s][k].fd=-1; }
+        for (unsigned k=0;k<CAR_CATALOG_SOLID_MAP;++k) if (packs[s][k]>=0) close(packs[s][k]);
     }
+    if (sidecars>=0) { close(sidecars); sidecars=-1; }
     memset(inventory,0,sizeof inventory); generation[0]=compatibility[0]=0; nslots=nselected=0;
 }
 static int load(const char *root) {
-    Json pointer={0},catalog={0},policy={0}; int base=-1,gen=-1,rc=-1;
+    Json pointer={0},catalog={0},policy={0}; int base=-1,gen=-1,sidecar_writer=-1,rc=-1;
     int policy_slots[CAR_CATALOG_SLOTS]; char policy_digest[65],catalog_digest[65],claimed[65];
     errno=0;
     base=root_open(root);
@@ -728,7 +766,8 @@ static int load(const char *root) {
     hash_bytes(catalog.s,catalog.size,claimed);
     if (strcmp(claimed,catalog_digest)) { bad("catalog SHA-256 mismatch"); goto done; }
     if (!FIELDS(&catalog,0,"schema","policy_sha256","compatibility","cars") || !integer(&catalog,field(&catalog,0,"schema"),1) ||
-        hash_field(&catalog,0,"policy_sha256",claimed) || strcmp(claimed,policy_digest)) { bad("catalog schema or packaged approval policy mismatch"); goto done; }
+        hash_field(&catalog,0,"policy_sha256",claimed) ||
+        (strcmp(claimed,policy_digest) && strcmp(claimed,LEGACY_POLICY_SHA256))) { bad("catalog schema or packaged approval policy mismatch"); goto done; }
     int cars=field(&catalog,0,"cars");
     if (catalog.t[cars].type!='[' || catalog.t[cars].count!=CAR_CATALOG_SLOTS) { bad("catalog requires 90 ordered reservations"); goto done; }
     int at=cars+1;
@@ -752,7 +791,7 @@ static int load(const char *root) {
         inventory[s].selected=1; previous=(int)s;
     }
     for (unsigned s=0;s<CAR_CATALOG_SLOTS;++s) if (inventory[s].ready) {
-        for (unsigned k=0;k<CAR_CATALOG_OUTPUTS;++k) if (inventory[s].outputs[k].present && output_verify(gen,s,k)) {
+        for (unsigned k=0;k<CAR_CATALOG_OUTPUTS;++k) if (inventory[s].outputs[k].present && output_verify(gen,s,k,&sidecar_writer)) {
             slot_error(s,output_names[k]); goto done;
         }
     }
@@ -760,6 +799,7 @@ static int load(const char *root) {
     /* Only now publish any inventory/selected entries. */
     nslots=CAR_CATALOG_SLOTS; nselected=(size_t)pointer.t[selection].count; rc=(int)nselected;
  done:
+    if (sidecar_writer>=0) close(sidecar_writer);
     if (gen>=0) close(gen);
     if (base>=0) close(base);
     json_free(&pointer); json_free(&catalog); json_free(&policy);
@@ -768,7 +808,7 @@ static int load(const char *root) {
 int car_catalog_init(const char *root, int enabled) {
     if (initialized) return result;
     initialized=1;
-    for (unsigned s=0;s<CAR_CATALOG_SLOTS;++s) for (unsigned k=0;k<CAR_CATALOG_OUTPUTS;++k) retained[s][k].fd=-1;
+    for (unsigned s=0;s<CAR_CATALOG_SLOTS;++s) for (unsigned k=0;k<CAR_CATALOG_SOLID_MAP;++k) packs[s][k]=-1;
     result=enabled ? load(root):0;
     if (result<0) clear_inventory();
     return result;
@@ -786,7 +826,45 @@ const char *car_catalog_compatibility(void) { return compatibility; }
 const char *car_catalog_error(void) { return problem; }
 const char *car_catalog_output_name(CarCatalogOutputKind kind) { return (unsigned)kind<CAR_CATALOG_OUTPUTS ? output_names[kind]:NULL; }
 int car_catalog_open_output(unsigned slot, CarCatalogOutputKind kind) {
-    if (slot>=nslots || (unsigned)kind>=CAR_CATALOG_OUTPUTS || retained[slot][kind].fd<0 ||
-        (kind==CAR_CATALOG_GRIP && !inventory[slot].grip.present)) { errno=ENOENT; return -1; }
-    return readonly_snapshot(retained[slot][kind].fd);
+    if (slot>=nslots || (unsigned)kind>=CAR_CATALOG_SOLID_MAP || !inventory[slot].outputs[kind].present) {
+        errno=ENOENT; return -1;
+    }
+    return readonly_snapshot(packs[slot][kind]);
+}
+
+typedef struct { off_t offset; size_t left; } SidecarRange;
+static int read_sidecar(void *cookie, char *buffer, int size) {
+    SidecarRange *range=cookie;
+    if (!range->left || size<=0) return 0;
+    size_t want=(size_t)size<range->left ? (size_t)size:range->left;
+    ssize_t got;
+    do { got=pread(sidecars,buffer,want,range->offset); } while (got<0 && errno==EINTR);
+    if (got<0) return -1;
+    if (!got) { errno=EIO; return -1; }
+    range->offset+=got;
+    range->left-=(size_t)got;
+    return (int)got;
+}
+static int close_sidecar(void *cookie) {
+    free(cookie);
+    return 0;
+}
+FILE *car_catalog_open_sidecar(unsigned slot, CarCatalogOutputKind kind) {
+    if (slot>=nslots || kind<CAR_CATALOG_SOLID_MAP || (unsigned)kind>=CAR_CATALOG_OUTPUTS ||
+        !inventory[slot].outputs[kind].present || (kind==CAR_CATALOG_GRIP && !inventory[slot].grip.present)) {
+        errno=ENOENT; return NULL;
+    }
+    SidecarRange *range=malloc(sizeof *range);
+    if (!range) return NULL;
+    *range=(SidecarRange){sidecar_offsets[slot][kind],(size_t)inventory[slot].outputs[kind].size};
+    FILE *stream=funopen(range,read_sidecar,NULL,NULL,close_sidecar);
+    if (!stream) free(range);
+    return stream;
+}
+void car_catalog_unselect(unsigned slot) {
+    if (slot<nslots && inventory[slot].selected) {
+        inventory[slot].selected=0;
+        --nselected;
+        result=(int)nselected;
+    }
 }

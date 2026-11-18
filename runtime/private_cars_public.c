@@ -5,8 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 static PrivateCar inventory[CAR_CATALOG_SLOTS];
-static size_t nslots, nselected;
-static unsigned selected[CAR_CATALOG_ADDITIONS];
+static size_t nslots;
 static int initialized, result;
 static char problem[256];
 int private_cars_init(const char *root, int enabled, const char *const *originals, size_t count) {
@@ -35,21 +34,22 @@ int private_cars_init(const char *root, int enabled, const char *const *original
         COPY(display_name,s->display_name); COPY(manufacturer,s->manufacturer);
         COPY(geometry,s->outputs[CAR_CATALOG_GEOMETRY].path);
         COPY(textures,s->outputs[CAR_CATALOG_TEXTURES].path);
-        COPY(solid_map,s->outputs[CAR_CATALOG_SOLID_MAP].path);
-        COPY(wheel_fit,s->outputs[CAR_CATALOG_WHEEL_FIT].path);
-        COPY(collision,s->outputs[CAR_CATALOG_COLLISION].path);
-        COPY(paint,s->outputs[CAR_CATALOG_PAINT].path);
-        COPY(physics,s->outputs[CAR_CATALOG_PHYSICS].path);
         d->grip=s->grip;
 #undef COPY
-        if (d->selected && !d->swap) selected[nselected++]=(unsigned)i;
     }
     return result=0;
 }
-size_t private_cars_count(void) { return nselected; }
-const PrivateCar *private_cars_get(size_t i) { return i<nselected?&inventory[selected[i]]:NULL; }
+size_t private_cars_count(void) { return nslots?car_catalog_count():0; }
+const PrivateCar *private_cars_get(size_t i) {
+    const CarCatalogSlot *s=nslots?car_catalog_get(i):NULL;
+    return s?&inventory[s->slot]:NULL;
+}
 size_t private_cars_inventory_count(void) { return nslots; }
-const PrivateCar *private_cars_inventory_get(size_t i) { return i<nslots?&inventory[i]:NULL; }
+const PrivateCar *private_cars_inventory_get(size_t i) {
+    if (i>=nslots) return NULL;
+    inventory[i].selected=car_catalog_inventory_get(i)->selected;
+    return &inventory[i];
+}
 const char *private_cars_generation(void) { return result<0?"":car_catalog_generation(); }
 const char *private_cars_compatibility(void) { return result<0?"":car_catalog_compatibility(); }
 const char *private_cars_error(void) { return problem[0]?problem:car_catalog_error(); }

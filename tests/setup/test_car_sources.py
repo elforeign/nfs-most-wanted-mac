@@ -85,7 +85,7 @@ def release(platform, exe, assets, game="carbon"):
                           role="geometry" if name.endswith("GEOMETRY.BIN") else "textures")
         files.append(record)
     info = cs.pe_info(exe) if platform == "pc" else cs.xex_info(exe)
-    if game == "undercover":
+    if (game, platform) == ("undercover", "x360"):
         for row, name in zip(files, assets):
             row["archive"] = uc_archive(name)
     return {"game": game, "platform": platform, "edition": "standard" if platform == "pc" else "Collector's Edition", "executable": fingerprint(exe, **info),
@@ -496,6 +496,7 @@ class LaterRecognitionTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
         self.ps_assets = {n: b"ProStreet " + d for n, d in ASSETS.items()}
+        self.ps_assets["GLOBAL/INGAMEA.BUN"] = b"ProStreet rotor atlas"
         self.uc_assets = {n: b"Undercover " + d for n, d in ASSETS.items()}
         self.xex = fake_xex(0x45410876)
         self.pc = self.work / "pc"
@@ -539,7 +540,7 @@ class LaterRecognitionTests(unittest.TestCase):
     def test_prostreet_folder_without_executable(self):
         result = self.statuses(self.pc)
         self.assertEqual((result["game"], result["platform"], len(result["shared"])),
-                         ("prostreet", "pc", 4))
+                         ("prostreet", "pc", 5))
         self.assertIsNone(result["fingerprints"]["executable"])
 
     def test_prostreet_any_selected_executable(self):
@@ -609,6 +610,23 @@ class LaterRecognitionTests(unittest.TestCase):
         self.assertEqual(result["fingerprints"]["executable"]["title_id"], "0x45410876")
         self.assertEqual({r["archive"] for r in result["shared"]}, {0, 20})
 
+    def test_undercover_pc_and_xbox_360_use_separate_fingerprints(self):
+        pc = self.work / "undercover-pc"
+        pc_assets = {n: data for n, data in self.uc_assets.items()
+                     if n.count("/") == 2 or n in cs.PC_CONVERSION_SHARED["undercover"]}
+        write_files(pc, pc_assets)
+        self.catalog["releases"].append(release("pc", fake_pe(), pc_assets, "undercover"))
+        self.save_catalog()
+        installed, disc = cs.recognise(pc), cs.recognise(self.iso)
+        self.assertEqual((installed["game"], installed["platform"]), ("undercover", "pc"))
+        self.assertEqual((disc["game"], disc["platform"]), ("undercover", "x360"))
+        self.assertTrue(all("archive" not in r for r in installed["shared"]))
+        self.assertTrue(all(r["status"] == "importable" for r in installed["cars"]))
+        (pc / "GLOBAL/ATTRIBUTES.BIN").write_bytes(b"changed PC attributes")
+        with self.assertRaisesRegex(cs.SourceError, "Undercover shared files did not match"):
+            cs.recognise(pc)
+        self.assertEqual(cs.recognise(self.iso), disc)
+
     def test_undercover_files_wrapper(self):
         folder = self.work / "wrapper"
         write_files(folder / "FILES", {n.lower(): d for n, d in self.physical.items()})
@@ -638,7 +656,7 @@ class LaterRecognitionTests(unittest.TestCase):
         self.reject_disc("default.xex")
 
     def test_undercover_changed_globals_and_attributes(self):
-        for name in cs.SHARED_NAMES.values():
+        for name in self.uc_assets.keys() & set(cs.SHARED_NAMES.values()):
             with self.subTest(name=name):
                 assets = dict(self.uc_assets)
                 data = assets[name]
@@ -750,7 +768,7 @@ class RealInputs(unittest.TestCase):
     def test_real_prostreet(self):
         result = cs.recognise(os.environ["NFS_PROSTREET_PC"])
         self.assertEqual((result["game"], len(result["cars"]), len(result["shared"])),
-                         ("prostreet", 91, 4))
+                         ("prostreet", 91, 5))
         self.assertTrue(all(c["status"] == "importable" for c in result["cars"]))
 
     @unittest.skipUnless(os.environ.get("NFS_UNDERCOVER_X360"), "NFS_UNDERCOVER_X360 not supplied")

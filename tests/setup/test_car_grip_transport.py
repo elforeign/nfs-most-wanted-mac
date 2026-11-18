@@ -374,7 +374,13 @@ def original_function(module, fragment, digest):
     namespace = {}
     exec(compile(fragment, '<pinned-original>', 'exec'), vars(module), namespace)
     name = fragment.split('def ', 1)[1].split('(', 1)[0]
-    with mock.patch.object(module, name, namespace[name]):
+    original = namespace[name]
+
+    def decoded_with_stock_writer(*args, writer=None, **kwargs):
+        assert writer is None
+        return original(*args, **kwargs)
+
+    with mock.patch.object(module, name, decoded_with_stock_writer if name == '_convert_decoded' else original):
         yield
 
 

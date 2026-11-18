@@ -211,7 +211,7 @@ def main():
     translated = '\n'.join(function(path.read_text(), name) for path, name in
                            zip(paths, ('f_007397D0', 'f_00751540_orig')))
     source = (ROOT / 'runtime/car85.c').read_text()
-    names = ('load_solid_map', 'private_solid_hash', 'model_00751540', 'f_00751540')
+    names = ('read_solid_map', 'load_solid_map', 'private_solid_hash', 'model_00751540', 'f_00751540')
     production = '\n'.join(function(source, name) for name in names)
     old = production.replace('int repaired=car_kit_fallback(models,space,a->solid_map,a->solid_count);', 'int repaired=0;')
     assert old != production

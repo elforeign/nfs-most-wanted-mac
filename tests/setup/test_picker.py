@@ -248,16 +248,19 @@ for path in CommandLine.arguments.dropFirst() {
                         recognition = next(e for e in events if e['ev'] == 'cars-recognition')
                         self.assertEqual(recognition['platform'], platform)
                         self.assertFalse(recognition['output_verified'])
-                # Same bytes identified as a different game are recognized by
-                # the source API, then rejected by the Carbon-only UI command.
-                manifest.write_text(json.dumps({'schema': 1, 'releases': [sf.release('pc', sf.fake_pe(), sf.ASSETS, game='prostreet')]}))
-                output = io.StringIO()
-                with redirect_stdout(output):
-                    rc = backend.main(['--cars-check', '--carbon', str(game), '--events'])
-                self.assertNotEqual(rc, 0)
-                events = [json.loads(line) for line in output.getvalue().splitlines()]
-                self.assertFalse(any(e['ev'] in ('done', 'cars-result') for e in events))
-                self.assertIn('Carbon source', events[-1]['msg'])
+                # The picker uses the detected game for either new PC source.
+                for title in ('prostreet', 'undercover'):
+                    manifest.write_text(json.dumps({'schema': 1, 'releases': [
+                        sf.release('pc', sf.fake_pe(), sf.ASSETS, game=title)]}))
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        rc = backend.main(['--cars-check', '--carbon', str(game), '--events'])
+                    self.assertEqual(rc, 0, output.getvalue())
+                    events = [json.loads(line) for line in output.getvalue().splitlines()]
+                    recognition = next(e for e in events if e['ev'] == 'cars-recognition')
+                    self.assertEqual((recognition['game'], recognition['platform']), (title, 'pc'))
+                    self.assertTrue(recognition['approval_available'])
+                    self.assertFalse(recognition['output_verified'])
                 # A wrong title ID in the chosen Xbox folder is refused by content.
                 sf.write_files(xbox, {'DEFAULT.XEX': sf.fake_xex(title=0x4D5307E6)})
                 manifest.write_text(json.dumps({'schema': 1, 'releases': [sf.release('x360', sf.fake_xex(),

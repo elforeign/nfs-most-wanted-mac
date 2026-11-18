@@ -24,6 +24,8 @@
 #include "car_kit_fallback.h"
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 #include "car_physics.h"
+#else
+#include "car_catalog.h"
 #endif
 
 #define TYPES 84u
@@ -290,19 +292,7 @@ static void folder(char out[16], const char *s) {
 
 // WFT1 is emitted by tools_snapshot/wheel_attrib.py from the source ecar.
 // Optional for existing manifests; legacy CAR85 never reads a sidecar.
-static void load_collision(Addition *a, const char *verified);
-static void load_wheel_fit(Addition *a, const char *verified) {
-    char path[PATH_MAX];
-    if (verified) snprintf(path,sizeof path,"%s",verified);
-    else if (snprintf(path, sizeof path, "%s/WHEELFIT.BIN", a->directory) >= (int)sizeof path)
-        fail("wheel geometry path too long");
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        if (errno != ENOENT) fail("cannot open wheel geometry");
-        if (diag_on) diag_event("addcars: wheel geometry absent name=%s (donor values retained)", a->name);
-        return;
-    }
-    if (fseek(f,0,SEEK_SET)) fail("cannot rewind wheel geometry");
+static const char *read_wheel_fit(Addition *a, FILE *f) {
     uint32_t header[4];
     int good = fread(header, 1, 16, f) == 16 &&
         fread(a->wheel_offsets, 1, 64, f) == 64 &&
@@ -324,90 +314,83 @@ static void load_wheel_fit(Addition *a, const char *verified) {
         if (a->spoke_count > 255) good = 0;
     }
     good = good && fgetc(f) == EOF && !ferror(f);
-    fclose(f);
-    if (!good || header[0] != 0x31544657u || (header[1] != 1 && header[1] != 2)) fail("invalid WHEELFIT.BIN");
+    if (!good || header[0] != 0x31544657u || (header[1] != 1 && header[1] != 2)) return "invalid WHEELFIT.BIN";
     // Validate identities with the game's StringToLowerCaseKey at vault load.
     a->wheel_fit = 1;
     a->wheel_key = header[2]; a->wheel_donor = header[3];
     for (unsigned i = 0; i < 16; ++i)
         if (!isfinite(a->wheel_offsets[i]) || fabsf(a->wheel_offsets[i]) > 20 ||
             ((i & 3) == 3 && (a->wheel_offsets[i] < .1f || a->wheel_offsets[i] > 1)))
-            fail("invalid wheel centre/radius");
+            return "invalid wheel centre/radius";
     for (unsigned i = 0; i < 2; ++i)
         if (!isfinite(a->wheel_compressions[i]) || fabsf(a->wheel_compressions[i]) > 20)
-            fail("invalid frontend wheel compression");
+            return "invalid frontend wheel compression";
     for (unsigned i = 0; i < 4; ++i)
         if (!isfinite(a->wheel_widths[i]) || a->wheel_widths[i] < .1f || a->wheel_widths[i] > 1)
-            fail("invalid render wheel width");
+            return "invalid render wheel width";
+    return NULL;
 }
 
-static void load_collision(Addition *a, const char *verified) {
-    char path[PATH_MAX];
-    if (verified) snprintf(path,sizeof path,"%s",verified);
-    else if (snprintf(path, sizeof path, "%s/COLLISION.BIN", a->directory) >= (int)sizeof path)
-        fail("collision path too long");
-    FILE *f = fopen(path, "rb");
-    if (!f) { if (errno != ENOENT) fail("cannot open collision sidecar"); return; }
-    if (fseek(f,0,SEEK_SET)) fail("cannot rewind collision sidecar");
-    uint32_t h[5];
-    if (fread(h, 4, 5, f) != 5 || h[0] != 0x31544C43u || h[1] != 1 ||
-        (a->wheel_fit && (h[2] != a->wheel_key || h[3] != a->wheel_donor)) || h[4] < 80 || h[4] > 1048576)
-        fail("invalid collision sidecar header");
-    uint8_t *b = malloc(h[4]);
-    if (!b || fread(b, 1, h[4], f) != h[4] || fgetc(f) != EOF || ferror(f))
-        fail("invalid collision sidecar extent");
-    fclose(f);
+static const char *collision_error(const uint8_t *b, uint32_t size) {
     uint32_t n; memcpy(&n, b + 4, 4);
     uint32_t at = 16 + n * 48, clouds;
-    if (!n || n > 128 || at + 16 > h[4]) fail("invalid collision bound count");
+    if (!n || n > 128 || at + 16 > size) return "invalid collision bound count";
     memcpy(&clouds, b + at, 4);
-    if (clouds > 128) fail("invalid collision cloud count");
+    if (clouds > 128) return "invalid collision cloud count";
     for (unsigned i = 0; i < n; ++i) {
-        uint8_t *bound = b + 16 + i * 48; int16_t dims[3], first;
+        const uint8_t *bound = b + 16 + i * 48; int16_t dims[3], first;
         memcpy(dims, bound + 16, 6); memcpy(&first, bound + 30, 2);
         if (dims[0] < 0 || dims[1] < 0 || dims[2] < 0 ||
             (dims[0] == 0 && dims[1] == 0 && dims[2] == 0) ||
             (first == -1 ? bound[22] != 0 : first < 0 || first + bound[22] > n) ||
             (int8_t)bound[23] < -1 || (int8_t)bound[23] >= (int)clouds)
-            fail("invalid collision bound topology");
+            return "invalid collision bound topology";
     }
     at += 16;
     for (unsigned i = 0; i < clouds; ++i) {
         uint32_t points;
-        if (at + 16 > h[4]) fail("truncated collision cloud");
+        if (at + 16 > size) return "truncated collision cloud";
         memcpy(&points, b + at, 4);
-        if (points < 4 || points > 4096 || points * 16 + 16 > h[4] - at)
-            fail("invalid collision points");
+        if (points < 4 || points > 4096 || points * 16 + 16 > size - at)
+            return "invalid collision points";
         for (unsigned j = 0; j < points * 4; ++j) {
             float value; memcpy(&value, b + at + 16 + j * 4, 4);
-            if (!isfinite(value) || fabsf(value) >= 1000) fail("invalid collision point value");
+            if (!isfinite(value) || fabsf(value) >= 1000) return "invalid collision point value";
         }
         at += 16 + points * 16;
     }
-    if (at != h[4]) fail("unexpected collision trailing bytes");
-    a->collision_bytes = b; a->collision_size = h[4];
-    a->collision_key=h[2]; a->collision_donor=h[3];
+    return at == size ? NULL : "unexpected collision trailing bytes";
 }
 
-static void load_solid_map(Addition *a, const char *path) {
-    FILE *f=fopen(path,"rb");
-    if (!f) fail("cannot open verified solid map");
-    if (fseek(f,0,SEEK_SET)) fail("cannot rewind solid map");
+static const char *read_collision(Addition *a, FILE *f) {
+    uint32_t h[5];
+    if (fread(h, 4, 5, f) != 5 || h[0] != 0x31544C43u || h[1] != 1 ||
+        (a->wheel_fit && (h[2] != a->wheel_key || h[3] != a->wheel_donor)) || h[4] < 80 || h[4] > 1048576)
+        return "invalid collision sidecar header";
+    uint8_t *b = malloc(h[4]);
+    const char *error = (!b || fread(b, 1, h[4], f) != h[4] || fgetc(f) != EOF || ferror(f))
+        ? "invalid collision sidecar extent" : collision_error(b, h[4]);
+    if (error) { free(b); return error; }
+    a->collision_bytes = b; a->collision_size = h[4];
+    a->collision_key=h[2]; a->collision_donor=h[3];
+    return NULL;
+}
+
+static const char *read_solid_map(Addition *a, FILE *f) {
     uint32_t h[4];
     // Version 2 adds private image rows to the same sorted donor -> private table.
     if (fread(h,1,16,f)!=16 || h[0]!=0x31504D53u || (h[1]!=1 && h[1]!=2) ||
-        (a == &traffic_addition && h[1] != 2) || h[2]!=parts_hash(a->name) || !h[3] || h[3]>8192) fail("invalid solid map header");
+        (a == &traffic_addition && h[1] != 2) || h[2]!=parts_hash(a->name) || !h[3] || h[3]>8192) return "invalid solid map header";
     a->solid_count=h[3]; a->solid_map=malloc(8u*h[3]);
     if (!a->solid_map || fread(a->solid_map,8,h[3],f)!=h[3] || fgetc(f)!=EOF || ferror(f))
-        fail("invalid solid map size");
-    fclose(f);
+        return "invalid solid map size";
     for (unsigned i=1;i<a->solid_count;++i)
-        if (a->solid_map[2*i]<=a->solid_map[2*i-2]) fail("unordered solid map");
+        if (a->solid_map[2*i]<=a->solid_map[2*i-2]) return "unordered solid map";
     if (a != &traffic_addition) {
         char geometry[PATH_MAX], space[32];
         if (a->geometry[0]) snprintf(geometry,sizeof geometry,"%s",a->geometry);
         else if (snprintf(geometry,sizeof geometry,"%s/GEOMETRY.BIN",a->directory)>=(int)sizeof geometry)
-            fail("geometry path too long");
+            return "geometry path too long";
         snprintf(space,sizeof space,"NFSAD_%s",a->name);
         FILE *models=fopen(geometry,"rb");
         if (models) {
@@ -416,6 +399,7 @@ static void load_solid_map(Addition *a, const char *path) {
             if (diag_on && repaired>0) diag_event("car85: %s stock kit fallbacks=%d",a->name,repaired);
         }
     }
+    return NULL;
 }
 
 // Validate optional body values before any addition writes guest memory.
@@ -439,20 +423,65 @@ static void load_physics(Addition *a, const char *verified) {
 // conversion. Catalog mode reads only a hash-verified, listed output path.
 // Version 2 checks the full record; obsolete base-key selections and absent or
 // invalid metadata preserve the donor's stock paint.
-static void load_default_paint(Addition *a, const char *path) {
+static const char *read_default_paint(Addition *a, FILE *f) {
     a->paint_source = a->paint_key = 0;
     uint32_t h[8];
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
-    int valid = !fseek(f,0,SEEK_SET) && fread(h, 1, sizeof h, f) == sizeof h && fgetc(f) == EOF && !ferror(f);
-    fclose(f);
+    int valid = fread(h, 1, sizeof h, f) == sizeof h && fgetc(f) == EOF && !ferror(f);
+    if (!valid) return "invalid default paint extent";
     uint32_t checksum = UINT32_MAX;
-    if (valid) for (unsigned i=0; i<7; ++i) checksum = (checksum ^ h[i]) * 16777619u;
-    if (!valid || h[0] != 0x31545044u || h[1] != 2 ||
+    for (unsigned i=0; i<7; ++i) checksum = (checksum ^ h[i]) * 16777619u;
+    if (h[0] != 0x31545044u || h[1] != 2 ||
         h[2] != parts_hash(a->name) || h[3] != parts_hash(a->donor_folder) ||
-        !h[4] || h[4] == UINT32_MAX || !h[5] || h[5] == UINT32_MAX || h[7] != checksum ||
-        (h[6] != 1 && h[6] != 2) || (h[6] == 1 && h[4] != h[5])) return;
+        h[7] != checksum) return "invalid default paint header";
+    if (h[6] == 0 && !h[5]) return NULL;
+    if (!h[4] || h[4] == UINT32_MAX || !h[5] || h[5] == UINT32_MAX ||
+        (h[6] != 1 && h[6] != 2) || (h[6] == 1 && h[4] != h[5])) return "invalid default paint selection";
     a->paint_source = h[4]; a->paint_key = h[5];
+    return NULL;
+}
+
+static void load_wheel_fit(Addition *a, const char *verified) {
+    char path[PATH_MAX];
+    if (verified) snprintf(path,sizeof path,"%s",verified);
+    else if (snprintf(path, sizeof path, "%s/WHEELFIT.BIN", a->directory) >= (int)sizeof path)
+        fail("wheel geometry path too long");
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        if (errno != ENOENT) fail("cannot open wheel geometry");
+        if (diag_on) diag_event("addcars: wheel geometry absent name=%s (donor values retained)", a->name);
+        return;
+    }
+    const char *error=fseek(f,0,SEEK_SET) ? "cannot rewind wheel geometry" : read_wheel_fit(a,f);
+    fclose(f);
+    if (error) fail(error);
+}
+
+static void load_collision(Addition *a, const char *verified) {
+    char path[PATH_MAX];
+    if (verified) snprintf(path,sizeof path,"%s",verified);
+    else if (snprintf(path, sizeof path, "%s/COLLISION.BIN", a->directory) >= (int)sizeof path)
+        fail("collision path too long");
+    FILE *f = fopen(path, "rb");
+    if (!f) { if (errno != ENOENT) fail("cannot open collision sidecar"); return; }
+    const char *error=fseek(f,0,SEEK_SET) ? "cannot rewind collision sidecar" : read_collision(a,f);
+    fclose(f);
+    if (error) fail(error);
+}
+
+static void load_solid_map(Addition *a, const char *path) {
+    FILE *f=fopen(path,"rb");
+    if (!f) fail("cannot open verified solid map");
+    const char *error=fseek(f,0,SEEK_SET) ? "cannot rewind solid map" : read_solid_map(a,f);
+    fclose(f);
+    if (error) fail(error);
+}
+
+static void load_default_paint(Addition *a, const char *path) {
+    a->paint_source = a->paint_key = 0;
+    FILE *f=fopen(path,"rb");
+    if (!f) return;
+    if (!fseek(f,0,SEEK_SET)) read_default_paint(a,f);
+    fclose(f);
 }
 
 static void configure_traffic(const PrivateCar *car, const char *directory) {
@@ -477,6 +506,21 @@ static void configure_traffic(const PrivateCar *car, const char *directory) {
     traffic_active = 1;
 }
 
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+static int load_catalog_sidecar(Addition *a, CarCatalogOutputKind kind,
+                                const char *(*decode)(Addition *, FILE *)) {
+    unsigned slot=a->catalog_id-CAR_CATALOG_FIRST_ID;
+    const CarCatalogSlot *entry=car_catalog_inventory_get(slot);
+    if (!entry || !entry->outputs[kind].present) return 0;
+    FILE *f=car_catalog_open_sidecar(slot,kind);
+    const char *error=f ? decode(a,f) : "cannot open verified sidecar";
+    if (f) fclose(f);
+    if (!error) return 0;
+    fprintf(stderr,"cars: skipped %s (%s): %s\n",a->name,car_catalog_output_name(kind),error);
+    return -1;
+}
+#endif
+
 static int on(void) {
     if (configured) return enabled;
     configured = 1;
@@ -488,11 +532,15 @@ static int on(void) {
 #endif
     if ((!legacy || !*legacy) && (!manifest || !*manifest)) {
         catalog_mode = manifest_mode = 1;
-        for (size_t i=0;i<private_cars_count();++i) {
+        for (size_t i=0;i<private_cars_count();) {
             const PrivateCar *car=private_cars_get(i);
-            if (car->swap) continue;
+            if (car->swap) { ++i; continue; }
             if (nadditions==MAX_ADDITIONS) fail("too many catalog additions");
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+            Addition *a=&additions[nadditions];
+#else
             Addition *a=&additions[nadditions++];
+#endif
             folder(a->name,car->name); folder(a->donor_folder,car->donor);
             a->catalog_id=car->id;
             snprintf(a->directory,sizeof a->directory,"%s",car->geometry);
@@ -508,17 +556,26 @@ static int on(void) {
             snprintf(a->ecar,sizeof a->ecar,"%s",car->ecar);
             snprintf(a->display_name,sizeof a->display_name,"%s",car->display_name);
             snprintf(a->manufacturer_name,sizeof a->manufacturer_name,"%s",car->manufacturer);
-#endif
-            if (car->wheel_fit[0]) load_wheel_fit(a,car->wheel_fit);
-#if defined(NFS_PUBLIC) && NFS_PUBLIC
-            if (car->collision[0]) load_collision(a,car->collision);
+            if (load_catalog_sidecar(a,CAR_CATALOG_WHEEL_FIT,read_wheel_fit) ||
+                load_catalog_sidecar(a,CAR_CATALOG_COLLISION,read_collision) ||
+                load_catalog_sidecar(a,CAR_CATALOG_SOLID_MAP,read_solid_map) ||
+                load_catalog_sidecar(a,CAR_CATALOG_PAINT,read_default_paint)) {
+                car_catalog_unselect(a->catalog_id-CAR_CATALOG_FIRST_ID);
+                free(a->collision_bytes);
+                free(a->solid_map);
+                memset(a,0,sizeof *a);
+                continue;
+            }
+            ++nadditions;
 #else
+            if (car->wheel_fit[0]) load_wheel_fit(a,car->wheel_fit);
             if (a->render_fit) load_collision(a,NULL);
-#endif
             if (car->physics[0]) load_physics(a,car->physics);
-            a->grip=car->grip;
             if (car->solid_map[0]) load_solid_map(a,car->solid_map);
             if (car->paint[0]) load_default_paint(a,car->paint);
+#endif
+            a->grip=car->grip;
+            ++i;
         }
         if (traffic_pilot_enabled()) {
             const PrivateCar *car = private_cars_traffic_get();

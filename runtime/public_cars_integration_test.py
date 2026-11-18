@@ -58,6 +58,8 @@ static uint32_t selected,created,create_fail,menu_vault,retail_type_override=UIN
 static Setting master={.boot_value=1};
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; fprintf(stderr,"FAIL %u: %s\n",__LINE__,#x); } } while(0)
 extern uint32_t test_key(const char *);
+extern int deny_catalog_tmp;
+extern int fail_catalog_read;
 uint32_t gmalloc(uint32_t n) { uint32_t p=arena; arena+=(n+63)&~63u; assert(arena<0x7000000); return p; }
 void gfree(uint32_t p) { (void)p; }
 uint32_t gstr(const char *s) { uint32_t p=gmalloc((uint32_t)strlen(s)+1); strcpy((char *)G+p,s); return p; }
@@ -166,6 +168,22 @@ int main(int argc,char **argv) {
     setenv("NFS_TEST_PRIVATE_CARS_ROOT","/must-not-open",1); setenv("NFS_TEST_CAR_DIR","/must-not-open",1);
     if (!strcmp(argv[2],"missing-setting")) setenv("TEST_MISSING_SETTING","1",1);
     private_cars_boot(); int active=!strcmp(argv[2],"on");
+    if (!strcmp(argv[3],"temp-unavailable")) {
+        size_t expected=private_cars_count();
+        deny_catalog_tmp=1;
+        car85_count();
+        printf("sidecar load with temp unavailable: %u/%zu cars\n",nadditions,expected);
+        return expected && nadditions==expected?0:1;
+    }
+    if (!strcmp(argv[3],"sidecar-read-error")) {
+        fail_catalog_read=1;
+        car85_count();
+        CHECK(nadditions==1 && addition_for_type(159)==&additions[0] && !addition_for_type(84));
+        CHECK(private_cars_count()==1 && !private_cars_inventory_get(0)->selected);
+        CHECK(!car_catalog_inventory_get(0)->selected && car_catalog_inventory_get(75)->selected);
+        printf("sidecar read failure: %u/2 cars checks=%u failures=%u\n",nadditions,checks,failures);
+        return failures!=0;
+    }
     CHECK(private_cars_count()==(active?2:0)); CHECK(car85_count()==(active?160:84));
     if (active && nadditions!=2) { printf("public integration on checks=%u failures=%u\n",checks,failures); return 1; }
     private_cars_boot(); CHECK(private_cars_count()==(active?2:0));
@@ -199,7 +217,8 @@ int main(int argc,char **argv) {
             CHECK(additions[j].solid_count==2 && additions[j].wheel_fit==1 && additions[j].render_fit);
             CHECK(additions[j].collision_size==80 && additions[j].collision_bytes && additions[j].paint_key==123);
         }
-        Addition standalone={0}; load_collision(&standalone,private_cars_get(0)->collision);
+        Addition standalone={.catalog_id=84};
+        CHECK(!load_catalog_sidecar(&standalone,CAR_CATALOG_COLLISION,read_collision));
         CHECK(standalone.collision_size==80 && standalone.collision_key==test_key("MODEL_0") && !standalone.wheel_fit);
         free(standalone.collision_bytes);
         Addition unicode={0}; snprintf(unicode.display_name,sizeof unicode.display_name,"Caf\xc3\xa9");
@@ -426,7 +445,22 @@ def main():
         calls |= {'f_005ACB70_orig', 'f_0058FD10_orig'}
         stubs = '\n'.join(f'void {n}(Cpu *c) {{ (void)c; abort(); }}' for n in sorted(calls - provided))
         (root / 'native.c').write_text(source.replace('STUBS', stubs))
-        (root / 'reader.c').write_text('#include "' + str(ROOT / 'runtime/car_catalog.c') + '"\nuint32_t test_key(const char *s) {return attribute_key_case(s,1);}\n')
+        (root / 'reader.c').write_text(r'''
+#include <errno.h>
+#include <stdlib.h>
+#include <unistd.h>
+int deny_catalog_tmp, fail_catalog_read;
+static int limited_mkstemp(char *path) {
+    if (deny_catalog_tmp) { errno=ENOSPC; return -1; }
+    return mkstemp(path);
+}
+static ssize_t limited_pread(int fd, void *buffer, size_t size, off_t offset) {
+    if (fail_catalog_read) { fail_catalog_read=0; errno=EIO; return -1; }
+    return pread(fd,buffer,size,offset);
+}
+#define mkstemp limited_mkstemp
+#define pread limited_pread
+''' + '#include "' + str(ROOT / 'runtime/car_catalog.c') + '"\nuint32_t test_key(const char *s) {return attribute_key_case(s,1);}\n')
         (root / 'car85.c').write_text(car)
         common = ['clang', '-std=c11', '-O1', '-g', '-DNFS_PUBLIC=1', '-fsanitize=address,undefined',
                   '-Wno-deprecated-declarations', '-I', str(root), '-I', str(ROOT / 'runtime'),
@@ -452,6 +486,9 @@ def main():
         exe = root / 'activation'
         build(common + inputs + ['-o', str(exe)])
         run(exe, [root, 'on', 'normal'])
+        # 265b530a exits 2 while loading the first sidecar; fixed loads both.
+        run(exe, [root, 'on', 'temp-unavailable'])
+        run(exe, [root, 'on', 'sidecar-read-error'])
         run(exe, [root, 'off', 'normal'])
         run(exe, [root, 'missing-setting', 'normal'])
         absent = root / 'absent'
@@ -492,7 +529,7 @@ def main():
             'wrong-unlock': ('M8(lay + 0x59) = M8(policy + 0x59);', 'M8(lay + 0x59) = 0;'),
             'wrong-name': ('snprintf(label,sizeof label,"CAR_NAME_%s",a->name);', 'snprintf(label,sizeof label,"CAR_NAME_%s",a->donor_folder);'),
             'wrong-brand': ('gstr(addition_brand(a, M32(fe->ld + 0x1C)))', 'gstr("MODEL_DONOR")'),
-            'missing-collision': ('if (car->collision[0]) load_collision(a,car->collision);', '/* omitted verified collision */'),
+            'missing-collision': ('load_catalog_sidecar(a,CAR_CATALOG_COLLISION,read_collision) ||', '0 ||'),
             'wrong-binding': ('sizeof a->frontend,"%s",car->frontend', 'sizeof a->frontend,"%s",car->pvehicle'),
             'allow-hole': (' || (c->eax>=TYPES && !addition_for_type(c->eax))', ''),
             'unguarded-cash': (' || !scratch_profile() || !on()', ' || !on()'),

@@ -173,6 +173,12 @@ def car_protocol_failures(binary):
             want('split extras %d' % chunk, text, chunk=chunk, carOperation='import', carSelection=[11],
                  carPhase='converted', carSlot=11, carVolumes=1, carApproved=False,
                  recognition={'platform': 'pc', 'approval': True, 'count': 1})
+        for game, platform in (('prostreet', 'pc'), ('undercover', 'pc'), ('undercover', 'x360')):
+            approved = platform == 'pc'
+            event = ev(ev='cars-recognition', game=game, platform=platform, approval_available=approved,
+                       output_verified=False, cars=[{'car_hash': 'deadbeef', 'status': 'importable'}])
+            want(game + ' ' + platform, event + ev(**result),
+                 recognition={'platform': platform, 'approval': approved, 'count': 1})
         want('no newline', text.rstrip('\n'), carOperation='import')
         want('no result', recognition + plan, 'failed')
         want('done is not car success', recognition + ev(ev='done', app=tmp), 'failed')
@@ -231,7 +237,7 @@ def refresh_failures(source):
         if args.count > 1, args[1] == "--refresh-review-test" {
             let s = Setup()
             s.carbon = URL(fileURLWithPath: "/source")
-            let choice = CarChoice(platform: "pc", slot: 1, folder: "300C", spec: [:])
+            let choice = CarChoice(game: "carbon", platform: "pc", slot: 1, folder: "300C", spec: [:])
             s.carChoices = [choice]; s.selectedCarIDs = [choice.id]
             s.state.recognition = CarRecognition(game: "carbon", platform: "pc", approval_available: true,
                                                 output_verified: false, cars: [RecognizedCar(car_hash: choice.carHash, status: "importable")])
@@ -444,7 +450,7 @@ class AppTests(unittest.TestCase):
             let s = Setup()
             s.pc = s.pcRoot(URL(fileURLWithPath: args[2]))
             s.carbon = URL(fileURLWithPath: "/carbon")
-            let choice = CarChoice(platform: "pc", slot: 1, folder: "300C", spec: [:])
+            let choice = CarChoice(game: "carbon", platform: "pc", slot: 1, folder: "300C", spec: [:])
             s.carChoices = [choice]; s.selectedCarIDs = [choice.id]
             s.state.recognition = CarRecognition(game: "carbon", platform: "pc", approval_available: true,
                                                 output_verified: false, cars: [RecognizedCar(car_hash: choice.carHash, status: "importable")])
@@ -470,7 +476,8 @@ class AppTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / 'tools'))
         from setup_kit import car_selection, car_sources
         rows = car_selection.load()
-        pc = [r for r in rows if r['origin']['platform'] == 'pc'][:2]
+        pc = [r for r in rows if r['origin']['platform'] == 'pc'
+              and r['origin']['folder'] in ('240SX', '300C', 'ZONDA')]
         recognition = dict(game='carbon', platform='pc', approval_available=True, output_verified=False,
                            cars=[dict(car_hash=car_sources.path_hash('CARS/' + r['origin']['folder']),
                                       status='importable') for r in pc])
@@ -488,6 +495,8 @@ class AppTests(unittest.TestCase):
             self.assertEqual(got['defaults'], [])
             self.assertIn('Chrysler 300C', got['names'])
             self.assertIn('Porsche 911 GT3 RS', got['names'])
+            self.assertEqual(got['names'].count('Pagani Zonda F'), 1)
+            self.assertEqual(len(got['names']), 89)
             for name in ('Nissan 240SX', 'Porsche 911 Turbo', 'Chevrolet Camaro Concept',
                          'Infiniti G35', 'Mazdaspeed3', 'Shelby GT500'):
                 self.assertEqual(got['names'].count(name), 1 if name == 'Shelby GT500' else 2)
@@ -497,6 +506,16 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(got['arguments'], [])
                 self.assertEqual(got['spec'], '')
+            for game in ('prostreet', 'undercover'):
+                matches = [r for r in rows if r['origin']['game'] == game]
+                source = dict(recognition, game=game, cars=[
+                    dict(car_hash=car_sources.path_hash('CARS/' + r['origin']['folder']), status='importable')
+                    for r in matches])
+                ticks = selected + [game + ':pc:' + str(r['slot']) for r in matches]
+                result, got = call(self.real, ticks, source=source)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(Path(got['spec']).read_text()),
+                                 [car_selection.spec(r) for r in matches])
             changed = Path(td) / 'edited.json'
             changed.write_bytes(car_selection.METADATA.read_bytes().replace(b'300C', b'300X', 1))
             result, _ = call(self.real, selected, metadata=changed)
@@ -509,7 +528,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn('chooseCarSelection', text)
         self.assertNotIn('Choose a car selection file', text)
         self.assertIn('Toggle(car.name', text)
-        self.assertIn('ForEach(["pc", "x360"]', text)
+        self.assertIn('$0.game == recognition.game && $0.platform == recognition.platform', text)
 
     def test_x360_optional_choices_arguments_and_space(self):
         def violations(binary):

@@ -135,6 +135,14 @@ release_critical="maxperf_career_test maxperf_checkout_test padprompts_shop_test
 run_one() {
     n=$1; d=$2; mkdir -p "$d"
     case $n in
+    private_facade_test|private_road_headlight_test|private_worldreflect_test|private_c1load_test|private_shaders_test|test_car_platform_conversion)
+        # Present only in private trees. Run the same fixtures in nightly and named runs.
+        if [ -f runtime/private_suite_inputs.py ]; then
+            for f in recomp/$n.py tests/setup/$n.py; do [ -f "$f" ] && break; done
+            exec "$py" -I runtime/private_suite_inputs.py "$f" "$NFS_GAME"
+        fi ;;
+    esac
+    case $n in
     ws2_policy|ws2_policy_test) clang -O1 -Iruntime -Irecomp -Irecomp/out runtime/ws2_policy_test.c -o "$d/t" && exec "$d/t" ;;
     settings_look|settings_look_test) clang $CF -I recomp runtime/settings_look_test.c runtime/settings.c -o "$d/t" && exec "$d/t" ;;
     note_len|note_len_test) clang $CF -I recomp -I runtime runtime/note_len_test.c runtime/text_fit.c -o "$d/t" && exec "$d/t" ;;
