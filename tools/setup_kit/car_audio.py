@@ -1,7 +1,6 @@
 """Read source audio graphs without changing donor data or generating sound.
 
-Only the audited little endian vault / ABKC and big endian S10A combination
-is supported. Callers provide source identity and resource bytes explicitly.
+Callers provide source platform and resource bytes explicitly.
 """
 import hashlib
 import math
@@ -32,6 +31,11 @@ def identity(cls, key):
 
 class AudioAttributes(FitAttributes):
     """Bounded typed reader; absent optional fields differ from broken pointers."""
+    endian = '<'
+
+    def uint(self, data, position):
+        return words(data, position, self.endian + 'I')[0]
+
     def lineage(self, cls, key):
         chain = []
         while key:
@@ -39,7 +43,7 @@ class AudioAttributes(FitAttributes):
             require((cls, key) in self.collections, f'audio missing collection {identity(cls, key)}')
             chain.append(key)
             vault, off = self.collections[cls, key]
-            key = u32(vault.buffers[0], off + 8)
+            key = self.uint(vault.buffers[0], off + 8)
         return chain
 
     def field(self, cls, key, field):
@@ -55,14 +59,15 @@ class AudioAttributes(FitAttributes):
                 if layout:
                     target = (layout[0], layout[1] + at)
             else:
-                nt = words(raw, off + 24, '<H')[0] if vault.modern else u32(raw, off + 24)
-                start = off + ((32 + nt * 4 + 7) & ~7) if vault.modern else off + 32 + nt * 4
-                entries = span(raw, start, u32(raw, off + 20) * 12, 'audio entries range')
-                hits = [start + i for i in range(0, len(entries), 12) if u32(entries, i) == field]
+                aligned = self.endian == '>' or vault.modern
+                nt = words(raw, off + 24, self.endian + 'H')[0] if aligned else u32(raw, off + 24)
+                start = off + ((32 + nt * 4 + 7) & ~7) if aligned else off + 32 + nt * 4
+                entries = span(raw, start, self.uint(raw, off + 20) * 12, 'audio entries range')
+                hits = [start + i for i in range(0, len(entries), 12) if self.uint(entries, i) == field]
                 require(len(hits) <= 1, 'audio duplicate field')
                 if hits:
                     entry = hits[0]
-                    inline = raw[entry + 10] & (0x40 if vault.modern else 0x20)
+                    inline = raw[entry + 10] & (0x40 if self.endian == '<' and aligned else 0x20)
                     require(not inline or (size <= 4 and not flags & 1), 'audio inline field shape')
                     target = (0, entry + 4) if inline else vault.pointer(0, entry + 4)
                     require(target is not None, 'audio unresolved field pointer')
@@ -71,7 +76,7 @@ class AudioAttributes(FitAttributes):
             dep, pos = target
             count = 1
             if flags & 1:
-                alloc, count, esz, enc = words(vault.buffers[dep], pos, '<4H')
+                alloc, count, esz, enc = words(vault.buffers[dep], pos, self.endian + '4H')
                 require(count <= alloc <= maximum and esz == size, 'audio array shape')
                 pos += 8 + (8 if enc & 0x8000 else 0)
             span(vault.buffers[dep], pos, count * size, 'audio value range')
@@ -82,11 +87,10 @@ class AudioAttributes(FitAttributes):
                                    'flags': flags, 'alignment': align}}
         return None
 
-    @staticmethod
-    def string(vault, dep, pos):
+    def string(self, vault, dep, pos):
         target = vault.pointer(dep, pos)
         if target is None:
-            require(u32(vault.buffers[dep], pos) == 0, 'audio unresolved string')
+            require(self.uint(vault.buffers[dep], pos) == 0, 'audio unresolved string')
             return None
         data = vault.buffers[target[0]]
         end = data.find(b'\0', target[1], target[1] + 4096)
@@ -97,13 +101,13 @@ class AudioAttributes(FitAttributes):
         data = vault.buffers[dep]
         if dt == REF:
             require(size == 12, 'audio reference size')
-            cls, key, reserved = words(data, pos, '<3I')
+            cls, key, reserved = words(data, pos, self.endian + '3I')
             require(reserved == 0, 'audio reference reserved word')
             return {'class': f'{cls:08x}', 'key': f'{key:08x}'}
         if dt == STRING:
             require(size == 8, 'unsupported audio string-key layout')
             text = self.string(vault, dep, pos + 4)
-            key = u32(data, pos)
+            key = self.uint(data, pos)
             require(text is None or key == hash32(text), 'audio string-key identity mismatch')
             return {'hash': f'{key:08x}', 'text': text}
         if dt == TEXT:
@@ -112,7 +116,7 @@ class AudioAttributes(FitAttributes):
         fmt = PRIMITIVES.get(dt)
         if fmt:
             require(struct.calcsize('<' + fmt) == size, 'audio primitive size')
-            values = list(words(data, pos, '<' + fmt))
+            values = list(words(data, pos, self.endian + fmt))
             require(all(not isinstance(v, float) or math.isfinite(v) for v in values), 'audio nonfinite value')
             return values[0] if len(values) == 1 else values
         # Source-specific inline records preserve every byte plus relocations.
@@ -126,12 +130,22 @@ class AudioAttributes(FitAttributes):
         return {'bytes': payload.hex(), 'strings': strings}
 
 
-def bank_inventory(data):
+class XenonAudioAttributes(AudioAttributes):
+    endian = '>'
+
+    def __init__(self, data):
+        from .car_x360_inputs import XenonAttributes
+        vault = XenonAttributes(data)
+        self.defs, self.collections = vault.defs, vault.collections
+
+
+def bank_inventory(data, *, platform='pc'):
     """Inventory embedded modules and sample identities, without decoding PCM."""
     require(len(data) >= 0x60 and data[:4] == b'ABKC', 'unsupported bank: expected ABKC')
-    require(u32(data, 0x14) == len(data), 'ABKC declared size')
-    count = words(data, 10, '<H')[0]
-    table, bank, extent = words(data, 0x1c, '<3I')
+    endian, encoding = ('>', (3, 48000)) if platform == 'x360' else ('<', (4, 44100))
+    require(words(data, 0x14, endian + 'I')[0] == len(data), 'ABKC declared size')
+    count = words(data, 10, endian + 'H')[0]
+    table, bank, extent = words(data, 0x1c, endian + '3I')
     require(bank >= 0x60 and extent >= 12, 'ABKC bank extent')
     s10 = span(data, bank, extent, 'ABKC bank outside file')
     require(s10[:4] == b'S10A', 'unsupported bank payload: expected S10A')
@@ -150,7 +164,7 @@ def bank_inventory(data):
         loop = bool(b >> 29 & 1)
         loop_start = words(s10, off + 8, '>I')[0] if loop else None
         version, codec, channels, rate = a >> 28, a >> 24 & 15, (a >> 18 & 63) + 1, a & 0x3ffff
-        require(version == 0 and codec == 4 and channels == 1 and rate == 44100,
+        require(version == 0 and (codec, rate) == encoding and channels == 1,
                 'unsupported S10A version/codec/channels/rate')
         require(b >> 30 == 0, 'unsupported S10A nonresident resource dependency')
         frames = b & 0x1fffffff
@@ -170,8 +184,9 @@ def bank_inventory(data):
 
 class Resources:
     """Exact source paths; case and basename ambiguity are rejected up front."""
-    def __init__(self, files):
+    def __init__(self, files, *, platform='pc'):
         self.files, self.basenames = {}, {}
+        self.platform = platform
         for path, data in files.items():
             path = path.replace('\\', '/')
             p = PurePosixPath(path)
@@ -197,7 +212,7 @@ class Resources:
             result['kind'] = 'gin'
         elif suffix == '.abk':
             result['kind'] = 'abk'
-            result.update(bank_inventory(data))
+            result.update(bank_inventory(data, platform=self.platform))
         else:
             raise ValueError('unsupported audio resource extension: ' + path)
         return result
@@ -250,7 +265,7 @@ def graph(attributes, car, resources, *, game='carbon', platform='pc'):
                     edges.append({'field': f'{fk:08x}', 'index': index, 'target': child,
                                   'inherited_self': inherited_self})
                 elif dt == STRING:
-                    # The source's SPU bank alternatives are console-only.
+                    # The SPU alternatives are console-only.
                     if cls == ENGINE and fk == 0x04935eab:
                         field['excluded'] = 'SPU bank alternatives are not PC dependencies'
                         continue

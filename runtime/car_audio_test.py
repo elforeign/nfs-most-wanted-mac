@@ -8,6 +8,8 @@ added AEMS/Ginsu constructors select their own engine/exhaust (2/2), nonzero PCM
 Explicit off/0 retains donor bytes. All 18 prior safety controls still PASS.
 Native private replay also uses the unset default: stock/Off 120,320 PCM bytes
 identical; Jaguar XK 2/2 resources and 4/4 source GINs, 163,701 nonzero samples.
+Carbon Xbox 360 997 GT3 RS and 997 Turbo: 384–799 excess decoded frames
+per loop sample -> 0; PCM matches the separately decoded EA blocks 0/6 -> 6/6.
 
 Generated banks execute in the real interpreter with the production adapter.
 Old -> new: 12 safety/lifetime controls fail 12/12 -> 0/12, including import
@@ -32,6 +34,8 @@ Off/stock: 120,320 equal PCM bytes across four comparisons, plus CPU/controller
 bytes. Eleven targeted serving/export/PCM/GIN/descriptor/profile/lifetime/gain/
 headroom/activity controls must fail. The float headroom fixture retains +1.25
 and -1.5 through the native conversion boundary; the old int16 stage fails 2/2.
+Carbon Xenon renders all 208 declared XMA slots. The cross-car bank control
+is rejected with the package pin (1/1) and accepted with it removed (0/1).
 """
 import sys as _inputs_sys
 from pathlib import Path as _InputsPath
@@ -137,6 +141,8 @@ void dispatch(Cpu *c,uint32_t t) {
     if(car_audio_dispatch(c,t)) return;
     NATIVE_DISPATCH
     if(t==0xf1000000) { assert(callback); callback(c); return; }
+    if(t==0x0041ad40) { assert(arg(c,0)==77); c->eax=0x2a000; c->esp+=4; return; }
+    if(t==0x00672d30) { assert(arg(c,0)==0x2a038 && arg(c,1)==4); c->eax=2; c->esp+=4; return; }
     if(t==0xdead0001) { x87_push(c,raw_rpm); c->esp+=4; return; }
     if(t==0x8196c2) { c->eax=M32(arg(c,0)+16); M32(arg(c,0)+16)=0; c->esp+=4; return; }
     if(t==0x8196ce) { c->eax=M32(arg(c,0)+20); c->esp+=4; return; }
@@ -319,23 +325,122 @@ static void rejected_packages(const char *filename) {
         if(mode==0) --size;
         if(mode==1) bad[0]^=1;
         if(mode==2) memset(bad+12,0,4);
-        if(mode==3) bad[68+rd(bad+16)+0x28]^=1;
+        if(mode==3) bad[76+0x28]^=1;
         if(mode==4) {
             /* Recomputing the transport checksum cannot admit a different
              * calibration or controller closure. The compiled profile wins. */
-            bad[68+rd(bad+16)+0x28]^=1;
+            bad[76+0x28]^=1;
             digest(bad+68,(size_t)n-68,bad+36);
         }
         f=fopen(path,"wb"); assert(f); assert(fwrite(bad,1,size,f)==size); assert(!fclose(f));
-        assert(car_audio_load(77,"jaguarxk",path)<0 && allocated==before);
+        assert(car_audio_load(77,1,"jaguarxk",path)<0 && allocated==before);
     }
-    assert(car_audio_load(77,"unsupported",filename)<0 && allocated==before);
+    assert(car_audio_load(77,1,"unsupported",filename)<0 && allocated==before);
     setenv("NFS_ADDCAR_AUDIO","off",1);
-    assert(car_audio_load(77,"jaguarxk",path)==0 && allocated==before);
+    assert(car_audio_load(77,1,"jaguarxk",path)==0 && allocated==before);
     setenv("NFS_ADDCAR_AUDIO","on",1);
     assert(!unlink(path)); free(source); free(bad);
 }
+static uint32_t be32(const uint8_t *p) {
+    return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3];
+}
+static unsigned check_loop_intros(const char *car, const Resource *r, unsigned *mismatches) {
+    X360Abk bank;
+    char why[128];
+    unsigned count=0;
+    assert(x360abk_parse_carbon(r->source,r->size,&bank,why,sizeof why));
+    for(unsigned j=0;j<bank.count;++j) {
+        const X360AbkSound *s=bank.s+j;
+        if(!s->loop_start) continue;
+        assert(s->loop_start==be32(r->source+s->data+4));
+        int16_t *pcm=NULL;
+        unsigned frames, decoded;
+        assert(x360abk_decode_carbon(r->source,s,&pcm,&frames,why,sizeof why) && frames==s->samples);
+        assert(sscanf(why,"decoded %u frames",&decoded)==1);
+        unsigned offset=0, data=s->data;
+        int matches=1;
+        while(offset<s->samples) {
+            X360AbkSound block=*s;
+            block.data=data;
+            block.samples=be32(r->source+block.data+4);
+            block.end=block.data+be32(r->source+block.data);
+            assert(block.samples<=s->samples-offset);
+            int16_t *part=NULL;
+            assert(x360abk_decode_carbon(r->source,&block,&part,&frames,why,sizeof why) &&
+                   frames==block.samples);
+            matches &= !memcmp(pcm+offset,part,(size_t)frames*sizeof(*part));
+            free(part);
+            offset+=frames;
+            data=block.end;
+            assert(offset==s->loop_start || offset==s->samples);
+        }
+        FILE *log=decoded!=s->samples || !matches?stderr:stdout;
+        fprintf(log,"%s slot %u: excess %d frames, block PCM %s\n",
+                car,j,(int)decoded-(int)s->samples,matches?"matches":"differs");
+        *mismatches+=decoded!=s->samples || !matches;
+        free(pcm);
+        ++count;
+    }
+    return count;
+}
+static int admit_all(int argc,char **argv) {
+    G=calloc(1,0x2000000); assert(G);
+    unsigned good=0, wrong=0, tiers=0, initial_heap=heap, samples=0, loop_mismatches=0;
+    unsetenv("NFS_ADDCAR_AUDIO");
+    for(int i=2;i+2<argc;i+=3) {
+        int console=!strcmp(argv[i],"x360");
+        int expected=console || !strcmp(argv[i],"ok");
+        unsigned version=!strcmp(argv[i],"wrong-platform") || console ? 3 : 0;
+        FILE *f=fopen(argv[i+2],"rb"); assert(f);
+        int admitted=car_audio_load_stream(77,1,argv[i+1],version,f);
+        fclose(f);
+        if(expected) {
+            if(admitted!=1) { fprintf(stderr,"admission failed: %s\n",argv[i+1]); return 1; }
+            Package *p=packages;
+            for(unsigned t=0;t<p->tier_count;t++) {
+                for(unsigned k=0;k<2;k++) {
+                    if(prepare_bank(p->resource+p->tiers[t].layer[k][0],k)) {
+                        fprintf(stderr,"bank failed: %s tier=%u layer=%u\n",argv[i+1],t,k); return 1;
+                    }
+                }
+                ++tiers;
+            }
+            if(console) {
+                int porsche=!strcmp(argv[i+1],"997GT3RS") || !strcmp(argv[i+1],"997TT");
+                unsigned intros=0;
+                for(unsigned j=0;j<p->count;j++) {
+                    Resource *r=p->resource+j;
+                    if(!r->translated) continue;
+                    if(porsche) intros+=check_loop_intros(argv[i+1],r,&loop_mismatches);
+                    assert(r->bank.source && r->samples);
+                    for(unsigned z=0;z<r->sample_count;z++) {
+                        CarAudioPCM *s=r->samples+z;
+                        if(!s->pcm) continue;
+                        assert(s->rate==48000 && s->loop && s->loop_start<s->frames);
+                        unsigned k=0;
+                        while(k<s->frames && s->pcm[k]==0) ++k;
+                        assert(k<s->frames); ++samples;
+                    }
+                }
+                if(porsche) assert(intros==3);
+                setenv("NFS_ADDCAR_AUDIO","0",1);
+                assert(car_audio_load(77,2,argv[i+1],argv[i+2])==0 && !packages[1].key);
+                unsetenv("NFS_ADDCAR_AUDIO");
+            }
+            ++good;
+        } else {
+            wrong+=admitted<0;
+            if(admitted>=0) { fprintf(stderr,"wrong layer accepted: %s\n",argv[i+1]); return 1; }
+        }
+        car_audio_unload(1); assert(allocated==freed); heap=initial_heap;
+    }
+    free(G);
+    printf("Carbon runtime admission %u packages %u tiers; wrong packages refused %u; nonzero Xenon sample records %u\n",
+           good,tiers,wrong,samples);
+    return loop_mismatches!=0;
+}
 int main(int argc,char **argv) {
+    if(argc>1 && !strcmp(argv[1],"--admit")) return admit_all(argc,argv);
     assert(argc==5); G=calloc(1,0x2000000); assert(G);
     M32(0x9c21f4)=0x80000; M16(0x9c218c)=128; M8(0x9c204a)=128;
     for(unsigned i=0;i<2;i++) {
@@ -353,13 +458,17 @@ int main(int argc,char **argv) {
     rejected_packages(argv[1]);
     unsetenv("NFS_ADDCAR_AUDIO");
     assert(car_audio_open("SOUND/ENGINE/GIN_DB9.gin")==-1);
-    assert(car_audio_load(77,"jaguarxk",argv[1])==1);
+    assert(car_audio_load(77,1,"jaguarxk",argv[1])==1);
     unchanged(&c,77,0); unchanged(&c,999,-1);
     unsetenv("NFS_ADDCAR_AUDIO");
     sample_frames=nonzero_frames=nonzero_ginsu=nonzero_bank=0; total_energy=0;
     unsigned matched=0,matched_gins=0;
     for(unsigned cycle=0;cycle<2;cycle++) {
         setup(77); c.ecx=0x20000;
+        if(cycle) {
+            M32(0x22000+0x234)=77;
+            M32(0x2a000)=0x2b000; M32(0x2b000+0x44)=0x00686a40;
+        }
         f_004EE3E0_orig(&c); c.esp=0x1f00000;
         f_004EE1C0(&c);
         Engine *e=engine(0x20000);
@@ -382,12 +491,18 @@ int main(int argc,char **argv) {
                 }
             }
         }
-        if(e && cycle) { car_audio_unload(77); assert(e->package->retiring && e->package->key==77); }
+        if(e) assert(e->tier==e->package->tiers+cycle);
+        if(e && cycle) {
+            assert(car_audio_load(77,2,"jaguarxk",argv[1])==1);
+            assert(for_object(0x20000)->vault==2);
+            car_audio_unload(1); assert(e->package->retiring && e->package->key==77);
+            assert(for_object(0x20000)->vault==2);
+        }
         if(e) for(unsigned k=0;k<2;k++) {
-            Resource *r=e->package->resource+e->package->layer[k][0];
+            Resource *r=e->package->resource+e->tier->layer[k][0];
             matched+=e->instances[k].bank==&r->bank;
             for(unsigned part=0;part<3;part++) {
-                Resource *res=e->package->resource+e->package->layer[k][part];
+                Resource *res=e->package->resource+e->tier->layer[k][part];
                 char pack_id[65],res_id[65],path[192]; hex(e->package->digest,pack_id); hex(res->digest,res_id);
                 snprintf(path,sizeof path,"SOUND/ADDCAR_AUDIO/%s/%s",pack_id,res_id);
                 int fd=car_audio_open(path); assert(fd>=0); uint8_t *data=malloc(res->size); assert(data);
@@ -402,7 +517,7 @@ int main(int argc,char **argv) {
             }
             for(unsigned mode=0;mode<2;mode++) {
                 unsigned i=k*2+mode;
-                Resource *res=e->package->resource+e->package->layer[k][mode+1];
+                Resource *res=e->package->resource+e->tier->layer[k][mode+1];
                 assert(!memcmp(G+e->ginsu[i].gin,res->source,res->size));
                 assert(M32(e->ginsu[i].data+0x1c)==e->ginsu[i].gin+0x20);
                 assert(M32(e->ginsu[i].synth+0x28)==e->ginsu[i].data);
@@ -414,19 +529,24 @@ int main(int argc,char **argv) {
             c.ecx=0x20000; f_004EE3E0(&c);
             if(e) for(unsigned k=0;k<2;k++) {
                 const uint8_t *m=e->instances[k].engine.members; assert(m);
-                assert(ri(m)==87 && ri(m+4)>0 && ri(m+8)==512 && ri(m+12)==512);
+                assert(ri(m)==ri(e->tier->calibration[k]+0x124) && ri(m+4)>0 && ri(m+8)==512 && ri(m+12)==512);
                 assert(ri(m+4*15)==16384 && ri(m+4*28)==16384 && ri(m+4*21)==12000);
-                assert(ri(m+4*84)==ri(e->package->calibration[1]+0x74));
+                assert(ri(m+4*84)==ri(e->tier->calibration[1]+0x74));
             }
             for(unsigned k=0;k<4;k++) pump(&c);
         }
         c.ecx=0x20000; f_004F5D60(&c); assert(!engine(0x20000));
         for(unsigned i=0;i<128;i++) assert(!transport[i].live);
         for(unsigned i=0;i<512;i++) assert(!voices[i].owned);
-        car_audio_unload(77); assert(allocated==freed);
-        if(!cycle) assert(car_audio_load(77,"jaguarxk",argv[1])==1);
+        car_audio_unload(1);
+        if(cycle) {
+            assert(for_object(0x20000)->vault==2);
+            car_audio_unload(2);
+        }
+        assert(allocated==freed);
+        if(!cycle) assert(car_audio_load(77,1,"jaguarxk",argv[1])==1);
     }
-    assert(car_audio_load(77,"jaguarxk",argv[1])==1);
+    assert(car_audio_load(77,1,"jaguarxk",argv[1])==1);
     setup(77); c.ecx=0x20000; f_004EDD90_orig(&c); c.esp=0x1f00000; f_004DC360(&c);
     Engine *aems=engine(0x20000); unsigned aems_ok=aems && aems->instances[0].bank && aems->instances[1].bank;
     for(unsigned tick=0;tick<4;tick++) {
@@ -435,7 +555,7 @@ int main(int argc,char **argv) {
     }
     diag_on=0; c.ecx=0x20000; f_004DC1D0(&c); assert(!engine(0x20000) && !M32(0x20000+0x28));
     setup(77); c.ecx=0x20000; f_004EDD90_orig(&c); c.esp=0x1f00000; f_004DC360(&c);
-    c.ecx=0x20000; f_004EDD90(&c); c.ecx=0x20000; f_004F5CD0(&c); assert(!engine(0x20000)); car_audio_unload(77);
+    c.ecx=0x20000; f_004EDD90(&c); c.ecx=0x20000; f_004F5CD0(&c); assert(!engine(0x20000)); car_audio_unload(1);
     for(unsigned i=0;i<128;i++) assert(!transport[i].live);
     for(unsigned i=0;i<512;i++) assert(!voices[i].owned);
     assert(allocated==freed);
@@ -599,7 +719,7 @@ void f_00825310_orig(Cpu *c) {
 typedef struct { uint32_t key; char name[16],directory[PATH_MAX]; } TestAddition;
 static unsigned fatal_calls;
 static void fail(const char *why) { (void)why; ++fatal_calls; }
-static void vault_audio(const TestAddition *a) { VAULT_AUDIO }
+static void vault_audio(const TestAddition *a) { int result=0; uint64_t generation=1; VAULT_AUDIO (void)result; }
 static uint32_t get(void) { uint32_t v; CHECK(fread(&v,4,1,stdin)==1); return v; }
 static uint8_t *read_bytes(uint32_t n) { uint8_t *b=malloc(n); CHECK(b && fread(b,1,n,stdin)==n); return b; }
 static void setup(uint32_t key) {
@@ -730,7 +850,7 @@ static unsigned identity(Cpu *c,uint32_t key,int enabled,int mode) {
 int main(int argc,char **argv) {
     CHECK(argc==3); G=calloc(1,0x2000000); CHECK(G!=NULL);
     M32(0x9c21f4)=pool; M16(0x9c218c)=64;
-    Package *p=packages; p->count=3; p->key=77;
+    Package *p=packages; p->count=3; p->key=77; p->vault=1; p->tier_count=1;
     uint8_t cal[2][CALIBRATION]={{0}},gin[64]={0};
     memcpy(gin,"Gnsu20",6); float lo=1000,hi=8000; memcpy(gin+8,&lo,4);
     uint8_t *sources[2],*plans[2];
@@ -744,11 +864,11 @@ int main(int argc,char **argv) {
         for(unsigned j=0;j<2;j++) {
             float *pcm=malloc(8*sizeof(float)); CHECK(pcm!=NULL);
             for(unsigned n=0;n<8;n++) pcm[n]=(n&1)?0.25f:-0.5f;
-            r->samples[j]=(CarAudioPCM){pcm,8,44100,1,NULL,NULL};
+            r->samples[j]=(CarAudioPCM){pcm,8,44100,1,NULL,NULL,0};
         }
         memcpy(cal[k]+0x120,&lo,4); memcpy(cal[k]+0xe8,&hi,4);
         uint32_t unity=32767; memcpy(cal[k]+0x128,&unity,4);
-        p->calibration[k]=cal[k]; p->layer[k][0]=k; p->layer[k][1]=p->layer[k][2]=2;
+        p->tiers[0].calibration[k]=cal[k]; p->tiers[0].layer[k][0]=k; p->tiers[0].layer[k][1]=p->tiers[0].layer[k][2]=2;
     }
     p->resource[2].source=gin; p->resource[2].size=sizeof gin; p->resource[2].kind=1;
     digest(gin,sizeof gin,p->resource[2].digest);
@@ -784,7 +904,7 @@ int main(int argc,char **argv) {
         char path[PATH_MAX]; CHECK(snprintf(path,sizeof path,"%s/AUDIO.BIN",a.directory)<(int)sizeof path);
         FILE *bad=fopen(path,"wb"); CHECK(bad!=NULL);
         for(unsigned i=0;i<100;i++) fputc((int)i,bad); CHECK(!fclose(bad));
-        CHECK(car_audio_load(a.key,a.name,path)<0); vault_audio(&a); CHECK(!fatal_calls && !for_object(0));
+        CHECK(car_audio_load(a.key,1,a.name,path)<0); vault_audio(&a); CHECK(!fatal_calls && !for_object(0));
     }
     if(!strcmp(argv[1],"all") || !strcmp(argv[1],"tick")) { init(&c,1); poison(&c,0); }
     if(!strcmp(argv[1],"all") || !strcmp(argv[1],"import")) { init(&c,1); poison(&c,1); }
@@ -855,7 +975,7 @@ int main(int argc,char **argv) {
         M8(pool+(speech&255)*0x90+0x6d)=0; M8(pool+(siren&255)*0x90+0x6d)=0;
     }
     if(!strcmp(argv[1],"all") || !strcmp(argv[1],"destroy")) duplicate_destroy();
-    CHECK(!stolen); car_audio_unload(77);
+    CHECK(!stolen); car_audio_unload(1);
     CHECK(allocations==frees);
     for(unsigned k=0;k<2;k++) { free(sources[k]); free(plans[k]); }
     printf("{\"checks\":%u,\"identity_bytes\":%u,\"pcm_bytes\":16384,\"allocations\":%u,\"frees\":%u,\"stolen\":%u}\n",checks,identity_bytes,allocations,frees,stolen);
@@ -865,13 +985,35 @@ int main(int argc,char **argv) {
 
 
 def vault_audio_block(source):
-    start = source.index('if (car_audio_load && a->directory[0]) {')
+    start = source.index('if (a->directory[0] && car_audio_enabled()) {')
     at = source.index('{', start)
     depth = 1
     while depth:
         at += 1
         depth += (source[at] == '{') - (source[at] == '}')
     return source[start:at+1]
+
+
+def xma_link(folder, *, real=False):
+    if real:
+        ffmpeg = ROOT / 'third_party/ffmpeg'
+        libraries = [ffmpeg / ('lib/lib' + name + '.a') for name in ('avcodec', 'avutil')]
+        if all(lib.is_file() for lib in libraries):
+            return ['-I'+str(ffmpeg / 'include'), str(ROOT / 'runtime/x360abk.c'),
+                    *map(str, libraries), '-lz', '-Wl,-dead_strip']
+    # The synthetic PC fixture has no console bank. Here any PCM request must fail.
+    stub = folder / 'xma_unavailable.c'
+    stub.write_text('''
+#include "x360abk.h"
+int x360abk_parse_carbon(const uint8_t *f, size_t n, X360Abk *b, char *msg, size_t len) {
+    (void)f; (void)n; (void)b; (void)msg; (void)len; return 0;
+}
+int x360abk_decode_carbon(const uint8_t *f, const X360AbkSound *s, int16_t **pcm,
+                          unsigned *frames, char *msg, size_t len) {
+    (void)f; (void)s; (void)pcm; (void)frames; (void)msg; (void)len; return 0;
+}
+''')
+    return [str(stub)]
 
 
 def safety(mutant=None, case=None):
@@ -900,7 +1042,7 @@ def safety(mutant=None, case=None):
         'pool-range': ('unsigned count=M8(0x009c204a),free=0;', 'unsigned count=M16(0x009c218c),free=0;'),
         'gain-rise': ('fminf(1,(float)engine_mix_gain(e)/e->mix_gain)', '(float)engine_mix_gain(e)/e->mix_gain'),
         'off': ('if(!car_audio_enabled() || engine(object)) return;', 'if(engine(object)) return;'),
-        'stock': ('if(key && packages[i].key==key) return packages+i;', 'if(key) return packages+i;'),
+        'stock': ('if(key && p->key==key && !p->retiring && (!selected || p->vault>selected->vault)) selected=p;', 'if(key) return packages;'),
         'ginsu-detach': ('if(e) detach_engine(c,e,0); f_004DC670_orig(c);', 'f_004DC670_orig(c);'),
     }
     if mutant in changes:
@@ -916,10 +1058,10 @@ def safety(mutant=None, case=None):
         assert runtime.count(old) == 1
         runtime = runtime.replace(old, '')
     elif mutant == 'pack':
-        vault = '''if (car_audio_load && a->directory[0]) {
+        vault = '''if (a->directory[0] && car_audio_enabled()) {
             char path[PATH_MAX];
             if (snprintf(path,sizeof path,"%s/AUDIO.BIN",a->directory)>=(int)sizeof path ||
-                car_audio_load(a->key,a->name,path)<0) fail("invalid added-car audio sidecar");
+                car_audio_load(a->key,generation,a->name,path)<0) fail("invalid added-car audio sidecar");
         }'''
     elif mutant:
         raise AssertionError(mutant)
@@ -935,6 +1077,7 @@ def safety(mutant=None, case=None):
                    '-I'+str(folder), '-I'+str(ROOT / 'runtime'), '-I'+str(ROOT / 'recomp'),
                    str(folder / 'harness.c'), str(folder / 'adapter.c'), str(ROOT / 'runtime/interp.c'),
                    *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('csis', 'engine_class', 'player', 'backend', 'filter')],
+                   *xma_link(folder),
                    '-o', str(folder / 'safety')]
         built = subprocess.run(command, capture_output=True, text=True, timeout=90)
         assert built.returncode == 0, built.stderr[-6000:]
@@ -974,6 +1117,181 @@ def native_fragments(proof, source_exe):
     return code, declarations, dispatch, stubs
 
 
+def pc_package_arguments(folder, attributes, resources):
+    # The independent roster is Setup's approved Carbon PC selection list.
+    from setup_kit import car_audio as ca
+    selections = json.loads((ROOT / 'tools/setup_kit/car_selections.json').read_text())
+    roster = [row['origin']['folder'] for row in selections
+              if (row['origin']['game'], row['origin']['platform']) == ('carbon', 'pc')]
+    assert len(set(roster)) == len(roster) == 30
+    reader = ca.AudioAttributes(attributes)
+    by_name = {Path(name).name.casefold(): bytes_ for name, bytes_ in resources.items()}
+    packages, arguments, layers = {}, [], 0
+    for car in roster:
+        data = pack.build(attributes, car, resources)
+        _, version, size, count, tiers, _, checksum = pack.HEADER.unpack_from(data)
+        assert (version, size, checksum) == (2, len(data), hashlib.sha256(data[68:]).digest())
+        offset = 76 + 624 * tiers
+        digests = []
+        for _ in range(count):
+            _, resource_size, plan_size, samples = struct.unpack_from('<4I', data, offset)
+            digests.append(data[offset+16:offset+48])
+            offset += 48 + resource_size + plan_size
+            for _ in range(samples):
+                offset += 16 + struct.unpack_from('<I', data, offset+12)[0]
+        assert offset == size
+        vehicle_tiers = reader.field(pack.hash32('pvehicle'), pack.hash32(car.lower()),
+                                     pack.hash32('Audio'))['values']
+        assert tiers == len(vehicle_tiers)
+        for i, tier in enumerate(vehicle_tiers):
+            for k, field in enumerate((ca.ENGINE, pack.hash32('exhaustaudio'))):
+                node = reader.field(ca.CAR, int(tier['key'], 16), field)['values'][0]
+                expected = []
+                for field_id in (0x2fc9c96f, 0x2cee0a54, 0x3a7c2f3d):
+                    name = reader.field(ca.ENGINE, int(node['key'], 16), field_id)['values'][0]['text']
+                    expected.append(hashlib.sha256(by_name[name.casefold()]).digest())
+                calibration = 76 + 312 * (2*i+k)
+                ids = struct.unpack_from('<3I', data, calibration+300)
+                assert [digests[j] for j in ids] == expected, (car, i, k)
+                assert data[calibration:calibration+300] == pack.calibration(reader, int(node['key'], 16))
+                layers += 1
+        output = folder / (car + '.bin')
+        output.write_bytes(data)
+        arguments += ['ok', car, str(output)]
+        if car in ('997TT', 'R8'):
+            packages[car] = data
+    assert layers == 98
+    wrong = []
+    for own, donor in (('997TT', 'R8'), ('R8', '997TT')):
+        # Exchange complete engine/exhaust tier records and their resources.
+        # The resulting files have an intact payload digest and the claimed
+        # car in the header. Only the car's independently reviewed pin refuses.
+        data = bytearray(packages[donor])
+        data[20:36] = packages[own][20:36]
+        output = folder / (own + '-swapped.bin')
+        output.write_bytes(data)
+        wrong += ['wrong', own, str(output)]
+    print(f'Carbon PC serialized plan: {len(roster)}/30 cars, {layers}/98 ordered layer records')
+    return arguments, wrong
+
+
+def x360_package_arguments(folder, iso, pc_attributes, pc_resources):
+    from setup_kit import car_sources, car_x360_inputs
+    from setup_kit.x360 import Source
+    selections = json.loads((ROOT / 'tools/setup_kit/car_selections.json').read_text())
+    roster = [row for row in selections if row['origin']['platform'] == 'x360']
+    assert len(roster) == 14
+    source = Source(iso)
+    try:
+        logical = car_sources._logical(source, car_sources._physical(source))
+
+        def read(path):
+            return car_sources._read(source, logical[car_sources.path_hash(path)])
+
+        attributes = read('GLOBAL/ATTRIBUTES.BIN')
+        vault = car_x360_inputs.XenonAttributes(attributes)
+        pc_vault = pack.car_audio.AudioAttributes(pc_attributes)
+        packages, arguments = {}, []
+        banks, gins, layers, loop_intros = {}, set(), 0, set()
+        pc_by_name = {Path(n).name.casefold(): d for n, d in pc_resources.items()}
+        gin_comparisons = {}
+        for selection in roster:
+            car = selection['origin']['folder']
+            paths = pack.x360_resource_paths(attributes, car)
+            source_files = {p: read(p) for p in paths}
+            data = pack.build(attributes, car, source_files, platform='x360')
+            path = folder / (car + '-x360.bin')
+            path.write_bytes(data)
+            arguments += ['x360', car, str(path)]
+            assert hashlib.sha256(data).hexdigest() == selection['outputs']['AUDIO.BIN']['sha256']
+            _, version, size, count, tiers, _, checksum = pack.HEADER.unpack_from(data)
+            assert (version, size, checksum) == (3, len(data), hashlib.sha256(data[68:]).digest())
+            offset = 76 + 624 * tiers
+            records, hashes = [], []
+            for _ in range(count):
+                kind, raw_size, plan_size, samples = struct.unpack_from('<4I', data, offset)
+                digest = data[offset+16:offset+48]
+                raw = data[offset+48:offset+48+raw_size]
+                assert hashlib.sha256(raw).digest() == digest
+                end = offset + 48 + raw_size + plan_size
+                if kind == 2:
+                    banks[digest] = sum(struct.unpack_from('<I', data, end+16*j)[0] > 0 for j in range(samples))
+                    for j in range(samples):
+                        if struct.unpack_from('<I', data, end+16*j+8)[0] > 1:
+                            loop_intros.add((digest,j))
+                else:
+                    gins.add(digest)
+                end += 16 * samples
+                records.append((offset, end))
+                hashes.append(digest)
+                offset = end
+            assert offset == size
+            names = {Path(p).name.casefold(): p for p in paths}
+            pc_tiers = pc_vault.field(pack.hash32('pvehicle'), pack.hash32(car.lower()),
+                                      pack.hash32('Audio'))['values']
+            vehicle = list(struct.iter_unpack('>3I', vault.raw('pvehicle', pack.hash32(car.lower()), 'Audio')))
+            assert tiers == len(vehicle) == len(pc_tiers)
+            for i, (_, tier, _) in enumerate(vehicle):
+                for k, field in enumerate(('engineaudio', 'exhaustaudio')):
+                    _, layer, _ = struct.unpack('>3I', vault.raw('caraudio', tier, field))
+                    pc_ref = pc_vault.field(pack.car_audio.CAR, int(pc_tiers[i]['key'],16),
+                                            pack.hash32(field))['values'][0]
+                    expected = []
+                    for field_id in (0x2fc9c96f, 0x2cee0a54, 0x3a7c2f3d):
+                        name_hash, _ = struct.unpack('>II', vault.raw('engineaudio', layer, field_id))
+                        pc_name = pc_vault.field(pack.car_audio.ENGINE, int(pc_ref['key'],16),
+                                                 field_id)['values'][0]['text']
+                        assert name_hash == pack.hash32(pc_name)
+                        name = names[pc_name.casefold()]
+                        if name.endswith('.GIN'):
+                            gin_comparisons[name] = source_files[name] == pc_by_name[pc_name.casefold()]
+                        expected.append(hashlib.sha256(source_files[name]).digest())
+                    calibration = 76 + 312 * (2*i+k)
+                    ids = struct.unpack_from('<3I', data, calibration+300)
+                    assert [hashes[j] for j in ids] == expected
+                    expected_calibration = bytearray(300)
+                    for f, (_, at, width, _, flags, _) in vault.defs[pack.car_audio.ENGINE].items():
+                        if not flags & 2 or not (0x28 <= at <= 300 - width):
+                            continue
+                        raw = vault.raw('engineaudio', layer, f)
+                        unit = min(width, 4)
+                        assert len(raw) == width and width % unit == 0
+                        for pos in range(0, width, unit):
+                            value = int.from_bytes(raw[pos:pos+unit], 'big')
+                            expected_calibration[at+pos:at+pos+unit] = value.to_bytes(unit, 'little')
+                    assert data[calibration:calibration+300] == expected_calibration
+                    layers += 1
+            packages[car] = data, records
+            if car == '997TT':
+                bank = next(p for p in paths if p.endswith('_ENG_MB_EE.ABK'))
+                pc_bank = pc_by_name[Path(bank).name.casefold()]
+                try:
+                    pack.build(attributes, car, source_files | {bank: pc_bank}, platform='x360')
+                except ValueError as error:
+                    assert 'ABKC declared size' in str(error)
+                else:
+                    raise AssertionError('PC bank accepted in Xenon source closure')
+    finally:
+        source.close()
+    assert (len(banks), sum(banks.values()), len(loop_intros), len(gins)) == (26, 208, 3, 52)
+    assert len(gin_comparisons) == 53 and sum(gin_comparisons.values()) == 52
+
+    # Replace one engine bank record, keeping car, version, tier calibration,
+    # GIN identities and resource index intact. Recompute both length and checksum.
+    recipient, rec = packages['997TT']
+    donor, donor_rec = packages['R8']
+    first, last = rec[struct.unpack_from('<I', recipient, 76+300)[0]]
+    src_first, src_last = donor_rec[struct.unpack_from('<I', donor, 76+300)[0]]
+    swapped = bytearray(recipient[:first] + donor[src_first:src_last] + recipient[last:])
+    struct.pack_into('<I', swapped, 8, len(swapped))
+    swapped[36:68] = hashlib.sha256(swapped[68:]).digest()
+    negative = folder / 'wrong-x360-bank.bin'
+    negative.write_bytes(swapped)
+    assert layers == 44
+    print('Carbon Xenon plan: 14 cars, 44 layers, 26 banks/208 slots, 3 loop intros and 53 GINs; PC ABK refused')
+    return arguments, ['wrong', '997TT', str(negative)], ['wrong-platform', '997TT', str(folder / '997TT.bin')]
+
+
 def run(original=False, mutant=None):
     proof = module(ROOT / 'runtime/car_audio_runtime_test.py', 'runtime_proof')
     inputs = proof.private_inputs()
@@ -981,7 +1299,8 @@ def run(original=False, mutant=None):
         return None
     resources, _, source_exe, native_exe = inputs
     source = input_path('NFSC')
-    data = pack.build((source / 'GLOBAL/attributes.bin').read_bytes(), 'jaguarxk', resources)
+    attributes = (source / 'GLOBAL/attributes.bin').read_bytes()
+    data = pack.build(attributes, 'jaguarxk', resources)
     with tempfile.TemporaryDirectory(prefix='car-audio-live-') as directory:
         folder = Path(directory)
         (folder / 'AUDIO.BIN').write_bytes(data)
@@ -993,13 +1312,13 @@ def run(original=False, mutant=None):
             live = live.replace('init_engine(c,object,1);', '').replace('init_engine(c,object,0);', '')
         changes = {
             'serving': ('return fd;', 'close(fd); return -1;'),
-            'secondary': ('for(unsigned k=0;k<2;k++) {\n        Resource *r=p->resource+p->layer[k][0]; int32_t words[100];',
-                          'for(unsigned k=0;k<1;k++) {\n        Resource *r=p->resource+p->layer[k][0]; int32_t words[100];'),
+            'secondary': ('for(unsigned k=0;k<2;k++) {\n        Resource *r=p->resource+e->tier->layer[k][0]; int32_t words[100];',
+                          'for(unsigned k=0;k<1;k++) {\n        Resource *r=p->resource+e->tier->layer[k][0]; int32_t words[100];'),
             'pcm': ('car_audio_backend_render(&backend,dry,wet,PACKET_FRAMES);', '(void)dry; (void)wet;'),
             'gin': ('uint32_t gin=e->ginsu[k].gin;', 'uint32_t gin=e->ginsu[0].gin;'),
             'descriptor': ('gmalloc_try(160)', 'gmalloc_try(64)'),
             'profile': ('if(strcmp(package_id,', 'if(0 && strcmp(package_id,'),
-            'defer': ('engines[i].package->retiring=1; return;', 'return;'),
+            'defer': ('p->retiring=1;', '/* omit retirement */'),
             'gain': ('M16(attr+8)=4; M8(play)=127;', 'M16(attr+8)=4; M8(play)=0;'),
             'headroom': ('if(bridge.live && car_audio_enabled() && frames)', 'if(0 && bridge.live && car_audio_enabled() && frames)'),
             'detach': ('if(e) detach_engine(c,e,0); f_004DC1D0_orig(c);', 'f_004DC1D0_orig(c);'),
@@ -1015,6 +1334,7 @@ def run(original=False, mutant=None):
         harness = HARNESS.replace('NATIVE_DECLARATIONS', declarations).replace('NATIVE_DISPATCH', dispatch)
         harness = harness.replace('NATIVE_STUBS', stubs).replace('VOICE_WRAPPERS', wrappers)
         (folder / 'harness.c').write_text(harness)
+        decoder = xma_link(folder, real=True)
         command = [shutil.which('clang') or 'clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-O1', '-g',
                    '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-Wno-unused-variable',
                    '-Wno-parentheses-equality', '-Wno-deprecated-declarations', '-ffp-contract=off',
@@ -1022,22 +1342,48 @@ def run(original=False, mutant=None):
                    '-I'+str(folder), '-I'+str(ROOT / 'runtime'), '-I'+str(ROOT / 'recomp'),
                    str(folder / 'harness.c'), str(folder / 'native.c'), str(ROOT / 'runtime/interp.c'),
                    *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('runtime', 'csis', 'engine_class', 'player', 'backend', 'filter')],
+                   *decoder,
                    '-o', str(folder / 'live')]
         built = subprocess.run(command, capture_output=True, text=True, timeout=90)
         assert built.returncode == 0, built.stderr[-6000:]
+        xenon_package = None
+        if not original and mutant in (None, 'profile'):
+            arguments, wrong = pc_package_arguments(folder, attributes, resources)
+            console = next(input_path('NFSC_X360').glob('*.iso'), None)
+            if console and len(decoder) > 1:
+                good_x360, swap_x360, platform_x360 = x360_package_arguments(folder, console, attributes, resources)
+                tests = [wrong, swap_x360] if mutant else [arguments + wrong, good_x360 + swap_x360 + platform_x360]
+                xenon_package = folder / 'JAGUARXK-x360.bin'
+            else:
+                print('Carbon Xenon proof skipped: local console ISO and FFmpeg libraries required')
+                tests = [wrong if mutant else arguments + wrong]
+            for cases in tests:
+                admitted = subprocess.run([str(folder / 'live'), '--admit', *cases], capture_output=True,
+                                          text=True, timeout=90)
+                if mutant:
+                    assert admitted.returncode == 1 and 'wrong layer accepted' in admitted.stderr, admitted.stderr[-4000:]
+                else:
+                    assert admitted.returncode == 0, admitted.stderr[-4000:]
+                    print(admitted.stdout.strip())
+            if mutant:
+                print('wrong-layer controls without per-car pins: exit 1, swapped bank accepted')
+                return 1
         native_path = Path(os.environ.get('NFS_SPEED_EXE', ROOT.parent / 'Need For Speed Most Wanted Black Edition/speed.exe'))
         stock = [native_path.parent / 'SOUND/ENGINE' / name for name in ('GIN_DB9.gin', 'GIN_DB9_DCL.gin')]
         assert all(p.is_file() for p in stock), 'private stock GIN inputs absent'
-        result = subprocess.run([str(folder / 'live'), str(folder / 'AUDIO.BIN'), str(folder / 'memory.bin'), *map(str, stock)],
-                                capture_output=True, text=True, timeout=90)
-        assert result.returncode == 0, result.stderr[-6000:]
-        row = json.loads(result.stdout)
-        print(json.dumps(row, sort_keys=True))
-        assert row['resource_matches'] == row['expected'], 'engine/exhaust resource matches 0/2 -> 2/2 required'
-        assert row['source_gins'] == 4
-        assert row['aems_lifecycle'] == 1
-        assert row['nonzero_pcm'] and row['bank_pcm'] and row['ginsu_pcm'] and row['energy'] > 0, 'nonzero source bank/Ginsu PCM required'
-        assert row['allocations'] == row['freed'] and row['packet_creates'] == row['packet_destroys']
+        for image in (folder / 'AUDIO.BIN', xenon_package):
+            if image is None:
+                continue
+            result = subprocess.run([str(folder / 'live'), str(image), str(folder / 'memory.bin'), *map(str, stock)],
+                                    capture_output=True, text=True, timeout=90)
+            assert result.returncode == 0, result.stderr[-6000:]
+            row = json.loads(result.stdout)
+            print(json.dumps(dict(row, platform='x360' if image == xenon_package else 'pc'), sort_keys=True))
+            assert row['resource_matches'] == row['expected'], 'engine/exhaust resource matches 0/2 -> 2/2 required'
+            assert row['source_gins'] == 4
+            assert row['aems_lifecycle'] == 1
+            assert row['nonzero_pcm'] and row['bank_pcm'] and row['ginsu_pcm'] and row['energy'] > 0, 'nonzero source bank/Ginsu PCM required'
+            assert row['allocations'] == row['freed'] and row['packet_creates'] == row['packet_destroys']
         return row
 
 
@@ -1051,7 +1397,7 @@ def main():
     args = parser.parse_args()
     if args.private or args.original or args.mutant:
         row = run(args.original, args.mutant)
-        return 3 if row is None else 0
+        return 3 if row is None else (1 if args.mutant == 'profile' else 0)
     safety(args.safety_control)
     if not args.safety_control:
         for control in controls:

@@ -1,17 +1,14 @@
 NFS Native - Setup
 
 Best of all worlds: your PC game on Mac, with console-inspired features and more from your own Xbox 360 files. Setup contains no game files; nothing is uploaded.
-Optional later-game cars: appearance review accepted 10 PC and 9 Xbox 360
-conversions: 997GT3RS, BRERA, CCX, CORVETTEZ06, EUROPA, JAGUARXK, MR2,
-R32 and R8 on both platforms, plus 300C on PC. JAGUARXK is visible in race
-and showroom on both platforms.
-240SX remains unapproved on both platforms because its logo is a placeholder.
-997TT, CAMARON, G35, MAZDASPEED3 and MUSTANGSHLBYN on both, plus 300C on
-Xbox 360, failed conversion at review time. Later fixes need new render evidence.
-Most Wanted Setup includes approvals for the accepted cars.
-Recognition alone does not approve a car.
-Most Wanted only: use Extras to import or manage approved cars from your own
-files. Enable Cars from later games in the game settings and restart.
+Optional cars in Most Wanted: use your own installed Carbon, ProStreet or
+Undercover PC folder, or a Carbon Xbox 360 folder, .iso, or .zip/.7z containing
+one of those Xbox 360 sources.
+In Setup, open Extras from your other games. For an existing install, choose
+Manage installed extras… on the welcome screen. Choose a Later-game source,
+tick the cars you want, click Retry check, then Import selected extras.
+In the game, press F10 (or Fn+F10), open Cars & cutscenes, turn on Cars from
+later games, then quit and reopen the game.
 Keep retained generations: if a career needs removed cars, restore its verified
 generation or reimport identical inputs with the same package, then restart.
 Do not delete the career or its dependency files to bypass a refusal.

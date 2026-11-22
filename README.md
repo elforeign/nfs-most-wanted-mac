@@ -66,7 +66,7 @@ Press **F10** (Fn+F10 on a Mac keyboard, or click the touchpad on a DualSense or
 - Gameplay options: fixed heat level, no rubber banding, skip the intro movies or the prologue, more reward cards,
   Unlock All.
 - Record clips with sound, save the last 30 seconds, or stream to YouTube.
-- Underglow on every car you can own, the stock BMW M3 GTR in the car lot, and 75 optional cars in Setup
+- Underglow on every car you can own, the stock BMW M3 GTR in the car lot, and [75 optional cars](GETTING_STARTED.md#added-cars-optional) in Setup
   from your own files. Carbon PC offers 30 cars, with 14 of those also available from Carbon Xbox 360.
   ProStreet PC offers 31 and Undercover PC offers 14.
 - Updates from inside the game, problem reports ready for a GitHub issue, and Discord status (off until you turn it

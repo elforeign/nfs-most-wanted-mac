@@ -242,6 +242,15 @@ class Proof(unittest.TestCase):
         self.assertEqual(report['pointers'][0]['target'], report['modules'][0]['state'] + 900)
         json.dumps(report)
 
+    def test_import_requires_instance_on_guest_stack(self):
+        data = bytearray(fixture())
+        descriptor = abi._u32(data, 0x1c)
+        code = abi._u32(data, descriptor + 40)
+        self.assertEqual(data[code + 11:code + 13], b'\x56\xe8')
+        data[code + 11] = 0x90
+        with self.assertRaisesRegex(ValueError, 'import must push the instance argument'):
+            abi.inspect_bank(bytes(data), resource(data))
+
     def test_import_contracts_and_unknown(self):
         expected = {0, 1, 4, 6, 7, 8, 10, 13, 15, 16, 17, 21, 22, 25, 27, 28, 29, 30, 31} | {35, 38}
         self.assertEqual(set(abi.ARITHMETIC) | set(abi.LIFECYCLE), expected)

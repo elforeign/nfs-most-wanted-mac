@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.8.1
+
+- **Added cars sit right:** the 61 added cars converted from Carbon, ProStreet and Undercover no longer sit too low or flip over; their collision shape now matches their size.
+- **Car select fixes:** the tyres on the Pontiac GTO (1965) and the BMW M3 (E92) no longer show wedges in the showroom mirror, and all 75 added cars show their own names.
+- **Their own engine sound:** the 30 Carbon cars, and the Carbon Xbox 360 cars Setup can import, play their own engine sound by default; ProStreet and Undercover cars keep a Most Wanted engine sound. Import an earlier Carbon car again in Setup to get its sound.
+- **How to add cars:** see "Added cars (optional)" in GETTING_STARTED.md.
+
 ## 4.8.0
 
 - **Added cars (75):** Setup can now add 75 extra cars from your own copies of other Need for Speed games. Setup converts them on your Mac from your game files; this port ships no car data. They appear in the game's car list alongside Most Wanted's own cars.

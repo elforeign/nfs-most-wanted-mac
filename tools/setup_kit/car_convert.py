@@ -1884,6 +1884,9 @@ def _converter_policy(platform, lighting, tracked, mac_audio=False):
     if mac_audio:
         from . import car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank
         modules += [Path(m.__file__) for m in (car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank)]
+        if platform == 'x360':
+            from . import car_audio_x360, car_selection
+            modules += [Path(m.__file__) for m in (car_audio_x360, car_selection)]
     if platform == 'x360':
         from . import car_x360, car_x360_inputs
         modules += [Path(m.__file__) for m in (car_x360, car_x360_inputs)]
@@ -2082,7 +2085,43 @@ def convert(car_dir, mw_donor_dir, shared, out_dir, *, lighting=None, mac_audio=
         raise FormatError('invalid conversion input: ' + str(exc)) from exc
 
 
-def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None, writer=None):
+# Source-recognized retail console sets peak at 394,709 bytes per resource
+# and 2,917,462 bytes per car (350Z). The 4 MiB cap leaves 1,276,842 bytes
+# of headroom. Check both limits before reading the selected payloads.
+X360_AUDIO_FILE_LIMIT = 512 << 10
+X360_AUDIO_TOTAL_LIMIT = 4 << 20
+
+
+def _x360_audio_pins(car):
+    from . import car_selection
+    origin = dict(game='carbon', platform='x360', folder=car)
+    for row in car_selection.load():
+        if row['origin'] == origin:
+            return {name: pin for name, pin in row['inputs']['source'].items()
+                    if name.startswith('SOUND/ENGINE/')}
+    raise FormatError('No approved console engine audio for ' + car + '.')
+
+
+def x360_audio_inputs(attributes, car, logical):
+    """Preflight the complete selected console audio closure using range metadata."""
+    from . import car_audio_pack, car_sources
+    sizes = {}
+    for name in car_audio_pack.x360_resource_paths(attributes, car):
+        entry = logical.get(car_sources.path_hash(name))
+        require(entry is not None, 'Incomplete console engine audio: missing ' + name + '.')
+        sizes[name] = entry[2]
+    require(all(0 < size <= X360_AUDIO_FILE_LIMIT for size in sizes.values()),
+            'Console engine audio exceeds the file size limit.')
+    require(sum(sizes.values()) <= X360_AUDIO_TOTAL_LIMIT,
+            'Console engine audio exceeds the total size limit.')
+    pins = _x360_audio_pins(car)
+    require(sizes.keys() == pins.keys(), 'Console engine audio selection does not match the approved files.')
+    for name, size in sizes.items():
+        require(size == pins[name]['size'], 'Console engine audio does not match the approved file: ' + name + '.')
+    return pins
+
+
+def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None, mac_audio=False, writer=None):
     """Convert a live D-normalized Bundle through the common audited writer.
 
     Keep its Source open until return. Bundle dependencies, including additional
@@ -2100,13 +2139,31 @@ def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None, 
         source_path = bundle._reader.source.path.resolve()
         tracked = _Inputs(out_dir, (source_path if source_path.is_dir() else source_path.parent, mw_root, mw_donor_dir))
         code = _Inputs(out_dir, ())
-        policy, options = _converter_policy('x360', lighting, code)
+        policy, options = _converter_policy('x360', lighting, code, mac_audio)
+        source_reader = bundle._reader
+        attr = source_reader.read('GLOBAL/ATTRIBUTES.BIN')
+        audio_pack = None
+        audio_inputs = {}
+        if mac_audio:
+            from . import car_audio_pack
+            pins = x360_audio_inputs(attr, car, source_reader.logical)
+            payloads = {}
+            for name, pin in pins.items():
+                identity = cs.path_hash(name)
+                row = dict(path_hash=identity, **pin)
+                require(identity not in bundle.inputs and source_reader.expected.setdefault(identity, row) == row,
+                        'X360 audio dependency collision')
+                payloads[name] = source_reader.read(name)
+                audio_inputs[identity] = source_reader.inputs[identity]
+            audio_pack = car_audio_pack.build(attr, car, payloads, platform='x360')
+        source_inputs = bundle.inputs | audio_inputs
+
         def check_source():
-            require(bundle.inputs == bundle._reader.inputs, 'X360 omitted or altered dependency')
-            require(bundle.inputs.keys() == bundle._reader.expected.keys(), 'X360 dependency closure incomplete')
+            require(source_inputs == source_reader.inputs, 'X360 omitted or altered dependency')
+            require(source_inputs.keys() == source_reader.expected.keys(), 'X360 dependency closure incomplete')
             require(all(row['size'] == bundle._reader.expected[key]['size'] and
                         row['sha256'] == bundle._reader.expected[key]['sha256']
-                        for key, row in bundle.inputs.items()), 'X360 dependency fingerprint differs')
+                        for key, row in source_inputs.items()), 'X360 dependency fingerprint differs')
             required = [f'CARS/{car}/GEOMETRY.BIN', f'CARS/{car}/TEXTURES.BIN',
                         'GLOBAL/GLOBALB.LZC', 'GLOBAL/GLOBALB.BUN', 'GLOBAL/ATTRIBUTES.BIN', 'CARS/TEXTURES.BIN']
             require(all(cs.path_hash(n) in bundle.inputs for n in required), 'X360 dependency closure incomplete')
@@ -2123,11 +2180,11 @@ def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None, 
         return _convert_decoded(car=car, donor=donor, source=bundle.geometry, source_tex=None,
             models=bundle.models, textures=bundle.textures, shared_raw=bundle.global_data,
             attributes=bundle.attributes, mw_donor_dir=mw_donor_dir, mw_root=mw_root, out_dir=out_dir,
-            tracked=tracked, platform='x360', source_inputs=lambda: copy.deepcopy(bundle.inputs),
+            tracked=tracked, platform='x360', source_inputs=lambda: copy.deepcopy(source_inputs),
             source_check=check_source, code=code, policy=policy, lighting=options,
             shared_textures=bundle.shared_textures, source_aliases=bundle.texture_aliases,
             runtime_bindings=bundle.runtime_bindings, runtime_materials=bundle.runtime_materials,
-            grip=ci.grip_metadata(bundle._reader.read('GLOBAL/ATTRIBUTES.BIN'), car, donor), writer=writer)
+            grip=ci.grip_metadata(attr, car, donor), audio_pack=audio_pack, writer=writer)
     except ConversionError:
         raise
     except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, UnicodeError, np.linalg.LinAlgError) as exc:

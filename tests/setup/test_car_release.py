@@ -22,8 +22,8 @@ admits 9; altered X360 source input and converter output files each fail their
 pin before publication (2/2 refused: changed source input / changed converter
 output). An altered installed X360 output admits zero cars (exit 1). PC 10/10
 identities and their original ordered approval variants remain unchanged.
-Additional measured contracts: PC 6/6, X360 5/6; all 343 changed input
-pins and 88 changed output pins reject (including one deliberately broken
+Additional measured contracts: PC 6/6, X360 5/6; all 448 changed input
+pins and 94 changed output pins reject (including one deliberately broken
 pin per edition/car). Original 19 selections and ordered approval variants
 remain byte-identical to their GRIP.BIN refresh. In an exported source tree,
 reproduce the rows with --review-additions PC_ROOT X360_ISO MW_ROOT WORK
@@ -82,8 +82,8 @@ LOCK = 'tools/installer/deps.lock.json'
 SETUP_PYTHON = 'build/installer/dmg/NFS Most Wanted Native Setup.app/Contents/Resources/python/bin/python3'
 PIN =re.compile(r'^PACKAGED_POLICY_SHA256 = .*$', re.M)
 # Generated from actual PC/X360 conversions by --refresh-converter-pins.
-MEASURED_OUTPUTS = '{"pc":{"converter":{"policy":"08fa0ba94725d1ac53c7dce7c894bbefeb6d52785e0fc19a669c29a806ee4918","revision":2},"outputs":{"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"630e44334ca9b1aa5a966a15ee7204833243de6b97f5d2b634b9b484661ce46a","size":31794692},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"130f958a3932f42c42a5dd13b8c8f961b503b8b22a29890ece199b9e0b56b36e","size":894620},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0},"x360":{"converter":{"policy":"93288adaecbae6783424fa82be0c32201f667d770dc2226a1e1306ac09038561","revision":2},"outputs":{"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"85d950fcd3174a2ba3906c50004e9ebc283b04a154d88403b0642e2bdc947f7b","size":24024061},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"2bd3ebccf9d75de9e773b140297ca7283fe1f1a1345ae08ed308ddda659f0e39","size":931484},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0}}\n'
-MEASURED_OUTPUTS_SHA256 = '9b6a1b1bb53ccb5056a30a5d09d1b8fb41b5a5892df88a44b26e7b94f5bec5e4'
+MEASURED_OUTPUTS = '{"pc":{"converter":{"policy":"31dbb4da359500670d43861c6be1234ab0116600feed45ec50f0b92562561f75","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"fbe66eb609a07e9c7ee3519ee42433ec8e7ce50b77e4d0c51f25e811ad04c5cb","size":4028804},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"630e44334ca9b1aa5a966a15ee7204833243de6b97f5d2b634b9b484661ce46a","size":31794692},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"130f958a3932f42c42a5dd13b8c8f961b503b8b22a29890ece199b9e0b56b36e","size":894620},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0},"x360":{"converter":{"policy":"b0de600956160ce35770946c518726725f0b9fbb1bc53106ecb980a4d9e6a1b3","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"09f8cfc744202d6af67aff6b49f5240341f0d94a3debe0ae8ed558f53d0f14df","size":1087690},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"85d950fcd3174a2ba3906c50004e9ebc283b04a154d88403b0642e2bdc947f7b","size":24024061},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"2bd3ebccf9d75de9e773b140297ca7283fe1f1a1345ae08ed308ddda659f0e39","size":931484},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0}}\n'
+MEASURED_OUTPUTS_SHA256 = 'df1cef09074eedf2b07d8dad6737b344fb8ece0606c051766e345a15c7187dbc'
 FORBIDDEN = (
     'tools_snapshot/carbon_car.py', 'tools_snapshot/carbon_batch.py',
     'tools_snapshot/private_cars.py', 'tools_snapshot/carbon_namespace.py',
@@ -225,7 +225,13 @@ def converter_pin_report(emulate):
         except cc.CatalogError as exc:
             if 'conversion contract is not approved' not in str(exc):
                 raise
-    return dict(rows=len(rows), mismatched=len(mismatched), first=mismatched[:3], accepted=accepted)
+    donor_rows = x360_donor_rows(measured)
+    for row in donor_rows:
+        reservations = cc.reservations()
+        reservations[row['slot']] = row
+        cc.make_catalog(reservations, cc.packaged_policy())
+    return dict(rows=len(rows), mismatched=len(mismatched), first=mismatched[:3], accepted=accepted,
+                console_donor_approved=len(donor_rows))
 
 
 def review_additions(pc, x360, mw, work):
@@ -357,10 +363,25 @@ def refreshed_converter_rows(rows):
         game, platform = row['origin']['game'], row['origin']['platform']
         mw_names = car_import._mw_names(game, row['donors']['model'])
         available = row['inputs']['dependencies'].keys() | row['inputs']['donor'].keys()
-        code, policy, _ = car_import._code(platform, sorted(set(mw_names) - available), game)
+        code, policy, _ = car_import._code(platform, sorted(set(mw_names) - available), game,
+                                           mac_audio='AUDIO.BIN' in row['outputs'])
         row['inputs']['converter'] = code.pins
         row['converter']['policy'] = policy['sha256']
     return refreshed
+
+
+def x360_donor_rows(rows):
+    """Derive the donor variant of measured console outputs for logical exports."""
+    donor_rows = []
+    for row in rows:
+        if (row['origin']['game'], row['origin']['platform']) != ('carbon', 'x360'):
+            continue
+        donor = copy.deepcopy(row)
+        del donor['outputs']['AUDIO.BIN']
+        donor['inputs']['source'] = {name: pin for name, pin in donor['inputs']['source'].items()
+                                     if not name.startswith('SOUND/ENGINE/')}
+        donor_rows.append(donor)
+    return refreshed_converter_rows(donor_rows)
 
 
 def measured_converter_rows(rows, pc, x360, mw, later_pc=None):
@@ -419,6 +440,11 @@ def refresh_converter_pins(pc, x360, mw, prostreet, undercover):
         index = variants.index(variant)
         assert cc.slot_compatibility(before) == cc.slot_compatibility(after)
         variants[index] = dict(contract=cc.contract_hash(after), compatibility=cc.slot_compatibility(after))
+    for row in x360_donor_rows(refreshed):
+        variants = policy['slots'][row['slot']]['variants']
+        variant = dict(contract=cc.contract_hash(row), compatibility=cc.slot_compatibility(row), legacy=1)
+        if variant not in variants:
+            variants.append(variant)
     (ROOT / POLICY).write_bytes(cc.encoded(policy))
     generate(ROOT)
     cc.PACKAGED_POLICY_SHA256 = cc.digest(policy)
@@ -558,7 +584,7 @@ def export_payload(base, fault=None):
     names = command(['git', '-C', str(ROOT), 'ls-files', '-z']).stdout.split('\0')
     names += ['tools/publish/denylist_carbon.txt', POLICY, HEADER, SELECTIONS, 'tools/setup_kit/car_selection.py',
               'tests/setup/test_car_release.py', 'runtime/save_file_fixture.py']
-    names += ['tools/setup_kit/carbon_source.py']
+    names += ['tools/setup_kit/carbon_source.py', 'tools/setup_kit/car_audio_x360.py']
     names += [f'tools/setup_kit/{stem}.py' for stem in
               ('ps_attrib', 'ps_namespace', 'uc_batch', 'ucpc_car', 'v25_batch', 'v25_car')]
     allowed = publish.patterns(ROOT / 'tools/publish/allowlist.txt')
@@ -772,6 +798,8 @@ class CarRelease(unittest.TestCase):
         # Executable and writer pins are remeasured; source, donors and selection
         # semantics retain their original reviewed bytes.
         for row in original:
+            row['inputs']['source'] = {name: pin for name, pin in row['inputs']['source'].items()
+                                       if not name.startswith('SOUND/ENGINE/')}
             del row['inputs']['converter'], row['converter'], row['outputs']
         self.assertEqual(len(original), 19)
         self.assertEqual(hashlib.sha256(cc.encoded(original)).hexdigest(),
@@ -796,8 +824,8 @@ class CarRelease(unittest.TestCase):
         proof = verify_contracts(ROOT, rows)
         self.assertEqual(proof['platforms'], dict(pc=6, x360=5))
         self.assertEqual(proof['contracts'], 11)
-        self.assertEqual(proof['rejected']['inputs'], 343)
-        self.assertEqual(proof['rejected']['outputs'], 88)
+        self.assertEqual(proof['rejected']['inputs'], 523)
+        self.assertEqual(proof['rejected']['outputs'], 99)
         print('additional contracts: ' + json.dumps(proof, sort_keys=True))
 
     def test_multigame_roster(self):
@@ -832,7 +860,8 @@ class CarRelease(unittest.TestCase):
         added = {name: pc[name] for name in CARBON_PC_PROMOTIONS if name in pc}
         self.assertEqual({name: row['id'] for name, row in added.items()}, CARBON_PC_PROMOTIONS)
         self.assertEqual(len(pc), 30)
-        outputs = {name: {file: pin['sha256'] for file, pin in row['outputs'].items()}
+        self.assertEqual(sum('AUDIO.BIN' in row['outputs'] for row in pc.values()), 30)
+        outputs = {name: {file: pin['sha256'] for file, pin in row['outputs'].items() if file != 'AUDIO.BIN'}
                    for name, row in added.items()}
         self.assertEqual(sum(map(len, outputs.values())), 112)
         # Canonical SHA-256 of the independently approved local output hashes.
@@ -889,6 +918,7 @@ class CarRelease(unittest.TestCase):
                       f'mismatched, {report["accepted"]}/{report["rows"]} measured contracts approved')
                 self.assertEqual(report['mismatched'], 0, report['first'])
                 self.assertEqual(report['accepted'], len(rows))
+                self.assertEqual(report['console_donor_approved'], 14)
         self.assertEqual(hashlib.sha256(MEASURED_OUTPUTS.encode('ascii')).hexdigest(),
                          MEASURED_OUTPUTS_SHA256)
         measured = json.loads(MEASURED_OUTPUTS)
@@ -928,14 +958,14 @@ class CarRelease(unittest.TestCase):
         doc = verify_policy(ROOT)
         self.assertEqual(len(doc['slots']), 90)
 
-    def test_legacy_approvals_match_public_release(self):
-        """c4b98837 retains 0/30 of these 4.7.1 approvals. The fixed policy retains 30/30."""
+    def test_retained_approvals_match_public_releases(self):
+        """Preserve 311 prior contracts and retain the 14 refreshed console donor variants."""
         doc = verify_policy(ROOT)
         entries = sorted((slot['slot'], variant['contract'], variant['compatibility'])
                          for slot in doc['slots'] for variant in slot['variants']
                          if variant.get('legacy') == 1)
-        self.assertEqual(len(entries), 30)
-        self.assertEqual(cc.digest(entries), '90a9dcdfdd3f04a141c95e902b03990c07d90ee6a1cf4af0a5826fbdff7a0107')
+        self.assertEqual(len(entries), 325)
+        self.assertEqual(cc.digest(entries), '7d8c8b8a067f55b21e5ab719037135b0ef8ece7480fb306863cfd132a6d65a0b')
 
     @unittest.skipUnless((ROOT / 'tools/publish/import.py').is_file(), 'exporter belongs to the source checkout')
     def test_later_pc_shipped_setup(self):

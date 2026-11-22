@@ -94,7 +94,8 @@ static inline NSString *PURPrepareScript(NSString *script) {
         @"if os.environ.get('PUB_UPDATE_REHEARSAL_FAULT') == 'rebuild':\n"
         @"    original_run = backend.Runner.run\n"
         @"    def fail_build(self, argv, *args, **kwargs):\n"
-        @"        if 'runtime/build.sh' in [str(a) for a in argv]: raise backend.SetupError('Rehearsal forced rebuild failure')\n"
+        @"        build_commands = ('runtime/build.sh', 'recomp/build_private_runtime.py')\n"
+        @"        if any(str(a) in build_commands for a in argv): raise backend.SetupError('Rehearsal forced rebuild failure')\n"
         @"        return original_run(self, argv, *args, **kwargs)\n"
         @"    backend.Runner.run = fail_build\n";
     return [script stringByReplacingOccurrencesOfString:@"stream = Events()\n" withString:guard];

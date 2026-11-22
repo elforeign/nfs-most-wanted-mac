@@ -28,10 +28,17 @@ MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = '54d1cae330a4e6313541fdc24805849b2b2ad0f1710bbc89817a44f2eaff1f5e'
+PACKAGED_POLICY_SHA256 = '5abf0a914b1029ad9cac84a0e90e0f6c581b79e98b74b84c28eb8c96be4408ed'
 # Public Setup 4.7.1 catalog and retained preparation receipts.
 LEGACY_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
 LEGACY_POLICY_REVISION = 2
+# Last policy before Carbon PC audio. Its original contracts remain reviewable.
+PRE_AUDIO_POLICY_SHA256 = '54d1cae330a4e6313541fdc24805849b2b2ad0f1710bbc89817a44f2eaff1f5e'
+PRE_AUDIO_POLICY_REVISION = 4
+PC_AUDIO_POLICY_SHA256 = 'fb94c2862e1ee321c1220b97d22b275da3ea73fbe697d082d745c48395402aa1'
+PC_AUDIO_POLICY_REVISION = 5
+X360_AUDIO_POLICY_SHA256 = '243e055faf5957ba00d4ce5329756e6861355571c44335e1fe0543d32b7c4626'
+X360_AUDIO_POLICY_REVISION = 6
 POLICY_PATH = Path(__file__).with_name('car_approvals.json')
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Z0-9_]{1,31}\Z')
@@ -507,6 +514,8 @@ def _row(row, expected, policy):
     _pins(row['outputs'])
     _require(REQUIRED_OUTPUTS <= row['outputs'].keys() and
              all(_OUTPUT.fullmatch(name) for name in row['outputs']), 'missing required output or invalid filename')
+    _require('AUDIO.BIN' not in row['outputs'] or origin['game'] == 'carbon',
+             'audio sidecar requires Carbon provenance')
     contract, compatibility = contract_hash(row), slot_compatibility(row)
     _require(any(v['contract'] == contract and v['compatibility'] == compatibility for v in policy['variants']),
              'conversion contract is not approved')
@@ -533,7 +542,8 @@ def make_catalog(rows, policy):
 def _catalog(doc, policy):
     _keys(doc, ('schema', 'policy_sha256', 'compatibility', 'cars'))
     _require(type(doc['schema']) is int and doc['schema'] == 1, 'unsupported catalog schema')
-    _require(doc['policy_sha256'] in (policy.sha256, LEGACY_POLICY_SHA256),
+    _require(doc['policy_sha256'] in (policy.sha256, LEGACY_POLICY_SHA256, PRE_AUDIO_POLICY_SHA256,
+                                    PC_AUDIO_POLICY_SHA256, X360_AUDIO_POLICY_SHA256),
              'catalog policy or compatibility mismatch')
     _require(dict(doc, policy_sha256=policy.sha256) == make_catalog(doc['cars'], policy),
              'catalog policy or compatibility mismatch')

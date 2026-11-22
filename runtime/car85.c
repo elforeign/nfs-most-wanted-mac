@@ -22,6 +22,7 @@
 #include "private_cars.h"
 #include "traffic_pilot.h"
 #include "car_kit_fallback.h"
+#include "car_audio.h"
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
 #include "car_physics.h"
 #else
@@ -80,10 +81,15 @@ static Addition *asset(unsigned j) { return j < nadditions ? additions + j : &tr
 static _Thread_local Addition *model_namespace;
 static uint32_t parts_hash(const char *s);
 /* Standalone catalog checks omit the optional sidecar adapter. */
-__attribute__((weak)) int car_audio_load(uint32_t key, const char *name, const char *path) {
-    (void)key; (void)name; (void)path; return 0;
+__attribute__((weak)) int car_audio_enabled(void) { return 0; }
+__attribute__((weak)) int car_audio_load(uint32_t key, uint64_t generation, const char *name, const char *path) {
+    (void)key; (void)generation; (void)name; (void)path; return 0;
 }
-__attribute__((weak)) void car_audio_unload(uint32_t key) { (void)key; }
+__attribute__((weak)) int car_audio_load_stream(uint32_t key, uint64_t generation, const char *name,
+                                              unsigned version, FILE *stream) {
+    (void)key; (void)generation; (void)name; (void)version; (void)stream; return 0;
+}
+__attribute__((weak)) void car_audio_unload(uint64_t generation) { (void)generation; }
 void f_00751540_orig(Cpu *c);
 void f_00752940_orig(Cpu *c);
 void f_00752B60_orig(Cpu *c);
@@ -177,13 +183,11 @@ void car85_vault_unloaded(uint32_t vault) {
             traffic_generation[i] = 0; traffic_vault[i] = 0;
             if (!i) traffic_pv_layout = 0;
         }
+    car_audio_unload(generation);
     unsigned before = nsources;
     memset(v, 0, sizeof *v);
     for (unsigned i = 0; i < nsources; ) {
         if (sources[i].generation != generation) { ++i; continue; }
-        if (car_audio_unload && M32(sources[i].ld + 4) == PVEHICLE)
-            for (unsigned j=0;j<nadditions;++j)
-                if (additions[j].pv==M32(sources[i].ld)) car_audio_unload(additions[j].key);
         gfree(sources[i].ld);
         memmove(sources + i, sources + i + 1, (--nsources - i) * sizeof *sources);
     }
@@ -544,6 +548,7 @@ static int on(void) {
 #endif
             folder(a->name,car->name); folder(a->donor_folder,car->donor);
             a->catalog_id=car->id;
+            snprintf(a->display_name,sizeof a->display_name,"%s",car->display_name);
             snprintf(a->directory,sizeof a->directory,"%s",car->geometry);
             char *slash=strrchr(a->directory,'/');
             if (!slash) fail("verified addition has no pack directory");
@@ -555,7 +560,6 @@ static int on(void) {
             snprintf(a->pvehicle,sizeof a->pvehicle,"%s",car->pvehicle);
             snprintf(a->frontend,sizeof a->frontend,"%s",car->frontend);
             snprintf(a->ecar,sizeof a->ecar,"%s",car->ecar);
-            snprintf(a->display_name,sizeof a->display_name,"%s",car->display_name);
             snprintf(a->manufacturer_name,sizeof a->manufacturer_name,"%s",car->manufacturer);
             if (load_catalog_sidecar(a,CAR_CATALOG_WHEEL_FIT,read_wheel_fit) ||
                 load_catalog_sidecar(a,CAR_CATALOG_COLLISION,read_collision) ||
@@ -863,17 +867,22 @@ static void register_names(void) {
         char labels[2][128];
         snprintf(labels[0], sizeof labels[0], "CARNAME_%s_%s", brand, a->name);
         snprintf(labels[1], sizeof labels[1], "CAR_NAME_%s", a->name);
-        for (unsigned k = a->display_name[0]?1:0; k < 2; ++k) {
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+        unsigned first_label = a->display_name[0] ? 1 : 0;
+#else
+        unsigned first_label = 0;
+#endif
+        a->display_string=packed_display(a);
+        for (unsigned k = first_label; k < 2; ++k) {
             uint32_t hash = parts_hash(labels[k]);
             for (uint32_t i = 0; i < n; ++i)
                 if (M32(owned + i * 8) == hash) fail("added name collides with language record");
             M32(owned + n * 8) = hash;
-            a->display_string=packed_display(a);
             M32(owned + n * 8 + 4) = a->display_string;
             ++n;
         }
         if (diag_on) diag_event("addcars: names %s %s text=%s manufacturer=%s",
-            labels[0], labels[1], a->name, brand);
+            labels[0], labels[1], a->display_name[0] ? a->display_name : a->name, brand);
     }
     qsort(G + owned, n, 8, language_compare);
     M32(0x0091CF80u) = owned; M32(0x0091CF78u) = n;
@@ -1106,14 +1115,16 @@ void f_00681340(Cpu *c) {
                 }
                 for (unsigned k = 0; k < n; ++k) {
                     uint32_t bound = p + 16 + k * 48;
-                    // Imported bounds can leave this cache empty. OnLoaded
-                    // copies the root radius into CarRenderInfo (+17A8), so
-                    // initialize a conservative box sphere before publishing.
+                    // Sphere primitives use the source game's largest half-extent.
+                    // Keep the enclosing diagonal for boxes and the root, whose
+                    // radius OnLoaded copies to CarRenderInfo (+17A8).
                     if (MF32(bound + 32) == 0.0f) {
                         float x = (int16_t)M16(bound + 16) * 0.001f;
                         float y = (int16_t)M16(bound + 18) * 0.001f;
                         float z = (int16_t)M16(bound + 20) * 0.001f;
-                        MF32(bound + 32) = sqrtf(x*x + y*y + z*z);
+                        int sphere = (M16(bound + 14) & 0xc0) == 0x80;
+                        MF32(bound + 32) = k && sphere
+                            ? fmaxf(x, fmaxf(y, z)) : sqrtf(x*x + y*y + z*z);
                     }
                     M32(bound + 44) = p;
                 }
@@ -1341,6 +1352,29 @@ static uint32_t own_fit_entry(uint32_t src, uint32_t ld, uint32_t key) {
     return match;
 }
 
+static void load_added_audio(Addition *a, uint64_t generation) {
+    int result=0;
+#if defined(NFS_PUBLIC) && NFS_PUBLIC
+    if (car_audio_enabled()) {
+        unsigned slot=a->catalog_id-CAR_CATALOG_FIRST_ID;
+        FILE *stream=car_catalog_open_sidecar(slot,CAR_CATALOG_AUDIO);
+        if (stream) {
+            const CarCatalogSlot *car=car_catalog_inventory_get(slot);
+            result=car?car_audio_load_stream(a->key,generation,a->name,car->outputs[CAR_CATALOG_AUDIO].version,stream):-1;
+            fclose(stream);
+        } else if (errno!=ENOENT) result=-1;
+    }
+#else
+    if (a->directory[0] && car_audio_enabled()) {
+        char path[PATH_MAX];
+        result=snprintf(path,sizeof path,"%s/AUDIO.BIN",a->directory)>=(int)sizeof path
+            ? -1 : car_audio_load(a->key,generation,a->name,path);
+    }
+#endif
+    if (result<0 && diag_on)
+        diag_event("addcar_audio: rejected sidecar car=%s key=%08X; using donor",a->name,a->key);
+}
+
 static void append_collection_as(Cpu *, Source *, uint32_t, int, Addition *, uint32_t, unsigned);
 
 static void apply_linked_fit(Cpu *c, uint32_t src, uint32_t ld, Addition *a) {
@@ -1373,6 +1407,25 @@ static void apply_linked_fit(Cpu *c, uint32_t src, uint32_t ld, Addition *a) {
         uint32_t match = own_fit_entry(src, ld, links[i]);
         M32(match + 4) = copy;
     }
+}
+
+static void fit_showroom_reflection(uint32_t lay, const Addition *a) {
+    if (!a->wheel_fit || a == &traffic_addition) return;
+    float contact_sum = 0.0f, tallest = -INFINITY;
+    for (unsigned wheel = 0; wheel < 4; ++wheel) {
+        const float *tire = a->wheel_offsets + wheel * 4;
+        float contact = tire[3] - tire[2] - a->wheel_compressions[wheel / 2];
+        contact_sum += contact;
+        tallest = fmaxf(tallest, contact);
+    }
+    // 007A96C0 places the car at the mean tire contact height minus 25 mm.
+    // 00750980 adds the showroom translation and subtracts ReflectionOffset
+    // from that height, then draws the inverted car. Limit its tires to Z<=0.
+    float room_z, offset;
+    memcpy(&room_z, G + 0x009053C8u, sizeof room_z);
+    memcpy(&offset, G + lay + 0xF4, sizeof offset);
+    float minimum = contact_sum * 0.25f - 0.025f + room_z + tallest;
+    if (offset < minimum) memcpy(G + lay + 0xF4, &minimum, sizeof minimum);
 }
 
 static void apply_render_fit(uint32_t lay, Addition *a, unsigned kind) {
@@ -1426,6 +1479,7 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
 #endif
     if (cls == ECAR) apply_wheel_fit(src, ld, lay, a);
     if (fit_kind || cls == ECAR) apply_render_fit(lay, a, fit_kind);
+    if (cls == ECAR) fit_showroom_reflection(lay, a);
     if (manifest_mode && cls == FRONTEND) {
         Source *menu = source(FRONTEND, a->menu_fe);
         if (!menu) fail("price/unlock donor frontend missing");
@@ -1490,8 +1544,10 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
     M32(e) = coll; M32(e + 4) = 0; M32(e + 8) = tidx; M32(e + 12) = 0;
     M32(keys + (nd + n) * 4) = key;
     M32(vault + 0x34) = n + 1;
-    if (vehicle && cls == PVEHICLE && a!=&traffic_addition && a->catalog_id)
-        car_grip_bind(&a->grip_binding,&a->grip,a->key,vault,v->generation);
+    if (vehicle && cls == PVEHICLE && a!=&traffic_addition) {
+        if (a->catalog_id) car_grip_bind(&a->grip_binding,&a->grip,a->key,vault,v->generation);
+        load_added_audio(a,v->generation);
+    }
     if (diag_on) diag_event("car85: collection class=%08X donor=%08X new=%08X vault=%08X generation=%llu exports=%u->%u",
                             cls, M32(src), key, vault, (unsigned long long)v->generation, n, n + 1);
 }
@@ -1639,13 +1695,6 @@ void car85_vault_loaded(Cpu *c, uint32_t vault) {
             if (!a->frontend_key || !a->ecar_key) fail("zero catalog binding key");
         }
         if (!a->key) fail("zero addition Attrib key");
-        if (car_audio_load && a->directory[0]) {
-            char path[PATH_MAX];
-            if (snprintf(path,sizeof path,"%s/AUDIO.BIN",a->directory)>=(int)sizeof path ||
-                car_audio_load(a->key,a->name,path)<0) {
-                if (diag_on) diag_event("addcar_audio: rejected sidecar key=%08X; using stock engine",a->key);
-            }
-        }
         for (unsigned i = 0; i < j; ++i) {
             Addition *b=&additions[i];
             if (a->key==b->key || addition_key(a,FRONTEND)==addition_key(b,FRONTEND) ||

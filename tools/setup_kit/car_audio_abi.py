@@ -371,6 +371,8 @@ def inspect_bank(data, expected):
         definition['instruction_count'] = len(local_seen)
         definition['player_private_accesses'] = 0
     _need(reached_imports == set(by_site), 'unreachable/unclassified import sites')
+    _need(all(instructions.get(site - 2, {}).get('bytes') == '56' for site in reached_imports),
+          'import must push the instance argument')
     ordered = sorted(instructions.values(), key=lambda x: x['offset'])
     for left, right in zip(ordered, ordered[1:]):
         _need(left['offset'] + left['size'] <= right['offset'], 'overlapping instruction boundaries')

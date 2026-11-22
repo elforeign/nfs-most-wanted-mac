@@ -113,7 +113,7 @@ static void retired_sample(void *p) { assert(p==&bank); ++retired; }
 static int resolve(void *p,uint64_t identity,int16_t sample,CarAudioPCM *out) {
     assert(p==&bank && identity==77 && sample>=0); ++borrows;
     printf("{\"event\":\"resolve\",\"sample\":%d,\"bank\":%"PRIu64"}\n",sample,identity);
-    *out=(CarAudioPCM){waveform,8,44100.0f,1,retired_sample,p}; return 0;
+    *out=(CarAudioPCM){waveform,8,44100.0f,1,retired_sample,p,0}; return 0;
 }
 static int create_class(void *p,const int32_t *v,size_t n,void **out) {
     (void)p; assert(n==1); int32_t *a=malloc(sizeof(*a)); assert(a); *a=*v;

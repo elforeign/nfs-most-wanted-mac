@@ -22,10 +22,11 @@
 
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static int within(size_t off, size_t len, size_t limit) { return off <= limit && len <= limit - off; }
-static int collect(const uint8_t *, const X360AbkSound *, uint8_t **, unsigned *, char *, size_t);
+typedef struct { uint8_t data[2048]; unsigned block_frames; int restart; } XmaPacket;
+static int collect(const uint8_t *, const X360AbkSound *, XmaPacket **, unsigned *, char *, size_t, int carbon);
 static int fail(char *why, size_t n, const char *fmt, unsigned a, unsigned b) { snprintf(why, n, fmt, a, b); return 0; }
 
-int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
+static int parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n, int carbon) {
     memset(o, 0, sizeof *o);
     if (size < 0x60 || memcmp(f, "ABKC", 4)) return fail(why, n, "not ABKC", 0, 0);
     if (rd32(f + 0x14) != size) return fail(why, n, "ABKC size %u != file %u", rd32(f + 0x14), (unsigned)size);
@@ -45,6 +46,9 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
         uint32_t a = rd32(h), b = rd32(h + 4);
         s->version = a >> 28; s->codec = a >> 24 & 15; s->channels = (a >> 18 & 63) + 1; s->rate = a & 0x3ffff;
         s->storage = b >> 30; s->loop = b >> 29 & 1; s->samples = b & 0x1fffffff;
+        if (carbon && (s->version || s->codec != 3 || s->channels != 1 || s->rate != 48000 ||
+                       s->storage || !s->samples || s->samples > 10000000))
+            return fail(why, n, "invalid Carbon sound profile at slot %u", i, 0);
         unsigned hs = 8;
         if (s->loop) {
             if (!within(rel, 12, ext)) return fail(why, n, "sound %u loop field outside bank", i, 0);
@@ -60,16 +64,25 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
     if (last) last->end = bank + ext;
     for (unsigned i = 0; i < cnt; ++i)
         if (o->s[i].hdr && o->s[i].codec == 3 && !o->s[i].storage &&
-            !collect(f, &o->s[i], NULL, NULL, why, n)) return 0;
+            !collect(f, &o->s[i], NULL, NULL, why, n, carbon)) return 0;
     snprintf(why, n, "ok: S10A %u sounds", cnt);
     return 1;
 }
 
+int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
+    return parse(f, size, o, why, n, 0);
+}
+
+int x360abk_parse_carbon(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
+    return parse(f, size, o, why, n, 1);
+}
+
 // Walks the blocks of one resident sound and returns the packet payloads (stripped of the EA wrapping) in order.
-static int collect(const uint8_t *f, const X360AbkSound *s, uint8_t **out, unsigned *npk, char *why, size_t n) {
+static int collect(const uint8_t *f, const X360AbkSound *s, XmaPacket **out, unsigned *npk,
+                   char *why, size_t n, int carbon) {
     uint32_t pos = s->data, total = 0;
     unsigned pk = 0, cap = 64, seq = 0;
-    uint8_t *buf = out ? malloc((size_t)cap * 2048) : NULL;
+    XmaPacket *buf = out ? malloc((size_t)cap * sizeof(*buf)) : NULL;
     if (out && !buf) return fail(why, n, "out of memory", 0, 0);
     while (total < s->samples) {
         if (!within(pos, 12, s->end)) { free(buf); return fail(why, n, "block at %08X outside sound (%u samples so far)", pos, total); }
@@ -79,20 +92,27 @@ static int collect(const uint8_t *f, const X360AbkSound *s, uint8_t **out, unsig
         // The last packet of a block may be cut short (half the X360 engine banks): zero-padded to 2048 bytes, the
         // padding lies after the block's last frame.
         for (size_t p = (size_t)pos + 12; p < (size_t)pos + bsize; p += 2048) {
-            if (p != pos + 12 && (unsigned)(f[p] >> 4) != ((seq + 1) & 15)) {   // a block may restart the sequence
+            size_t remaining = pos + bsize - p;
+            int valid = carbon
+                ? remaining >= 4 && (f[p] & 0xfc) == 0x08 && !f[p + 3]
+                : p == pos + 12 || (unsigned)(f[p] >> 4) == ((seq + 1) & 15);
+            if (!valid) {
                 free(buf); return fail(why, n, "packet %u sequence break at %08X", pk, (unsigned)p);
             }
             seq = f[p] >> 4;
             if (out && pk == cap) {
                 if (cap > UINT32_MAX / 2) { free(buf); return fail(why, n, "too many packets", 0, 0); }
-                uint8_t *grown = realloc(buf, (size_t)cap * 2 * 2048);
+                XmaPacket *grown = realloc(buf, (size_t)cap * 2 * sizeof(*buf));
                 if (!grown) { free(buf); return fail(why, n, "out of memory", 0, 0); }
                 buf = grown; cap *= 2;
             }
             uint32_t len = pos + bsize - p < 2048 ? pos + bsize - p : 2048;
             if (out) {
-                memcpy(buf + (size_t)pk * 2048, f + p, len);
-                memset(buf + (size_t)pk * 2048 + len, 0, 2048 - len);
+                memcpy(buf[pk].data, f + p, len);
+                memset(buf[pk].data + len, 0, 2048 - len);
+                buf[pk].block_frames = carbon && p == pos + 12 ? bsamp : 0;
+                /* Drain at each EA block and each independent XMA stream inside it. */
+                buf[pk].restart = carbon && (buf[pk].block_frames || !(rd32(f + p) & 0x03fff800u));
             }
             ++pk;
         }
@@ -102,20 +122,15 @@ static int collect(const uint8_t *f, const X360AbkSound *s, uint8_t **out, unsig
     return 1;
 }
 
-int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames, char *why, size_t n) {
-    *pcm = NULL; *frames = 0;
-    if (s->codec != 3 || s->storage != 0 || s->channels > 2 || !s->rate || !s->samples)
-        return fail(why, n, "unsupported codec %u storage %u", s->codec, s->storage);
-    uint8_t *pk; unsigned npk;
-    if (!collect(f, s, &pk, &npk, why, n)) return 0;
+static int decode_packets(const XmaPacket *pk, unsigned npk, const X360AbkSound *s,
+                          int16_t *out, unsigned cap, unsigned *got, size_t *decoded, char *why, size_t n) {
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_XMA1);
     AVCodecContext *c = codec ? avcodec_alloc_context3(codec) : NULL;
     AVPacket *p = av_packet_alloc();
     AVFrame *fr = av_frame_alloc();
-    unsigned cap = s->samples + 8192, got = 0, ch = s->channels;
-    int16_t *o = calloc((size_t)cap * ch, 2);
+    unsigned ch = s->channels;
     int ok = 0;
-    if (!c || !p || !fr || !o) { fail(why, n, "no xma1 decoder in FFmpeg", 0, 0); goto done; }
+    if (!c || !p || !fr) { fail(why, n, "no xma1 decoder in FFmpeg", 0, 0); goto done; }
     av_channel_layout_default(&c->ch_layout, ch);
     c->sample_rate = s->rate;
     c->pkt_timebase = (AVRational){1, (int)s->rate};
@@ -126,27 +141,66 @@ int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsig
     for (unsigned i = 0; i <= npk; ++i) {
         if (i < npk) {
             if (av_new_packet(p, 2048) < 0) goto done;
-            memcpy(p->data, pk + (size_t)i * 2048, 2048);
+            memcpy(p->data, pk[i].data, 2048);
             p->pts = 0;   // a timestamp, so the decoder's start trim needs no log note
         }
         if (avcodec_send_packet(c, i < npk ? p : NULL) < 0) { fail(why, n, "packet %u rejected", i, 0); goto done; }
         av_packet_unref(p);
         while (avcodec_receive_frame(c, fr) >= 0) {
-            for (int k = 0; k < fr->nb_samples && got < cap; ++k, ++got)
+            *decoded += fr->nb_samples;
+            for (int k = 0; k < fr->nb_samples && *got < cap; ++k, ++*got)
                 for (unsigned j = 0; j < ch; ++j) {
                     float v = ((const float *)fr->extended_data[j])[k] * 32768.f;
-                    o[got * ch + j] = v > 32767.f ? 32767 : v < -32768.f ? -32768 : (int16_t)v;
+                    out[*got * ch + j] = v > 32767.f ? 32767 : v < -32768.f ? -32768 : (int16_t)v;
                 }
             av_frame_unref(fr);
         }
     }
-    snprintf(why, n, "decoded %u frames from %u packets (declared %u)", got, npk, s->samples);
-    if (got < s->samples) goto done;
-    *pcm = o; o = NULL; *frames = s->samples; ok = 1;
+    ok = 1;
 done:
-    free(o); free(pk);
     av_frame_free(&fr); av_packet_free(&p); avcodec_free_context(&c);
     return ok;
+}
+
+static int decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
+                  char *why, size_t n, int carbon) {
+    *pcm = NULL; *frames = 0;
+    if (s->codec != 3 || s->storage != 0 || !s->channels || s->channels > 2 || !s->rate ||
+        !s->samples || s->samples > UINT32_MAX - 8192)
+        return fail(why, n, "unsupported codec %u storage %u", s->codec, s->storage);
+    XmaPacket *packets;
+    unsigned count;
+    if (!collect(f, s, &packets, &count, why, n, carbon)) return 0;
+    unsigned cap = carbon ? s->samples : s->samples + 8192, got = 0;
+    size_t decoded = 0;
+    int16_t *out = calloc((size_t)cap * s->channels, sizeof(*out));
+    int ok = out != NULL;
+    if (!ok) fail(why, n, "out of memory", 0, 0);
+    unsigned block_end = carbon ? packets[0].block_frames : cap;
+    for (unsigned first = 0, end = 1; ok && end <= count; ++end) {
+        if (end < count && !packets[end].restart) continue;
+        ok = decode_packets(packets + first, end - first, s, out, block_end, &got, &decoded, why, n);
+        unsigned next_frames = end < count ? packets[end].block_frames : 0;
+        if (ok && carbon && (next_frames || end == count) && got != block_end)
+            ok = fail(why, n, "Carbon EA block ended at %u frames (expected %u)", got, block_end);
+        block_end += next_frames;
+        first = end;
+    }
+    free(packets);
+    if (ok) snprintf(why, n, "decoded %zu frames from %u packets (declared %u)",
+                     carbon ? decoded : got, count, s->samples);
+    if (!ok || got < s->samples) { free(out); return 0; }
+    *pcm = out; *frames = s->samples;
+    return 1;
+}
+
+int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames, char *why, size_t n) {
+    return decode(f, s, pcm, frames, why, n, 0);
+}
+
+int x360abk_decode_carbon(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
+                         char *why, size_t n) {
+    return decode(f, s, pcm, frames, why, n, 1);
 }
 
 // ---- PC side (BNKl, the only bank PC Snd reads: 008222A1 / 00823E2D) ----

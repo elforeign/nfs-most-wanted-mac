@@ -444,12 +444,57 @@ class NativeCatalogTests(unittest.TestCase):
         self.assertLess(result['peak'], 256)
 
     def test_legacy_policy_envelope_still_checks_contract_and_outputs(self):
-        digest = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
-        self.rewrite(lambda doc: doc.update(policy_sha256=digest))
-        self.good_result()
-        self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
+        for digest in (cc.LEGACY_POLICY_SHA256, cc.PRE_AUDIO_POLICY_SHA256, cc.PC_AUDIO_POLICY_SHA256,
+                       cc.X360_AUDIO_POLICY_SHA256):
+            self.rewrite(lambda doc: doc.update(policy_sha256=digest))
+            self.good_result()
+            self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
         self.rewrite(lambda doc: doc['cars'][0]['display'].update(name='Changed name'))
         self.zero()
+
+    def test_audio_sidecar_is_verified_and_streamed(self):
+        row = self.rows[0]
+        name = row['origin']['folder'].lower().encode()
+        path = self.outputs[0] / 'AUDIO.BIN'
+        data = struct.pack('<4s4I16s32s', b'A7CA', 2, 68, 1, 1, name, bytes(32))
+        path.write_bytes(data)
+        row['outputs'][path.name] = cc.fingerprint(path)
+        self.approve_rows()
+        self.policy = self.load_policy()
+        cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
+        read = self.good_result(self.native(exe=self.compile()))
+        self.assertIn(row['outputs'][path.name]['sha256'], [o['bytes_hash'] for o in read['rows'][0]['outputs']])
+
+        path.write_bytes(data[:20] + b'wrong'.ljust(16, b'\0') + data[36:])
+        row['outputs'][path.name] = cc.fingerprint(path)
+        self.approve_rows()
+        self.policy = self.load_policy()
+        cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
+        self.zero(self.native(exe=self.compile()))
+        mutant = SOURCE.read_text().replace('!strncasecmp((const char *)header+20,car->source_folder,name_size)',
+                                            '(name_size > 0)')
+        self.assertEqual(self.native(exe=self.compile(source=mutant))['count'], 3)
+        type(self).mutants += 1
+
+    def test_console_audio_header_matches_origin(self):
+        row = self.rows[0]
+        row['origin']['platform'] = 'x360'
+        path = self.outputs[0] / 'AUDIO.BIN'
+        name = row['origin']['folder'].lower().encode()
+        for version in (3, 2):
+            path.write_bytes(struct.pack('<4s4I16s32s', b'A7CA', version, 68, 1, 1, name, bytes(32)))
+            row['outputs'][path.name] = cc.fingerprint(path)
+            self.approve_rows()
+            self.policy = self.load_policy()
+            cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=self.policy)
+            result = self.native(exe=self.compile())
+            if version == 3:
+                self.good_result(result)
+            else:
+                self.zero(result)
+                mutant = SOURCE.read_text().replace('word32(header+4)==version', 'word32(header+4)==2')
+                self.assertEqual(self.native(exe=self.compile(source=mutant))['count'], 3)
+                type(self).mutants += 1
 
     def test_original_bug(self):
         d = self.root / 'original'

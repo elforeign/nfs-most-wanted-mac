@@ -15,6 +15,7 @@ typedef struct {
     int loop;
     void (*retire)(void *);
     void *owner;
+    size_t loop_start; /* First frame of the loop, after any one-time intro. */
 } CarAudioPCM;
 typedef int (*CarAudioResolve)(void *, uint64_t bank, int16_t sample, CarAudioPCM *);
 

@@ -214,35 +214,62 @@ controls. Bypassing the contract-approval guard in memory makes four tests fail
 (zero errors). Real output approvals still require visual review.
 ## Optional source engine audio
 
-`NFS_ADDCAR_AUDIO` defaults On (unset, `on` or `1`), enabling the optional Mac
-`AUDIO.BIN` sidecar for the Jaguar XK source stock tier. `off` or `0` restores
-donor audio. Stock cars stay on the native engine path, byte-identical to the
-adapter bypass. Missing sidecars retain the donor engine. Other source cars,
-source revisions and tiers have no admission profile.
-This is a startup experiment: listening acceptance and a guarded game check are
-still required. Timbre, layer balance, acceleration/deceleration transitions,
-spatial impression and audible clicks have no automated acceptance claim.
+`NFS_ADDCAR_AUDIO` defaults On (unset, `on` or `1`). Setup imports all 30
+reviewed Carbon PC additions and 14 reviewed Xbox 360 variants with a locally
+built `AUDIO.BIN`. The importer snapshots the selected car's attributes and
+audio files under `SOUND/ENGINE`. The Xbox 360 route reads those logical ranges
+from the selected disc's numbered archives. Reimport a retained Carbon pack to
+get its source sidecar. Retained catalogs still open under their original
+approval contracts. The earlier private Jaguar XK stock sidecar is also
+readable. Missing or refused sidecars, ProStreet and Undercover additions, and
+explicit `off` or `0` use donor audio.
 
-`car_convert.convert(..., mac_audio=True)` adds the sidecar to the normal tracked,
-transactional output inventory. The default conversion and X360/Windows outputs
-retain their existing binary files. Setup must explicitly request this Mac
-option; no UI, backend protocol or approval policy is changed by this feature.
-Existing catalog generations require a reviewed output pin before adding it.
+The converter preserves `pvehicle.Audio[]` order. Each `caraudio` resolves to
+engine and exhaust `engineaudio`, in that order. Each layer contains its
+effective numeric calibration followed by the bank, acceleration GIN and
+deceleration GIN. Carbon PC uses little-endian ABKC with big-endian
+S10A codec-4 samples and standalone Gnsu20 GINs. Resident mono PCM preserves
+authored loop start, including the intro in the 997GT3RS and 997TT engine bank.
+Xbox 360 uses big-endian ABKC and resident mono S10A codec 3 at 48 kHz. Setup
+validates XMA framing and the ordered tier calibration. It translates each
+bank's interpreted AEMS operations and typed state to the guest ABI, then
+checks the generated program, imports, selector rows and exported class.
+The runtime decodes the console samples when a tier first needs them, using
+the declared frame count and loop start. It drains and restarts the XMA
+decoder at each internal stream boundary.
+Setup and the runtime bind the complete package digest to the selected car
+and source platform.
+Replacing layers or recomputing the embedded checksum cannot admit different
+content. Each package contains the selected tiers' direct banks and GINs.
 
-The version-1 `A7CA` sidecar contains the complete canonical A1 graph, both
-effective numeric engineaudio calibration layouts, all source GIN/ABK resources,
-A2 decoded samples, source selector identities and the two A3/A4 executable
-plans. Its 68-byte header stores magic, version, total bytes, resource count,
-graph bytes, a 16-byte car name and a 32-byte payload digest. All integers are
-little endian. Layer records contain a 300-byte calibration and bank/acceleration/
-deceleration resource indices. Resource records retain full source SHA-256s,
-source bytes, pointer-free plans and mono PCM. Full package SHA-256 is pinned in
-both the builder and runtime:
-`66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c`
-(6,481,404 bytes). Recomputing a corrupt input's local checksum cannot admit it.
-Generic ABI admission stays closed; only the exact paired stock programs can
-use the named `jaguarxk:stock-v1` execution profile. Upgrade resources remain
-provenance in the complete graph and acquire no executable admission.
+The version-2 A7CA header is 68 bytes. It contains the magic, version, total
+size, resource count, tier count, NUL-padded lowercase 16-byte car name and
+payload SHA-256. Two little-endian words after it store the source maximum and
+default engine upgrade levels. Each tier stores two 300-byte calibrations
+followed individually by the three resource indices. The resource table
+contains full SHA-256s, source bytes, validated pointer-free ABKC plans and
+little-endian mono PCM. The PCM loop word is zero for one-shot playback and
+one plus the loop-start frame for loops. Source bytes remain local to the
+pack. Only contracts and fingerprints ship.
+
+Version 3 identifies Carbon Xbox 360. It keeps the header, tier and resource
+layouts and stores the original console ABKC bytes as the bank identity.
+Each bank plan starts with the length and bytes of its translated executable
+image followed by the same pointer-free execution manifest. Sample rows
+store declared frames, rate and loop start with a zero PCM byte count. The
+runtime checks those values against the source before decoding to float PCM.
+
+For race objects the port obtains the live MW engine upgrade level via
+`Physics::Upgrades::GetLevel` (00672D30, engine type 4). Carbon PC's 0053B570
+maps level 0 to tier 0. A positive level selects level minus one, except a car
+with maximum level 1 selects tier 1. The result is bounded by the source
+maximum and the number of authored tiers. Jaguar XK has a maximum of 2, so
+levels 0 and 1 select tier 0 and level 2 selects tier 1.
+
+| Jaguar XK tier | Engine bank and GINs | Exhaust bank and GINs |
+| --- | --- | --- |
+| 0 | `car_87_eng_mb_ee.abk`, `en_acl_87.gin`, `en_dcl_87.gin` | `car_87_exh_mb_ee.abk`, `ex_acl_87.gin`, `ex_dcl_87.gin` |
+| 1 | `car_87_eng_mb_ee.abk`, `en_acl_87.gin`, `en_dcl_87.gin` | `car_82_exh_mb_ee.abk`, `ex_acl_82.gin`, `ex_dcl_82.gin` |
 
 Resource opens use `SOUND/ADDCAR_AUDIO/<package SHA-256>/<resource SHA-256>`.
 Both full digests are compared; runtime bank tokens are monotonically allocated,
@@ -270,50 +297,68 @@ Only the eight owned packet buffers use the original float values in native
 retains headroom before the existing master limiter. The measured source peak
 is 1.08107078; a separate +1.25/-1.5 fixture fails with int16 staging and passes
 with float conversion. Native transport startup gain is unity. The source
-pool has 512 voices; its priority arbitration is separate from the four native
-transport voices. Native-pool resource pressure and this grouping still need a
-guarded-game assessment; the headless transport does not certify native voice
-stealing, device mix or audible quality.
+pool has 512 voices and separate priority arbitration. Four shared native
+packet voices transport its output.
 
-For player engines, all four original acceleration/deceleration GIN byte streams
-(engine plus exhaust) pass through native `004E1280`, Ginsu construction,
-SetSynthData, StartSynthesis, UpdateFrequency and teardown. The two donor Ginsu
-streams are stopped after successful replacement. A retiring pvehicle vault
-defers freeing a package while an engine still borrows it; the final real engine
-destructor finishes that unload. AEMS and Ginsu instances both release their
-source players, classes and buffers before the original destructor runs.
+For player engines, the selected tier's four acceleration/deceleration GINs
+use the native Ginsu path (004E1280 through synthesis, frequency update and
+teardown). The two donor Ginsu streams stop after successful attachment. The
+public runtime reads the sidecar from the catalog's verified snapshot. The
+owning pvehicle vault generation holds the package and prepares decoded
+float PCM and relocated ABKC images when a tier first needs them. On retirement
+the package stops admitting engines. The last borrowing engine then releases
+its bank images, PCM and package bytes, even if the same car has already
+mounted in a new vault.
 
-Default-selection proof in `runtime/car_audio_test.py` compares 267,040
-CPU/guest/PCM bytes for stock cars across four lifecycle pairs with the switch
-unset, and verifies both added-car constructors select source engine/exhaust
-with nonzero PCM. Each check fails with exit 1 on the old unset-Off default;
-both pass with the new default. Explicit `off` and `0` retain the donor path;
-all 18 prior safety controls still pass. The native private replay below uses
-the unset default for stock comparisons and Jaguar XK source selection.
+The baseline manifest registered 30 Carbon PC additions and admitted only
+the legacy XK sidecar. The current manifest registered and admitted all 30
+in four guarded null-audio runs. The upgraded XK run used
+`NFS_TEST_UPGRADE_INTERVAL=1` to select the upgraded exhaust. The headless
+replay selected the same tier from installed level 2. Each live car detached
+and reattached after a race restart with the same bank and GIN identities.
 
-Headless proof: `runtime/car_audio_test.py --original --private` must exit 1 with
-0/2 source engine/exhaust matches; `--private` must exit 0 with 2/2, four matched
-GINs, nonzero bank and native-Ginsu PCM, AEMS teardown and two unload/reload
-cycles. It uses pinned native synthesis/default-initializer fragments and the
-production hooks, interpreter, adapters and file service; packet transport and
-live car observations are headless boundaries. The real native packet reader
-and PCM converter are included. Off/stock compares 120,320 native
-PCM bytes across four pairs, with matching per-pair SHA-256
-`671cd21892b9cbc6b431092b06b93d732f0b7ccc76e7a8a522591b5f3bec1ee7`,
-plus 65,536 controller bytes and CPU state. Removing serving, either export,
-source PCM, GIN selection or the package pin must fail; a 64-byte native
-attribute descriptor also fails its guest guard (the initializer writes 104).
-Eleven targeted controls include detached/inactive controller use, deferred
-unload, zero transport gain and lossy headroom. The fixed lifecycle releases
-194/194 guest allocations and 44/44 native packet objects and produces 163,702
-nonzero samples out of 247,936 native packet-reader PCM samples.
+| Live car | Tier | Package bytes | Package, decoded PCM and relocated bank bytes | Native / source voices at first race update | Nonzero mixed packet samples before restart |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Jaguar XK | 0 | 5,859,678 | 11,044,294 | 18 / 5 | 1,828,864 |
+| Jaguar XK | 1 | 5,859,678 | 11,332,762 | 18 / 3 | 1,829,888 |
+| Porsche 997 Turbo | 0 | 1,909,505 | 4,774,809 | 20 / 3 | 1,827,840 |
+| Audi R8 | 0 | 4,759,106 | 10,830,490 | 18 / 3 | 1,829,888 |
 
-The adapter's default generated replay rejects both duplicate and overlapping
-player ranges before modifying the load image, verifies immediate unlink after
-an external ordinal-4 destroy request, and checks cleared imported-control
-handles. All six compiled detach/selector/ordinal/control/unlink/overlap controls
-fail without private banks. Private adapter replay covers 69 banks, 98 modules,
-400 players and 127/127 interfaces with every PCM borrow/control object retired.
+`runtime/car_audio_test.py --private` compares 98/98 ordered layer records
+across 49 tiers with the source vault and loads both banks for all 30 cars.
+Both sides of a 997TT/R8 layer swap are rejected. Disabling the per-car digest
+check fails the same control. The XK native packet-reader replay produces
+163,701/247,936 nonzero samples, releases 194/194 guest allocations and destroys
+44/44 native packets. The Off path compares 120,320 native PCM bytes plus
+65,536 controller bytes and CPU state with the donor-only path. Listening was
+outside this round of verification.
+
+The Xbox 360 closure covers 22 ordered tiers and 44 layer records. Every
+layer names the same bank and GIN files as its Carbon PC tier. Six cars carry
+at least one different console calibration field. The 26 console banks
+contain 208 live sample slots and three nonzero loop starts. Of the 53 GIN
+paths, 52 are byte-identical to PC. The package retains the console
+`EN_ACL_25.GIN` bytes.
+
+The exported Setup route imported all 14 sidecars and the native catalog
+streamed all 14. The packer rejects a Carbon PC ABK supplied under a console
+resource name. The runtime rejects a single cross-car bank replacement with
+a valid package checksum and refuses a PC sidecar in a console slot.
+The console XK headless replay produced 163,704 nonzero samples and matched
+120,320 donor PCM bytes with source audio Off. On unload it released all
+194 guest allocations and 44 native packet objects.
+
+All three guarded null-audio races admitted 14 console packages. Each car
+used the same bank and four GIN identities after restart. Bank numbers below
+identify the engine and exhaust files on the disc. Memory covers the package,
+decoded PCM and relocated programs. Voice counts are native / source at the
+first source update in each race.
+
+| Xbox 360 race car | Tier | Engine / exhaust banks | Package bytes | Resident bank bytes | Voices before / after restart | Nonzero packet samples before restart |
+| --- | ---: | --- | ---: | ---: | --- | ---: |
+| Jaguar XK | 1 | 87 (`14528364f970`) / 82 (`3f59c85ded46`) | 1,847,426 | 7,042,438 | 18 / 1 → 20 / 2 | 1,824,768 |
+| Porsche 997 Turbo | 0 | 46 (`9c008fde6920`) / 42 (`0ecb6d1f3ff0`) | 497,979 | 3,221,235 | 20 / 3 → 19 / 3 | 1,825,792 |
+| Audi R8 | 0 | 62 (`de0e035021ba`) / 62 (`7fc98ee05bf4`) | 1,728,470 | 7,490,494 | 18 / 1 → 18 / 2 | 1,822,720 |
 
 ## Optional source grip
 

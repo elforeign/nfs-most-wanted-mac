@@ -19,6 +19,10 @@ With only that fix applied, the earlier engine fails three checks (45 run,
 2 failures, 1 error): a link planted at the stage 'outputs' redirects seven
 real converter writes into a player folder, and an external disable or
 deselection landing after the state read is undone. Fixed engine: 45 OK.
+Carbon Xbox 360 logical export without audio: donor imports 0/1 -> 1/1.
+Oversized console audio reaches the resource reader 2/2 -> 0/2 (file and set).
+Retail console audio preflight at 2 MiB: 0/6 pass (350Z: 2,917,462 bytes).
+At 4 MiB: 6/6 pass. The 4,194,305-byte set fails before payload read.
 """
 import copy
 from contextlib import contextmanager
@@ -39,6 +43,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(Path(__file__).resolve().parent)]
 from setup_kit import car_catalog as catalog, car_convert as converter, car_sources as sources
+from setup_kit import car_audio_pack
 if importlib.util.find_spec('setup_kit.car_import') is not None:
     from setup_kit import car_import as ci
 else:
@@ -231,6 +236,92 @@ class Lifecycle(unittest.TestCase):
                          sum(len(v) for v in self.assets.files.values()))
         self.assertEqual(catalog.fingerprint(iso), before)
         self.assertEqual(first['pointer'], second['pointer'])
+
+    def test_x360_audio_less_export_imports_with_donor_sound(self):
+        pin = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        with mock.patch.object(car_audio_pack, 'X360_ATTRIBUTES', pin), \
+                mock.patch.object(car_audio_pack, 'x360_resource_paths',
+                                  return_value=['SOUND/ENGINE/FIXTURE.ABK']):
+            checked = self.engine.check(self.x360, mw_pc=self.mw, cars=[self.car])
+            selected = sources.path_hash('CARS/' + self.car['folder'])
+            self.assertIn((selected, 'importable'),
+                          {(r['car_hash'], r['status']) for r in checked['recognition']['cars']})
+            self.run_import(self.x360)
+        row = self.ready().selected[0]
+        self.assertEqual(row['donors']['model'], self.car['donors']['model'])
+        self.assertNotIn('AUDIO.BIN', row['outputs'])
+
+    def test_x360_retail_audio_sets_fit_preflight(self):
+        # Logical resource sizes from the retail Carbon Xbox 360 ZDIR.
+        muscle = (143642, 162860, 180614, 183032, 194760, 310089, 310089, 391021, 391021)
+        cases = {
+            '350Z': (54672, 58193, 89175, 99794, 132372, 137516, 137516, 159600,
+                     159876, 279069, 279069, 286414, 286414, 378891, 378891),
+            'IMPREZAWRXSTI': (39808, 66508, 68032, 73108, 101648, 121152,
+                             293145, 293145, 298247, 298247, 326188, 337780),
+            'CHALLENGER71': muscle,
+            'CHARGER69': muscle,
+            'CUDA': muscle,
+            'VIPER': (86712, 103528, 142384, 265876, 271064, 309869, 309869, 353269, 353269),
+        }
+        for car, sizes in cases.items():
+            with self.subTest(car=car, total=sum(sizes)):
+                pins = {f'SOUND/ENGINE/FIXTURE{i}': dict(size=size) for i, size in enumerate(sizes)}
+                logical = {sources.path_hash(name): ('fixture', 0, pin['size']) for name, pin in pins.items()}
+                with mock.patch.object(car_audio_pack, 'x360_resource_paths', return_value=list(pins)), \
+                        mock.patch.object(converter, '_x360_audio_pins', return_value=pins):
+                    self.assertEqual(converter.x360_audio_inputs(b'', car, logical), pins)
+
+    def test_x360_archive_audio_limits_before_reading(self):
+        attr = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        # Each resource in the total-size control fits the 512 KiB file limit.
+        for sizes, message in (([6666, 6666, 6666, 6666, 524289], 'file size limit'),
+                               ([524288] * 8 + [1], 'total size limit')):
+            with self.subTest(sizes=sizes):
+                paths = [f'SOUND/ENGINE/FIXTURE{i}.ABK' for i in range(len(sizes))]
+                files = self.assets.files | dict(zip(paths, map(bytes, sizes)))
+                physical = source_fixture.archive_files(source_fixture.fake_xex(), files)
+                archive = self.root / 'oversized.iso'
+                archive.write_bytes(source_fixture.tiny_iso(physical))
+                read = ci._logical
+
+                def watch(reader, entry, **kwargs):
+                    self.assertNotIn(entry[2], sizes, 'oversized audio set reached the resource reader')
+                    return read(reader, entry, **kwargs)
+
+                with mock.patch.object(car_audio_pack, 'X360_ATTRIBUTES', attr), \
+                        mock.patch.object(car_audio_pack, 'x360_resource_paths', return_value=paths), \
+                        mock.patch.object(ci, '_logical', side_effect=watch):
+                    with self.assertRaisesRegex(ValueError, message):
+                        self.run_import(archive)
+
+    def test_x360_audio_partial_and_changed_exports_fail_before_staging(self):
+        name = 'SOUND/ENGINE/FIXTURE.ABK'
+        expected = b'approved resource'
+        pins = {name: dict(size=len(expected), sha256=hashlib.sha256(expected).hexdigest())}
+        audio = self.x360 / name
+        audio.parent.mkdir(parents=True)
+        attr = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        read = ci._logical
+
+        def watch(reader, entry, **kwargs):
+            self.assertIsNone(kwargs.get('stage'), 'invalid audio reached staging')
+            return read(reader, entry, **kwargs)
+
+        with mock.patch.object(car_audio_pack, 'X360_ATTRIBUTES', attr), \
+                mock.patch.object(converter, '_x360_audio_pins', return_value=pins), \
+                mock.patch.object(ci, '_logical', side_effect=watch), \
+                mock.patch.object(self.engine, '_convert') as convert:
+            audio.with_name('OTHER.ABK').write_bytes(expected)
+            with mock.patch.object(car_audio_pack, 'x360_resource_paths', return_value=[name]):
+                with self.assertRaisesRegex(ValueError, 'Incomplete console engine audio'):
+                    self.run_import(self.x360)
+                audio.write_bytes(b'x' * len(expected))
+                with self.assertRaisesRegex(ValueError, 'does not match the approved file'):
+                    self.run_import(self.x360)
+            convert.assert_not_called()
+        self.assertFalse((self.engine.root / 'current.json').exists())
+        self.assertFalse(list(self.engine.work.glob('c-*')))
 
     def test_missing_pack_restore_needs_neither_source_nor_cache(self):
         first = self.run_import()

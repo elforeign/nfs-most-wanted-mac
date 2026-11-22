@@ -2,21 +2,19 @@
 
 ## Optional cars
 
-Appearance review accepted 10 PC and 9 Xbox 360 conversions. Accepted on both:
-997GT3RS, BRERA, CCX, CORVETTEZ06, EUROPA, JAGUARXK, MR2, R32 and R8;
-300C is accepted on PC only. JAGUARXK renders in race and showroom on both.
+Use your own installed Carbon, ProStreet or Undercover PC folder, or a Carbon
+Xbox 360 folder, `.iso`, or `.zip`/`.7z` containing one of those Xbox 360 sources.
+In Most Wanted Setup, open **Extras from your other games**. If you’ve already
+installed the game, choose **Manage installed extras…** on the welcome screen.
+Choose a **Later-game source**, tick the cars you want, click **Retry check**,
+then **Import selected extras**.
 
-240SX remains unapproved on both platforms because its logo is a placeholder.
-997TT, CAMARON, G35, MAZDASPEED3 and MUSTANGSHLBYN on both platforms, plus
-300C on Xbox 360, failed conversion during review. Converter fixes now exist,
-but those outputs still need appearance review.
+In **F10 > Cars & cutscenes**, turn on **Cars from later games**, then quit and
+reopen the game. Look for the cars in Quick Race car selection and the Career
+car lot. Each uses the price and Blacklist unlock requirement of the Most
+Wanted car it’s based on.
 
-Most Wanted Setup includes these approvals for import on its **Extras** page.
-Your Most Wanted installation works without extras.
-
-When a package provides approved cars, use Setup's Extras page to import your
-own source files. Enable **Cars from later games** and restart. Keep retained
-generations when removing cars. If a career requests missing cars, restore its
+Keep retained generations when removing cars. If a career requests missing cars, restore its
 verified generation in Setup, or reimport the identical source files with the
 same package, then restart. Keep the career and its dependency files together;
 never delete or overwrite a career to bypass a missing-car refusal.

@@ -1,6 +1,6 @@
 """Synthetic collision loading -> translated OnLoaded -> translated pixel size.
 
-19 checks: fixed 0 failures; old loader mutant 4 failures.
+21 checks: fixed 0 failures; old loader mutant 5 failures.
 Missing-radius control: old 0 m / 0 pixels (rejected at minimum 4);
 fixed 3 m / 42 pixels. Original bounds/files and authored radii stay exact.
 The old loader mutant must fail; no private car bytes or game process needed.
@@ -64,15 +64,20 @@ static unsigned pixels(float radius) {
 }
 int main(void) {
     G=calloc(1,0xa00000); if (!G) return 2;
-    // Three synthetic bounds, one cloud of four points. Millimetre half sizes
-    // form a 1/2/2 box (sphere 3), an authored sphere, and a .3/.4/0 box.
-    uint8_t raw[16+3*48+16+16+4*16]={0}, original[sizeof raw];
-    uint32_t key=0x1234, n=3, one=1, four=4;
-    memcpy(raw,&key,4); memcpy(raw+4,&n,4);
-    const int16_t dims[3][3]={{1000,2000,2000},{100,100,100},{300,400,0}};
-    for (unsigned k=0;k<3;++k) memcpy(raw+16+k*48+16,dims[k],6);
+    // Root and box use the diagonal. Spheres use the authored radius or the
+    // largest half-extent; the unequal extents exercise all three axes.
+    enum { n = 4, clouds = 16 + n * 48 };
+    uint8_t raw[clouds+16+16+4*16]={0}, original[sizeof raw];
+    uint32_t key=0x1234, count=n, one=1, four=4;
+    memcpy(raw,&key,4); memcpy(raw+4,&count,4);
+    const int16_t dims[n][3]={{1000,2000,2000},{100,100,100},{300,400,0},{200,300,400}};
+    const uint16_t flags[n]={0x40,0x82,0x46,0x82};
+    for (unsigned k=0;k<n;++k) {
+        memcpy(raw+16+k*48+14,&flags[k],2);
+        memcpy(raw+16+k*48+16,dims[k],6);
+    }
     float authored=.75f; memcpy(raw+16+48+32,&authored,4);
-    memcpy(raw+16+3*48,&one,4); memcpy(raw+16+3*48+16,&four,4);
+    memcpy(raw+clouds,&one,4); memcpy(raw+clouds+16,&four,4);
     memcpy(original,raw,sizeof raw);
     Addition *a=additions; a->model_key=key; a->donor_model=0x5678;
     a->collision_bytes=raw; a->collision_size=sizeof raw;
@@ -83,17 +88,18 @@ int main(void) {
     CHECK(MF32(loaded+16+32)==3.0f);
     CHECK(MF32(loaded+16+48+32)==authored);
     CHECK(fabsf(MF32(loaded+16+96+32)-.5f)<1e-6f);
+    CHECK(fabsf(MF32(loaded+16+144+32)-.4f)<1e-6f);
     CHECK(!memcmp(raw,original,sizeof raw) && M32(loaded+8)==1);
-    for (unsigned k=0;k<3;++k) CHECK(M32(loaded+16+k*48+44)==loaded);
-    CHECK(M32(loaded+16+3*48+16+12)==loaded+16+3*48+32);
+    for (unsigned k=0;k<n;++k) CHECK(M32(loaded+16+k*48+44)==loaded);
+    CHECK(M32(loaded+clouds+16+12)==loaded+clouds+32);
     // Only runtime caches/back-pointers may differ from the source bytes.
     uint8_t expected[sizeof raw]; memcpy(expected,raw,sizeof raw);
     memcpy(expected+8,G+loaded+8,4);
-    for (unsigned k=0;k<3;++k) {
+    for (unsigned k=0;k<n;++k) {
         memcpy(expected+16+k*48+32,G+loaded+16+k*48+32,4);
         memcpy(expected+16+k*48+44,G+loaded+16+k*48+44,4);
     }
-    memcpy(expected+16+3*48+16+12,G+loaded+16+3*48+16+12,4);
+    memcpy(expected+clouds+16+12,G+loaded+clouds+16+12,4);
     CHECK(!memcmp(expected,G+loaded,sizeof raw));
     uint32_t render=0x60000, conn=0x50000;
     M32(conn+0x64)=1; M32(0x9b09d8)=0x70000;

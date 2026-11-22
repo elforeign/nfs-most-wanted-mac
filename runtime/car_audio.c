@@ -1,5 +1,6 @@
 #include "car_audio.h"
 #include "car_audio_runtime.h"
+#include "x360abk.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -7,29 +8,33 @@
 #include <setjmp.h>
 #include <stdlib.h>
 #include <strings.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
-enum { MAX_RESOURCES=64, MAX_PACKAGES=76, MAX_ENGINES=64, CALIBRATION=0x12c };
+enum { MAX_RESOURCES=64, MAX_PACKAGES=76, MAX_ENGINES=64, MAX_TIERS=4, CALIBRATION=0x12c };
 typedef struct {
-    const uint8_t *source, *plan;
-    uint32_t size, plan_size, kind, sample_count;
+    const uint8_t *source, *translated, *plan, *sample_source;
+    uint32_t size, translated_size, plan_size, kind, sample_count;
     uint8_t digest[32];
     CarAudioPCM *samples;
     CarAudioRuntimeBank bank;
     CarAudioRuntimeModule *modules;
     CarAudioRuntimeInterface *refs;
     CarAudioCsisInterface *registry;
-    size_t nm,nr;
+    size_t nm,nr,pcm_bytes;
     uint32_t image;
 } Resource;
 typedef struct {
-    uint32_t key, count;
+    const uint8_t *calibration[2];
+    uint32_t layer[2][3];
+} Tier;
+typedef struct {
+    uint32_t key, version, count, tier_count, max_level, default_level;
+    uint64_t vault;
+    char name[16];
     int retiring;
     uint8_t *bytes, digest[32];
     size_t size;
-    const uint8_t *calibration[2];
-    uint32_t layer[2][3];
+    Tier tiers[MAX_TIERS];
     Resource resource[MAX_RESOURCES];
 } Package;
 typedef struct {
@@ -37,6 +42,8 @@ typedef struct {
     int native_ginsu, replaced, recovering;
     uint32_t mix_gain;
     Package *package;
+    const Tier *tier;
+    int diag_started;
     CarAudioRuntimeInstance instances[2];
     /* Four native Ginsu streams: engine/exhaust, acceleration/deceleration. */
     struct { uint32_t data, synth, work, gin; int32_t voice; int constructed; } ginsu[4];
@@ -45,7 +52,7 @@ static Package packages[MAX_PACKAGES];
 static Engine engines[MAX_ENGINES];
 static CarAudioBackend backend;
 static CarAudioVoice voices[512];
-static uint64_t next_identity=1;
+static uint64_t next_identity=1, diag_nonzero_samples;
 static _Thread_local CarAudioRuntimeInstance *executing;
 static _Thread_local jmp_buf *import_escape;
 static uint32_t native_call(Cpu *c,uint32_t fn,uint32_t object,int n,const uint32_t *args) {
@@ -122,6 +129,14 @@ static void bridge_render(uint64_t sequence) {
     }
     car_audio_backend_render(&backend,dry,wet,PACKET_FRAMES);
     for(unsigned i=0;i<512;i++) voices[i].volume=saved_volume[i];
+    if(diag_on) {
+        uint64_t before=diag_nonzero_samples;
+        for(unsigned i=0;i<PACKET_FRAMES*2;i++)
+            diag_nonzero_samples+=(dry[i]!=0)+(wet[i]!=0);
+        if(!before && diag_nonzero_samples)
+            diag_event("addcar_audio: first nonzero packet samples=%llu",
+                (unsigned long long)diag_nonzero_samples);
+    }
     unsigned slot=(unsigned)(sequence%PACKET_CACHE);
     for(unsigned i=0;i<PACKET_FRAMES;i++) for(unsigned ch=0;ch<2;ch++) {
         bridge.cache[slot][ch][i]=dry[i*2+ch]; bridge.cache[slot][ch+2][i]=wet[i*2+ch];
@@ -310,67 +325,192 @@ static int plan(Resource *r) {
         for(size_t j=0;j<m->control_count;j++) controls[j]=word(&in);
     }
     if(in.failed || in.n || !next_identity) return -1;
-    r->image=gmalloc_try(r->size); if(!r->image) return -1;
+    const uint8_t *program=r->translated?r->translated:r->source;
+    uint32_t size=r->translated?r->translated_size:r->size;
+    r->image=gmalloc_try(size); if(!r->image) return -1;
     CarAudioRuntimeClasses classes={create_class,update_class,release_class,NULL};
-    return car_audio_runtime_load(&r->bank,r->source,G+r->image,r->size,r->image,next_identity++,
+    return car_audio_runtime_load(&r->bank,program,G+r->image,size,r->image,next_identity++,
         r->modules,r->nm,r->refs,r->nr,r->registry,r->nr,&backend,&classes);
 }
+static void clear_bank(Resource *r) {
+    car_audio_runtime_unload(&r->bank);
+    if(r->image) gfree(r->image);
+    for(size_t j=0;j<r->nm && r->modules;j++) {
+        free((void *)r->modules[j].players); free((void *)r->modules[j].controls);
+    }
+    for(uint32_t j=0;j<r->sample_count && r->samples;j++) free((void *)r->samples[j].pcm);
+    free(r->samples); free(r->modules); free(r->refs); free(r->registry);
+    r->image=0; r->samples=NULL; r->modules=NULL; r->refs=NULL; r->registry=NULL;
+    r->nr=r->nm=r->pcm_bytes=0;
+}
 static void clear_package(Package *p) {
-    for(unsigned i=0;i<p->count;i++) {
-        Resource *r=p->resource+i;
-        car_audio_runtime_unload(&r->bank);
-        if(r->image) gfree(r->image);
-        for(size_t j=0;j<r->nm && r->modules;j++) { free((void *)r->modules[j].players); free((void *)r->modules[j].controls); }
-        for(uint32_t j=0;j<r->sample_count && r->samples;j++) free((void *)r->samples[j].pcm);
-        free(r->samples); free(r->modules); free(r->refs); free(r->registry);
-    }
+    if(diag_on && p->key)
+        diag_event("addcar_audio: retired car=%s key=%08X vault=%llu bytes=%zu",
+            p->name,p->key,(unsigned long long)p->vault,p->size);
+    for(unsigned i=0;i<p->count;i++) clear_bank(p->resource+i);
     free(p->bytes); memset(p,0,sizeof(*p));
-    int loaded=0;
-    for(unsigned i=0;i<MAX_PACKAGES;i++) loaded|=packages[i].key!=0;
-    if(!loaded) car_audio_backend_destroy(&backend);
+    for(unsigned i=0;i<MAX_PACKAGES;i++) if(packages[i].key) return;
+    car_audio_backend_destroy(&backend);
 }
-static int allowed(const Resource *r,unsigned layer) {
-    char name[65]; hex(r->digest,name);
-    return !strcmp(name,layer==0?
-        "e5e2aaa143f345009f37a0436643aed099f438a9d975c1e26f828045b2ff7f64":
-        "67d6f7fb267d3725729a66f827cee8f60e62c3f5971ad8d994adbbc91448ae7c");
+
+/* Reviewed converter outputs. The digest binds the car, every ordered tier,
+ * GIN and bank identity, calibration, executable plan and decoded PCM. */
+static const struct { const char *car, *sha; } carbon_pc_packages[] = {
+    {"240sx","fbe66eb609a07e9c7ee3519ee42433ec8e7ce50b77e4d0c51f25e811ad04c5cb"},
+    {"300c","e6bd89177de2f5efba8b917a230ff9efd11bd950ae170a1f6f9d4b6d301e9084"},
+    {"997gt3rs","54aed5eb7b94e40771b723928ffb62bd9d960520fc974ba0fcf864898e03dd17"},
+    {"997tt","5298e813fb9c789f5072a7722091527399824d231701420b44bcbe387f4d9d27"},
+    {"brera","841509440157085aa347d306701c43bcec3f1bb4cb71c3fc54d1215ac298b571"},
+    {"camaron","0440ca26467b760f2145ddeec816e0f20d41d2be3f7b4e478802d56f3d9919f5"},
+    {"ccx","1eb1b0ccb25b32cd9c477e2d4889a9a7cdc66708d441bf4a5437c17a4b91b979"},
+    {"challenger71","becaab4a5771d219c545a909527f225b0867729aff24c6bae350bd3493cf16e3"},
+    {"challengern","90192b1f49b28b9a935e7f59d6f4bc2af4eaebc05268b8674f937ed367f9ac9d"},
+    {"charger06","51642a6b823fb4c9332989b10873553ec8d225d72e7b30b79d3920ad2d490cba"},
+    {"charger69","09e41dff7d6998748248571038240393a2b3594db9da9e14c827358c404553ec"},
+    {"chevelle","f65b6fc44e4572cfcc89f0e54cf92dc665910f557cb2ab6b46ae5c467561d185"},
+    {"corolla","63427325cbac15ad03c1bbd3fc30c332058581ce793a549871063c59643cd7c9"},
+    {"corvettez06","419535f2c6519e36685828e2abe3f0b958d45cd658904fae31d6c3e4cba6e065"},
+    {"cuda","65d1a081d3bfa7524955a10af41a4ac10e11cb4362758d2ac5804101e0d0b236"},
+    {"eclipse","9446cf4483219f7e60d3468742feb2d4a3871254d96f2e64b65c4007ec4c71cf"},
+    {"europa","714241dc6a29aa11b8eadb1651a236b6f59813727d6ff9f9f58f165a69d91b59"},
+    {"g35","08cf2e94774951a46c1d43582093ac65587be723087d120dd2c5ddd3c303ca16"},
+    {"jaguarxk","3ee0fd04ddc6cb5768055cbe5c5cbca072aa2ca35b2484d500fbb0d7a29132b5"},
+    {"lancerevo9","ad9cb69b0b9873da5bc058ee6e18d0a900e173e00fd9130606a77e8d9140e76e"},
+    {"mazdaspeed3","32fe405f6f856f5f47d9789d95b0cac67d7026fd815709e620cc25ee4df3135a"},
+    {"mr2","d83dbcf10b0c667d1211f4414171751ae593b983a8cd4a4bfef763519a446ae5"},
+    {"murcielago640","a54249add9bc3ada995b52d128186e7a35e615f674116da53db6d867c11a1647"},
+    {"mustangshlbyn","77171892255496bfb032110a12d968ca0b381dad445ff0e64de023f43c974e3a"},
+    {"mustangshlbyo","5bf23f8a22f5a151adefa9c34d878e2c1e163a2369ca264d1b5c2fcdd982ccda"},
+    {"r32","0da4b92d401f0bc1339fdfd82c6b6933e0d7727d0d481f272fb5d051e27ec6ab"},
+    {"r8","10c2d964f0aadb018f318f2761e53cf6e652c36ef0b6d7e316c57766332b6d8c"},
+    {"roadrunner","52978701b7b13838ae2aadfd22c500633ae1c8b80113d46843f234fd5d3ce959"},
+    {"skyline","eb0ecd9ca7b6d9104a9283a063ac0cdb43a354ccda3bde403dd947a46cba24dd"},
+    {"zonda","56dabea84ff2feb8edca601d68e23de63a8b66b2c45c4d289075dd4243003346"},
+};
+static const struct { const char *car, *sha; } carbon_x360_packages[] = {
+    {"240sx","09f8cfc744202d6af67aff6b49f5240341f0d94a3debe0ae8ed558f53d0f14df"},
+    {"997gt3rs","d9f186aba6f20c9e1b2db10d09d2c526673083e5e88492581ec6302550772176"},
+    {"997tt","43fe5509e4172c5ae7cfd06ec6d8576f2f6124413e327b81583b055791dcd5fe"},
+    {"brera","126642a5789995fca847e3e321ad2296611451d0c6e2c32a9403025cac790044"},
+    {"camaron","13cfa5b3b67cd84ed3222e6f2704c6defbb16148cdbadc930967d0e797785072"},
+    {"ccx","59982d1521f3ccf18c1c137b2f8fafb65a8ceff8b5901edc6c68f6cf2ada187b"},
+    {"corvettez06","e3431aafbd83c72d81042a9dc6e8a3a551975b231d18c1279ca2c235415bc3b4"},
+    {"europa","6ae195ad870d10049b974f9325c1c1ba220b16fe75ac2f7afd57415536b12d85"},
+    {"g35","9dcd6843e5d26beb7b46fb409efddbd9919b19823330ae554cf2f8a0c982c663"},
+    {"jaguarxk","5d35beb8f823eee5d5a5318d0660a47ec747f7d497d25b57b095153b76b45ee2"},
+    {"mazdaspeed3","e5c8bb91248b2389cf2f74f2d0aa2ad251a620c2aec43ae3b1512bf729f56c58"},
+    {"mr2","d6821a26d5910de2c40582805a650f8f5189b8eac8331017050eb285a9561aae"},
+    {"r32","214032468863cffbca72156fb019ce43d59fab8581afc32fcaf5d879b0d2370e"},
+    {"r8","7684f1aec405770755e2680b6c7a4d391caf429b413087a1a408f337740d8556"},
+};
+static const char *package_pin(const char *name,uint32_t version) {
+    if(version==1 && !strcasecmp(name,"jaguarxk"))
+        return "66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c";
+    if(version==2) for(size_t i=0;i<sizeof carbon_pc_packages/sizeof *carbon_pc_packages;i++)
+        if(!strcasecmp(name,carbon_pc_packages[i].car)) return carbon_pc_packages[i].sha;
+    if(version==3) for(size_t i=0;i<sizeof carbon_x360_packages/sizeof *carbon_x360_packages;i++)
+        if(!strcasecmp(name,carbon_x360_packages[i].car)) return carbon_x360_packages[i].sha;
+    return NULL;
 }
-int car_audio_load(uint32_t key,const char *name,const char *filename) {
-    if(!car_audio_enabled()) return 0;
-    if(!key || !name || !filename) return -1;
-    if(strcasecmp(name,"jaguarxk")) {
-        struct stat st;
-        return stat(filename,&st) && errno==ENOENT?0:-1;
+
+static int prepare_samples(Resource *r) {
+    r->samples=calloc(r->sample_count?r->sample_count:1,sizeof(*r->samples));
+    if(!r->samples) return -1;
+    X360Abk bank;
+    char why[128];
+    if(r->translated && (!x360abk_parse_carbon(r->source,r->size,&bank,why,sizeof why) ||
+                         bank.count!=r->sample_count)) return -1;
+    const uint8_t *pcm=r->sample_source;
+    for(uint32_t j=0;j<r->sample_count;j++) {
+        uint32_t frames=rd(pcm),rate=rd(pcm+4),loop=rd(pcm+8),n=rd(pcm+12);
+        pcm+=16;
+        int16_t *decoded=NULL;
+        if(r->translated) {
+            const X360AbkSound *s=bank.s+j;
+            unsigned count;
+            if(frames!=s->samples || rate!=s->rate || loop!=(s->loop?s->loop_start+1:0) ||
+               (frames && !x360abk_decode_carbon(r->source,s,&decoded,&count,why,sizeof why))) return -1;
+        }
+        if(frames) {
+            float *samples=malloc((size_t)frames*sizeof(float));
+            if(!samples) { free(decoded); return -1; }
+            for(uint32_t k=0;k<frames;k++) {
+                int sample;
+                if(decoded) sample=decoded[k];
+                else {
+                    unsigned u=(unsigned)pcm[2*k]|(unsigned)pcm[2*k+1]<<8;
+                    sample=u<=32767?(int)u:(int)u-65536;
+                }
+                samples[k]=(float)sample*(1.0f/32768.0f);
+            }
+            free(decoded);
+            r->samples[j]=(CarAudioPCM){samples,frames,(float)rate,loop!=0,NULL,NULL,loop?loop-1:0};
+            r->pcm_bytes+=(size_t)frames*sizeof(float);
+        }
+        pcm+=n;
     }
+    return 0;
+}
+
+static int prepare_bank(Resource *r,unsigned layer) {
+    if(!r->bank.source) {
+        if(!backend.voices && car_audio_backend_init(&backend,voices,512,44100,resolve,NULL)) return -1;
+        if(plan(r) || prepare_samples(r)) goto fail;
+    }
+    return car_audio_engine_class_matches(layer?0:1,&r->modules[0].interface)?0:-1;
+fail:
+    clear_bank(r); return -1;
+}
+
+int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned expected_version,FILE *f) {
+    if(!car_audio_enabled()) return 0;
+    if(!key || !name || !f || !*name || strlen(name)>=sizeof packages[0].name) return -1;
     Package *p=NULL;
     for(unsigned i=0;i<MAX_PACKAGES;i++) {
-        if(packages[i].key==key) { packages[i].retiring=0; return 1; }
+        if(packages[i].key==key && packages[i].vault==vault)
+            return !packages[i].retiring && !strcasecmp(packages[i].name,name) &&
+                   (!expected_version || packages[i].version==expected_version)?1:-1;
         if(!packages[i].key && !p) p=packages+i;
     }
-    if(!p || !filename) return -1;
-    FILE *f=fopen(filename,"rb"); if(!f) return errno==ENOENT?0:-1;
-    if(fseek(f,0,SEEK_END)) { fclose(f); return -1; }
-    long bytes=ftell(f); rewind(f);
-    if(bytes<68 || bytes>256*1024*1024) { fclose(f); return -1; }
-    p->bytes=malloc((size_t)bytes); p->size=(size_t)bytes;
-    int ok=p->bytes && fread(p->bytes,1,p->size,f)==p->size; fclose(f);
-    if(!ok) goto fail;
+    if(!p) return -1;
+    uint8_t header[68];
+    if(fread(header,1,sizeof header,f)!=sizeof header || memcmp(header,"A7CA",4)) return -1;
+    uint32_t version=rd(header+4), size=rd(header+8);
+    const char *pin=package_pin(name,version);
+    if(!pin || (expected_version && version!=expected_version) ||
+       size<sizeof header || size>256*1024*1024) return -1;
+    p->size=size; p->bytes=malloc(size);
+    if(!p->bytes) goto fail;
+    memcpy(p->bytes,header,sizeof header);
+    if(fread(p->bytes+sizeof header,1,size-sizeof header,f)!=size-sizeof header ||
+       fgetc(f)!=EOF || ferror(f)) goto fail;
     const uint8_t *b=p->bytes;
-    if(memcmp(b,"A7CA",4) || rd(b+4)!=1 || rd(b+8)!=p->size ||
-       memcmp(b+20,"jaguarxk\0\0\0\0\0\0\0\0",16)) goto fail;
-    p->count=rd(b+12); if(!p->count || p->count>MAX_RESOURCES) { p->count=0; goto fail; }
+    size_t name_size=strlen(name);
+    if(strncasecmp((const char *)b+20,name,name_size)) goto fail;
+    for(size_t i=name_size;i<sizeof p->name;i++) if(b[20+i]) goto fail;
     uint8_t sha[32]; digest(b+68,p->size-68,sha); if(memcmp(sha,b+36,32)) goto fail;
     digest(b,p->size,p->digest);
     char package_id[65]; hex(p->digest,package_id);
-    if(strcmp(package_id,"66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c")) goto fail;
+    if(strcmp(package_id,pin)) goto fail;
+
     Reader in={b+68,p->size-68,0};
-    uint32_t graph_size=rd(b+16); if(graph_size>4*1024*1024 || !take(&in,graph_size)) goto fail;
-    for(unsigned k=0;k<2;k++) {
-        p->calibration[k]=take(&in,CALIBRATION);
-        if(!p->calibration[k]) goto fail;
-        for(unsigned j=0;j<3;j++) { p->layer[k][j]=word(&in); if(p->layer[k][j]>=p->count) goto fail; }
-        if(!isfinite(rf(p->calibration[k]+0x120)) || !isfinite(rf(p->calibration[k]+0xe8)) ||
-           rd(p->calibration[k]+0x124)!=87) goto fail;
+    uint32_t resources=rd(b+12),layout=rd(b+16);
+    if(!resources || resources>MAX_RESOURCES) goto fail;
+    p->count=resources;
+    if(version==1) {
+        if(layout>4*1024*1024 || !take(&in,layout)) goto fail;
+        p->tier_count=1;
+    } else {
+        p->tier_count=layout; p->max_level=word(&in); p->default_level=word(&in);
+        if(!layout || layout>MAX_TIERS || p->default_level>p->max_level || p->max_level>4) goto fail;
+    }
+    for(unsigned tier=0;tier<p->tier_count;tier++) for(unsigned k=0;k<2;k++) {
+        Tier *t=p->tiers+tier;
+        const uint8_t *cal=t->calibration[k]=take(&in,CALIBRATION);
+        if(!cal || !isfinite(rf(cal+0x120)) || !isfinite(rf(cal+0xe8)) || rd(cal+0x124)>99) goto fail;
+        for(unsigned j=0;j<3;j++) {
+            t->layer[k][j]=word(&in); if(t->layer[k][j]>=p->count) goto fail;
+        }
     }
     for(unsigned i=0;i<p->count;i++) {
         Resource *r=p->resource+i;
@@ -378,42 +518,45 @@ int car_audio_load(uint32_t key,const char *name,const char *filename) {
         const uint8_t *d=take(&in,32); if(!d) goto fail; memcpy(r->digest,d,32);
         if((r->kind!=1 && r->kind!=2) || r->size>16*1024*1024 ||
            r->sample_count>4096 || r->plan_size>1024*1024) goto fail;
-        r->source=take(&in,r->size); r->plan=take(&in,r->plan_size);
+        r->source=take(&in,r->size); r->plan=take(&in,r->plan_size); r->sample_source=in.p;
         if(!r->source || !r->plan) goto fail;
         digest(r->source,r->size,sha); if(memcmp(sha,r->digest,32)) goto fail;
         if(r->kind==1 && (r->size<40 || memcmp(r->source,"Gnsu20",6) || r->plan_size || r->sample_count)) goto fail;
         if(r->kind==2 && (r->size<0x60 || memcmp(r->source,"ABKC",4))) goto fail;
-        for(unsigned j=0;j<i;j++) if(!memcmp(r->digest,p->resource[j].digest,32)) {
-            /* Two authored names may share exact bytes, but conflicting kinds
-             * or executable plans for the same digest are never accepted. */
-            if(r->kind!=p->resource[j].kind || r->plan_size!=p->resource[j].plan_size) goto fail;
+        if(version==3 && r->kind==2) {
+            Reader exec={r->plan,r->plan_size,0};
+            r->translated_size=word(&exec);
+            r->translated=take(&exec,r->translated_size);
+            if(!r->translated || r->translated_size<0x60 || r->translated_size>256*1024 ||
+               !exec.n || !r->sample_count) goto fail;
+            r->plan=exec.p; r->plan_size=(uint32_t)exec.n;
         }
-        r->samples=calloc(r->sample_count?r->sample_count:1,sizeof(*r->samples)); if(!r->samples) goto fail;
         for(uint32_t j=0;j<r->sample_count;j++) {
             uint32_t frames=word(&in),rate=word(&in),loop=word(&in),n=word(&in);
-            if(frames>10000000 || n!=(uint64_t)frames*2 || loop>1 || (frames && rate!=44100)) goto fail;
-            const uint8_t *pcm=take(&in,n); if(!pcm) goto fail;
-            if(!frames) { if(rate || loop) goto fail; continue; }
-            float *samples=malloc((size_t)frames*sizeof(float)); if(!samples) goto fail;
-            for(uint32_t k=0;k<frames;k++) {
-                unsigned u=(unsigned)pcm[2*k]|(unsigned)pcm[2*k+1]<<8;
-                samples[k]=(float)(u<=32767?(int)u:(int)u-65536)*(1.0f/32768.0f);
-            }
-            r->samples[j]=(CarAudioPCM){samples,frames,(float)rate,(int)loop,NULL,NULL};
+            if(frames>10000000 || n!=(version==3?0:(uint64_t)frames*2) || loop>frames ||
+               rate!=(frames?(version==3?48000u:44100u):0u) || !take(&in,n)) goto fail;
         }
     }
     if(in.failed || in.n) goto fail;
-    if(!backend.voices && car_audio_backend_init(&backend,voices,512,44100,resolve,NULL)) goto fail;
-    for(unsigned k=0;k<2;k++) {
-        Resource *r=p->resource+p->layer[k][0];
-        if(r->kind!=2 || !allowed(r,k) || !r->plan_size || plan(r) ||
-           !car_audio_engine_class_matches(k?0:1,&r->modules[0].interface)) goto fail;
-        for(unsigned j=1;j<3;j++) if(p->resource[p->layer[k][j]].kind!=1) goto fail;
+    for(unsigned tier=0;tier<p->tier_count;tier++) for(unsigned k=0;k<2;k++) {
+        const uint32_t *ids=p->tiers[tier].layer[k];
+        Resource *r=p->resource+ids[0];
+        if(r->kind!=2 || !r->plan_size || p->resource[ids[1]].kind!=1 || p->resource[ids[2]].kind!=1) goto fail;
     }
-    p->key=key;
-    if(diag_on) diag_event("addcar_audio: loaded key=%08X bytes=%zu sha256=%s resources=%u",key,p->size,package_id,p->count);
+    p->key=key; p->vault=vault; p->version=version;
+    memcpy(p->name,b+20,sizeof p->name);
+    if(diag_on) diag_event("addcar_audio: loaded car=%s key=%08X vault=%llu bytes=%zu sha256=%s resources=%u tiers=%u platform=%s",
+        p->name,key,(unsigned long long)vault,p->size,package_id,p->count,p->tier_count,version==3?"x360":"pc");
     return 1;
-fail: clear_package(p); return -1;
+fail:
+    clear_package(p); return -1;
+}
+int car_audio_load(uint32_t key,uint64_t vault,const char *name,const char *filename) {
+    if(!car_audio_enabled()) return 0;
+    if(!filename) return -1;
+    FILE *f=fopen(filename,"rb"); if(!f) return errno==ENOENT?0:-1;
+    int result=car_audio_load_stream(key,vault,name,0,f);
+    fclose(f); return result;
 }
 /* Resource identities are full SHA-256 pairs. A fresh unlinked file gives each
  * guest open an independent cursor and prevents all unrelated substitutions. */
@@ -461,8 +604,12 @@ static Engine *engine(uint32_t object) {
 static Package *for_object(uint32_t object) {
     uint32_t state=M32(object+0x14),car=state?M32(state+0x34):0,collection=car?M32(car+0x204):0;
     uint32_t key=collection?M32(collection+0x20):0;
-    for(unsigned i=0;i<MAX_PACKAGES;i++) if(key && packages[i].key==key) return packages+i;
-    return NULL;
+    Package *selected=NULL;
+    for(unsigned i=0;i<MAX_PACKAGES;i++) {
+        Package *p=packages+i;
+        if(key && p->key==key && !p->retiring && (!selected || p->vault>selected->vault)) selected=p;
+    }
+    return selected;
 }
 static int execute(void *context,uint32_t entry,uint32_t input) {
     Cpu *caller=context,saved=*caller;
@@ -484,21 +631,21 @@ static int inputs(Cpu *c,Engine *e,unsigned layer,int32_t out[100]) {
     Cpu saved=*c; c->ecx=rpm_object;
     call_guest(c,M32(M32(rpm_object)+0x44),0,NULL);
     double rpm=c->st[c->top]; *c=saved;
-    const uint8_t *cal=e->package->calibration[layer];
-    controls[0]=87; controls[12]=1;
+    const uint8_t *cal=e->tier->calibration[layer];
+    controls[0]=ri(cal+0x124); controls[12]=1;
     if(car_audio_engine_class_rpm(rpm,rf(cal+0x120),rf(cal+0xe8),controls+1) ||
        car_audio_engine_class_pitch(MF32(object+0x3c),controls+16)) return -1;
     controls[2]=controls[3]; controls[4]=controls[5];
     controls[26]=controls[13]; controls[27]=controls[14]; controls[28]=controls[15]; controls[29]=controls[21];
-    return car_audio_engine_class_inputs(out,controls,30,e->package->calibration[1],CALIBRATION,
-        e->package->calibration[0],CALIBRATION);
+    return car_audio_engine_class_inputs(out,controls,30,e->tier->calibration[1],CALIBRATION,
+        e->tier->calibration[0],CALIBRATION);
 }
 static int start_ginsu(Cpu *c,Engine *e) {
     if(!free_native_voices(4)) return -1;
     uint32_t packets=8,overhead=native_call(c,0x0081dafd,0,1,&packets);
     if(overhead<0x9c || overhead>65536) return -1;
     for(unsigned k=0;k<4;k++) {
-        Resource *r=e->package->resource+e->package->layer[k/2][k%2+1];
+        Resource *r=e->package->resource+e->tier->layer[k/2][k%2+1];
         char pack[65],resource[65],name[192];
         hex(e->package->digest,pack); hex(r->digest,resource);
         snprintf(name,sizeof name,"SOUND/ADDCAR_AUDIO/%s/%s",pack,resource);
@@ -534,7 +681,7 @@ static void sync_ginsu_volume(Cpu *c,Engine *e) {
     uint32_t spatial=M32(e->object+0x10),state=M32(e->object+0x40);
     for(unsigned k=0;k<4;k++) {
         int32_t gain=state?(int32_t)M32(state+0x3c+4*(k%2)):0;
-        int32_t authored=ri(e->package->calibration[k/2]+0x128)&65535;
+        int32_t authored=ri(e->tier->calibration[k/2]+0x128)&65535;
         uint32_t base=spatial && engine_active(e) && !e->recovering?M32(spatial+4)&32767:0;
         int32_t level=(int32_t)((int64_t)gain*base*authored/(32767LL*32767*256));
         uint32_t volume[]={(uint32_t)e->ginsu[k].voice,(uint32_t)(level<0?0:level>127?127:level)};
@@ -610,6 +757,9 @@ static void detach_engine(Cpu *c,Engine *e,int restore) {
         if(e->ginsu[i].work) gfree(e->ginsu[i].work);
         if(e->ginsu[i].gin) gfree(e->ginsu[i].gin);
     }
+    if(diag_on && replaced)
+        diag_event("addcar_audio: detached car=%s object=%08X restore=%d mixed_nonzero_samples=%llu",
+            package->name,object,restore,(unsigned long long)diag_nonzero_samples);
     *c=saved; memset(e,0,sizeof(*e));
     int active=0,borrowed=0;
     for(unsigned i=0;i<MAX_ENGINES;i++) { active|=engines[i].object!=0; borrowed|=engines[i].package==package; }
@@ -618,24 +768,52 @@ static void detach_engine(Cpu *c,Engine *e,int restore) {
     if(package && package->retiring && !borrowed) clear_package(package);
     *c=saved;
 }
-void car_audio_unload(uint32_t key) {
-    /* A retiring vault cannot release bytes still borrowed by an engine. Its
-     * final real destructor finishes the deferred package unload. */
-    for(unsigned i=0;i<MAX_ENGINES;i++) if(engines[i].package && engines[i].package->key==key) {
-        engines[i].package->retiring=1; return;
+void car_audio_unload(uint64_t vault) {
+    for(unsigned i=0;i<MAX_PACKAGES;i++) {
+        Package *p=packages+i;
+        if(!p->key || p->vault!=vault) continue;
+        p->retiring=1;
+        /* Instances borrow bank bytes until their final destructor. */
+        int borrowed=0;
+        for(unsigned j=0;j<MAX_ENGINES;j++) borrowed|=engines[j].package==p;
+        if(!borrowed) clear_package(p);
     }
-    for(unsigned i=0;i<MAX_PACKAGES;i++) if(packages[i].key==key) clear_package(packages+i);
+}
+static unsigned tier_for_level(const Package *p,int32_t level) {
+    if(level<1) return 0;
+    if((unsigned)level>p->max_level) level=(int32_t)p->max_level;
+    unsigned tier=level<1?0:p->max_level==1?1:(unsigned)(level-1);
+    return tier<p->tier_count?tier:p->tier_count-1;
+}
+static unsigned engine_tier(Cpu *c,uint32_t object,const Package *p) {
+    if(p->tier_count<2) return 0;
+    uint32_t state=M32(object+0x14),car=M32(state+0x34),handle=M32(car+0x234);
+    int32_t level=(int32_t)p->default_level;
+    uint32_t sim=handle?native_call(c,0x0041ad40,0,1,&handle):0;
+    if(sim && M32(sim) && M32(M32(sim)+0x44)==0x00686a40) {
+        /* MW PhysicsObject::GetAttributes is +38. Engine is put_maps type 4. */
+        uint32_t args[]={sim+0x38,4};
+        level=(int32_t)native_call(c,0x00672d30,0,2,args);
+    }
+    unsigned tier=tier_for_level(p,level);
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+    const char *forced=getenv("NFS_TEST_UPGRADE_INTERVAL");
+    if(forced && forced[0]>='0' && forced[0]<'0'+(int)p->tier_count && !forced[1])
+        tier=(unsigned)(forced[0]-'0');
+#endif
+    return tier;
 }
 static void init_engine(Cpu *c,uint32_t object,int ginsu) {
     if(!car_audio_enabled() || engine(object)) return;
     Package *p=for_object(object); if(!p) return;
     Engine *e=NULL; for(unsigned i=0;i<MAX_ENGINES;i++) if(!engines[i].object) { e=engines+i; break; }
     if(!e) return;
-    e->object=object; e->package=p;
+    unsigned tier=engine_tier(c,object,p);
+    e->object=object; e->package=p; e->tier=p->tiers+tier;
     e->mix_gain=engine_mix_gain(e);
     for(unsigned k=0;k<2;k++) {
-        Resource *r=p->resource+p->layer[k][0]; int32_t words[100];
-        if(inputs(c,e,k,words)) goto fail;
+        Resource *r=p->resource+e->tier->layer[k][0]; int32_t words[100];
+        if(prepare_bank(r,k) || inputs(c,e,k,words)) goto fail;
         e->state[k]=gmalloc_try(r->modules[0].size); if(!e->state[k]) goto fail;
         if(car_audio_runtime_create(&r->bank,0,e->instances+k,G+e->state[k],r->modules[0].size,e->state[k],words,100)) goto fail;
     }
@@ -652,13 +830,22 @@ static void init_engine(Cpu *c,uint32_t object,int ginsu) {
         M32(object+0x68+i*0x18)=UINT32_MAX;
     }
     if(diag_on) {
-        char engine_id[65],exhaust_id[65];
-        hex(p->resource[p->layer[0][0]].digest,engine_id); hex(p->resource[p->layer[1][0]].digest,exhaust_id);
-        diag_event("addcar_audio: object=%08X key=%08X engine=%s exhaust=%s source_blocks=2 native_ginsu=%u",
-            object,p->key,engine_id,exhaust_id,ginsu?4:0);
+        char ids[2][3][65];
+        size_t resident=p->size;
+        for(unsigned i=0;i<p->count;i++) {
+            const Resource *r=p->resource+i;
+            resident+=r->pcm_bytes+r->bank.size;
+        }
+        for(unsigned k=0;k<2;k++) for(unsigned j=0;j<3;j++)
+            hex(p->resource[e->tier->layer[k][j]].digest,ids[k][j]);
+        diag_event("addcar_audio: attached car=%s object=%08X key=%08X tier=%u engine=%s exhaust=%s "
+                   "engine_accel=%s engine_decel=%s exhaust_accel=%s exhaust_decel=%s resident_bank_bytes=%zu native_ginsu=%u",
+            p->name,object,p->key,tier,ids[0][0],ids[1][0],ids[0][1],ids[0][2],ids[1][1],ids[1][2],resident,ginsu?4:0);
     }
     return;
-fail: detach_engine(c,e,1);
+fail:
+    if(diag_on) diag_event("addcar_audio: attach failed car=%s tier=%u",p->name,tier);
+    detach_engine(c,e,1);
 }
 void car_audio_tick(Cpu *c,uint32_t object) {
     if(!car_audio_enabled()) return;
@@ -684,7 +871,19 @@ void car_audio_tick(Cpu *c,uint32_t object) {
         int rc=car_audio_runtime_tick(executing,execute,c); executing=previous;
         if(rc || !e->instances[k].bank) goto fail;
     }
-    car_audio_backend_tick(&backend); *c=saved; return;
+    car_audio_backend_tick(&backend);
+    if(diag_on && !e->diag_started) {
+        unsigned source=0, native=0;
+        for(unsigned i=0;i<512;i++) source+=voices[i].owned && !voices[i].ended;
+        uint32_t pool=M32(0x009c21f4); unsigned capacity=M16(0x009c218c);
+        if(pool && capacity<=256)
+            for(unsigned i=0;i<capacity;i++) native+=M8(pool+i*0x90+0x6d)!=0;
+        if(source) {
+            diag_event("addcar_audio: race voices car=%s native=%u source=%u",e->package->name,native,source);
+            e->diag_started=1;
+        }
+    }
+    *c=saved; return;
 fail: *c=saved; detach_engine(c,e,1);
 }
 void f_004DC360_orig(Cpu *);

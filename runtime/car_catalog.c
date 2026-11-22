@@ -26,6 +26,9 @@
 #define FILE_LIMIT (UINT64_C(2) << 30)
 /* The public 4.7.1 catalog envelope. Each row is still checked against the
  * compiled policy, which carries the reviewed contracts for that release. */
+#define PRE_AUDIO_POLICY_SHA256 "54d1cae330a4e6313541fdc24805849b2b2ad0f1710bbc89817a44f2eaff1f5e"
+#define PC_AUDIO_POLICY_SHA256 "fb94c2862e1ee321c1220b97d22b275da3ea73fbe697d082d745c48395402aa1"
+#define X360_AUDIO_POLICY_SHA256 "243e055faf5957ba00d4ce5329756e6861355571c44335e1fe0543d32b7c4626"
 #define LEGACY_POLICY_SHA256 "cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c"
 #define DIR_FLAGS (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
 #define FILE_FLAGS (O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -42,7 +45,7 @@ static int initialized, result;
 static char generation[67], compatibility[65], problem[512];
 static const char *const output_names[CAR_CATALOG_OUTPUTS] = {
     "GEOMETRY.BIN", "TEXTURES.BIN", "SOLIDMAP.BIN", "WHEELFIT.BIN",
-    "COLLISION.BIN", "PAINT.BIN", "PHYSICS.BIN", "GRIP.BIN"
+    "COLLISION.BIN", "PAINT.BIN", "PHYSICS.BIN", "GRIP.BIN", "AUDIO.BIN"
 };
 static int bad(const char *why) {
     if (!problem[0]) snprintf(problem, sizeof problem, "%s", why);
@@ -458,6 +461,7 @@ static int row_load(Json *j, int at, unsigned s, Json *policy, int approval) {
         unsigned kind;
         for (kind=0;kind<CAR_CATALOG_OUTPUTS;++kind) if (equal(j,k,output_names[kind])) break;
         NEED(kind<CAR_CATALOG_OUTPUTS,"unknown output type; a supported sidecar validator is required");
+        NEED(kind!=CAR_CATALOG_AUDIO || carbon,"audio sidecar requires Carbon provenance");
         CarCatalogOutput *o=&out->outputs[kind];
         NEED(!pin(j,k+1,&o->size,o->sha256),"invalid output size/hash pin"); o->present=1;
     }
@@ -507,6 +511,18 @@ static int floats(const unsigned char *p, unsigned n, float maximum) {
 }
 static int sidecar(CarCatalogSlot *car, unsigned kind, int fd) {
     CarCatalogOutput *o=&car->outputs[kind];
+    if (kind==CAR_CATALOG_AUDIO) {
+        unsigned char header[68];
+        size_t name_size=strlen(car->source_folder);
+        unsigned version=!strcmp(car->source_platform,"x360")?3:2;
+        NEED(name_size<16 && o->size>=sizeof header && o->size<=256u*1024*1024 &&
+             pread(fd,header,sizeof header,0)==sizeof header && !memcmp(header,"A7CA",4) &&
+             word32(header+4)==version && word32(header+8)==o->size &&
+             !strncasecmp((const char *)header+20,car->source_folder,name_size),"invalid source audio header");
+        for (size_t i=name_size;i<16;++i) NEED(!header[20+i],"invalid source audio car");
+        o->version=version;
+        return 0;
+    }
     if (kind==CAR_CATALOG_GRIP) {
         /* Integrity is still mandatory. Optional handling semantics can refuse
          * independently without removing an otherwise admitted car. */
@@ -767,7 +783,9 @@ static int load(const char *root) {
     if (strcmp(claimed,catalog_digest)) { bad("catalog SHA-256 mismatch"); goto done; }
     if (!FIELDS(&catalog,0,"schema","policy_sha256","compatibility","cars") || !integer(&catalog,field(&catalog,0,"schema"),1) ||
         hash_field(&catalog,0,"policy_sha256",claimed) ||
-        (strcmp(claimed,policy_digest) && strcmp(claimed,LEGACY_POLICY_SHA256))) { bad("catalog schema or packaged approval policy mismatch"); goto done; }
+        (strcmp(claimed,policy_digest) && strcmp(claimed,LEGACY_POLICY_SHA256) &&
+         strcmp(claimed,PRE_AUDIO_POLICY_SHA256) && strcmp(claimed,PC_AUDIO_POLICY_SHA256) &&
+         strcmp(claimed,X360_AUDIO_POLICY_SHA256))) { bad("catalog schema or packaged approval policy mismatch"); goto done; }
     int cars=field(&catalog,0,"cars");
     if (catalog.t[cars].type!='[' || catalog.t[cars].count!=CAR_CATALOG_SLOTS) { bad("catalog requires 90 ordered reservations"); goto done; }
     int at=cars+1;

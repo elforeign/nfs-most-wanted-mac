@@ -168,6 +168,11 @@ def _logical(source, entry, **kwargs):
     return _range(path, offset, size, **kwargs)
 
 
+def _x360_donor_export(physical):
+    return ('NFS/ZDIR.BIN' not in physical and
+            not any(name.startswith('SOUND/ENGINE/') for name in physical))
+
+
 @contextmanager
 def _open_source(path):
     # The recognition context wraps every OSError from its body as a source
@@ -201,10 +206,11 @@ def _mw_asset(root, name, game):
     return path
 
 
-def _source_names(platform, folder, identities, game='carbon'):
+def _source_names(platform, folder, identities, game='carbon', audio_names=()):
     names = [*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game]]
     if platform == 'x360':
         names += ['GLOBAL/GLOBALB.BUN', 'CARS/TEXTURES.BIN', 'GLOBAL/INGAMEA.BUN']
+    names += [n for n in audio_names if game == 'carbon' and n.startswith('SOUND/ENGINE/')]
     known = {sources.path_hash(n): n for n in names}
     _require(set(identities) <= known.keys(), 'unmapped converter logical dependency')
     return {n: known[n] for n in identities}
@@ -290,10 +296,10 @@ def _later_route(game):
     return ucpc_car, modules + [ps_attrib, uc_batch, ucpc_car]
 
 
-def _code(platform, absent, game='carbon'):
+def _code(platform, absent, game='carbon', *, mac_audio=False):
     code = _Code()
     if game == 'carbon':
-        policy, _ = converter._converter_policy(platform, None, code)
+        policy, _ = converter._converter_policy(platform, None, code, mac_audio)
     else:
         from . import car_texture_namespace, huff, x360, xdvdfs
         _, route_modules = _later_route(game)
@@ -496,8 +502,11 @@ class CarImporter:
         expected = recognition['shared'] + by_car[sources.path_hash('CARS/' + folder)]['files']
         tick = lambda: self._tick(cancel)
         with _open_source(source) as reader:
-            logical = sources._logical(reader, sources._physical(reader))
-            bundle = None
+            physical = sources._physical(reader)
+            logical = sources._logical(reader, physical, engine_audio=platform == 'x360')
+            mac_audio = False
+            audio_paths = ()
+            donor_export = False
             if platform == 'x360':
                 bundle = xenon.resolve(reader, folder, car['donors']['model'], recognition=recognition)
                 source_pins = {key: _pin(row) for key, row in bundle.inputs.items()}
@@ -510,6 +519,30 @@ class CarImporter:
             for key, pin in source_pins.items():
                 _require(key in logical and _logical(reader, logical[key], tick=tick) == pin,
                          'selected logical source changed')
+            if game == 'carbon':
+                from . import car_audio_pack
+                attribute_id = sources.path_hash('GLOBAL/ATTRIBUTES.BIN')
+                x360 = platform == 'x360'
+                attributes_pin = car_audio_pack.X360_ATTRIBUTES if x360 else car_audio_pack.ATTRIBUTES
+                mac_audio = source_pins[attribute_id]['sha256'] == attributes_pin
+                donor_export = mac_audio and x360 and _x360_donor_export(physical)
+                mac_audio = mac_audio and not donor_export
+                if mac_audio:
+                    attr = sources._read(reader, logical[attribute_id])
+                    audio_pins = converter.x360_audio_inputs(attr, folder, logical) if x360 else None
+                    audio_paths = (audio_pins if x360 else
+                        car_audio_pack.resource_paths(attr, folder, (n for n in physical if n.startswith('SOUND/ENGINE/'))))
+                    for name in audio_paths:
+                        key = sources.path_hash(name)
+                        _require(key not in source_pins, 'colliding audio input')
+                        if not x360:
+                            _require(key not in logical, 'colliding audio input')
+                            logical[key] = (physical[name], 0, reader.size(physical[name]))
+                        source_pins[key] = _logical(reader, logical[key], tick=tick)
+                        if x360:
+                            _require(source_pins[key] == audio_pins[name],
+                                     'Console engine audio does not match the approved file: ' + name + '.')
+                        names[key] = name
             mw_names = _mw_names(game, car['donors']['model'])
             mw_paths = {name: _mw_asset(mw, name, game) for name in mw_names}
             extraction = sum(p['size'] for p in source_pins.values())
@@ -519,7 +552,7 @@ class CarImporter:
             else:
                 mw_pins = self._later_mw_pins(mw_paths, reviewed, car, extraction)
             absent = sorted(set(mw_names) - mw_pins.keys())
-            code, conversion_policy, environment = _code(platform, absent, game)
+            code, conversion_policy, environment = _code(platform, absent, game, mac_audio=mac_audio)
             dependencies = sum(p['size'] for p in mw_pins.values()) + sum(p['size'] for p in code.pins.values())
             identity = dict(schema=REVISION, car=car, game=game, platform=platform, source=source_pins,
                 mw=mw_pins, converter=code.pins, conversion_policy=conversion_policy,
@@ -531,7 +564,14 @@ class CarImporter:
             def unchanged():
                 tick()
                 with _open_source(source) as fresh:
-                    current = sources._logical(fresh, sources._physical(fresh))
+                    files = sources._physical(fresh)
+                    if donor_export:
+                        _require(_x360_donor_export(files), 'Console engine audio files changed before activation.')
+                    current = sources._logical(fresh, files, engine_audio=platform == 'x360')
+                    if platform == 'pc':
+                        for name in audio_paths:
+                            if name in files:
+                                current[sources.path_hash(name)] = (files[name], 0, fresh.size(files[name]))
                     for name, pin in source_pins.items():
                         _require(current.get(name) == logical[name] and
                                  _logical(fresh, current[name], tick=tick) == pin, 'source changed before activation')
@@ -540,7 +580,7 @@ class CarImporter:
                     _require(path == mw_paths[name] and catalog.fingerprint(path) == pin,
                              'MW dependency changed before activation')
                 _require(all(not _mw_asset(mw, name, game).exists() for name in absent), 'MW dependency inventory changed')
-                current_code, current_policy, _ = _code(platform, absent, game)
+                current_code, current_policy, _ = _code(platform, absent, game, mac_audio=mac_audio)
                 _require(current_code.pins == code.pins and current_policy == conversion_policy,
                          'converter dependency changed before activation')
 
@@ -650,14 +690,16 @@ class CarImporter:
         elif platform == 'pc':
             report = converter.convert(stage / 'source/CARS' / folder, donor,
                 dict(carbon_global=stage / 'source/GLOBAL/GLOBALB.LZC',
-                     attributes=stage / 'source/GLOBAL/ATTRIBUTES.BIN', mw_root=stage / 'mw'), out, writer=write)
+                     attributes=stage / 'source/GLOBAL/ATTRIBUTES.BIN', mw_root=stage / 'mw'), out,
+                mac_audio=any(n.startswith('SOUND/ENGINE/') for n in names.values()), writer=write)
         else:
             # Resolve again from the bounded, verified logical snapshot.
             # Conversion never needs the ISO's containing directory as an
             # output exclusion root, nor any unselected archive bytes.
             with _open_source(stage / 'source') as snapshot:
                 frozen = xenon.resolve(snapshot, folder, car['donors']['model'], recognition=recognition)
-                report = converter.convert_x360(frozen, donor, out, mw_root=stage / 'mw', writer=write)
+                report = converter.convert_x360(frozen, donor, out, mw_root=stage / 'mw',
+                    mac_audio=any(n.startswith('SOUND/ENGINE/') for n in names.values()), writer=write)
         catalog._bound(stage, owned.fd)
         return report
 
@@ -718,9 +760,15 @@ class CarImporter:
     def _cached(self, entry, identity, policy, *, retained=False):
         try:
             _require(policy is not None, 'cache requires packaged approval')
-            legacy = retained and identity['approval'] == dict(
+            legacy = identity['approval'] == dict(
                 sha256=catalog.LEGACY_POLICY_SHA256, revision=catalog.LEGACY_POLICY_REVISION)
-            _require(legacy or identity['approval'] == dict(sha256=policy.sha256,
+            pre_audio = identity['approval'] == dict(
+                sha256=catalog.PRE_AUDIO_POLICY_SHA256, revision=catalog.PRE_AUDIO_POLICY_REVISION)
+            pc_audio = identity['approval'] == dict(
+                sha256=catalog.PC_AUDIO_POLICY_SHA256, revision=catalog.PC_AUDIO_POLICY_REVISION)
+            x360_audio = identity['approval'] == dict(
+                sha256=catalog.X360_AUDIO_POLICY_SHA256, revision=catalog.X360_AUDIO_POLICY_REVISION)
+            _require((retained and (legacy or pre_audio or pc_audio or x360_audio)) or identity['approval'] == dict(sha256=policy.sha256,
                 revision=catalog._policy(policy)['revision']), 'cache approval revision is stale')
             with catalog._directory(entry) as base:
                 doc = catalog._decode(catalog._read(base, 'receipt.json'))
@@ -736,7 +784,8 @@ class CarImporter:
                      row['origin'] == dict(game=game, platform=identity['platform'], folder=car['folder']) and
                      row['converter'] == dict(revision=identity['conversion_policy']['revision'],
                                               policy=identity['conversion_policy']['sha256']), 'cache contract mismatch')
-            source_names = _source_names(identity['platform'], car['folder'], identity['source'], game)
+            source_names = _source_names(identity['platform'], car['folder'], identity['source'], game,
+                                         row['inputs']['source'])
             prefix = 'CARS/' + car['donors']['model'] + '/'
             _require(row['inputs'] == dict(
                 source={source_names[n]: p for n, p in identity['source'].items()},

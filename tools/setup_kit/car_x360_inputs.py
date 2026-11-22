@@ -494,7 +494,7 @@ class LogicalReader:
     """
     def __init__(self, source, expected):
         self.source = source
-        self.logical = cs._logical(source, cs._physical(source))
+        self.logical = cs._logical(source, cs._physical(source), engine_audio=True)
         self.expected, self.inputs = {}, {}
         for row in expected:
             identity = row['path_hash']
@@ -534,7 +534,7 @@ class LogicalReader:
         return self.read(name)
 
     def check_unchanged(self):
-        current = cs._logical(self.source, cs._physical(self.source))
+        current = cs._logical(self.source, cs._physical(self.source), engine_audio=True)
         for identity, row in self.inputs.items():
             if (current.get(identity) != self.logical[identity] or
                     cs._digest(self.source, current[identity]) != row['sha256']):

@@ -54,7 +54,7 @@ class Pack(unittest.TestCase):
 
     def test_unsupported_before_parsing(self):
         with self.assertRaisesRegex(ValueError, 'unsupported car'):
-            pack.build(b'', 'othercar', {})
+            pack.build(b'', '../othercar', {})
         with self.assertRaisesRegex(ValueError, 'attributes revision'):
             pack.build(b'', 'jaguarxk', {})
 
@@ -69,7 +69,18 @@ class Pack(unittest.TestCase):
         from setup_kit import car_convert
         import inspect
         self.assertFalse(inspect.signature(car_convert.convert).parameters['mac_audio'].default)
-        self.assertNotIn('mac_audio', inspect.signature(car_convert.convert_x360).parameters)
+        self.assertFalse(inspect.signature(car_convert.convert_x360).parameters['mac_audio'].default)
+
+    def test_console_packet_framing(self):
+        from setup_kit.car_audio_x360 import validate_samples
+        metadata = [dict(offset=0, frames=1, loop_start=0)]
+        packet = bytearray(12) + struct.pack('>3I', 16, 1, 8 << 2 | 3) + b'\x08\0\0\0'
+        validate_samples(packet, metadata, 0, len(packet))
+        for at, mask in ((15, 1), (19, 1), (23, 4), (24, 0x10), (27, 1)):
+            data = bytearray(packet)
+            data[at] ^= mask
+            with self.subTest(offset=at), self.assertRaises(ValueError):
+                validate_samples(data, metadata, 0, len(data))
 
 
 if __name__ == '__main__':

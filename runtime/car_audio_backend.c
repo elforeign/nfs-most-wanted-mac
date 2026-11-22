@@ -18,7 +18,7 @@ static void retire(CarAudioVoice *v) {
 static int valid_sample(const CarAudioPCM *s) {
     /* Restrict frames so floor(cursor) and its successor are exact doubles. */
     return s && s->pcm && s->frames && s->frames <= UINT32_MAX &&
-           isfinite(s->rate) && s->rate > 0.0f;
+           isfinite(s->rate) && s->rate > 0.0f && (!s->loop || s->loop_start < s->frames);
 }
 static void pan(CarAudioVoice *v, uint32_t offset) {
     uint16_t angle = (uint16_t)((uint32_t)v->base_angle + offset);
@@ -140,13 +140,13 @@ void car_audio_backend_render(CarAudioBackend *b, float *dry, float *wet, size_t
             double length = (double)v->sample.frames;
             if (v->cursor < 0.0 || v->cursor >= length) {
                 if (!v->sample.loop) { v->ended = 1; break; }
-                v->cursor = fmod(v->cursor, length);
-                if (v->cursor < 0.0) v->cursor += length;
-                /* The negative sum can round up to exactly length. */
-                if (v->cursor >= length) v->cursor = 0.0;
+                double start = (double)v->sample.loop_start, period = length - start;
+                double offset = fmod(v->cursor - start, period);
+                v->cursor = start + (offset < 0.0 ? offset + period : offset);
+                if (v->cursor >= length) v->cursor = start;
             }
             size_t a = (size_t)v->cursor, next = a + 1;
-            if (next == v->sample.frames) next = v->sample.loop ? 0 : a;
+            if (next == v->sample.frames) next = v->sample.loop ? v->sample.loop_start : a;
             double fraction = v->cursor - (double)a;
             float pcm = (float)((1.0 - fraction) * v->sample.pcm[a] +
                                fraction * v->sample.pcm[next]);

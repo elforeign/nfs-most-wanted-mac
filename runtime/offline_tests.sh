@@ -56,6 +56,7 @@
 # quarter-grey 74.2047; missing x2/ambient reject the full-road scene fixture.
 #   recomp/private_skydome_test.py: B2 sky selection and native ownership; auto-discovered
 #   recomp/private_daynight_cars_test.py: B2 car rig by day, key dot sun .9848; kind-2 control; auto-discovered
+#   recomp/private_daylamps_test.py: Carbon traffic quad skips noon (0 draws vs 1 without the gate); auto-discovered
 # Private region coverage: private_world_test, private_files_test and test_worldmerge.
 #   recomp/private_carbon_speech_test.py: CSI v3/IDX + cached sidecars, 14135 native decodes and endian/cache controls.
 #   recomp/private_carbon_music_test.py: PC graphs, 2004 offsets, native XA decode and PC-offset control.

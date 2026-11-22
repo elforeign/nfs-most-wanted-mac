@@ -35,6 +35,22 @@ This project does not provide, link to, or explain how to obtain any game file. 
 
 If something fails, Setup says which step failed and what to do. **Show Log** opens the full log.
 
+## Added cars (optional)
+
+Use your own installed PC game folder for **Carbon**, **ProStreet** or **Undercover**.
+For **Carbon on Xbox 360**, use an extracted game folder, an `.iso`, or a `.zip` or `.7z`
+containing one of those.
+
+1. In Most Wanted Setup, go to **Extras from your other games**, just after the Xbox 360 step.
+   If Most Wanted is already installed, open **Manage installed extras…** on Setup’s welcome screen.
+2. Under **Later-game source**, click **Choose…**. Tick the cars you want, click **Retry check**,
+   then **Import selected extras**. Repeat for each source you want to use.
+3. In Most Wanted, open **F10 > Cars & cutscenes** (Fn+F10 on some Mac keyboards), turn on
+   **Cars from later games**, then quit and reopen the game.
+
+The cars appear in Quick Race car selection and the Career car lot. Each uses the price and
+Blacklist unlock requirement of the Most Wanted car it’s based on.
+
 ## Export one app for backup
 
 Quit the game, open Setup and choose **Export all-in-one app…** (also available after a build).

@@ -2005,6 +2005,8 @@ def main(selection_only=False):
             if variant not in ('actual','public','original'): assert code!=actual,variant
             (tmp/'car85.c').write_text(code)
             extra=''
+            if variant=='public':
+                extra='\nFILE *car_catalog_open_sidecar(unsigned slot,CarCatalogOutputKind kind) { (void)slot; (void)kind; errno=ENOENT; return NULL; }\n'
             if variant=='original':
                 extra='\nint car85_traffic_ready(void){return 0;} uint32_t car85_traffic_key(void){return 0;} uint32_t car85_traffic_donor_key(void){return 0;} int car85_traffic_scratch_eligible(void){return 0;}\n'
             (tmp/'test.c').write_text(source+extra)

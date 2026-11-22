@@ -87,7 +87,7 @@ static void near(double x,double y,double tol,const char *label) {
 }
 static void retired_sample(void *p) { assert(p==&retired); ++retired; }
 static CarAudioPCM pcm(int loop) {
-    return (CarAudioPCM){samples,16,44100,loop,retired_sample,&retired};
+    return (CarAudioPCM){samples,16,44100,loop,retired_sample,&retired,0};
 }
 static int resolve(void *ctx,uint64_t bank,int16_t sample,CarAudioPCM *out) {
     assert(ctx==&resolved && bank==77 && sample==3); ++resolved;
@@ -290,7 +290,7 @@ static void wrap_round(void) {
     cb=car_audio_backend_callbacks(); retired=0;
     float *one=malloc(sizeof(float)); C(one!=NULL); if(!one) return;
     one[0]=1;
-    CarAudioPCM s={one,1,16000,1,retired_sample,&retired}; int32_t h=-1;
+    CarAudioPCM s={one,1,16000,1,retired_sample,&retired,0}; int32_t h=-1;
     C(car_audio_backend_stock(&pool,&s,60,&h)==0);
     cb->option(&pool,h,3,16384); cb->option(&pool,h,0,8192);
     float out[4]={0}; /* both renders add into it */ car_audio_backend_render(&pool,out,NULL,2);
@@ -298,6 +298,22 @@ static void wrap_round(void) {
     for(unsigned i=0;i<4;i++) near(out[i],i&1?2:0,1e-6,"wrapped loop PCM");
     cb->release(&pool,h); C(retired==1);
     car_audio_backend_destroy(&pool); free(one);
+}
+static void loop_intro(void) {
+    init(1);
+    float pcm[]={1,2,3,4}, out[24]={0};
+    CarAudioPCM s={.pcm=pcm,.frames=4,.rate=44100,.loop=1,.loop_start=2};
+    int32_t h=-1;
+    C(car_audio_backend_stock(&pool,&s,60,&h)==0);
+    cb->option(&pool,h,3,16384);
+    cb->option(&pool,h,0,2048);
+    car_audio_backend_render(&pool,out,NULL,12);
+    const float expected[]={1,1.5f,2,2.5f,3,3.5f,4,3.5f,3,3.5f,4,3.5f};
+    for(unsigned i=0;i<12;i++) near(out[2*i+1],expected[i],1e-6,"loop intro once");
+    cb->release(&pool,h);
+    s.loop_start=s.frames;
+    C(car_audio_backend_stock(&pool,&s,60,&h)<0);
+    car_audio_backend_destroy(&pool);
 }
 static void put(unsigned char *p,unsigned value) {
     for(unsigned i=0;i<4;i++) p[i]=(unsigned char)(value>>(8*i));
@@ -325,7 +341,7 @@ static void player_lifetime(void) {
 int main(int argc,char **argv) {
     goldens();
     if(argc>1 && !strcmp(argv[1],"all")) {
-        parameters(); pause_history(); contention(); age_batches(); blocks_and_rates(); lifecycle(); player_lifetime(); wrap_round();
+        parameters(); pause_history(); contention(); age_batches(); blocks_and_rates(); lifecycle(); player_lifetime(); wrap_round(); loop_intro();
     }
     car_audio_backend_destroy(&pool);
 #ifdef ORIGINAL
@@ -380,8 +396,9 @@ def compile_proof(folder, original=False, mutant=None):
         'resume-pitch': ('v->pitch = 1.0f;', 'v->pitch = 2.0f;'),
         'reset-history': ('case 6: car_audio_filter_set_cutoff',
                           'case 6: car_audio_filter_reset(&v->filter); car_audio_filter_set_cutoff'),
-        'wrap-round': ('if (v->cursor >= length) v->cursor = 0.0;\n',
+        'wrap-round': ('if (v->cursor >= length) v->cursor = start;\n',
                        ''),
+        'loop-start': ('double start = (double)v->sample.loop_start', 'double start = 0'),
         'wet-product': ('wg = v->volume * v->wet', 'wg = v->wet'),
     }
     if mutant:
@@ -430,7 +447,7 @@ class Proof(unittest.TestCase):
             self.assertIn('checks=8 failures=2', result.stdout)
             self.assertNotIn('Sanitizer', result.stderr)
         for mutant in ('quantized-gain', 'quantized-pan', 'default-priority', 'newest-tie',
-                       'protected-100', 'epoch-age', 'pause-cursor', 'resume-pitch', 'reset-history', 'wet-product', 'wrap-round'):
+                       'protected-100', 'epoch-age', 'pause-cursor', 'resume-pitch', 'reset-history', 'wet-product', 'wrap-round', 'loop-start'):
             with self.subTest(mutant=mutant), tempfile.TemporaryDirectory(prefix='car-control-') as folder:
                 result = run(compile_proof(Path(folder), mutant=mutant))
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)

@@ -622,6 +622,12 @@ by L and prepares nothing at 0. Lamp textures stay `_ON`: none of the 92 retail 
 BOOT_DIAG: `daynight_carlamps: frame=N L= head_in= head_out=` on each captured frame; check
 `runtime/daynight_carlamps_test.py --proof`.
 
+In Carbon, the traffic headlight ground quad is hidden when the existing lamp level
+is zero. It defaults On (`NFS_DAYNIGHT_DAYLAMPS=0` or `off` draws it), requires
+`NFS_DAYNIGHT=on`, and is read at startup from the environment.
+`007BE170` draws `2PLAYERHEADLIGHT1` through `IDI_WORLDPRELIT_FX/world`;
+at any positive lamp level it draws at native intensity.
+
 ## Lamp streaks
 
 `NFS_FLARE_STREAKS` (On by default, `=0`/`off` disables, restart required, only with `NFS_DAYNIGHT=on`; `flare_streaks.c`, from

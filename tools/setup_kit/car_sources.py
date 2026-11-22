@@ -177,12 +177,12 @@ def _digest(source, entry):
     return digest.hexdigest()
 
 
-def _logical(source, files):
+def _logical(source, files, *, engine_audio=False):
     """Resolve logical IDs from ZDIR or fully extracted CARS/GLOBAL files."""
     if "NFS/ZDIR.BIN" not in files:
         result = {}
         for name, key in files.items():
-            if name.startswith(("CARS/", "GLOBAL/")):
+            if name.startswith(("CARS/", "GLOBAL/")) or (engine_audio and name.startswith("SOUND/ENGINE/")):
                 identity = path_hash(name)
                 _require(identity not in result, "Colliding logical file hashes")
                 result[identity] = (key, 0, source.size(key))
