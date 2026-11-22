@@ -1,6 +1,8 @@
 """Production glass/chrome source and analytical fixtures; no game launches.
-Automotive head-on regression: original rear/windscreen alpha=.10123384/.10123384;
-required rear >=.65, windscreen .20-.35; fixed .80/.25 (coverage=1).
+Automotive head-on regression: rear alpha at full coverage was .799999952
+with privacy glass (VLT .20) and is .300000012 with factory glass (VLT .70).
+Required rear alpha=.30 ±1e-5, windscreen .20-.35; original clear-pane
+rear/windscreen alpha=.10123384/.10123384.
 The original production pane/alpha expression fails both checks (2 failures).
 Tolerances: F0 1e-5, pane R/T 1e-4, energy 1+1e-5, GGX FWHM 10%.
 The old boosted glass is R=.144/T=.60, chrome R=.50/direct mask=0.
@@ -47,7 +49,7 @@ Unshadowed resource regression: original glass/chrome declarations disagree
 with retail t0 in 8 texture/sampler bindings; corrected declarations: 0.
 Compiled GPU texture-type mismatches: 2 per original t0 variant, corrected 0.
 BMWM3GTR / BMWM3GTRE46 LOD A-D: 80 sections / 1,556 triangles, 0 wrong VLTs.
-LOD A front/rear/side: 114/108/132 and 114/108/136 triangles; VLT .75/.20/.70.
+LOD A front/rear/side: 114/108/132 and 114/108/136 triangles; VLT .75/.70/.70.
 Native t0 cube s0 / diffuse s1 GPU draws replace the old shadowed-layout fixture.
 The entire suite discovers this file through runtime/*_test.py.
 """
@@ -111,9 +113,10 @@ def glass_regression(tmp, optics, module):
     tail = function(module, 'realworld_materials_pixel')
     shader = ''.join(ast.literal_eval(t) for t in re.findall(r'"(?:\\.|[^"\\])*"', tail))
     glass = shader.split('#else\n')[-1].split('    float3 reflected=')[0]
-    main = r"""
+    main = function(module, 'pane_vlt') + r"""
 static float alpha(float nx, float side, float coverage) {
- struct {struct {float w;} texcoord4,texcoord3;} pi={{side>.5f?.70f:nx<0?.20f:.75f},{0}};
+ const double direction[3]={nx,side,0};
+ struct {struct {float w;} texcoord4,texcoord3;} pi={{pane_vlt(direction,side>.5f)},{0}};
  struct {simd_float4 k[3];} m={}; m.k[2][2]=side;
  float nv=1;
 """ + glass + r"""
@@ -121,19 +124,20 @@ static float alpha(float nx, float side, float coverage) {
 }
 int main(){
  float rear=alpha(-.25f,0,1), front=alpha(.40f,0,1), side=alpha(0,1,1);
- int errors=(rear<.65f)+(front<.20f || front>.35f);
+ int errors=!(fabs(rear-.30f)<=1e-5)+(front<.20f || front>.35f);
  if(!errors){
-  errors+=fabs(rear-.80f)>1e-5 || fabs(front-.25f)>1e-5 || fabs(side-.30f)>1e-5;
-  errors+=fabs(alpha(-.25f,0,.5f)-.40f)>1e-5;
+  errors+=fabs(front-.25f)>1e-5 || fabs(side-.30f)>1e-5;
+  errors+=fabs(alpha(-.25f,0,.5f)-.15f)>1e-5;
   for(float ci : {1.f,.5f,.1736481777f,0.f}) {
    float2 clear=rw_pane(ci);
    for(float nx : {-.25f,.40f}) {
-    float2 glass=rw_glass(ci,nx<0?.20f:.75f);
+    const double direction[3]={nx,0,0};
+    float2 glass=rw_glass(ci,pane_vlt(direction,0));
     errors+=fabs(glass.x-clear.x)>1e-6 || glass.y<0 || glass.x+glass.y>1.00001f;
    }
   }
  }
- printf("automotive rear alpha=%.9f (>=.65) windscreen=%.9f (.20-.35) failures=%d\n",rear,front,errors);
+ printf("automotive rear alpha=%.9f (.30 +/- 1e-5) windscreen=%.9f (.20-.35) failures=%d\n",rear,front,errors);
  return errors?1:0;
 }
 """
@@ -255,7 +259,7 @@ vertex In rw_scene(uint id [[vertex_id]],constant float4 &f [[buffer(0)]]) {
  In o; o.pos=float4(xy,0,1);o.color0=float4(.7f,.7f,.7f,.4f);o.color1=float4(0);
  o.texcoord0=float4(0,0,1,0);o.texcoord1=float4(f.w, f.w==.5f?.5f:.25f,0,0);o.texcoord2=float4(0,0,0,1);
  o.texcoord3=float4(0,0,f.z>0.5f?-1:1,f.z>2.5f?.815f:f.z>1.5f?.9f:0);
- o.texcoord4=float4(0,0,1,f.z>2.5f?.10f:f.z>1.5f?.70f:f.z>0.5f?.20f:.75f);
+ o.texcoord4=float4(0,0,1,f.z>2.5f?.10f:f.z>0.5f?.70f:.75f);
  o.texcoord5=float4(sqrt(1-f.x*f.x),0,f.y<0?-f.x:f.x,0);o.texcoord6=float4(0,0,0,1);return o;
 }
 )MSL";
@@ -321,7 +325,7 @@ static int production(id<MTLDevice>d,NSString*source,const char*path){
   double rs[]={.081346,.1669926,.552676},ts[]={.898766,.808937,.421764};
   if(!chrome){
    double ct=sqrt(1-(1-ci*ci)/(1.525139*1.525139));
-   ts[angle]*=pow((tint==8?.10:tint==0||tint==4||tint==5?.75:tint==1||tint==6?.20:.70)/.89876616,1/ct);
+   ts[angle]*=pow((tint==8?.10:tint==0||tint==4||tint==5?.75:.70)/.89876616,1/ct);
   }
   if(chrome&&tint){
    float weight=tint<4?1:((tint-4)%3==2?.5f:float(((tint-4)%3)^(tint>=7)));
@@ -462,7 +466,8 @@ def mesh_regression(tmp, optics):
                           (156,176,174,0), (122,100,208,0), (174,4,146,87), (118,62,116,80))
     expected_panes = ((2,2,2,0), (2,2,6,2), (2,2,0,0), (2,2,6,0),
                       (2,2,6,0), (2,2,6,0), (2,1,6,9), (2,2,6,2))
-    vlts = (.75, .20, .70, .10)
+    vlts = (.75, .70, .70, .10)
+    preceding_vlts = (.75, .20, .70, .10)
     review_quarters = {'911GT2': (38,142), '240SX': (78,156), 'MURCIELAGO640': (86,112), 'ZONDA': (58,64)}
     for car, path, want_triangles, want_panes in zip(cars, paths, expected_triangles, expected_panes):
         triangles = [0]*4; panes = [0]*4
@@ -530,7 +535,7 @@ def mesh_regression(tmp, optics):
                     else: want = 2 if '_LEFT_' in name or '_RIGHT_' in name else 1 if '_REAR_' in name else 0
                     got = fixed[np.array(component)-lo]
                     wrong_fixed = np.count_nonzero(np.any(abs(got-vlts[want]) > 1e-6, axis=1))
-                    wrong_previous = np.count_nonzero(np.any(abs(preceding[np.array(component)-lo]-vlts[want]) > 1e-6, axis=1))
+                    wrong_previous = np.count_nonzero(np.any(abs(preceding[np.array(component)-lo]-preceding_vlts[want]) > 1e-6, axis=1))
                     for j,n in enumerate((1,len(component),wrong_fixed,wrong_previous)): lod_counts[lod][j] += int(n)
                     assert wrong_fixed == 0, (car,name,'LOD mismatch',wrong_fixed)
                     if lod != 'A': continue
@@ -538,7 +543,7 @@ def mesh_regression(tmp, optics):
                     mixed += np.ptp(got) > 1e-6
                     wrong += np.count_nonzero(np.any(abs(got-vlts[want]) > 1e-6, axis=1))
                     old = np.array([[lib.baseline_vlt(float(v[3]),float(v[4]),mask) for v in t] for t in vv])
-                    bad = np.any(abs(old-vlts[want]) > 1e-6, axis=1)
+                    bad = np.any(abs(old-preceding_vlts[want]) > 1e-6, axis=1)
                     old_wrong += int(bad.sum()); old_mixed += np.ptp(old) > 1e-6
                     if car in review_quarters and ('_REAR_LEFT_' in name or '_REAR_RIGHT_' in name):
                         quarter_bad += int(bad.sum()); quarter_total += len(component)
@@ -602,7 +607,7 @@ def mesh_regression(tmp, optics):
                 if name[-1] == 'A': triangles[role] += count//3
         assert counts == {'A':[10,222+side_triangles], 'B':[10,202], 'C':[10,128], 'D':[10,92]}, (car, counts)
         assert triangles == [114,108,side_triangles], (car, triangles)
-        print(f'glass panes {car}: LOD A-D sections/triangles={counts}; front/rear/side VLT=.75/.20/.70, wrong=0')
+        print(f'glass panes {car}: LOD A-D sections/triangles={counts}; front/rear/side VLT=.75/.70/.70, wrong=0')
 
     # Undamaged dynamic WINDOW_* bindings resolve to WINDOW_FRONT; the separate
     # rear defroster and border mask also have coverage. No all-zero texture.
@@ -768,8 +773,8 @@ int main(void){@autoreleasepool{
 def main():
     with tempfile.TemporaryDirectory(prefix='glass-transmission-') as td:
         optics = literal(MODULE, 'optics')
-        mesh_regression(Path(td), optics)
         assert glass_regression(Path(td), optics, MODULE)==0, 'automotive glass transmission'
+        mesh_regression(Path(td), optics)
         # Frozen original pane/alpha expression: the same production check fails twice.
         old = 'float2 rt=rw_pane(nv); float alpha=coverage*(1.0f-rt.y);'
         assert hashlib.sha256(old.encode()).hexdigest()=='ae8d846da805cf6af632b4214382df16d6ead9edcd6498fb2db96e6ca7050526'

@@ -521,7 +521,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "7b2cdbd6a642390f12758f49a4b158513b40f6375a8b8b592f8aa401b82c596e"
+let carSelectionsSHA256 = "9ec6badf75f80037e87c5dff270636b82a8ac2a7238da98947ec6ddce657397f"
 let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
 
 func carSourceName(_ game: String, _ platform: String) -> String {

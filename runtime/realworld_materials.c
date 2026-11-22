@@ -22,7 +22,7 @@ static float pane_vlt(const double n[3], int mask) {
     if (n[2]>0 && n[2]*n[2]>=.98*.98*length2) return .10f;
     if (horizontal<1e-12) return mask ? .70f : .75f;
     if (fabs(n[0])<=.25*horizontal) return .70f;
-    return n[0]<0 ? .20f : .75f;
+    return n[0]<0 ? .70f : .75f;
 }
 // Each connected component of one material section gets one constant VLT.
 // Weld coincident positions across UV/normal seams, without joining nearby panes.

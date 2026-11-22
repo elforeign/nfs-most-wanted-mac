@@ -281,7 +281,7 @@ int main(int argc,char **argv) {
     /* Unrelated appearance references are outside this fixture. */
     a->render_fit=0; a->wheel_fit=0;
     Cpu c={.esp=0x1800000};
-    append_collection_as(&c,&src,0x74,1,a,a->key,0);
+    append_collection_as(&c,&src,0x74,1,a,a->key,0,NULL);
     CarGripOwner owner={1,a->key,v,0x1000,0x1000,life(v)->generation};
     CarGripOwner minted;
     CHECK(car85_grip_owner(a->key,v,owner.simable,owner.local_simable,&minted)==expected);
@@ -333,7 +333,7 @@ int main(int argc,char **argv) {
     CHECK(!car85_grip_owner(stale.key,v,stale.simable,stale.local_simable,&minted));
     memset(&a->grip_binding,0,sizeof a->grip_binding);
     src.generation=life(v)->generation;
-    append_collection_as(&c,&src,0x74,1,a,a->key,0);
+    append_collection_as(&c,&src,0x74,1,a,a->key,0,NULL);
     CHECK(!car85_grip_select(&stale,&live,&out));
     CHECK(car85_grip_owner(owner.key,v,owner.simable,owner.local_simable,&minted)==expected);
     owner.generation=life(v)->generation;
@@ -377,7 +377,7 @@ int tracked_select(const CarGripBinding *b,const CarGripOwner *o,const CarGripLi
     stubs = '\n'.join(f'void {n}(Cpu *c) {{ (void)c; abort(); }}' for n in sorted(calls - provided))
     (root / 'native.c').write_text(source.replace('STUBS', stubs))
     (root / 'reader.c').write_text('#include "car_catalog.c"\nuint32_t test_key(const char *s) {return attribute_key_case(s,1);}\n')
-    inputs = [root / 'native.c', root / 'reader.c', ROOT / 'runtime/car_grip.c',
+    inputs = [root / 'native.c', root / 'reader.c', ROOT / 'runtime/car_grip.c', ROOT / 'runtime/car_performance.c',
               ROOT / 'runtime/private_cars_public.c', ROOT / 'runtime/carsave_public.c', ROOT / 'runtime/traffic_pilot.c']
     flags = ['clang', '-std=c11', '-O1', '-g', '-DNFS_PUBLIC=1', '-fsanitize=address,undefined',
              '-Wno-deprecated-declarations', '-I'+str(root), '-I'+str(ROOT/'runtime'),

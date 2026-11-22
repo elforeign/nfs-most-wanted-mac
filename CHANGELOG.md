@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.9.0
+
+- **Added cars drive like themselves:** the 30 Carbon, 31 ProStreet and 14 Undercover cars use their own stock performance instead of a Most Wanted car's; their car-select bars are on Most Wanted's scale. Import an earlier car again in Setup to get this.
+- **More Carbon PC copies work for added cars:** a Carbon PC folder with the official 1.4 patch, and repacks of that version, now import all 30 Carbon cars (GitHub #24).
+- **Clearer messages when adding cars:** unpatched Carbon, PC disc images and an empty extras list now get plain messages.
+- **Rear window tint:** with Glass on (the default), rear windows use a lighter factory tint instead of looking almost black.
+- Going back to an older version after this update needs Setup to run again.
+
 ## 4.8.1
 
 - **Added cars sit right:** the 61 added cars converted from Carbon, ProStreet and Undercover no longer sit too low or flip over; their collision shape now matches their size.

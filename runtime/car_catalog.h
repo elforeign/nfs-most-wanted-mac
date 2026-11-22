@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "car_grip.h"
+#include "car_performance.h"
 
 /* Version 1 wire contract: runtime/docs/added-car-catalog.md.
  * Startup only, on one thread, before registration. Init is idempotent, including
@@ -17,11 +18,11 @@
 #define CAR_CATALOG_SLOTS 90
 #define CAR_CATALOG_ADDITIONS 76
 #define CAR_CATALOG_FIRST_ID 84
-#define CAR_CATALOG_OUTPUTS 9
 typedef enum {
     CAR_CATALOG_GEOMETRY, CAR_CATALOG_TEXTURES, CAR_CATALOG_SOLID_MAP,
     CAR_CATALOG_WHEEL_FIT, CAR_CATALOG_COLLISION, CAR_CATALOG_PAINT,
-    CAR_CATALOG_PHYSICS, CAR_CATALOG_GRIP, CAR_CATALOG_AUDIO
+    CAR_CATALOG_PHYSICS, CAR_CATALOG_GRIP, CAR_CATALOG_AUDIO,
+    CAR_CATALOG_PERFORMANCE, CAR_CATALOG_OUTPUTS
 } CarCatalogOutputKind;
 
 typedef struct {
@@ -56,7 +57,8 @@ typedef struct {
     size_t part_count, part_key_count;
     const CarCatalogPart *parts;
     const char (*part_keys)[32];
-    CarGrip grip; /* optional verified GRP1; invalid semantics leave it empty */
+    CarGrip grip;
+    CarPerformance performance; /* optional verified stock performance record */
     CarCatalogOutput outputs[CAR_CATALOG_OUTPUTS]; /* explicit absent metadata */
 } CarCatalogSlot;
 

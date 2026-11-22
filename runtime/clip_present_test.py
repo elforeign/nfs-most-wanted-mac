@@ -88,6 +88,9 @@ static void pipeline_frame_scope(int value) { (void)value; }
 static void hdr_output_diag(const char *label, MTLPixelFormat format) { (void)label; (void)format; }
 static void hdr_output_error(const char *label, NSError *error) { (void)label; (void)error; }
 static void presented(id<MTLDrawable> drawable) { (void)drawable; }
+static void present_image_encode(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable, uint64_t frame) {
+    (void)cb; (void)drawable; (void)frame;
+}
 static void quad_into(id<MTLCommandBuffer> cb,id<MTLTexture> src,MTLRegion r,id<MTLTexture> dst,int a,int b,MTLRegion out,int c) {
  (void)a;(void)b;(void)c; CHECK(cb==expected_cb); CHECK(src==expected_src);
  CHECK(r.size.width==expected_src.width && r.size.height==expected_src.height);

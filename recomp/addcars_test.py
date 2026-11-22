@@ -311,7 +311,7 @@ def main(extra_addresses=(), variants=None):
                 assert code!=source
             (tmp/"test.c").write_text(code)
             binary=tmp/variant
-            build=subprocess.run(["clang",str(base.ROOT/"runtime/car_grip.c"),str(base.ROOT/"runtime/car_physics.c"),"-O1","-I",str(tmp),"-I",str(base.ROOT/"runtime"),"-I",str(base.ROOT/"recomp"),"-I",str(base.ROOT/"recomp/out"),str(tmp/"test.c"),"-framework","CoreGraphics","-framework","CoreText","-framework","CoreFoundation","-o",str(binary)],text=True,capture_output=True)
+            build=subprocess.run(["clang",str(base.ROOT/"runtime/car_grip.c"), str(base.ROOT/"runtime/car_performance.c"),str(base.ROOT/"runtime/car_physics.c"),"-O1","-I",str(tmp),"-I",str(base.ROOT/"runtime"),"-I",str(base.ROOT/"recomp"),"-I",str(base.ROOT/"recomp/out"),str(tmp/"test.c"),"-framework","CoreGraphics","-framework","CoreText","-framework","CoreFoundation","-o",str(binary)],text=True,capture_output=True)
             assert build.returncode==0,build.stderr[-7000:]
             for n in ((0,1,2) if variant=="good" else (2,)):
                 manifest=tmp/"manifest.tsv"; manifest.write_text("".join(f"{name}\t{donor}\t{packs}\n" for name,donor in list(zip(("R8","CCX"),("997S","911TURBO")))[:n]))

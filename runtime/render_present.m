@@ -11,6 +11,9 @@
 #include <errno.h>
 #include <time.h>
 
+void report_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#include "present_image_diag_impl.h"
+
 // ---------------- present ----------------
 // The game thread has no run loop, so nothing drained its autorelease pool: every frame's render pass descriptors,
 // encoders and command buffers stayed alive (~11 MB a minute). A pool now spans each frame, from Present to Present.
@@ -509,6 +512,7 @@ static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, 
             id<MTLCommandBuffer> cb = [queue commandBuffer];
             quad_into(cb, src, MTLRegionMake2D(0, 0, src.width, src.height), d.texture, 0, 0,
                       MTLRegionMake2D(0, 0, d.texture.width, d.texture.height), 1);
+            if (timing) present_image_encode(cb, d, ticket.frame);
             cliprec_present(cb, src, d, clip_headroom);
             overlay_present(cb);         // the performance overlay, on its own layer above (overlay.m)
             if (diag_on && hdr_output_requested) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {

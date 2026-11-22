@@ -19,7 +19,7 @@ import struct
 
 import numpy as np
 
-from . import car_convert as mw, ps_namespace, uc_batch, v25_batch, v25_car
+from . import car_convert as mw, ps_namespace, uc_attrib, uc_batch, v25_batch, v25_car
 from .car_convert import require, u32, payload, children, find, name_hash
 
 ROLES = {'DIFFUSE', 'NORMAL', 'AMBIENT', 'OPACITY', 'SELFILLUMINATION'}
@@ -242,27 +242,6 @@ def opaque_tyres(d):
     return bytes(d)
 
 
-def wheel_vaults(data):
-    """Remove the final, unused dword of Undercover's relocation terminator."""
-    for name, binary, vault in mw.read_vpak(data):
-        for pos, (tag, size) in vault_chunks(vault):
-            if tag == b'NrtP' and pos + size == len(vault) and (size - 8) % 12 == 4:
-                require(not any(vault[-4:]), 'UC PC pointer table padding')
-                vault = vault[:pos + 4] + struct.pack('<I', size - 4) + vault[pos + 8:-4]
-        yield name, binary, vault
-
-
-def vault_chunks(vault):
-    pos = 0
-    while pos < len(vault):
-        tag, size = mw.words(vault, pos, '<4sI')
-        if size == 0:
-            break
-        require(8 <= size <= len(vault) - pos, 'UC PC vault chunk extent')
-        yield pos, (tag, size)
-        pos += size
-
-
 def convert(car, donor, source, native):
     """Convert the selected Undercover PC snapshot."""
     raw = bytearray(source[f'CARS/{car}/GEOMETRY.BIN'])
@@ -282,5 +261,6 @@ def convert(car, donor, source, native):
         native[f'CARS/{template}/GEOMETRY.BIN'], native[f'CARS/{template}/TEXTURES.BIN'], None,
         decode=lambda data, name: decode_sources(data, name, local_images))
     attributes = source['GLOBAL/ATTRIBUTES.BIN']
-    bins['WHEELFIT.BIN'] = mw.wheel_sidecar(attributes, car, donor, vaults=wheel_vaults(attributes))
+    bins['WHEELFIT.BIN'] = mw.wheel_sidecar(attributes, car, donor, vaults=uc_attrib.vaults(attributes))
+    bins['PERFORMANCE.BIN'] = uc_attrib.performance(attributes, native['GLOBAL/ATTRIBUTES.BIN'], car, donor)
     return bins

@@ -34,8 +34,10 @@ def host_sources(host):
     script = (ROOT / 'runtime/build.sh').read_text(encoding='utf-8')
     script = '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
     names = re.findall(r'(?<![\w/])([\w]+\.(?:c|m|mm|cpp))\b', script)
-    return sorted({ROOT / 'runtime' / name for name in names
-                   if (ROOT / 'runtime' / name).is_file()})
+    units = {ROOT / 'runtime' / name for name in names if (ROOT / 'runtime' / name).is_file()}
+    includes = {unit.parent / name for unit in units for name in
+                re.findall(r'^#include "([^"/]+(?:\.inc|_impl\.h))"', unit.read_text(encoding='utf-8'), re.M)}
+    return sorted(units | {path for path in includes if path.is_file()})
 
 
 def source_bodies(host):

@@ -35,6 +35,7 @@ int private_cars_init(const char *root, int enabled, const char *const *original
         COPY(geometry,s->outputs[CAR_CATALOG_GEOMETRY].path);
         COPY(textures,s->outputs[CAR_CATALOG_TEXTURES].path);
         d->grip=s->grip;
+        d->performance=s->performance;
 #undef COPY
     }
     return result=0;

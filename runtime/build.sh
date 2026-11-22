@@ -71,6 +71,7 @@ clang \
     trigopt.c \
     car_audio.c \
     car_grip.c \
+    car_performance.c \
     car_grip_force.c \
     car_grip_wheel.c \
     car_grip_assist.c \

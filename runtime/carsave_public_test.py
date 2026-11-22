@@ -608,7 +608,7 @@ def main():
                   '-DCAR_CATALOG_APPROVAL_HEADER="' + str(root / 'approval.h') + '"']
         userdata_source = userdata_fixture((ROOT/'runtime/boot.c').read_text())
         (root/'userdata.c').write_text(userdata_source)
-        sources = [str(ROOT / 'runtime/car_grip.c'), str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'),
+        sources = [str(ROOT / 'runtime/car_grip.c'), str(ROOT / 'runtime/car_performance.c'), str(root / 'native.c'), str(root / 'module.c'), str(root / 'file.c'),
                    str(root / 'userdata.c'), str(ROOT / 'runtime/car_catalog.c')]
         def compile_native(name, options=()):
             build = subprocess.run(common + list(options) + sources + ['-o', str(root / name)], capture_output=True, text=True)

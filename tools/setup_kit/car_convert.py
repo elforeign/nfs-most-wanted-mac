@@ -1316,9 +1316,9 @@ CAMERA_FIELDS = ('HEIGHT', 'FOV', 'ANGLE', 'LAG')
 
 class FitAttributes:
     """Read typed values with inheritance across class and collection exports."""
-    def __init__(self, data):
+    def __init__(self, data, *, vaults=None):
         self.defs, self.collections = {}, {}
-        for _, binary, raw in read_vpak(data):
+        for _, binary, raw in read_vpak(data) if vaults is None else vaults:
             vault = WheelVault(binary, raw)
             for key, typ, off in vault.exports:
                 if typ == 0x5E970CBC:
@@ -1334,13 +1334,24 @@ class FitAttributes:
                     require(identity not in self.collections, 'duplicate fit collection')
                     self.collections[identity] = (vault, off)
 
-    def raw(self, cls, key, name, seen=()):
+    def raw(self, cls, key, name, seen=(), *, allow_empty=False):
+        vault, dep, pos, size, maximum, flags = self.field_site(cls, key, name, seen)
+        if flags & 1:
+            alloc, count, esz, enc = words(vault.buffers[dep], pos, '<4H')
+            require((allow_empty or count > 0) and count <= alloc <= maximum and esz == size, 'fit array shape')
+            pos += 8 + (8 if enc & 0x8000 else 0)
+            size *= count
+        return bytes(span(vault.buffers[dep], pos, size, 'fit value range'))
+
+    def field_site(self, cls, key, name, seen=()):
+        """Resolve the data site, including fields containing relocations."""
         cls = hash32(cls) if isinstance(cls, str) else cls
+        ident = hash32(name) if isinstance(name, str) else name
         require(key not in seen and len(seen) < 32, 'fit parent cycle/depth')
         require((cls, key) in self.collections, 'fit collection missing')
         vault, off = self.collections[cls, key]
         raw = vault.buffers[0]
-        _, at, size, maximum, flags, _ = self.defs[cls][hash32(name) if isinstance(name, str) else name]
+        _, at, size, maximum, flags, _ = self.defs[cls][ident]
         target = None
         if flags & 2:
             target = vault.pointer(0, off + 28)
@@ -1350,7 +1361,7 @@ class FitAttributes:
             nt = words(raw, off + 24, '<H')[0] if vault.modern else u32(raw, off + 24)
             start = off + ((32 + nt * 4 + 7) & ~7) if vault.modern else off + 32 + nt * 4
             entries = span(raw, start, u32(raw, off + 20) * 12, 'fit entries range')
-            matches = [i for i in range(len(entries) // 12) if u32(entries, i * 12) == hash32(name)]
+            matches = [i for i in range(len(entries) // 12) if u32(entries, i * 12) == ident]
             require(len(matches) <= 1, 'duplicate fit field')
             if matches:
                 entry = start + matches[0] * 12
@@ -1359,14 +1370,9 @@ class FitAttributes:
         if target is None:
             parent = u32(raw, off + 8)
             require(parent != 0, 'fit field absent: ' + str(name))
-            return self.raw(cls, parent, name, seen + (key,))
+            return self.field_site(cls, parent, name, seen + (key,))
         dep, pos = target
-        if flags & 1:
-            alloc, count, esz, enc = words(vault.buffers[dep], pos, '<4H')
-            require(0 < count <= alloc <= maximum and esz == size, 'fit array shape')
-            pos += 8 + (8 if enc & 0x8000 else 0)
-            size *= count
-        return bytes(span(vault.buffers[dep], pos, size, 'fit value range'))
+        return vault, dep, pos, size, maximum, flags
 
     def floats(self, cls, key, names):
         raw = b''.join(self.raw(cls, key, name) for name in names)
@@ -1868,7 +1874,7 @@ def _lighting_rows(data, size):
 
 def _converter_policy(platform, lighting, tracked, mac_audio=False):
     """Hash executable policy dependencies separately from local asset inputs."""
-    from . import car_grip, car_lighting, car_paint, car_physics, car_sources, x360, xdvdfs
+    from . import car_grip, car_lighting, car_paint, car_performance, car_physics, car_sources, x360, xdvdfs
     require(lighting is None or isinstance(lighting, Mapping), 'lighting options must be a mapping')
     options = dict(lighting or {})
     require(set(options) <= {'amplitudes', 'lamps', 'gains'}, 'unknown lighting policy option')
@@ -1879,7 +1885,7 @@ def _converter_policy(platform, lighting, tracked, mac_audio=False):
         gains.validate()
         settings['gains'] = vars(gains)
     modules = [Path(__file__), Path(huff.__file__), Path(car_texture_namespace.__file__), Path(car_lighting.__file__),
-               Path(car_paint.__file__), Path(car_physics.__file__), Path(car_grip.__file__),
+               Path(car_paint.__file__), Path(car_physics.__file__), Path(car_grip.__file__), Path(car_performance.__file__),
                Path(car_sources.__file__), Path(x360.__file__), Path(xdvdfs.__file__)]
     if mac_audio:
         from . import car_audio, car_audio_abi, car_audio_pack, car_audio_codec, car_audio_bank
@@ -1914,9 +1920,9 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
                      attributes, mw_donor_dir, mw_root, out_dir, tracked, platform,
                      source_inputs, source_check, code, policy, lighting,
                      shared_textures=None, source_aliases=None, runtime_bindings=(),
-                     runtime_materials=(), audio_pack=None, grip=None, writer=None):
+                     runtime_materials=(), audio_pack=None, grip=None, performance=None, writer=None):
     """One assembly, resource, sidecar and audited writer path for both platforms."""
-    from . import car_grip, car_lighting, car_paint, car_physics
+    from . import car_grip, car_lighting, car_paint, car_performance, car_physics
     carbon_pc_layout = platform == 'pc' and car in _CARBON_PC_LAYOUT
     mw, mw_tex = (tracked.read(mw_donor_dir / n) for n in ('GEOMETRY.BIN', 'TEXTURES.BIN'))
     refs = validate_geometry(mw, input_pack=True)
@@ -2001,6 +2007,7 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     physics = car_physics.metadata(attributes, car, donor)
     if physics is not None:
         files['PHYSICS.BIN'] = physics
+    files['PERFORMANCE.BIN'] = car_performance.metadata(attributes, car, donor) if platform == 'pc' else performance
     files['GRIP.BIN'] = car_grip.optional_metadata(attributes, car, donor) if platform == 'pc' else grip
     files['PAINT.BIN'], paint = car_paint.metadata(shared_raw,
         lambda: unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC')), car, donor, attributes)
@@ -2184,7 +2191,8 @@ def convert_x360(bundle, mw_donor_dir, out_dir, *, mw_root=None, lighting=None, 
             source_check=check_source, code=code, policy=policy, lighting=options,
             shared_textures=bundle.shared_textures, source_aliases=bundle.texture_aliases,
             runtime_bindings=bundle.runtime_bindings, runtime_materials=bundle.runtime_materials,
-            grip=ci.grip_metadata(attr, car, donor), audio_pack=audio_pack, writer=writer)
+            grip=ci.grip_metadata(attr, car, donor),
+            performance=ci.performance_metadata(attr, car, donor), audio_pack=audio_pack, writer=writer)
     except ConversionError:
         raise
     except (OSError, ValueError, KeyError, IndexError, StopIteration, struct.error, UnicodeError, np.linalg.LinAlgError) as exc:

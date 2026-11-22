@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <limits.h>
@@ -52,6 +53,7 @@ typedef struct {
     uint32_t key, model_key, record, type, hash, pv, fe, menu_fe, donor_model, string, logo, brand_string;
     int wheel_fit;
     CarGrip grip;
+    CarPerformance performance;
     CarGripBinding grip_binding;
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     CarPhysics physics;
@@ -73,6 +75,7 @@ typedef struct {
 } Addition;
 static Addition additions[MAX_ADDITIONS];
 static unsigned nadditions;
+static void performance_release(uint32_t vault);
 // Traffic is a separate role: never counted by player enumeration or save masks.
 static Addition traffic_addition;
 static int traffic_active, traffic_scratch;
@@ -580,6 +583,13 @@ static int on(void) {
             if (car->paint[0]) load_default_paint(a,car->paint);
 #endif
             a->grip=car->grip;
+            a->performance=car->performance;
+            if (a->performance.version==1) {
+                if (!strcmp(car->source,"prostreet") || !strncmp(car->source,"P/",2))
+                    a->performance.source=CAR_PERFORMANCE_PROSTREET;
+                if (!strcmp(car->source,"undercover") || !strncmp(car->source,"U/",2))
+                    a->performance.source=CAR_PERFORMANCE_UNDERCOVER;
+            }
             ++i;
         }
         if (traffic_pilot_enabled()) {
@@ -643,6 +653,20 @@ static int on(void) {
             load_wheel_fit(a,NULL);
             if (a->render_fit) load_collision(a,NULL);
             load_physics(a,NULL);
+#if !defined(NFS_PUBLIC) || !NFS_PUBLIC
+            if (car_performance_enabled()) {
+                char performance_path[PATH_MAX];
+                if (snprintf(performance_path,sizeof performance_path,"%s/PERFORMANCE.BIN",a->directory) >=
+                    (int)sizeof performance_path) fail("performance path too long");
+                int fd=open(performance_path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+                if (fd>=0) {
+                    int rc=car_performance_read(fd,car_physics_key(a->name),
+                                                car_physics_key(a->donor_folder),&a->performance);
+                    close(fd);
+                    if (rc) fail("invalid PERFORMANCE.BIN");
+                } else if (errno!=ENOENT) fail("cannot open PERFORMANCE.BIN");
+            }
+#endif
             char paint_path[PATH_MAX];
             if (snprintf(paint_path, sizeof paint_path, "%s/PAINT.BIN", a->directory) >= (int)sizeof paint_path)
                 fail("paint path too long");
@@ -685,12 +709,16 @@ void car85_vault_begin(uint32_t address) {
 
 void f_0045C380(Cpu *c) {
     car85_vault_unloaded(c->ecx); // before Deinitialize can release layouts/exports
+    uint32_t vault=c->ecx;
     f_0045C380_orig(c);
+    performance_release(vault);
 }
 
 void f_0045C090(Cpu *c) {
     car85_vault_unloaded(c->ecx); // Deinitialize releases .bin layouts before the destructor
+    uint32_t vault=c->ecx;
     f_0045C090_orig(c);
+    performance_release(vault);
 }
 
 uint32_t car85_asset_name(uint32_t address) {
@@ -1238,7 +1266,8 @@ void car85_collection_seen(uint32_t ld, uint32_t vault) {
     if (!on() || inserting) return;
     uint32_t cls = M32(ld + 4);
     if (cls != PVEHICLE && cls != FRONTEND && cls != ECAR &&
-        cls != 0xAFA210F0u && cls != 0xBD38D1CAu && cls != 0x93C171E4u) return;
+        cls != 0xAFA210F0u && cls != 0xBD38D1CAu && cls != 0x93C171E4u &&
+        !(car_performance_enabled() && car_performance_class(cls))) return;
     VaultLife *v = life(vault);
     if (!v || v->ready) return; // dynamic/non-vault collections are not load descriptors
     if (nsources == sizeof sources / sizeof sources[0]) fail("source collection capacity exhausted");
@@ -1335,7 +1364,7 @@ static void apply_wheel_fit(uint32_t src, uint32_t ld, uint32_t lay, Addition *a
 
 // Add explicit metadata using the clone's spare descriptor capacity. Values
 // and RefSpec arrays always get new storage; retail data remains immutable.
-static uint32_t own_fit_entry(uint32_t src, uint32_t ld, uint32_t key) {
+static uint32_t own_fit_entry(uint32_t src, uint32_t ld, uint32_t key, uint32_t type) {
     uint32_t old = entry(src, key);
     if (!old) fail("fit donor attribute missing");
     uint32_t nt = M32(ld + 0x18), ne = M32(ld + 0x14);
@@ -1343,7 +1372,7 @@ static uint32_t own_fit_entry(uint32_t src, uint32_t ld, uint32_t key) {
     for (uint32_t i = 0; i < ne; ++i)
         if (M32(begin + 12 * i) == key) return begin + 12 * i;
     memmove(G + begin + 4, G + begin, 12 * ne);
-    M32(begin) = REFSPEC;
+    M32(begin) = type;
     uint32_t match = begin + 4 + 12 * ne;
     memcpy(G + match, G + old, 12);
     M16(match + 8) = (uint16_t)nt;
@@ -1375,7 +1404,7 @@ static void load_added_audio(Addition *a, uint64_t generation) {
         diag_event("addcar_audio: rejected sidecar car=%s key=%08X; using donor",a->name,a->key);
 }
 
-static void append_collection_as(Cpu *, Source *, uint32_t, int, Addition *, uint32_t, unsigned);
+static void append_collection_as(Cpu *, Source *, uint32_t, int, Addition *, uint32_t, unsigned, const void *);
 
 static void apply_linked_fit(Cpu *c, uint32_t src, uint32_t ld, Addition *a) {
     if (!a->render_fit) return;
@@ -1401,10 +1430,10 @@ static void apply_linked_fit(Cpu *c, uint32_t src, uint32_t ld, Addition *a) {
             snprintf(name, sizeof name, "nfsad_%s_fit_%u_%u", a->name, i, tier);
             uint32_t text = gstr(name), key = call_guest(c, 0x004549B0, 1, &text);
             if (!key || source(M32(ref), key)) fail("fit linked identity collision");
-            append_collection_as(c, donor, i == 0 ? 0x74 : i == 1 ? 0x50 : 0x6F, 0, a, key, i + 1);
+            append_collection_as(c, donor, i == 0 ? 0x74 : i == 1 ? 0x50 : 0x6F, 0, a, key, i + 1, NULL);
             M32(ref + 4) = key; M32(ref + 8) = 0;
         }
-        uint32_t match = own_fit_entry(src, ld, links[i]);
+        uint32_t match = own_fit_entry(src, ld, links[i], REFSPEC);
         M32(match + 4) = copy;
     }
 }
@@ -1458,7 +1487,13 @@ static void apply_render_fit(uint32_t lay, Addition *a, unsigned kind) {
     }
 }
 
-static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a, uint32_t key, unsigned fit_kind) {
+void f_006794E0_orig(Cpu *c);
+void f_00683EB0_orig(Cpu *c);
+void f_00678CE0_orig(Cpu *c);
+#include "car_performance_attrib_impl.h"
+
+static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a,
+                                 uint32_t key, unsigned fit_kind, const void *performance_layout) {
     VaultLife *v = life(s->vault);
     if (!v || !v->ready || v->generation != s->generation) return;
     uint32_t src = s->ld, vault = s->vault, cls = M32(src + 4);
@@ -1467,9 +1502,10 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
     // same long-lived vault as the donor; body values can be overridden below.
     uint32_t nt = M32(src + 0x18), ne = M32(src + 0x14);
     uint32_t bytes = 0x20 + 4 * nt + 12 * ne;
-    uint32_t ld = gmalloc(bytes + 128), lay = gmalloc(layout_size);
+    uint32_t ld=performance_layout ? performance_alloc(vault,bytes) : gmalloc(bytes+128);
+    uint32_t lay=performance_layout ? performance_alloc(vault,layout_size) : gmalloc(layout_size);
     memcpy(G + ld, G + src, bytes);
-    memcpy(G + lay, G + M32(src + 0x1C), layout_size);
+    memcpy(G + lay, performance_layout ? performance_layout : G + M32(src + 0x1C), layout_size);
     M32(ld) = key; M32(ld + 0x1C) = lay;
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     if (vehicle && cls == PVEHICLE) {
@@ -1523,7 +1559,8 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
         }
         M32(match + 4) = ref;
     }
-    if (cls == PVEHICLE || cls == ECAR) apply_linked_fit(c, src, ld, a);
+    if (cls == ECAR || (cls == PVEHICLE && !apply_performance(c,s,ld,lay,a)))
+        apply_linked_fit(c, src, ld, a);
     uint32_t tt = M32(vault + 4), tidx = 0xFFFFFFFFu;
     for (uint32_t i = 0; i < M32(tt + 8); ++i)
         if (M32(M32(tt) + 8 * i) == 0x8E112EB7u) tidx = i;
@@ -1553,7 +1590,7 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
 }
 
 static void append_collection(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a) {
-    append_collection_as(c, s, layout_size, vehicle, a, addition_key(a,M32(s->ld+4)), 0);
+    append_collection_as(c, s, layout_size, vehicle, a, addition_key(a,M32(s->ld+4)), 0, NULL);
 }
 
 void f_00739B40(Cpu *c) {
@@ -1754,7 +1791,7 @@ void car85_vault_loaded(Cpu *c, uint32_t vault) {
              * Keep the catalog ecar binding and provide that folder alias to the
              * same owned values, without changing either binding's identity. */
             if (a->ecar[0] && a->ecar_key!=a->folder_key)
-                append_collection_as(c,ec,0x11D,0,a,a->folder_key,0);
+                append_collection_as(c,ec,0x11D,0,a,a->folder_key,0,NULL);
         }
     }
     register_traffic(c);

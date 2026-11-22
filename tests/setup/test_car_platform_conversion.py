@@ -893,7 +893,7 @@ class PlatformConversion(unittest.TestCase):
                 lighting={'amplitudes':True,'gains':cl.Gains(.25,1,1)})
             self.assertTrue(result['lighting']['rows'])
             expected = {'car_convert.py','car_texture_namespace.py','huff.py','car_lighting.py','car_paint.py',
-                        'car_physics.py','car_grip.py','car_sources.py','x360.py','xdvdfs.py'}
+                        'car_physics.py','car_grip.py','car_performance.py','car_sources.py','x360.py','xdvdfs.py'}
             if platform == 'x360': expected |= {'car_x360.py','car_x360_inputs.py','x360_tex.py','texture_compare.py'}
             self.assertEqual(set(result['converter_policy']['modules']),expected)
             self.assertEqual(len(result['dependencies']),len(result['inputs']))

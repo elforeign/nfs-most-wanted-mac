@@ -50,6 +50,7 @@
 #include "slowlog_lumab.h"
 #include "report_position.h"
 #include "blackbox.h"
+#include "present_image_diag.h"
 
 #if NFS_GAME == NFS_GAME_MW
 #define GAMEFLOW_STATE 0x00925E90u   // 3 front end, 6 racing
@@ -460,6 +461,7 @@ void report_frame(uint64_t frame, uint32_t flow) {
     if (diag_on) padlink_idle(0);
 #endif
     uint64_t head = __atomic_load_n(&perf_nframes, __ATOMIC_ACQUIRE);
+    if (diag_on && head) present_image_diag_tick(perf_frames[(head - 1) % PERF_RING].ticks, flow);
     if (blackbox_enabled()) {
         BlackboxTiming timing = {0};
         if (head) {
@@ -519,6 +521,7 @@ void report_frame(uint64_t frame, uint32_t flow) {
     double now = host_ticks() / 1e9;
     if (now < next) return;
     next = now + 1;
+    if (diag_on) present_image_diag_second(frame, flow);
 #if NFS_GAME == NFS_GAME_MW
     slowlog_cached(&slow_sample);
 #else

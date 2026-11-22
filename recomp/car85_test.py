@@ -118,6 +118,9 @@ void f_00590D40_orig(Cpu *c) {
 }
 void f_0045C380_orig(Cpu *c) { c->esp += 4; }
 void f_0045C090_orig(Cpu *c) { c->esp += 4; }
+void f_006794E0_orig(Cpu *c) { (void)c; abort(); }
+void f_00683EB0_orig(Cpu *c) { (void)c; abort(); }
+void f_00678CE0_orig(Cpu *c) { (void)c; abort(); }
 void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }
 void f_00581790_orig(Cpu *c) { c->eax=0; c->esp+=4; }
 void f_00591160_orig(Cpu *c) { c->eax=0; c->esp+=4; }
@@ -433,7 +436,7 @@ void f_00739920(Cpu *c) { f_00739920_orig(c); }
             assert variant == "good" or old or modified != actual, variant
             (tmp / "car85.c").write_text(modified)
             binary = tmp / variant
-            command = ["clang",str(ROOT/"runtime/car_grip.c"),str(ROOT/"runtime/car_physics.c"), "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
+            command = ["clang",str(ROOT/"runtime/car_grip.c"), str(ROOT/"runtime/car_performance.c"),str(ROOT/"runtime/car_physics.c"), "-O1", "-g", "-I", str(tmp), "-I", str(ROOT / "runtime"),
                        "-I", str(ROOT / "recomp"), "-I", str(ROOT / "recomp/out"), str(tmp / "test.c"),
                        "-framework", "CoreGraphics", "-framework", "CoreText", "-framework", "CoreFoundation", "-o", str(binary)]
             build = subprocess.run(command, text=True, capture_output=True)

@@ -81,9 +81,10 @@ untrusted application input. Python object construction is not a security sandbo
 The policy has `schema: 1`, a positive integer `revision`, and exactly 90 ordered
 `slots`. Each slot has `slot`, `identity` (a hash or null), and `variants`.
 Null identity requires an empty variant list. Non-null identities are unique and
-reserve their slots even without an approved variant. Each variant is only
-`{contract, compatibility}`, two hashes. This metadata carries no source names,
-manufacturer labels, donor names, evidence or copied roster. Final release policy
+reserve their slots even without an approved variant. Each variant carries
+`contract` and `compatibility` hashes. Retained variants also carry a `legacy`
+group number and can verify previously published catalogs. This metadata carries
+no source names, manufacturer labels, donor names, evidence or copied roster. Final release policy
 assigns the existing stable slot identities; importers never allocate by discovery
 order. Pending slots have no approved variants.
 
@@ -380,3 +381,91 @@ Selection requires the current pvehicle identity and vault generation. Each
 call owns its guest tyre-layout shadow and restores the original pointer and
 thread-local scope on exit. Unload, reload and address reuse invalidate old
 selection tokens. The default remains off pending a handling comparison.
+
+## Source performance
+
+Setup emits a 344-byte `PERFORMANCE.BIN` for each supported Carbon PC and Xbox
+360 variant from that variant's local `GLOBAL/ATTRIBUTES.BIN`. The CPF3 header
+stores its size and both collection identities. The payload stores typed
+little-endian float values and explicit array lengths. Approval policy revision 8
+pins the record alongside `AUDIO.BIN` when source audio is available. Earlier generations
+can still load. CPF1 imports use donor nitrous. CPF2 imports carry source boost
+and capacity plus the donor's remaining nitrous fields. Reimport to pick up the
+complete source nitrous record.
+
+To return to an older release after a revision 8 import, run that release's
+Setup and reimport the cars your save uses.
+
+The startup default, `NFS_ADDCAR_PERFORMANCE=on`, uses the record for driving
+and Quick Race estimates. Set it to `off` to use the MW donor. MW keeps the
+same save/type IDs, upgrade slots, fit dimensions, and local grip/contact
+options. The engine, transmission, induction, chassis, brakes and tyres
+project each donor endpoint's change from stock onto the Carbon stock values.
+CPF3 nitrous uses the equipped refill timing, speed thresholds and flow at
+every installed level. Carbon and MW share the equipped values and the kit
+boost and capacity endpoints. A donor with one kit endpoint gets a separate
+low endpoint so MW blends two equipped layouts. MW computes the stock and
+maximum ratings from those collections using its retail normalization bounds.
+
+| Collection and field | Carbon → MW offset | Decoded value |
+| --- | --- | --- |
+| pvehicle MASS | 40 → 38 | Driving mass in kg |
+| pvehicle TENSOR_SCALE | 00 → 00 | Three inertia multipliers and vector padding |
+| pvehicle HandlingRating | sparse → sparse | Stock and full-upgrade handling with 2 float values |
+| engine TORQUE | 00 → 00 | 9 lb-ft samples on the idle-to-maximum RPM grid |
+| engine SPEED_LIMITER | 2C → 2C | Array of up to 2 mph limits, empty in the supported stock records |
+| engine ENGINE_BRAKING | 3C → 3C | 3 engine braking values |
+| engine FLYWHEEL_MASS | 50 → 50 | Flywheel inertia setting |
+| engine MAX_RPM | 54 → 54 | Maximum RPM |
+| engine RED_LINE | 58 → 58 | Redline RPM |
+| engine IDLE | 5C → 5C | Idle RPM |
+| transmission GEAR_RATIO | 00 → 00 | Reverse, neutral, and forward ratios, with authored length |
+| transmission DIFFERENTIAL | 2C → 2C | 3 differential values |
+| transmission GEAR_EFFICIENCY (5250EB92) | 40 → 40 | 9 gear efficiency samples |
+| transmission TORQUE_CONVERTER | 6C → 6C | Torque converter setting |
+| transmission 7381EE38 | 70 → 70 | Front drive fraction used by MW drive-axle selection |
+| transmission CF5DD4E9 | 74 → 74 | Clutch play and slip scale |
+| transmission 8DC16371 | 78 → 78 | Optimal shift range scale |
+| transmission SHIFT_SPEED | 7C → 7C | Shift speed setting |
+| transmission FINAL_GEAR | 80 → 80 | Final-drive ratio |
+| induction LOW_BOOST | 00 → 00 | Low-RPM boost multiplier |
+| induction SPOOL_TIME_DOWN (1F158097) | 04 → 04 | Spool-down time |
+| induction VACUUM | 08 → 08 | Vacuum setting |
+| induction SPOOL (CF11AF87) | 0C → 0C | Spool setting |
+| induction SPOOL_TIME_UP (AC1C0D2F) | 10 → 10 | Spool-up time |
+| induction PSI | 14 → 14 | Pressure in psi |
+| induction HIGH_BOOST | 18 → 18 | High-RPM boost multiplier |
+| chassis AERO_COEFFICIENT | 70 → 68 | Aero coefficient |
+| chassis DRAG_COEFFICIENT | 78 → 70 | Drag coefficient |
+| brakes BRAKE_LOCK | 00 → 00 | Front/rear lock values |
+| brakes BRAKES | 08 → 08 | Front/rear torque settings in lb-ft |
+| brakes EBRAKE | 10 → 10 | Handbrake torque setting in lb-ft |
+| tires STEERING | 78 → 48 | Steering scale |
+| nos NOS_DISENGAGE | 00 → 00 | Delay before recharging, in seconds |
+| nos TORQUE_BOOST | 04 → 04 | Fractional torque above the baseline |
+| nos FLOW_RATE | 08 → 08 | Nitrous flow setting |
+| nos RECHARGE_MIN | 0C → 0C | Refill time at the lower speed threshold, in seconds |
+| nos NOS_CAPACITY | 10 → 10 | Capacity in seconds |
+| nos RECHARGE_MAX | 14 → 14 | Refill time at the upper speed threshold, in seconds |
+| nos RECHARGE_MAX_SPEED | 18 → 18 | Upper refill speed threshold, in mph |
+| nos RECHARGE_MIN_SPEED | 1C → 1C | Lower refill speed threshold, in mph |
+
+The conversion and native input regression is `tests/setup/test_car_performance.py`.
+
+Setup approval policy revision 9 adds `PERFORMANCE.BIN` for all 31
+ProStreet PC imports. The same startup switch enables their source values.
+Setup resamples their engine torque curves on MW's RPM grid and projects the
+source speed limits, drivetrain, axle brakes, steering scale and handling
+ratings into MW's collections. MW supplies the upgrade slots, brake-lock
+settings, steering rate and range, and nitrous kits. Reimport ProStreet cars
+to add their driving records. Earlier approved generations still load.
+
+Setup approval policy revision 10 adds the same performance record for all
+14 Undercover PC imports. It includes stock mass and inertia, resampled
+engine torque, speed limits, drivetrain and zero-speed brake and steering
+calibration. MW uses those inputs for driving and to estimate stock speed
+and acceleration on the retail scale. MW supplies the handling endpoints,
+suspension, contact, steering and brake envelopes, and nitrous kits.
+Superleggera keeps its own save ID and fit with the authored LP560-4 tuning
+link. Reimport existing Undercover cars to add source performance. Earlier
+approved generations still load and retain save compatibility.

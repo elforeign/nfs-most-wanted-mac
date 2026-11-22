@@ -11,7 +11,8 @@ from .car_convert import hash32, require
 
 HEADER = struct.Struct('<4s4I16s32s')
 PROFILE = 'jaguarxk:stock-v1'
-ATTRIBUTES = 'b1c9ba06e476519db69ef3878a6b2796a0e7be90708355527601f3d58c129a4b'
+ATTRIBUTES = ('b1c9ba06e476519db69ef3878a6b2796a0e7be90708355527601f3d58c129a4b',
+              'd64234661f8226fe24abd45eae7f5c24ce400a214526a4d23d6b421e75d820e4')
 X360_ATTRIBUTES = '24cc0188954147db87c8889363d6d0338a6dac40ab5d3b2780873cd1173b904d'
 MAX_SIZE = 256 << 20
 LEGACY_XK_SHA256 = '66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c'
@@ -153,7 +154,7 @@ def build(attributes, car, resources, *, platform='pc', legacy_xk=False):
     require(platform in ('pc', 'x360'), 'audio unsupported platform')
     console = platform == 'x360'
     require(not legacy_xk or (not console and car.lower() == 'jaguarxk'), 'legacy audio is Jaguar XK only')
-    require(hashlib.sha256(attributes).hexdigest() == (X360_ATTRIBUTES if console else ATTRIBUTES),
+    require(hashlib.sha256(attributes).hexdigest() in ((X360_ATTRIBUTES,) if console else ATTRIBUTES),
             'audio unsupported attributes revision')
     inventory = car_audio.Resources(resources, platform=platform)
     if console:
@@ -246,7 +247,7 @@ def build(attributes, car, resources, *, platform='pc', legacy_xk=False):
 
 def resource_paths(attributes, car, candidates):
     """Resolve the graph's complete resource closure against relative source paths."""
-    require(hashlib.sha256(attributes).hexdigest() == ATTRIBUTES, 'audio unsupported attributes revision')
+    require(hashlib.sha256(attributes).hexdigest() in ATTRIBUTES, 'audio unsupported attributes revision')
     attrib = car_audio.AudioAttributes(attributes)
     names, seen = set(), set()
 

@@ -126,7 +126,7 @@ def _pin(row):
     return {k: row[k] for k in ('size', 'sha256')}
 
 
-def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None):
+def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None, packed_geometry=None):
     _require(type(size) is int and 0 <= size <= converter.MAX_FILE, 'logical range too large')
     with _asset(path) as fd, ExitStack() as stack:
         before = os.fstat(fd)
@@ -135,6 +135,7 @@ def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None):
         digest, left = hashlib.sha256(), size
         os.lseek(fd, offset, os.SEEK_SET)
         sink = None
+        packed_blocks = [] if packed_geometry is not None else None
         if target is not None:
             sink = stack.enter_context(os.fdopen(stage.open_file(target), 'wb'))
         try:
@@ -143,9 +144,15 @@ def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None):
                 block = os.read(fd, min(left, 1 << 20))
                 _require(bool(block), 'source truncated while reading')
                 digest.update(block)
-                if sink is not None:
+                if packed_blocks is not None:
+                    packed_blocks.append(block)
+                elif sink is not None:
                     sink.write(block)
                 left -= len(block)
+            pin = dict(size=size, sha256=digest.hexdigest())
+            if packed_blocks is not None:
+                _require(pin == packed_geometry, 'source changed during selected extraction')
+                pin = sources._decoded_geometry(b''.join(packed_blocks), sink=sink, tick=tick)
             if sink is not None:
                 sink.flush()
                 os.fsync(sink.fileno())
@@ -155,7 +162,7 @@ def _range(path, offset, size, *, target=None, stage=None, tick=lambda: None):
         finally:
             if sink is not None:
                 sink.close()
-    return dict(size=size, sha256=digest.hexdigest())
+    return pin
 
 
 def _logical(source, entry, **kwargs):
@@ -193,7 +200,9 @@ def _mw_names(game, donor):
     if game == 'carbon':
         return (*packs, *MW_SHARED)
     from .ps_namespace import TEMPLATE
-    shared = ('GLOBAL/GLOBALB.LZC', 'GLOBAL/ATTRIBUTES.BIN') if game == 'prostreet' else ()
+    shared = ('GLOBAL/ATTRIBUTES.BIN',)
+    if game == 'prostreet':
+        shared = ('GLOBAL/GLOBALB.LZC', *shared)
     return tuple(dict.fromkeys((*packs, *_car_packs(TEMPLATE), *shared)))
 
 
@@ -289,11 +298,11 @@ def _later_route(game):
     from . import ps_namespace, v25_batch, v25_car
     modules = [ps_namespace, v25_batch, v25_car]
     if game == 'prostreet':
-        from . import ps_attrib
-        return ps_namespace, modules + [ps_attrib]
+        from . import car_performance, ps_attrib
+        return ps_namespace, modules + [ps_attrib, car_performance]
     _require(game == 'undercover', 'unsupported PC converter')
-    from . import ps_attrib, uc_batch, ucpc_car
-    return ucpc_car, modules + [ps_attrib, uc_batch, ucpc_car]
+    from . import car_performance, ps_attrib, uc_attrib, uc_batch, ucpc_car
+    return ucpc_car, modules + [ps_attrib, uc_attrib, uc_batch, ucpc_car, car_performance]
 
 
 def _code(platform, absent, game='carbon', *, mac_audio=False):
@@ -507,6 +516,7 @@ class CarImporter:
             mac_audio = False
             audio_paths = ()
             donor_export = False
+            packed_geometry = {}
             if platform == 'x360':
                 bundle = xenon.resolve(reader, folder, car['donors']['model'], recognition=recognition)
                 source_pins = {key: _pin(row) for key, row in bundle.inputs.items()}
@@ -516,15 +526,16 @@ class CarImporter:
                 allowed = {r['path_hash']: r for r in expected}
                 _require(names.keys() <= allowed.keys(), 'PC dependency missing from recognition')
                 source_pins = {key: _pin(allowed[key]) for key in names}
+                packed_geometry = {key: allowed[key]['packed'] for key in names if 'packed' in allowed[key]}
             for key, pin in source_pins.items():
-                _require(key in logical and _logical(reader, logical[key], tick=tick) == pin,
+                _require(key in logical and _logical(reader, logical[key], tick=tick) == packed_geometry.get(key, pin),
                          'selected logical source changed')
             if game == 'carbon':
                 from . import car_audio_pack
                 attribute_id = sources.path_hash('GLOBAL/ATTRIBUTES.BIN')
                 x360 = platform == 'x360'
-                attributes_pin = car_audio_pack.X360_ATTRIBUTES if x360 else car_audio_pack.ATTRIBUTES
-                mac_audio = source_pins[attribute_id]['sha256'] == attributes_pin
+                attributes_pins = (car_audio_pack.X360_ATTRIBUTES,) if x360 else car_audio_pack.ATTRIBUTES
+                mac_audio = source_pins[attribute_id]['sha256'] in attributes_pins
                 donor_export = mac_audio and x360 and _x360_donor_export(physical)
                 mac_audio = mac_audio and not donor_export
                 if mac_audio:
@@ -574,7 +585,8 @@ class CarImporter:
                                 current[sources.path_hash(name)] = (files[name], 0, fresh.size(files[name]))
                     for name, pin in source_pins.items():
                         _require(current.get(name) == logical[name] and
-                                 _logical(fresh, current[name], tick=tick) == pin, 'source changed before activation')
+                                 _logical(fresh, current[name], tick=tick) == packed_geometry.get(name, pin),
+                                 'source changed before activation')
                 for name, pin in mw_pins.items():
                     path = _mw_asset(mw, name, game)
                     _require(path == mw_paths[name] and catalog.fingerprint(path) == pin,
@@ -619,7 +631,8 @@ class CarImporter:
                         pass
                 with _open_source(source) as fresh:
                     for name, pin in source_pins.items():
-                        actual = _logical(fresh, logical[name], stage=owned, target='source/' + names[name], tick=tick)
+                        actual = _logical(fresh, logical[name], stage=owned, target='source/' + names[name],
+                                          tick=tick, packed_geometry=packed_geometry.get(name))
                         _require(actual == pin, 'source changed during selected extraction')
                 for name, pin in mw_pins.items():
                     actual = _range(mw_paths[name], 0, pin['size'], stage=owned, target='mw/' + name, tick=tick)
@@ -762,13 +775,21 @@ class CarImporter:
             _require(policy is not None, 'cache requires packaged approval')
             legacy = identity['approval'] == dict(
                 sha256=catalog.LEGACY_POLICY_SHA256, revision=catalog.LEGACY_POLICY_REVISION)
-            pre_audio = identity['approval'] == dict(
-                sha256=catalog.PRE_AUDIO_POLICY_SHA256, revision=catalog.PRE_AUDIO_POLICY_REVISION)
-            pc_audio = identity['approval'] == dict(
-                sha256=catalog.PC_AUDIO_POLICY_SHA256, revision=catalog.PC_AUDIO_POLICY_REVISION)
-            x360_audio = identity['approval'] == dict(
-                sha256=catalog.X360_AUDIO_POLICY_SHA256, revision=catalog.X360_AUDIO_POLICY_REVISION)
-            _require((retained and (legacy or pre_audio or pc_audio or x360_audio)) or identity['approval'] == dict(sha256=policy.sha256,
+            retained_policy = retained and identity['approval'] in (
+                dict(sha256=catalog.LEGACY_POLICY_SHA256, revision=catalog.LEGACY_POLICY_REVISION),
+                dict(sha256=catalog.PRE_AUDIO_POLICY_SHA256, revision=catalog.PRE_AUDIO_POLICY_REVISION),
+                dict(sha256=catalog.PC_AUDIO_POLICY_SHA256, revision=catalog.PC_AUDIO_POLICY_REVISION),
+                dict(sha256=catalog.X360_AUDIO_POLICY_SHA256, revision=catalog.X360_AUDIO_POLICY_REVISION),
+                dict(sha256=catalog.AUDIO_V7_POLICY_SHA256, revision=7),
+                dict(sha256=catalog.CPF1_POLICY_SHA256, revision=5),
+                dict(sha256=catalog.CPF2_POLICY_SHA256, revision=6),
+                dict(sha256=catalog.CPF3_POLICY_SHA256, revision=7),
+                dict(sha256=catalog.PRE_RETAIL_ATTRIBUTES_POLICY_SHA256, revision=8),
+                dict(sha256=catalog.RETAIL_ATTRIBUTES_POLICY_SHA256, revision=9),
+                dict(sha256=catalog.PS_PERFORMANCE_POLICY_SHA256, revision=9),
+                dict(sha256=catalog.PRE_UC_PERFORMANCE_POLICY_SHA256, revision=11),
+            )
+            _require(retained_policy or identity['approval'] == dict(sha256=policy.sha256,
                 revision=catalog._policy(policy)['revision']), 'cache approval revision is stale')
             with catalog._directory(entry) as base:
                 doc = catalog._decode(catalog._read(base, 'receipt.json'))

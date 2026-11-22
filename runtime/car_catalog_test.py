@@ -99,6 +99,15 @@ static void text(const char *s) {
     putchar('"');
 }
 int main(int argc,char **argv) {
+    if (argc==2 && !strcmp(argv[1],"policy")) {
+        Json policy={0};
+        int slots[CAR_CATALOG_SLOTS];
+        char digest[65];
+        int rc=policy_load(&policy,slots,digest);
+        puts(car_catalog_error());
+        json_free(&policy);
+        return rc!=0;
+    }
     if (argc<3) return 2;
     track_peak=argc>3 && !strcmp(argv[3],"limited");
     int rc=car_catalog_init(argv[1],atoi(argv[2]));
@@ -218,6 +227,18 @@ def paint(folder, donor, mode=1):
     return struct.pack('<8I', *values, h)
 
 
+def performance(car, donor):
+    body = struct.pack('<5fI2f', 1000., 1., 1., 1., 0., 2, 50., 60.)
+    body += struct.pack('<I9fI2fI3f4f', 9, *([90.] * 9), 0, 0., 0., 3, 1., 1., 1.,
+                        0.6, 7000., 6500., 800.)
+    body += struct.pack('<I9f', 7, 3., 0., 3., 2., 1.5, 1., .8, 0., 0.)
+    body += struct.pack('<I3fI9f', 3, 1., 1., 1., 9, *([1.] * 9))
+    body += struct.pack('<6f', *([1.] * 5), 4.)
+    body += struct.pack('<15f', *([1.] * 15))
+    assert len(body) == 296
+    return struct.pack('<4s3I', b'CPF1', 312, car, donor) + body
+
+
 def sidecars(folder, donor):
     a, b = hash32(folder.lower()), hash32(donor.lower())
     bounds = bytearray(80)
@@ -304,22 +325,24 @@ class NativeCatalogTests(unittest.TestCase):
         path.write_bytes(cc.encoded(self.policy_doc))
         return cc.load_policy(path, cc.digest(self.policy_doc))
 
-    def compile(self, *, source=None, policy=True, policy_data=None, expected=None):
+    def compile(self, *, source=None, policy=True, policy_data=None, expected=None, packaged=False):
         self.serial += 1
         d = self.root / f'build-{self.serial}'
         d.mkdir()
         reader = d / 'reader.c'
         reader.write_text(SOURCE.read_text() if source is None else source)
-        if policy:
+        if policy and not packaged:
             data = cc.encoded(self.policy_doc) if policy_data is None else policy_data
             (d / 'approval.h').write_text('#define CAR_CATALOG_POLICY_JSON ' + json.dumps(data.decode('ascii')) + '\n#define CAR_CATALOG_POLICY_SHA256 "' + (expected or hashlib.sha256(data).hexdigest()) + '"\n')
         c = d / 'harness.c'
         c.write_text(NATIVE.replace('READER_SOURCE', str(reader)))
         exe = d / 'reader'
         args = ['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-g', '-fsanitize=address,undefined', '-I', str(ROOT / 'runtime')]
-        if policy:
+        if packaged:
+            args += ['-DNFS_PUBLIC']
+        elif policy:
             args += ['-DCAR_CATALOG_APPROVAL_HEADER="' + str(d / 'approval.h') + '"']
-        p = subprocess.run(args + [str(ROOT / 'runtime/car_grip.c'), str(c), '-o', str(exe)], capture_output=True, text=True)
+        p = subprocess.run(args + [str(ROOT / 'runtime/car_grip.c'), str(ROOT / 'runtime/car_performance.c'), str(c), '-o', str(exe)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr[-5000:])
         return exe
 
@@ -445,7 +468,10 @@ class NativeCatalogTests(unittest.TestCase):
 
     def test_legacy_policy_envelope_still_checks_contract_and_outputs(self):
         for digest in (cc.LEGACY_POLICY_SHA256, cc.PRE_AUDIO_POLICY_SHA256, cc.PC_AUDIO_POLICY_SHA256,
-                       cc.X360_AUDIO_POLICY_SHA256):
+                       cc.X360_AUDIO_POLICY_SHA256, cc.AUDIO_V7_POLICY_SHA256,
+                       cc.CPF1_POLICY_SHA256, cc.CPF2_POLICY_SHA256, cc.CPF3_POLICY_SHA256,
+                       cc.PRE_RETAIL_ATTRIBUTES_POLICY_SHA256, cc.RETAIL_ATTRIBUTES_POLICY_SHA256,
+                       cc.PS_PERFORMANCE_POLICY_SHA256, cc.PRE_UC_PERFORMANCE_POLICY_SHA256):
             self.rewrite(lambda doc: doc.update(policy_sha256=digest))
             self.good_result()
             self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
@@ -531,6 +557,12 @@ class NativeCatalogTests(unittest.TestCase):
         self.rewrite(lambda d: d['cars'][0].update(approved=True, evidence='local words'))
         self.zero()
 
+    def test_packaged_policy_loads_natively(self):
+        """fdf85535 rejects the packaged policy (exit 1). The fixed reader loads it (exit 0)."""
+        run = subprocess.run([str(self.compile(packaged=True)), 'policy'],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_policy_integrity_and_invalid_shapes(self):
         self.zero(self.native(exe=self.compile(expected='0'*64)))
         original = copy.deepcopy(self.policy_doc)
@@ -540,6 +572,7 @@ class NativeCatalogTests(unittest.TestCase):
                    lambda p: p['slots'][1].update(identity=p['slots'][0]['identity']),
                    lambda p: p['slots'][1].update(variants=p['slots'][0]['variants']),
                    lambda p: p['slots'][0]['variants'].append(p['slots'][0]['variants'][0]),
+                   lambda p: p['slots'][0]['variants'][0].update(legacy=4),
                    lambda p: p['slots'][0]['variants'][0].update(approved='yes')]
         for change in changes:
             with self.subTest(change=changes.index(change)):
@@ -866,6 +899,49 @@ class NativeCatalogTests(unittest.TestCase):
         self.write_pointer(original_ptr)
         self.policy_doc=original_policy
         self.assertEqual(self.generation_dir(),original_base)
+
+    def test_carbon_performance_admission(self):
+        # A catalog with both sidecars admits 3 cars. Aliasing the performance
+        # name to audio admits 0 cars.
+        row = self.rows[0]
+        name = row['origin']['folder'].lower().encode()
+        audio = self.outputs[0] / 'AUDIO.BIN'
+        audio.write_bytes(struct.pack('<4s4I16s32s', b'A7CA', 2, 68, 1, 1, name, bytes(32)))
+        row['outputs'][audio.name] = cc.fingerprint(audio)
+        car = hash32(row['origin']['folder'].lower())
+        donor = hash32(row['donors']['model'].lower())
+        old = performance(car, donor)
+        cpf2 = struct.pack('<4sI', b'CPF2', 320) + old[8:] + struct.pack('<2f', 1., 5.)
+        valid = struct.pack('<4sI', b'CPF3', 344) + cpf2[8:] + struct.pack('<6f', 2., 3., 50., 30., 100., 50.)
+        bad_count = valid[:48] + struct.pack('<I', 65535) + valid[52:]
+        bad_nos = valid[:-4] + struct.pack('<f', float('nan'))
+        bad_magic = cpf2[:4] + valid[4:]
+        other_car = performance(car ^ 1, donor)
+        pin = self.outputs[0] / 'PERFORMANCE.BIN'
+        for data, version in ((old, 1), (cpf2, 2), (valid, 3), (valid[:-1], 0),
+                              (bad_count, 0), (bad_nos, 0), (bad_magic, 0), (other_car, 0)):
+            with self.subTest(data=len(data), checksum=hashlib.sha256(data).hexdigest()[:8]):
+                pin.write_bytes(data)
+                row['outputs'][pin.name] = cc.fingerprint(pin)
+                self.approve_rows()
+                policy = self.load_policy()
+                cc.publish(self.store, self.rows, self.outputs, self.inputs, policy=policy)
+                result = self.native(exe=self.compile())
+                if version:
+                    self.assertEqual(result['count'], 3)
+                    outputs = result['rows'][0]['outputs']
+                    self.assertEqual([(o['version'], o['bytes_hash']) for o in outputs[-2:]],
+                                     [(2, row['outputs'][audio.name]['sha256']),
+                                      (version, row['outputs'][pin.name]['sha256'])])
+                    if version == 3:
+                        source = SOURCE.read_text()
+                        mutant = source.replace('"AUDIO.BIN", "PERFORMANCE.BIN"', '"AUDIO.BIN", "AUDIO.BIN"')
+                        self.assertNotEqual(mutant, source)
+                        self.zero(self.native(exe=self.compile(source=mutant)))
+                        type(self).mutants += 1
+                else:
+                    self.assertEqual(result['count'], 0)
+                    self.assertIn('PERFORMANCE.BIN', result['error'])
 
     def test_optional_sidecars_absent_and_legacy_versions(self):
         # Explicit absence never causes reads of convenient sibling sidecars.

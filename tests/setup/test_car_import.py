@@ -1,5 +1,6 @@
 """Standalone import lifecycle proof using generated assets and test-only policy.
 
+Issue #24 first list with no catalog: 0/1 silent before, 1/1 after.
 Original baseline: the public engine API test fails (1 failure, 0 errors)
 because no standalone transaction engine exists. No test reads repository history.
 Good: 45 lifecycle/API tests; real PC/X360 selected-range dry runs write seven
@@ -93,6 +94,10 @@ class Lifecycle(unittest.TestCase):
         self.root = self.assets.root
         self.carbon = self.root / 'pc'
         self.x360 = self.root / 'x360'
+        self.x360_files = self.x360 / 'FILES'
+        self.x360_files.mkdir()
+        for name in ('CARS', 'GLOBAL'):
+            (self.x360 / name).rename(self.x360_files / name)
         self.mw = self.root / 'mw'
         self.car = spec()
         self.alternative = copy.deepcopy(self.car)
@@ -169,6 +174,11 @@ class Lifecycle(unittest.TestCase):
     def cache(self):
         return next(self.engine.work.glob('c-*'))
 
+    def test_issue24_first_list_has_no_catalog_error(self):
+        listed = self.engine.list_cars()
+        self.assertEqual((listed['generation'], listed['selection'], listed['error']), ('', [], ''))
+        self.assertEqual(listed['cars'], catalog.reservations())
+
     def test_check_keeps_source_roles_and_never_approves_output(self):
         optional = self.root / 'optional-mw-x360'
         optional.mkdir()
@@ -238,7 +248,7 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(first['pointer'], second['pointer'])
 
     def test_x360_audio_less_export_imports_with_donor_sound(self):
-        pin = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        pin = catalog.fingerprint(self.x360_files / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
         with mock.patch.object(car_audio_pack, 'X360_ATTRIBUTES', pin), \
                 mock.patch.object(car_audio_pack, 'x360_resource_paths',
                                   return_value=['SOUND/ENGINE/FIXTURE.ABK']):
@@ -273,7 +283,7 @@ class Lifecycle(unittest.TestCase):
                     self.assertEqual(converter.x360_audio_inputs(b'', car, logical), pins)
 
     def test_x360_archive_audio_limits_before_reading(self):
-        attr = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        attr = catalog.fingerprint(self.x360_files / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
         # Each resource in the total-size control fits the 512 KiB file limit.
         for sizes, message in (([6666, 6666, 6666, 6666, 524289], 'file size limit'),
                                ([524288] * 8 + [1], 'total size limit')):
@@ -301,7 +311,7 @@ class Lifecycle(unittest.TestCase):
         pins = {name: dict(size=len(expected), sha256=hashlib.sha256(expected).hexdigest())}
         audio = self.x360 / name
         audio.parent.mkdir(parents=True)
-        attr = catalog.fingerprint(self.x360 / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
+        attr = catalog.fingerprint(self.x360_files / 'GLOBAL/ATTRIBUTES.BIN')['sha256']
         read = ci._logical
 
         def watch(reader, entry, **kwargs):
@@ -384,6 +394,28 @@ class Lifecycle(unittest.TestCase):
         with mock.patch.object(converter, 'convert', wraps=converter.convert) as writer:
             self.run_import()
         self.assertEqual(writer.call_count, 1)
+
+    def test_retained_pack_can_use_prior_policy_receipt(self):
+        for revision, name in ((4, 'PRE_AUDIO_POLICY_SHA256'), (5, 'PC_AUDIO_POLICY_SHA256'),
+                               (6, 'X360_AUDIO_POLICY_SHA256'), (7, 'AUDIO_V7_POLICY_SHA256'),
+                               (5, 'CPF1_POLICY_SHA256'), (6, 'CPF2_POLICY_SHA256'),
+                               (7, 'CPF3_POLICY_SHA256'), (8, 'PRE_RETAIL_ATTRIBUTES_POLICY_SHA256'),
+                               (9, 'RETAIL_ATTRIBUTES_POLICY_SHA256'), (9, 'PS_PERFORMANCE_POLICY_SHA256'),
+                               (11, 'PRE_UC_PERFORMANCE_POLICY_SHA256')):
+            with self.subTest(revision=revision):
+                self.policy_doc['revision'] = revision
+                self.save_policy()
+                with mock.patch.object(catalog, name, self.policy.sha256):
+                    self.run_import()
+                    row = self.ready().selected[0]
+                    self.policy_doc['revision'] = 12
+                    self.save_policy()
+                    entry = self.engine._retained_input(row, self.policy)
+                    identity = json.loads((entry / 'receipt.json').read_bytes())['identity']
+                    with self.assertRaisesRegex(ci.CacheError, 'cache approval revision is stale'):
+                        self.engine._cached(entry, identity, self.policy)
+                    self.engine.disable()
+                    force_remove(entry)
 
     def test_unapproved_default_never_activates_or_accepts_approval_argument(self):
         self.policy = None

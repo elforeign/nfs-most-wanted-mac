@@ -45,7 +45,9 @@ PRELUDE = r'''
 #include <unistd.h>
 #include "blackbox.h"
 #include "game_select.h"
+#include "present_image_diag.h"
 void carbon_blackbox_fe(uint64_t frame, uint32_t flow, uint64_t now) { (void)frame; (void)flow; (void)now; }
+void present_image_diag_tick(uint32_t ticks, uint32_t flow) { (void)ticks; (void)flow; }
 static uint64_t virtual_ns = 100000000000ull;
 static int fixture_clock(clockid_t id, struct timespec *t) {
     (void)id; t->tv_sec = virtual_ns / 1000000000ull;

@@ -15,6 +15,7 @@
 #include "realworld_materials.h"
 #include "materials.h"
 #include "live_picture.h"
+#include "present_image_diag.h"
 
 void *user32_metal_layer(uint32_t hwnd);
 void user32_client_size(uint32_t hwnd, int *cw, int *ch);
@@ -639,6 +640,7 @@ static int d_CreateDevice(Cpu *c) {            // (this, adapter, type, hFocusWi
     // 8-bit gamma space): tagged, so macOS colour-matches them to the display (untagged, a P3 panel showed them in its
     // own wider gamut, oversaturated).
     if (layer) { layer.device = mtl; layer.pixelFormat = MTLPixelFormatBGRA8Unorm; layer.framebufferOnly = YES; layer.colorspace = srgb_colorspace(); }
+    if (diag_on) present_image_diag_init(layer);
     fprintf(stderr, "boot: D3D9 CreateDevice(hwnd %08X, behavior %X) on %s%s; antialiasing: level %u, menu maximum %u, MultiSample %u/%u\n", dev.hwnd, dev.behavior,
 #if NFS_GAME == NFS_GAME_MW
             mtl.name.UTF8String, layer ? "" : " (no window layer)", M32(0x00901808), M32(0x00901890), dev.pp[4], dev.pp[5]);

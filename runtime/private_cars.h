@@ -2,6 +2,7 @@
 #define NFS_PRIVATE_CARS_H
 #include <stddef.h>
 #include "car_grip.h"
+#include "car_performance.h"
 /* Startup-only immutable inventory; WO2 supplies userdata root and settings.
  * Repeated init returns the first result without I/O. No hot-path I/O.
  * Pending IDs must never be compacted. Original swaps use uppercase MW names.
@@ -14,6 +15,7 @@ typedef struct {
     char paint[4096], physics[4096], collision[4096];
     /* Parsed from the verified startup descriptor; never reopen a sibling. */
     CarGrip grip;
+    CarPerformance performance;
     char pvehicle[32], frontend[32], ecar[32];
     char display_name[513], manufacturer[513];
 } PrivateCar;

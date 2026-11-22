@@ -4,8 +4,9 @@ The fingerprint catalog contains no source paths or car roster. File IDs are
 the game's case-insensitive path hashes; car IDs hash their parent directory.
 ``cars`` and ``shared`` describe the complete audited conversion inputs, with
 identical IDs and hashes for an ISO and its extracted files. Extra files are
-ignored, and are never implicitly approved for conversion. This is source
-recognition only: it does not approve converted output or decode car meshes.
+ignored, and are never implicitly approved for conversion. Some Carbon PC
+geometry also has a decoded pack fingerprint. Only the conversion policy can
+approve the resulting outputs.
 """
 from contextlib import contextmanager
 import hashlib
@@ -21,6 +22,8 @@ MAX_EXECUTABLE = 128 << 20
 CARBON_TITLE = "0x454107EC"
 UNDERCOVER_TITLE = "0x45410876"
 GAME_NAMES = {"carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"}
+CARBON_PATCH_MESSAGE = "Update Carbon with the official 1.4 patch, then try again"
+CARBON_OLD_GLOBALB_SIZES = {7_938_478, 7_938_901}
 PC_CONVERSION_SHARED = {
     "carbon": ("GLOBAL/GLOBALB.LZC", "GLOBAL/ATTRIBUTES.BIN"),
     "prostreet": ("GLOBAL/GLOBALB.LZC", "GLOBAL/ATTRIBUTES.BIN", "GLOBAL/INGAMEA.BUN"),
@@ -30,6 +33,15 @@ PC_CONVERSION_SHARED = {
 
 class SourceError(ValueError):
     """An incomplete, damaged or unaudited source was selected."""
+
+    rank = (-1, False, False)
+
+
+class _SharedMismatch(SourceError):
+    def __init__(self, message, matches, old_carbon, known_executable):
+        super().__init__(CARBON_PATCH_MESSAGE if old_carbon else message)
+        self.rank = (matches, old_carbon, known_executable)
+        self.old_carbon = old_carbon
 
 
 def path_hash(path):
@@ -143,6 +155,20 @@ def _source(path):
         source = Source(path)
         yield source
     except (OSError, X360Error, xdvdfs.DiscError, UnicodeError, struct.error) as error:
+        if source is None and isinstance(error, xdvdfs.DiscError) and str(error).startswith(
+                "no XDVDFS volume descriptor found"):
+            # A readable signature can survive the loss of the rest of its sector.
+            try:
+                with path.open("rb") as image:
+                    for base in xdvdfs.PARTITION_OFFSETS:
+                        image.seek(base + 32 * xdvdfs.SECTOR)
+                        if image.read(len(xdvdfs.MAGIC)) == xdvdfs.MAGIC:
+                            raise SourceError("Truncated Xbox 360 volume descriptor. "
+                                              "Choose a complete disc image.") from error
+            except OSError as read_error:
+                raise SourceError(str(read_error)) from read_error
+            raise SourceError("PC disc images can't be used for added cars. "
+                              "Choose your installed Carbon folder instead.") from error
         raise SourceError(str(error)) from error
     finally:
         if source is not None:
@@ -177,9 +203,51 @@ def _digest(source, entry):
     return digest.hexdigest()
 
 
+def _decoded_geometry(data, *, sink=None, tick=lambda: None):
+    """Fingerprint an uncompressed v29 pack, writing those same bytes if staged."""
+    from . import car_convert as cv
+
+    root_size = cv.u32(data, 4)
+    cv.require(len(data) <= cv.MAX_FILE and root_size <= len(data) - 8, 'geometry root range')
+    entries = cv.index(data)
+    start, length = cv.pack_header(data, 0x80134001)
+    header_end = start + 8 + length
+    index_at = next(off + 8 for kind, off, _ in cv.walk(data, start + 8, header_end)
+                    if kind == 0x134004)
+    physical_order = sorted(enumerate(entries), key=lambda row: row[1][1])
+    header = bytearray(data[:header_end])
+    delta = 0
+    # Preserve the header, index order, gaps and trailer. Only the fields that
+    # describe storage move when the indexed solids are written as raw bytes.
+    for row, (key, at, stored, size, _, _) in physical_order:
+        struct.pack_into('<6I', header, index_at + row * 24, key, at + delta, size, size, 0, 0)
+        delta += size - stored
+    cv.require(len(data) + delta <= cv.MAX_FILE, 'decoded geometry pack size')
+    struct.pack_into('<I', header, 4, root_size + delta)
+
+    digest = hashlib.sha256()
+
+    def write(block):
+        digest.update(block)
+        if sink is not None:
+            sink.write(block)
+
+    write(header)
+    view = memoryview(data)
+    position = header_end
+    for _, entry in physical_order:
+        tick()
+        _, at, stored, _, _, _ = entry
+        write(view[position:at])
+        write(cv.unpack_entry(data, entry))
+        position = at + stored
+    write(view[position:])
+    return dict(size=len(data) + delta, sha256=digest.hexdigest())
+
+
 def _logical(source, files, *, engine_audio=False):
     """Resolve logical IDs from ZDIR or fully extracted CARS/GLOBAL files."""
-    if "NFS/ZDIR.BIN" not in files:
+    if "NFS/ZDIR.BIN" not in files or _pc_folder(source.path):
         result = {}
         for name, key in files.items():
             if name.startswith(("CARS/", "GLOBAL/")) or (engine_audio and name.startswith("SOUND/ENGINE/")):
@@ -274,6 +342,25 @@ def _file_status(source, logical, expected):
     return "importable"
 
 
+def _car_file(source, logical, expected):
+    record = {k: v for k, v in expected.items() if k not in ("car_hash", "decoded")}
+    record["status"] = _file_status(source, logical, expected)
+    if record["status"] == "unknown" and "decoded" in expected:
+        from . import car_convert as cv
+
+        entry = logical[expected["path_hash"]]
+        if 0 < entry[2] <= cv.MAX_FILE:
+            data = _read(source, entry)
+            try:
+                decoded = _decoded_geometry(data)
+            except cv.FormatError:
+                return record
+            if decoded == expected["decoded"]:
+                record.update(decoded, status="importable",
+                              packed=dict(size=len(data), sha256=hashlib.sha256(data).hexdigest()))
+    return record
+
+
 def _shared_signature(rows, platform, game="carbon"):
     # Carbon PC needs three shared inputs, independent of whether a copy also
     # includes the catalog's GLOBALB.BUN companion. Later games require all four.
@@ -282,10 +369,19 @@ def _shared_signature(rows, platform, game="carbon"):
                   if "car_hash" not in r and r["path_hash"] != optional)
 
 
+def _releases(catalog):
+    for release in catalog["releases"]:
+        yield release
+        for overrides in release.get("shared_variants", ()):
+            yield dict(release, files=[dict(row, **overrides.get(row["path_hash"], {}))
+                                       for row in release["files"]])
+
+
 def _match(source, files, logical, release, selected, releases):
     game = release.get("game", "carbon")
     label = GAME_NAMES[game]
-    if release["platform"] == "pc":
+    if release["platform"] == "pc" or ("DEFAULT.XEX" not in files and
+                                         "NFS/ZDIR.BIN" not in files and not source.handle):
         _require(any(n.startswith("CARS/") for n in files)
                  and any(n.startswith("GLOBAL/") for n in files),
                  "Choose the folder that contains CARS and GLOBAL")
@@ -309,7 +405,14 @@ def _match(source, files, logical, release, selected, releases):
             problems.append(f"{name} ({'missing' if status == 'missing' else 'does not match a known file'})")
         else:
             shared.append(dict(expected))
-    _require(not problems, label + " shared files did not match: " + ", ".join(problems))
+    if problems:
+        signature = _shared_signature(shared, release["platform"], game)
+        globalb = logical.get(path_hash("GLOBAL/GLOBALB.LZC"))
+        old_carbon = ((game, release["platform"]) == ("carbon", "pc") and
+                      globalb is not None and globalb[2] in CARBON_OLD_GLOBALB_SIZES)
+        raise _SharedMismatch(label + " shared files did not match: " + ", ".join(problems),
+                              len(signature), old_carbon,
+                              bool(exe and exe["sha256"] == release["executable"]["sha256"]))
 
     # Keep pairs together: geometry from one known release and textures from
     # another do not establish a known conversion input pair.
@@ -328,22 +431,26 @@ def _match(source, files, logical, release, selected, releases):
             pairs.setdefault(car, []).append(rows)
     cars = []
     for car, alternatives in sorted(pairs.items()):
-        checked = [(rows, [_file_status(source, logical, row) for row in rows])
-                   for rows in alternatives]
-        rows, statuses = next(((rows, statuses) for rows, statuses in checked
-                               if set(statuses) == {"importable"}), checked[0])
-        status = ("importable" if set(statuses) == {"importable"} else
+        checked = []
+        for rows in alternatives:
+            records = [_car_file(source, logical, row) for row in rows]
+            statuses = {r["status"] for r in records}
+            checked.append((records, statuses))
+            if statuses == {"importable"}:
+                break
+        else:
+            records, statuses = checked[0]
+        status = ("importable" if statuses == {"importable"} else
                   "missing" if "missing" in statuses else "unknown")
-        records = []
-        for row, state in zip(rows, statuses):
-            record = {k: v for k, v in row.items() if k != "car_hash"}
-            record["status"] = state
-            records.append(record)
         cars.append({"car_hash": car, "status": status,
                      "files": sorted(records, key=lambda r: r["path_hash"])})
     return {"game": game, "platform": release["platform"], "edition": release["edition"],
             "fingerprints": {"executable": exe, "catalog_executable": dict(release["executable"])},
             "cars": cars, "shared": sorted(shared, key=lambda r: r["path_hash"])}
+
+
+def _pc_folder(path):
+    return path.is_dir() and {"CARS", "GLOBAL"} <= {p.name.upper() for p in path.iterdir() if p.is_dir()}
 
 
 def _folder(path):
@@ -358,22 +465,24 @@ def _folder(path):
     candidates = []
     for child in children:
         if child.is_dir() and not child.is_symlink():
-            names = {p.name.upper() for p in child.iterdir() if p.is_dir()}
-            if {"CARS", "GLOBAL"} <= names:
+            if _pc_folder(child):
                 candidates.append(child)
     _require(len(candidates) <= 1, "Choose the folder that contains CARS and GLOBAL")
-    return candidates[0] if candidates else path
+    # FILES is also the Xbox export wrapper. Keep it for source classification.
+    return candidates[0] if candidates and candidates[0].name.upper() != "FILES" else path
 
 
 def recognise(path):
     """Inventory Carbon, ProStreet PC, or Undercover PC and Xbox 360 inputs.
 
     Accept a PC folder or any selected .exe, X360 ISO, extracted archive or
-    logical files. Shared fingerprints identify the platform; executable hashes
-    are recorded only. XEX metadata must identify the game, with any version.
+    logical files directly in a folder or under FILES. Shared fingerprints identify
+    the game. PC executable hashes are only used to break ties between errors.
+    XEX metadata must identify the game, with any version.
     Each catalog car has an importable, unknown or missing status. File records
     on unknown/missing cars describe expected fingerprints, with their status;
     only importable pairs have been verified for conversion.
+    A decoded match carries a canonical pack pin and the selected packed pin.
     Edition labels describe the catalog sample, not the selected executable.
     """
     path = Path(path).expanduser()
@@ -386,18 +495,32 @@ def recognise(path):
     with MANIFEST.open(encoding="utf-8") as handle:
         catalog = json.load(handle)
     _require(catalog["schema"] == 1 and catalog["releases"], "Invalid car fingerprint catalog")
+    releases = tuple(_releases(catalog))
     with _source(path) as source:
         files = _physical(source)
         logical = _logical(source, files)
+        console = source.handle or "DEFAULT.XEX" in files or "NFS/ZDIR.BIN" in files
+        platform = ("pc" if selected is not None or _pc_folder(path) else
+                    "x360" if console else None)
+        candidates = [release for release in releases
+                      if platform is None or release["platform"] == platform]
+        if platform == "pc" and selected is None:
+            # Flat Carbon exports share the PC folder layout. Try the installed
+            # game first, then exports with all the required Xbox shared sizes.
+            sizes = {identity: entry[2] for identity, entry in logical.items()}
+            candidates.extend(release for release in releases
+                              if release["platform"] == "x360" and release.get("game", "carbon") == "carbon"
+                              and all(sizes.get(row["path_hash"]) == row["size"]
+                                      for row in release["files"] if "car_hash" not in row))
         errors = []
-        for release in catalog["releases"]:
-            if ((source.handle or "DEFAULT.XEX" in files or "NFS/ZDIR.BIN" in files)
-                    and release["platform"] != "x360"):
-                continue
-            if selected is not None and release["platform"] != "pc":
-                continue
+        for release in candidates:
             try:
-                return _match(source, files, logical, release, selected, catalog["releases"])
+                return _match(source, files, logical, release, selected, releases)
             except SourceError as error:
-                errors.append(str(error))
-        raise SourceError("Car source not recognised: " + "; ".join(dict.fromkeys(errors)))
+                if platform is None or release["platform"] == platform:
+                    errors.append(error)
+        _require(errors, "Choose your installed game folder or an Xbox 360 disc image.")
+        closest = max(errors, key=lambda error: error.rank)
+        if isinstance(closest, _SharedMismatch) and closest.old_carbon:
+            raise closest
+        raise SourceError("Car source not recognised: " + str(closest))

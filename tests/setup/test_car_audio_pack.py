@@ -1,5 +1,6 @@
 """Mac sidecar boundaries; generated GIN accepts both table directions.
 
+Issue #24 pins both Carbon PC attributes revisions: 0/1 before, 1/1 after.
 Control: increasing-only validation rejects the descending fixture (0/1);
 current validation accepts it (1/1). Mutation of every header/table boundary
 below is rejected; unsupported profiles cannot reach the conversion writer.
@@ -26,6 +27,12 @@ def gin(descending=False):
 
 
 class Pack(unittest.TestCase):
+    def test_issue24_pc_attributes_revisions(self):
+        self.assertIn('d64234661f8226fe24abd45eae7f5c24ce400a214526a4d23d6b421e75d820e4',
+                      pack.ATTRIBUTES)
+        self.assertIn('b1c9ba06e476519db69ef3878a6b2796a0e7be90708355527601f3d58c129a4b',
+                      pack.ATTRIBUTES)
+
     def test_gin_both_directions(self):
         for descending in (False, True):
             pack.validate_gin(gin(descending))

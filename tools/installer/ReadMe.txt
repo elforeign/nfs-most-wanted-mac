@@ -11,6 +11,9 @@ In the game, press F10 (or Fn+F10), open Cars & cutscenes, turn on Cars from
 later games, then quit and reopen the game.
 Keep retained generations: if a career needs removed cars, restore its verified
 generation or reimport identical inputs with the same package, then restart.
+Carbon imports include source performance and, when available, source engine
+audio. To return to an older release after importing with this Setup, run that
+release's Setup and reimport the cars your save uses.
 Do not delete the career or its dependency files to bypass a refusal.
 
 You need:

@@ -11,6 +11,12 @@ title IDs fail; changed/missing car files affect only their own pair.
 Set NFS_CARBON_PC / NFS_CARBON_X360 to additionally verify real inputs.
 NFS_PROSTREET_PC / NFS_UNDERCOVER_X360 enable the later-game real checks.
 The synthetic catalog is temporary and never adds accepted public fingerprints.
+Issue #24 before/after: retail shared set 0/1 -> 1/1, old Carbon patch
+message 0/2 -> 2/2, PC folder routing 0/1 -> 1/1, PC disc message 0/1 -> 1/1.
+Flat Xbox 360 exports with and without DEFAULT.XEX: 0/2 -> 2/2.
+FILES-wrapped exports: 2/2 -> 2/2. Truncated Xbox 360 descriptor: 0/1 -> 1/1.
+Equivalent geometry encodings: 0/1 accepted before, 1/1 after. A changed
+decoded byte is refused even when the framing and decoded length match.
 """
 import argparse
 import hashlib
@@ -243,6 +249,74 @@ class RecognitionTests(unittest.TestCase):
                     cs.recognise(self.pc)
                 p.write_bytes(data)
 
+    def test_issue24_retail_shared_set(self):
+        attributes = b"retail attributes"
+        self.catalog["releases"][0]["shared_variants"] = [
+            {cs.path_hash("GLOBAL/ATTRIBUTES.BIN"): fingerprint(attributes)}]
+        self.save_catalog()
+        (self.pc / "GLOBAL/ATTRIBUTES.BIN").write_bytes(attributes)
+        result = self.assert_car_statuses(self.pc, "importable")
+        self.assertIn(fingerprint(attributes, path_hash=cs.path_hash("GLOBAL/ATTRIBUTES.BIN"),
+                                  role="shared"), result["shared"])
+
+    def test_issue24_decoded_geometry_identity(self):
+        from setup_kit.car_convert import chunk
+
+        def pack(solid, compressed=False, gap=b"\0" * 8):
+            payload = (b"RAWW\x01\x10\0\0" + struct.pack("<II", len(solid), len(solid)) + solid
+                       if compressed else solid)
+            info = chunk(0x134002, struct.pack("<4I", 0, 0, 29, 1))
+            hashes = chunk(0x134003, struct.pack("<II", 1, 0))
+            at = 16 + len(info) + len(hashes) + 32 + len(gap)
+            index = chunk(0x134004, struct.pack("<6I", 1, at, len(payload), len(solid),
+                                                0x100 if compressed else 0, 0))
+            return chunk(0x80134000, chunk(0x80134001, info + hashes + index) + gap + payload)
+
+        relative = "CARS/MODEL/GEOMETRY.BIN"
+        path_id = cs.path_hash(relative)
+        row = next(r for r in self.catalog["releases"][0]["files"] if r["path_hash"] == path_id)
+        approved = fingerprint(pack(b"reviewed solid"))
+        row["decoded"] = approved
+        self.save_catalog()
+        path = self.pc / relative
+        packed = pack(b"reviewed solid", compressed=True)
+        path.write_bytes(packed)
+        result = self.assert_car_statuses(self.pc, "importable")
+        car = next(r for r in result["cars"] if r["car_hash"] == row["car_hash"])
+        actual = next(r for r in car["files"] if r["path_hash"] == path_id)
+        self.assertEqual(actual, dict(approved, path_hash=path_id, role="geometry", status="importable",
+                                      packed=fingerprint(packed)))
+
+        for changed in (pack(b"changed! solid", compressed=True),
+                        pack(b"reviewed solid", compressed=True, gap=b"\1" + b"\0" * 7), b"truncated"):
+            with self.subTest(size=len(changed), sha256=fingerprint(changed)["sha256"]):
+                path.write_bytes(changed)
+                self.assert_car_statuses(self.pc, "unknown")
+
+    def test_issue24_old_carbon_patch(self):
+        for size in (7_938_478, 7_938_901):
+            with self.subTest(size=size):
+                (self.pc / "GLOBAL/GLOBALB.LZC").write_bytes(bytes(size))
+                (self.pc / "GLOBAL/ATTRIBUTES.BIN").write_bytes(b"unknown attributes")
+                with self.assertRaises(cs.SourceError) as error:
+                    cs.recognise(self.pc)
+                self.assertEqual(str(error.exception),
+                                 "Update Carbon with the official 1.4 patch, then try again")
+
+    def test_issue24_pc_disc_message(self):
+        disc = self.work / "pc.iso"
+        disc.write_bytes(bytes(16 * xdvdfs.SECTOR) + b"\x01CD001")
+        with self.assertRaises(cs.SourceError) as error:
+            cs.recognise(disc)
+        self.assertEqual(str(error.exception),
+                         "PC disc images can't be used for added cars. Choose your installed Carbon folder instead.")
+
+    def test_issue24_truncated_x360_descriptor_message(self):
+        end = 32 * xdvdfs.SECTOR + len(xdvdfs.MAGIC)
+        self.iso.write_bytes(self.iso.read_bytes()[:end])
+        with self.assertRaisesRegex(cs.SourceError, "Truncated Xbox 360 volume descriptor"):
+            cs.recognise(self.iso)
+
     def test_pc_globalb_bun_is_optional(self):
         p = self.pc / "GLOBAL/GLOBALB.BUN"
         p.write_bytes(b"other companion bundle")
@@ -294,17 +368,25 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(cs.recognise(self.iso), cs.recognise(self.extracted))
 
     def test_logical_extraction_matches_disc(self):
-        folder = self.work / "logical"
-        write_files(folder, dict(self.xassets, **{"default.xex": self.xex}))
-        self.assertEqual(cs.recognise(self.iso), cs.recognise(folder))
+        disc = cs.recognise(self.iso)
+        for layout in ("direct", "FILES"):
+            with self.subTest(layout=layout):
+                folder = self.work / layout
+                root = folder if layout == "direct" else folder / "FILES"
+                write_files(root, dict(self.xassets, **{"default.xex": self.xex}))
+                self.assertEqual(disc, cs.recognise(folder))
 
     def test_logical_extraction_can_omit_executable(self):
-        folder = self.work / "logical"
-        write_files(folder, self.xassets)
-        result = cs.recognise(folder)
-        self.assertEqual(result["platform"], "x360")
-        self.assertIsNone(result["fingerprints"]["executable"])
-        self.assertEqual(result["cars"], cs.recognise(self.iso)["cars"])
+        disc = cs.recognise(self.iso)
+        for layout in ("direct", "FILES"):
+            with self.subTest(layout=layout):
+                folder = self.work / layout
+                root = folder if layout == "direct" else folder / "FILES"
+                write_files(root, self.xassets)
+                result = cs.recognise(folder)
+                self.assertEqual(result["platform"], "x360")
+                self.assertIsNone(result["fingerprints"]["executable"])
+                self.assertEqual(result["cars"], disc["cars"])
 
     def test_extracted_files_wrapper(self):
         folder = self.work / "wrapper"
@@ -536,6 +618,16 @@ class LaterRecognitionTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 with self.assertRaisesRegex(cs.SourceError, message or "."):
                     cs.recognise(path)
+
+    def test_issue24_pc_folder_reports_only_closest_game(self):
+        (self.pc / "GLOBAL/ATTRIBUTES.BIN").write_bytes(b"changed attributes")
+        with mock.patch.object(cs, "_match", wraps=cs._match) as match:
+            with self.assertRaises(cs.SourceError) as error:
+                cs.recognise(self.pc)
+        self.assertEqual({call.args[3]["platform"] for call in match.call_args_list}, {"pc"})
+        self.assertEqual(str(error.exception), "Car source not recognised: "
+                         "ProStreet shared files did not match: "
+                         "GLOBAL/ATTRIBUTES.BIN (does not match a known file)")
 
     def test_prostreet_folder_without_executable(self):
         result = self.statuses(self.pc)

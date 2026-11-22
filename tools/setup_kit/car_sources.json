@@ -44,7 +44,11 @@
           "size": 20716928,
           "sha256": "de884455908bc4445fa85433728ade368443775b2fd9367a2bb71aca2a311ab5",
           "role": "geometry",
-          "car_hash": "e5a8afa1"
+          "car_hash": "e5a8afa1",
+          "decoded": {
+            "size": 34445592,
+            "sha256": "f1b24536236243c93f02fbbbd19c160d9ed215334ce2f025920a65342cc160c9"
+          }
         },
         {
           "path_hash": "0b55697a",
@@ -72,7 +76,11 @@
           "size": 2834816,
           "sha256": "6095e0e5be031b569b02c92928a73c68f86d28bb21f81b102e7b5db8c44cca07",
           "role": "geometry",
-          "car_hash": "202118c0"
+          "car_hash": "202118c0",
+          "decoded": {
+            "size": 4817448,
+            "sha256": "5443f7a9ddc60e0eddd03bcfa132bc7f9dbc7423364cc0122bd5ddaaceae5a95"
+          }
         },
         {
           "path_hash": "0ef20996",
@@ -86,7 +94,11 @@
           "size": 2502272,
           "sha256": "4c109b05b511e9ad99deb6034f7230ea1b0de636950fc29ac612383e664ee559",
           "role": "geometry",
-          "car_hash": "65e277e4"
+          "car_hash": "65e277e4",
+          "decoded": {
+            "size": 4428028,
+            "sha256": "7f615daa171e013459b288b2e408c6bb6ace05027a5284db531430e0c01bd8d5"
+          }
         },
         {
           "path_hash": "0f9f3d77",
@@ -100,7 +112,11 @@
           "size": 22411328,
           "sha256": "69235d00144755ca2bbb9eaa3d29a9dd45db2523ea49c3580cf34dc93242eeee",
           "role": "geometry",
-          "car_hash": "c00508d0"
+          "car_hash": "c00508d0",
+          "decoded": {
+            "size": 35802756,
+            "sha256": "568cb2d569fd3f61c7be9a78ff9e102c012c380e4666e822b457d52f83da1e25"
+          }
         },
         {
           "path_hash": "162089dd",
@@ -317,7 +333,11 @@
           "size": 20468288,
           "sha256": "cb3c5ab0a6b6ad5d57488955bf6fe21991970fbdc8f50b9694af74d0ddbaca3f",
           "role": "geometry",
-          "car_hash": "a389cf2f"
+          "car_hash": "a389cf2f",
+          "decoded": {
+            "size": 35762340,
+            "sha256": "b2209322f32ad550b95b02ff32855288656ad78b6796e2debbb39e9ceb4f8155"
+          }
         },
         {
           "path_hash": "34141cff",
@@ -436,7 +456,11 @@
           "size": 21584320,
           "sha256": "50d7f5172c300ff4aa12c6ce722139d9278a3681e769f27c664d8e20e0374a7f",
           "role": "geometry",
-          "car_hash": "b1a07ebb"
+          "car_hash": "b1a07ebb",
+          "decoded": {
+            "size": 34438764,
+            "sha256": "dd829f740a568031556d7bdb85b1071eb8a6f891272fecf369728cfb924a9356"
+          }
         },
         {
           "path_hash": "4408591f",
@@ -581,7 +605,11 @@
           "size": 1920192,
           "sha256": "bff2e064dcca1988134ef95d78188ab05ae9d929f823e9ca746b18df88d70c1b",
           "role": "geometry",
-          "car_hash": "ff0cd10c"
+          "car_hash": "ff0cd10c",
+          "decoded": {
+            "size": 3437808,
+            "sha256": "d6646a914b76d741af9932767187334b06ef25dbc790ee07c2a52fd06a6c0765"
+          }
         },
         {
           "path_hash": "529ec845",
@@ -665,7 +693,11 @@
           "size": 20973568,
           "sha256": "2bf790d1dc5b48282e51789a9c0e98f29ea091fb6f204a50aecf6ac47a95fa2c",
           "role": "geometry",
-          "car_hash": "99789845"
+          "car_hash": "99789845",
+          "decoded": {
+            "size": 34340368,
+            "sha256": "cbb3b2b5a79b4a42ae34757d2ff87f2e897b07f32e725f98ed0ba426181b05b7"
+          }
         },
         {
           "path_hash": "61fa9d9f",
@@ -714,7 +746,11 @@
           "size": 2608000,
           "sha256": "75ad928ded7130aaf2abfabce9e94121d5c94207ec467bd013fbe5ec13caa38f",
           "role": "geometry",
-          "car_hash": "4fb53e06"
+          "car_hash": "4fb53e06",
+          "decoded": {
+            "size": 4431716,
+            "sha256": "d9b2e2e15107cd69ade224cd65e8815b178e0b112ab88763226e6fb633d270fe"
+          }
         },
         {
           "path_hash": "6a5a6657",
@@ -763,7 +799,11 @@
           "size": 21400256,
           "sha256": "b7c34979abe87feed4bcf4b4c2946d2376613e79a65f85eb08eba0f2c481c0e5",
           "role": "geometry",
-          "car_hash": "b1a04ff3"
+          "car_hash": "b1a04ff3",
+          "decoded": {
+            "size": 35184772,
+            "sha256": "f49f60fa20f1dd85569b8bbcca855aa1edb6a12634242856bebda97c98d99d4f"
+          }
         },
         {
           "path_hash": "6f6c2ee3",
@@ -784,21 +824,33 @@
           "size": 20988096,
           "sha256": "0ebf13ae034d4d2dcab32095c69b6c15488c23419fa79b31ab7787fe8b61357c",
           "role": "geometry",
-          "car_hash": "feca1963"
+          "car_hash": "feca1963",
+          "decoded": {
+            "size": 33465572,
+            "sha256": "cac68fbaaf6c6c0b3d9639e8bb1ac7b98718663b1fc57c4df91b760ab7fab797"
+          }
         },
         {
           "path_hash": "710e6370",
           "size": 18451200,
           "sha256": "223158d946cc2edd654ef95c06f3bd6a09a66931738019e68b36f9ccefe95d47",
           "role": "geometry",
-          "car_hash": "5e981c41"
+          "car_hash": "5e981c41",
+          "decoded": {
+            "size": 29579192,
+            "sha256": "6c4bd4b387bf1c4c265bf236d67c9cf810a714a762b5fd67ff5b282fb535779b"
+          }
         },
         {
           "path_hash": "7361bcf4",
           "size": 2765760,
           "sha256": "86b48587561fcc8cb1b1eac1fe44e8b316978f276cf4d6ba6ae7af816925abbd",
           "role": "geometry",
-          "car_hash": "16f3af45"
+          "car_hash": "16f3af45",
+          "decoded": {
+            "size": 4616488,
+            "sha256": "b312845cbfdd6bbb6bd4cbd299da542bf46ee79b26c7a7187245b37c3068b98d"
+          }
         },
         {
           "path_hash": "73df61f7",
@@ -812,7 +864,11 @@
           "size": 21811840,
           "sha256": "3bb97163be7ce0482c3bc403ef9d63d8c0d88176b812b4817a7d08fdb03e6986",
           "role": "geometry",
-          "car_hash": "82a44fdc"
+          "car_hash": "82a44fdc",
+          "decoded": {
+            "size": 34967512,
+            "sha256": "d5d6c5210638aac3c5c81cf76eb098cbd702b569cffe992db5ec8b9fc8d8ed3f"
+          }
         },
         {
           "path_hash": "742679a8",
@@ -833,7 +889,11 @@
           "size": 3179968,
           "sha256": "d6a57176f8dae3652f6ac83c91c0f73a3e475e9b92062eee711aa4e6374d37c4",
           "role": "geometry",
-          "car_hash": "b584bc89"
+          "car_hash": "b584bc89",
+          "decoded": {
+            "size": 5290452,
+            "sha256": "6bed8a802bb9d419224072ff0cf2a09462facbbf32720363ba5084f3ae2b5e4f"
+          }
         },
         {
           "path_hash": "7713a7cd",
@@ -889,7 +949,11 @@
           "size": 23564288,
           "sha256": "12fa2c00ee77035e6b5d1d7bf894754a757906af15b378e86cd6fef1e5f3da26",
           "role": "geometry",
-          "car_hash": "9aaaecd0"
+          "car_hash": "9aaaecd0",
+          "decoded": {
+            "size": 37647320,
+            "sha256": "a8fdcd94850241c46c054a95deff9376e58775682615fec80312e0961619c9a5"
+          }
         },
         {
           "path_hash": "82ea33b3",
@@ -945,7 +1009,11 @@
           "size": 22815680,
           "sha256": "e9e2e1dd7eb48d61728b085940763aaabd35a5e1e8be77d4a6da1cad048ee391",
           "role": "geometry",
-          "car_hash": "8dcbe955"
+          "car_hash": "8dcbe955",
+          "decoded": {
+            "size": 36480556,
+            "sha256": "97bdfb58295971657e08310ad0fb37c14a703ba78aca4fe5d6ff30a28f23b628"
+          }
         },
         {
           "path_hash": "8ca3adf1",
@@ -959,7 +1027,11 @@
           "size": 2415552,
           "sha256": "6f7685a514bd9c65fa80d11460180f2ebfbd83ab39874f27e400366eb7d971c0",
           "role": "geometry",
-          "car_hash": "6d5ce133"
+          "car_hash": "6d5ce133",
+          "decoded": {
+            "size": 4161168,
+            "sha256": "26aee0b686737bb35bde70830421fdb6a158ab82ae6309bff74999270caeeaa9"
+          }
         },
         {
           "path_hash": "8d6ecace",
@@ -1001,7 +1073,11 @@
           "size": 3322560,
           "sha256": "736cd1d09392f0c158317a4f1849d0b845762eac641c4ffea0d4dc76933544fa",
           "role": "geometry",
-          "car_hash": "d6d6516e"
+          "car_hash": "d6d6516e",
+          "decoded": {
+            "size": 5985856,
+            "sha256": "a725879389b26fb94a6a915b70be13c32beee429591f4b0c1b920269ece63e96"
+          }
         },
         {
           "path_hash": "95af8310",
@@ -1021,7 +1097,11 @@
           "size": 3246272,
           "sha256": "cf3fcfe571a09bdc0d4671eb850c2240513d046576328226c857d87fe1422e70",
           "role": "geometry",
-          "car_hash": "37fdf5f0"
+          "car_hash": "37fdf5f0",
+          "decoded": {
+            "size": 5567100,
+            "sha256": "21451418488ed5f8b25f501ea4a87487e2a7ee28d8e8e540bb3be546edb91c94"
+          }
         },
         {
           "path_hash": "989b5930",
@@ -1042,7 +1122,11 @@
           "size": 2510784,
           "sha256": "0dbbb5f474ead97f0cce4849096d678ca42e5e15d13d9652f13d6898f1df2a6f",
           "role": "geometry",
-          "car_hash": "9c5bb840"
+          "car_hash": "9c5bb840",
+          "decoded": {
+            "size": 4333496,
+            "sha256": "20bfa0880247c4266510edf9afe136018374e5e397c1c69ac30843ed21925be5"
+          }
         },
         {
           "path_hash": "9c13b48d",
@@ -1182,7 +1266,11 @@
           "size": 25137088,
           "sha256": "b04382c8ec23fd9d17a0311b6cb11ea35d911be9f4da96219308b28675857e3d",
           "role": "geometry",
-          "car_hash": "a389ce66"
+          "car_hash": "a389ce66",
+          "decoded": {
+            "size": 40230148,
+            "sha256": "c46a5cecc32eb3c38ce6ee295c8b3351f3149f7ad1c9b5e4f3f4bb5a6c611064"
+          }
         },
         {
           "path_hash": "ae97ddd7",
@@ -1294,7 +1382,11 @@
           "size": 21788032,
           "sha256": "1b19c5bf61b4a445bb7aaccd48eb12c220e7c9aad0cd704511c45ea7522895a6",
           "role": "geometry",
-          "car_hash": "6d5ce134"
+          "car_hash": "6d5ce134",
+          "decoded": {
+            "size": 36973324,
+            "sha256": "ae108c1fdb9caba962499d700b7dff688c63ff758d808bf7c19a1adf0d495c36"
+          }
         },
         {
           "path_hash": "c88d154a",
@@ -1329,7 +1421,11 @@
           "size": 3721152,
           "sha256": "b2851ab6af8dc46400a7e27434962c5b1a99fb11e71a3e96e6a0d2e39d7e74fa",
           "role": "geometry",
-          "car_hash": "b1a06d75"
+          "car_hash": "b1a06d75",
+          "decoded": {
+            "size": 6413444,
+            "sha256": "70c20a9ddd99fd5140d1795afcebaac72e11dba8b347e2b54d78e513231cd207"
+          }
         },
         {
           "path_hash": "cc8e20cb",
@@ -1357,7 +1453,11 @@
           "size": 20320448,
           "sha256": "a5334e4abd828f6f9e1a964d2d0b956c409ccf5e407ae5503ca5e21a98ee9781",
           "role": "geometry",
-          "car_hash": "99fa1f95"
+          "car_hash": "99fa1f95",
+          "decoded": {
+            "size": 32580256,
+            "sha256": "3ed3072313492a631bc59dacda859ad263dc0f414bb94474aa1cda0b61f5fbba"
+          }
         },
         {
           "path_hash": "ce2b35d7",
@@ -1371,7 +1471,11 @@
           "size": 24154688,
           "sha256": "b116af46e4015f464bbd5b10ddcd533dff00f1f4d0539deb6bc5796a72627b16",
           "role": "geometry",
-          "car_hash": "e59f499a"
+          "car_hash": "e59f499a",
+          "decoded": {
+            "size": 38761232,
+            "sha256": "7fdd33dfe4e8a8d302bff09cf78653d062395a4505996e4aa7230ce721159a8a"
+          }
         },
         {
           "path_hash": "cf146f5e",
@@ -1420,7 +1524,11 @@
           "size": 24379712,
           "sha256": "4b206809493de4f11cf7aa32382798a776655d0ceca8afd27648f1134ec48940",
           "role": "geometry",
-          "car_hash": "a453b7c7"
+          "car_hash": "a453b7c7",
+          "decoded": {
+            "size": 39840592,
+            "sha256": "1ae20af3fd4cb17a89c523ccd754eb275dfa437e6d201f24bb4760c7a831bf51"
+          }
         },
         {
           "path_hash": "d80b9167",
@@ -1525,7 +1633,11 @@
           "size": 20914624,
           "sha256": "a873ea58d0c455c7821109bfa2b136446d8e65079bee1b666788aec20dcb59e5",
           "role": "geometry",
-          "car_hash": "2ecaade1"
+          "car_hash": "2ecaade1",
+          "decoded": {
+            "size": 36010496,
+            "sha256": "7ad78f7680fb9aafc4a9ebcf981ee5dab5e9b3966c4912c694d234a712797981"
+          }
         },
         {
           "path_hash": "eb8620d7",
@@ -1661,7 +1773,15 @@
           "car_hash": "59dbe8ec"
         }
       ],
-      "game": "carbon"
+      "game": "carbon",
+      "shared_variants": [
+        {
+          "9775379a": {
+            "size": 1035584,
+            "sha256": "d64234661f8226fe24abd45eae7f5c24ce400a214526a4d23d6b421e75d820e4"
+          }
+        }
+      ]
     },
     {
       "platform": "x360",

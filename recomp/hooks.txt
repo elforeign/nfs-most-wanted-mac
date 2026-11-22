@@ -300,6 +300,9 @@
 00751860    car85.c: GetUsedCarTextureInfo (private image hashes for added cars; lamp-state textures for materials.m)
 00752940    car85.c: LoadedWheel (RideInfo model namespace)
 00752B60    car85.c: LoadedCar model hashes (RideInfo model namespace)
+00678CE0    car_performance_attrib_impl.h: keep estimated top speed within the imported ECU cutoff
+006794E0    car_performance_attrib_impl.h: retail bounds for admitted performance ratings
+00683EB0    car_performance_attrib_impl.h: diagnostics for normalized added-car ratings
 00755800    car85.c: CarRenderInfo parts (RideInfo model namespace)
 00750B20    car85.c: CarRenderConn::OnLoaded (owned stock-rim blur period)
 00739B40    car85.c: RideInfo cabin LOD range (owned near interiors and driver)
