@@ -30,6 +30,7 @@
 #include "private_cars.h"
 #if defined(NFS_PUBLIC) && NFS_PUBLIC
 #include "carsave_public.h"
+#include "bundle_roots.h"
 #endif
 #include "traffic_pilot.h"
 #include "settings.h"
@@ -1850,9 +1851,12 @@ static void deadline_start(void) {
 static void private_cars_boot(void) {
     char root[4096];
 #if defined(NFS_PUBLIC) && NFS_PUBLIC
+    static const char bundle_cars_capability[] __attribute__((used)) = "NFSBundleCarsV1";
     const char *car85_public_reconcile(Cpu *, unsigned);
     carsave_public_init(userdata_dir(),car85_public_reconcile);
-    snprintf(root,sizeof root,"%s/car-catalog",userdata_dir());
+    if (roots_exported()) {
+        if (!bundle_root_value("car-catalog",root,sizeof root)) return;
+    } else snprintf(root,sizeof root,"%s/car-catalog",userdata_dir());
     Setting *master=settings_find("cars.later_games");
     private_cars_init(root,master?master->boot_value:0,NULL,0);
 #else

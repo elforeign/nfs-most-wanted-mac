@@ -1,6 +1,8 @@
 """Standalone import lifecycle proof using generated assets and test-only policy.
 
 Issue #24 first list with no catalog: 0/1 silent before, 1/1 after.
+Issue #24 cache entry present at publish: old engine 0/2 (EACCES on the
+sealed-stage rename, the reported message), fixed engine 2/2 (reuse or quarantine).
 Original baseline: the public engine API test fails (1 failure, 0 errors)
 because no standalone transaction engine exists. No test reads repository history.
 Good: 45 lifecycle/API tests; real PC/X360 selected-range dry runs write seven
@@ -228,6 +230,39 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(verified.catalog['cars']), 90)
         self.assertEqual(self.before_sources, self.snapshot())
 
+    def _entry_appears_before_publish(self, corrupt):
+        # Issue #24: the cache entry exists by the time the sealed stage is
+        # renamed onto it; macOS refuses that rename with EACCES.
+        first = self.run_import()
+        entry = self.cache()
+        saved = self.root / 'saved-entry'
+        shutil.copytree(entry, saved)
+        self.engine.remove([11])
+        force_remove(entry)
+        if corrupt:
+            os.chmod(saved / 'outputs', 0o700)
+            os.chmod(saved / 'outputs/GEOMETRY.BIN', 0o600)
+            (saved / 'outputs/GEOMETRY.BIN').write_bytes(b'corrupt cache')
+        original = ci.CarImporter._finish_preparations
+
+        def racing(engine, *args, **kwargs):
+            shutil.copytree(saved, entry)
+            return original(engine, *args, **kwargs)
+        with mock.patch.object(ci.CarImporter, '_finish_preparations', racing):
+            result = self.run_import()
+        force_remove(saved)
+        self.assertEqual(result['pointer'], first['pointer'])
+        self.ready()
+        return list(self.engine.work.glob('.rejected-*'))
+
+    def test_issue24_existing_verified_entry_is_reused_at_publish(self):
+        self.assertEqual(self._entry_appears_before_publish(corrupt=False), [])
+
+    def test_issue24_existing_rejected_entry_is_quarantined_at_publish(self):
+        rejected = self._entry_appears_before_publish(corrupt=True)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual((rejected[0] / 'outputs/GEOMETRY.BIN').read_bytes(), b'corrupt cache')
+
     def test_x360_full_entry_uses_only_selected_logical_ranges(self):
         physical = source_fixture.archive_files(source_fixture.fake_xex(), self.assets.files)
         # Unselected padding must never appear in extraction or its receipt.
@@ -401,14 +436,16 @@ class Lifecycle(unittest.TestCase):
                                (5, 'CPF1_POLICY_SHA256'), (6, 'CPF2_POLICY_SHA256'),
                                (7, 'CPF3_POLICY_SHA256'), (8, 'PRE_RETAIL_ATTRIBUTES_POLICY_SHA256'),
                                (9, 'RETAIL_ATTRIBUTES_POLICY_SHA256'), (9, 'PS_PERFORMANCE_POLICY_SHA256'),
-                               (11, 'PRE_UC_PERFORMANCE_POLICY_SHA256')):
+                               (11, 'PRE_UC_PERFORMANCE_POLICY_SHA256'),
+                               (12, 'PRE_SIBLING_PERFORMANCE_POLICY_SHA256'),
+                               (13, 'PRE_CACHE_PUBLISH_POLICY_SHA256')):
             with self.subTest(revision=revision):
                 self.policy_doc['revision'] = revision
                 self.save_policy()
                 with mock.patch.object(catalog, name, self.policy.sha256):
                     self.run_import()
                     row = self.ready().selected[0]
-                    self.policy_doc['revision'] = 12
+                    self.policy_doc['revision'] = 14
                     self.save_policy()
                     entry = self.engine._retained_input(row, self.policy)
                     identity = json.loads((entry / 'receipt.json').read_bytes())['identity']

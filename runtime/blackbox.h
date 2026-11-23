@@ -6,10 +6,11 @@
 
 enum { BLACKBOX_MW = 1, BLACKBOX_CARBON = 2 };
 typedef enum { BB_F10, BB_HANG, BB_STALL, BB_CRASH } BlackboxTrigger;
-/* Reserved typed slots for later feeds; no arbitrary strings or personal identifiers. */
+/* Typed numeric slots; no arbitrary strings or personal identifiers. */
 typedef enum {
     BB_FLOW = 1, BB_HEARTBEAT, BB_MENU,
-    BB_FE, BB_PACKAGE, BB_LOAD, BB_MOVIE, BB_NIS, BB_INPUT, BB_ERROR
+    BB_FE, BB_PACKAGE, BB_LOAD, BB_MOVIE, BB_NIS, BB_INPUT, BB_ERROR, BB_MW_FE,
+    BB_CARBON_MOVIE, BB_CARBON_NIS
 } BlackboxKind;
 typedef struct {
     float frame_ms, busy_ms, wait_ms;
@@ -33,6 +34,27 @@ void blackbox_record_fe(const BlackboxFE *state, uint32_t valid, uint64_t frame,
 void blackbox_record_load(const BlackboxLoad *state, uint32_t valid, uint64_t frame, uint64_t now);
 void blackbox_record_package(uint32_t label, uint32_t address, uint32_t count,
                              uint32_t truncated, uint64_t frame, uint64_t now);
+typedef enum {
+    BB_CIN_STATE, BB_CIN_PLAY, BB_CIN_STOP, BB_CIN_DESTROY, BB_CIN_END, BB_CIN_TIMEOUT,
+    BB_CIN_LOAD, BB_CIN_UNLOAD
+} BlackboxCinematicEdge;
+typedef struct {
+    uint32_t address, state, id, next, paused, scene;
+} BlackboxCinematic;
+void blackbox_record_cinematic(BlackboxKind kind, const BlackboxCinematic *state,
+                               uint32_t valid, uint64_t frame, uint64_t now);
+void blackbox_cinematic_edge(BlackboxKind kind, BlackboxCinematicEdge edge,
+                            const BlackboxCinematic *state, uint32_t valid);
+/* Carbon clocks are raw IEEE float bits; no guest strings enter the recorder.
+ * Unsupported interfaces carry only address/class, with decoded=0. */
+typedef struct {
+    uint32_t address, class_id, state, next, filename_hash, track;
+    uint32_t elapsed, length, decoded, clock_valid;
+    uint64_t clock_since;
+} BlackboxCarbonCinematic;
+void blackbox_record_carbon_cinematic(BlackboxKind kind, BlackboxCinematicEdge edge,
+                                     const BlackboxCarbonCinematic *state,
+                                     uint32_t valid, uint64_t frame, uint64_t now);
 /* Selected game adapter; flow is already sampled by the caller on the guest thread. */
 void blackbox_game_frame(uint64_t frame, uint32_t flow, const BlackboxTiming *timing);
 void blackbox_menu(int open);

@@ -154,6 +154,22 @@ int main(void) {
     M32(TOD_POINTER)=tod; M32(FLOW)=6;
     write_float(tod+0xc,3.28f); write_float(tod+0x10,.5f);
     authored=day;
+    if (lighting_mode_d65()) {
+        assert(enabled && fixed && cars_enabled);
+        Cpu c=cpu(tod); f_00769360(&c);
+        c=cpu(tod); f_00769580(&c); record_io(tod,&got,0);
+        for (int k=0;k<3;++k) {
+            close_value(got.diffuse[k],luma(night.diffuse),"D65 moon");
+            close_value(got.ambient[k],luma(night.ambient),"D65 ambient");
+            close_value(got.specular[k],luma(night.specular),"D65 specular");
+        }
+        close_value(got.ambient[3],night.ambient[3],"D65 ambient W");
+        car_sun_y(tod,0,CAR_RIG,1);
+        for (int k=1;k<3;++k) close_value(read_float(CONTEXT+0x10+4*k),read_float(CONTEXT+0x10),"D65 rig");
+        puts("PASS explicit D65 enables the clock and keeps the moon, ambient, specular and rig at D65");
+        free(G);
+        return 0;
+    }
     // Off: exact original-call ABI and no object/config reads in either hook.
     enabled=0;
     Cpu c=cpu(tod); f_00769360(&c); abi(&c,0x4004); assert(c.eax==0x123 && advances==1);
@@ -277,7 +293,7 @@ def main():
                 'double a = (hour - 12) * PI / 12;', 'double a = (out->phase - 0.5) * PI;'),
             'rate_broken': source.replace('#define SECONDS_PER_GAME_HOUR 150.0', '#define SECONDS_PER_GAME_HOUR 90.0'),
             'weight_broken': source.replace('after.diffuse[i] *= clock_weight;', '(void)clock_weight;'),
-            'cars_broken': source.replace('write_float(a, read_float(a) * f);', '(void)a; (void)f;'),
+            'cars_broken': source.replace('write_float(a + 4 * i, rgb[i] * f);', '(void)f;'),
             'public': source,
         }
         for name, text in variants.items():
@@ -289,12 +305,18 @@ def main():
             if name == 'public':
                 # Exact source, with the excluded include truly absent from the
                 # compiler's search path. The public headers remain unchanged.
-                for header in ('host.h', 'daynight.h', 'game_select.h'):
+                for header in ('host.h', 'daynight.h', 'game_select.h', 'lighting_colour.h'):
                     (scratch / header).write_bytes((RUNTIME / header).read_bytes())
                 variant_flags = flags[:-2]
             subprocess.run(variant_flags + [f'-DDAYNIGHT_SOURCE="{candidate}"', str(harness), '-o', str(binary)], check=True)
             result = subprocess.run([str(binary)], text=True, capture_output=True,
                                     env=dict(os.environ, NFS_DAYNIGHT='off'))
+            if name == 'production':
+                env = dict(os.environ, NFS_WORLD_LIGHTING='neutral-d65',
+                           NFS_DAYNIGHT='off', NFS_DAYNIGHT_CARS='on', NFS_TEST_DAYNIGHT_HOUR='0')
+                neutral = subprocess.run([str(binary)], text=True, capture_output=True, env=env)
+                assert neutral.returncode == 0, neutral.stderr
+                print(neutral.stdout.strip().splitlines()[-1])
             if name.endswith('_broken'):
                 assert result.returncode != 0 and 'FAIL ' in result.stderr, result.stdout + result.stderr
                 print('PASS rejected ' + name + ': ' + result.stderr.strip().splitlines()[0])

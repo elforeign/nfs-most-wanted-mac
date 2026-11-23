@@ -63,9 +63,11 @@
 #   recomp/private_files_test.py: five console GIN recordings and the PC RX-8 deceleration control.
 #   recomp/private_build_inputs_test.py: tracked starts, recreated witnesses and missing-row control.
 #   recomp/*_test.py  tools_snapshot/test_*.py  tools_snapshot/worldmerge/test_*.py  tools/publish/test_*.py  tests/setup/test_*.py
+#   test_car_update_refresh.py: staged car refresh, deleted cache, conversion failure and rollback (auto-discovered).
 #   recomp/windows_host_test.py: synthetic guest VM/PE/import/TLS/Lua/GIL/thread proof, plus broken controls
 #   recomp/windows_hooks_test.py: SDK-free COFF symbols/relocations and hook-removed control (exit 3 without COFF clang)
 #   runtime/taskdelay_test.py: production SimTask hook + translated constructor/Run; pinned predecessor must fail
+#   runtime/car_performance_bars_test.py: production bounds hook + translated bars; old retail clamp must fail
 #   the standalone C/ObjC/shell tests listed in run_one below (aa_setting_test.c, settings_live_test.c incl. its LIVE_TEST_BROKEN run, feedback_test.c, padlink_test.c incl. its mutation, framecap_test.c incl. its
 #   --broken run, looppace_test.c incl. its --broken run, framelate_test.c incl. its --broken and --stale runs, heap_test.c, settings_look_test.c, note_len_test.c, rumble_test.m, jdlz_test.c, x360abk_test.c g3, lampbatch_test.m, soft_smoke_half_test.m incl. its two broken runs,
 #   msaa_resolve_test.m, rectangle_clear_test.m (via rectangle_clear_test.py), dsound_dup_test.sh, wfx_cb_test.sh, defaults_check.py)
@@ -97,8 +99,11 @@
 # Discovery proof: 140 registered names (7 Setup), 0 collisions, exit 0; injecting a duplicate test_app exits 1.
 # test_release_artifact is autodiscovered: builds packaged Setup with bundled Python
 # and scratch HOME/CLT (no game launch); exit 3 without the Setup artifact or PC input.
+#   tests/setup/test_setup_carflow.py: compiled car source/actions, N+4 activations -> 1 picker + 1 press, 2 -> 1 import buttons, 6 -> 0 screen hashes
 #   tests/setup/test_release_artifact_checks.py also exercises exported Carbon
 #   table-free controllers/settings (PC-only and optional-Xbox roots); 6 broken exports fail.
+#   tests/setup/test_export_cars.py: two verified cars survive relocation;
+#   corrupt snapshots and failed in-place updates preserve the old export.
 # Artifact scan proof: packaged source + Python added 319 spurious test paths;
 # excluding generated root build/dist output leaves 0 artifact paths in the scan.
 . "$(dirname "$0")/env.sh"; nfs_need_py
@@ -136,7 +141,7 @@ release_critical="maxperf_career_test maxperf_checkout_test padprompts_shop_test
 run_one() {
     n=$1; d=$2; mkdir -p "$d"
     case $n in
-    private_facade_test|private_road_headlight_test|private_worldreflect_test|private_c1load_test|private_shaders_test|test_car_platform_conversion)
+    private_daynight_test|private_facade_test|private_road_headlight_test|private_worldreflect_test|private_c1load_test|private_shaders_test|test_car_platform_conversion)
         # Present only in private trees. Run the same fixtures in nightly and named runs.
         if [ -f runtime/private_suite_inputs.py ]; then
             for f in recomp/$n.py tests/setup/$n.py; do [ -f "$f" ] && break; done
@@ -364,6 +369,8 @@ if [ "$1" = "--one" ]; then      # internal: run one test with a watchdog, log +
 fi
 
 #   runtime/blackbox_test.py: shared recorder, production report hooks, wrap/pause/loss and removed-hook control
+#   runtime/blackbox_mw_fe_test.py: MW loading, controlling package and fade script in F10, bounded cyclic reads
+#   runtime/blackbox_mw_cinematics_test.py: MW movie and NIS edges in F10 and hang, with the NIS feed removed as a control
 #   runtime/diag_profile_test.py: slow-frame and whole-session game-thread profiles, both images; old-profiler controls
 # run_guarded_parked_test.py: fixture race logs and a fake process (auto-discovered; impact_tests.py maps run_guarded.sh through its reader).
 # ---- the list

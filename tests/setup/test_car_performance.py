@@ -2,16 +2,11 @@
 
 The donor-only control uses the same donor layout bytes as the retail path.
 The donor-only control failed source comparison for 44/44 variants (exit 1).
-Default On matched 44/44, and Off matched the MW donor for 44/44 (exit 0).
-For nitrous, fdf85535 matched 21/44 source pairs (exit 1). The corrected
-mapping matches 44/44 Carbon pairs On and 44/44 MW donor pairs Off (exit 0).
-For recharge, 654ff2a1 matched 23/44 source layouts (exit 1). The 21 failures
-include 17 variants with zero donor refill times and positive source refill times.
-The full nitrous layout matches 44/44 Carbon layouts On and 44/44 MW donor
-layouts Off (exit 0).
-With the old donor projection, upgraded refill matches 27/44 Carbon variants
-and the full installed layout matches 25/44. The corrected projection matches
-44/44 for both, with 88/88 installed endpoints On and 82/82 unchanged Off.
+The plain source projection matches 44/44, and Off matches the MW donor for
+44/44 (exit 0). The sibling test covers the stock retail-derived projections.
+Stock zero-nitrous check: 25/44 before (exit 1), 44/44 after (exit 0).
+Carbon stock keeps its source nitrous metadata with zero boost and capacity.
+All 88 projected kit endpoints retain the equipped MW nitrous values.
 Guest ownership and the menu consumers are in car_performance_attrib_impl.h.
 The native wire layout is declared in car_performance.h.
 """
@@ -77,12 +72,10 @@ def layout(attrib, cls, key, size):
     return bytes(vault.buffers[dep][at:at + size])
 
 
-def upgraded_nitrous(lib, record, source, own, endian, mw, retail, stock, enabled):
-    source_keys = [key for _, key, _ in struct.iter_unpack(
-        endian + '3I', source.raw('pvehicle', own, 'nos'))]
+def upgraded_nitrous(lib, record, mw, retail, stock, enabled):
     donor_keys = [key for _, key, _ in struct.iter_unpack(
         '<3I', mw.raw('pvehicle', retail, 'nos'))]
-    assert len(source_keys) in (1, 3) and len(donor_keys) in (2, 3)
+    assert len(donor_keys) in (2, 3)
     indices = list(range(len(donor_keys)))
     if enabled:
         projected = (ct.c_uint * 3)()
@@ -90,23 +83,13 @@ def upgraded_nitrous(lib, record, source, own, endian, mw, retail, stock, enable
         assert projected[:count] == ([0, 0, 1] if len(donor_keys) == 2 else indices)
         indices = projected[:count]
     matches = []
-    kit_fields = ('TORQUE_BOOST', 'NOS_CAPACITY')
-    for tier, index in enumerate(indices[1:], 1):
+    for index in indices[1:]:
         endpoint = layout(mw, 'nos', donor_keys[index], 0x20)
         actual = ct.create_string_buffer(endpoint)
-        expected = bytearray(endpoint)
         if enabled:
             lib.car_performance_layout(ct.byref(record), len(FIELDS), True, stock,
                                        ct.create_string_buffer(endpoint), actual)
-            # A single source reference supplies stock refill for both MW kits.
-            source_key = source_keys[tier] if len(source_keys) > 1 else source_keys[0]
-            for name, offset in NITROUS.items():
-                if len(source_keys) == 1 and name in kit_fields:
-                    continue  # MW retains its kit choices when Carbon has only stock.
-                expected[offset:offset + 4] = little(source, 'nos', source_key, name, endian)
-        recharge = all(actual.raw[offset:offset + 4] == expected[offset:offset + 4]
-                       for name, offset in NITROUS.items() if name not in kit_fields)
-        matches.append((recharge, actual.raw[:len(endpoint)] == expected))
+        matches.append(actual.raw[:len(endpoint)] == endpoint)
     return matches
 
 
@@ -168,12 +151,11 @@ def native_test(lib, raw, source, endian, mw, row, work):
         ident: definition[1] for ident, definition in mw.defs[hash32(cls)].items()
         if ident in source.defs[hash32(cls)]
     }
-    matches = {name: actual.raw[offset:offset + 4] == little(source, cls, key, name, endian)
-               for name, offset in NITROUS.items()}
-    recharge_on = matches['NOS_DISENGAGE'] and all(
-        same for name, same in matches.items() if name.startswith('RECHARGE_'))
-    tiers = upgraded_nitrous(lib, record, source, own, endian, mw, retail, stock, enabled)
-    return on, off, all(matches.values()), actual.raw[:len(old)] == old, recharge_on, tiers
+    expected_nos = {name: bytes(4) if name in ('TORQUE_BOOST', 'NOS_CAPACITY')
+                    else little(source, cls, key, name, endian) for name in NITROUS}
+    matches = all(actual.raw[offset:offset + 4] == expected_nos[name] for name, offset in NITROUS.items())
+    tiers = upgraded_nitrous(lib, record, mw, retail, stock, enabled)
+    return on, off, matches, actual.raw[:len(old)] == old, tiers
 
 
 def little(source, cls, key, field, endian):
@@ -215,8 +197,8 @@ def main():
                                                ct.c_void_p, ct.c_void_p, ct.c_void_p]
         os.environ['NFS_ADDCAR_PERFORMANCE'] = 'off'
         control = [native_test(lib, *attrib[r['origin']['platform']], mw, r, work) for r in variants]
-        assert all(not own and donor and nos_donor and all(full for _, full in tiers)
-                   for own, donor, _, nos_donor, _, tiers in control), control
+        assert all(not own and donor and nos_donor and all(tiers)
+                   for own, donor, _, nos_donor, tiers in control), control
         print(f'donor-only control: 0/{len(control)} match Carbon, {len(control)}/{len(control)} match MW')
         if '--original' in sys.argv:
             return int(not all(own for own, *_ in control))
@@ -224,24 +206,20 @@ def main():
         assert lib.car_performance_enabled()
         result = [native_test(lib, *attrib[r['origin']['platform']], mw, r, work) for r in variants]
         assert all(own and not donor for own, donor, *_ in result), result
-        print(f'default On: {len(result)}/{len(result)} match Carbon')
-        matches = sum(nos for _, _, nos, _, _, _ in result)
-        recharge = sum(row[-2] for row in result)
-        print(f'nitrous recharge On: {recharge}/{len(result)} match Carbon', flush=True)
-        print(f'nitrous On: {matches}/{len(result)} match Carbon. '
+        print(f'plain source projection: {len(result)}/{len(result)} match Carbon')
+        matches = sum(nos for _, _, nos, _, _ in result)
+        print(f'nitrous On: {matches}/{len(result)} stock layouts have zero boost and capacity. '
               f'Off: {len(control)}/{len(control)} match MW', flush=True)
-        assert recharge == matches == len(result), 'Carbon nitrous stock layout mismatch'
+        assert matches == len(result), 'Carbon nitrous stock layout mismatch'
         tiers = [row[-1] for row in result]
-        recharge_variants = sum(all(same for same, _ in levels) for levels in tiers)
-        matched_variants = sum(all(full for _, full in levels) for levels in tiers)
-        matched_levels = sum(full for levels in tiers for _, full in levels)
+        matched_variants = sum(map(all, tiers))
+        matched_levels = sum(sum(levels) for levels in tiers)
         total_levels = sum(map(len, tiers))
         off_levels = sum(len(row[-1]) for row in control)
-        print(f'upgraded refill On: {recharge_variants}/{len(tiers)} variants match Carbon. '
-              f'Full layouts: {matched_variants}/{len(tiers)} variants, '
+        print(f'equipped nitrous On: {matched_variants}/{len(tiers)} variants, '
               f'{matched_levels}/{total_levels} endpoints. '
               f'Off: {off_levels}/{off_levels} endpoints match MW', flush=True)
-        assert recharge_variants == matched_variants == len(result), 'Carbon nitrous upgrade layout mismatch'
+        assert matched_variants == len(result), 'Carbon nitrous upgrade layout mismatch'
     return 0
 
 

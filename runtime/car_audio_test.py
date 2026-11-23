@@ -1047,8 +1047,11 @@ def safety(mutant=None, case=None):
     }
     if mutant in changes:
         old, new = changes[mutant]
-        assert live.count(old) == (2 if mutant == 'pool' else 1), mutant
+        assert live.count(old) == 1, mutant
         live = live.replace(old, new)
+        if mutant == 'pool':
+            assert live.count('if(!free_native_voices(count)) return -1;') == 1
+            live = live.replace('if(!free_native_voices(count)) return -1;', '(void)count;')
     elif mutant in ('default-stock', 'default-added'):
         old = 'return !value || !strcasecmp(value,"on") || !strcmp(value,"1");'
         assert live.count(old) == 1
@@ -1076,7 +1079,7 @@ def safety(mutant=None, case=None):
                    '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                    '-I'+str(folder), '-I'+str(ROOT / 'runtime'), '-I'+str(ROOT / 'recomp'),
                    str(folder / 'harness.c'), str(folder / 'adapter.c'), str(ROOT / 'runtime/interp.c'),
-                   *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('csis', 'engine_class', 'player', 'backend', 'filter')],
+                   *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('csis', 'engine_class', 'player', 'backend', 'filter', 'tmx')],
                    *xma_link(folder),
                    '-o', str(folder / 'safety')]
         built = subprocess.run(command, capture_output=True, text=True, timeout=90)
@@ -1341,7 +1344,7 @@ def run(original=False, mutant=None):
                    '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                    '-I'+str(folder), '-I'+str(ROOT / 'runtime'), '-I'+str(ROOT / 'recomp'),
                    str(folder / 'harness.c'), str(folder / 'native.c'), str(ROOT / 'runtime/interp.c'),
-                   *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('runtime', 'csis', 'engine_class', 'player', 'backend', 'filter')],
+                   *[str(ROOT / f'runtime/car_audio_{n}.c') for n in ('runtime', 'csis', 'engine_class', 'player', 'backend', 'filter', 'tmx')],
                    *decoder,
                    '-o', str(folder / 'live')]
         built = subprocess.run(command, capture_output=True, text=True, timeout=90)

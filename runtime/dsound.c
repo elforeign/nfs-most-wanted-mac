@@ -2,8 +2,7 @@
 // dsound.c - DSOUND.dll for the guest: COM objects over port/host/audio (DirectSound 8 -> CoreAudio 5.1).
 //
 // The library owns devices, buffers, cursors and the mixer; this file owns the vtables, reference counts and
-// guest memory. Buffer contents live in guest memory (gmalloc), so the game's Lock pointers are plain guest
-// addresses and the mixer reads the same bytes.
+// guest memory. Lock returns guest addresses and Unlock publishes the written ranges to the mixer.
 #include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -34,6 +33,7 @@ typedef struct {
     DsBuffer *buf;
     uint32_t mem, bytes;         // buffer memory (guest)
     uint32_t owner;              // notify: its buffer object; duplicate buffer: the source (memory is shared)
+    uint64_t device_order;       // only device objects, for newest-live lookup after slot reuse
     DsDiag diag;                // touched only with BOOT_DIAG, under the guest lock
     struct {                    // audio-loop watchdog, always on, guest lock only (see dsound_watchdog_tick)
         uint64_t unlocks, seen, last_unlock, quiet_since, travel, max_quiet;
@@ -43,22 +43,36 @@ typedef struct {
 } DsObj;
 static DsObj **objs;
 static unsigned nobjs;
+static uint32_t free_obj_header;
+static uint64_t device_order;
 static uint32_t vt_ds, vt_buf, vt_notify;
 
 static DsObj *new_obj(int kind, uint32_t vt) {
     DsObj *o = calloc(1, sizeof *o);
+    if (!o) return NULL;
+    unsigned i;
+    if (free_obj_header) {
+        o->guest = free_obj_header;
+        free_obj_header = M32(o->guest);
+        i = M32(o->guest + 4);
+    } else {
+        DsObj **slots = realloc(objs, (nobjs + 1) * sizeof *objs);
+        if (!slots) { free(o); return NULL; }
+        objs = slots;
+        i = nobjs++;
+        o->guest = galloc(16);
+    }
     o->kind = kind;
     o->refs = 1;
-    o->guest = galloc(16);
-    M32(o->guest) = vt; M32(o->guest + 4) = nobjs; M32(o->guest + 8) = 0x0D50D0B1;
-    objs = realloc(objs, (nobjs + 1) * sizeof *objs);
-    objs[nobjs++] = o;
+    M32(o->guest) = vt; M32(o->guest + 4) = i; M32(o->guest + 8) = 0x0D50D0B1;
+    objs[i] = o;
     return o;
 }
 static DsObj *obj(uint32_t g) {
     if (!g || M32(g + 8) != 0x0D50D0B1) return NULL;
     uint32_t i = M32(g + 4);
-    return i < nobjs ? objs[i] : NULL;
+    DsObj *o = i < nobjs ? objs[i] : NULL;
+    return o && o->guest == g ? o : NULL;
 }
 #define THIS obj(arg(c, 0))
 static void *gp(uint32_t a) { return a ? G + a : NULL; }
@@ -178,7 +192,6 @@ void dsound_watchdog_tick(void) {
     for (unsigned i = 0; i < 8; ++i) {
         DsObj *b = wd_list[i];
         if (!b) continue;
-        if (!b->buf || !b->refs) { b->wd.watched = 0; wd_list[i] = NULL; continue; }
         if (!b->wd.playing || !b->wd.looping || paused || b->wd.unlocks < 4) { b->wd.quiet_since = 0; b->wd.seen = b->wd.unlocks; continue; }
         uint32_t p = 0, w = 0;
         if (ds_buffer_get_current_position(b->buf, &p, &w) < 0 || !b->bytes) continue;
@@ -245,7 +258,7 @@ void dsound_diag_tick(void) {
     }
     for (unsigned i = 0; i < nobjs; ++i) {
         DsObj *b = objs[i];
-        if (b->kind != 2 || !b->buf || !b->refs || !b->mem) continue;
+        if (!b || b->kind != 2 || !b->buf || !b->refs || !b->mem) continue;
         uint32_t p = 0, w = 0, s = 0, hz = 0;
         int32_t volume = 0;
         DsResult r = ds_buffer_get_current_position(b->buf, &p, &w);
@@ -292,6 +305,7 @@ static int d_QueryInterface(Cpu *c) {          // (this, riid, ppv)
     }
     if (o->kind == 2 && d1 == 0xB0210783) {
         DsObj *n = new_obj(3, vt_notify);
+        if (!n) { M32(arg(c, 2)) = 0; RET((uint32_t)DSERR_OUTOFMEMORY, 3); }
         n->owner = o->guest;
         n->buf = o->buf;
         ++o->refs;
@@ -302,32 +316,50 @@ static int d_QueryInterface(Cpu *c) {          // (this, riid, ppv)
     RET(DSERR_NOINTERFACE, 3);
 }
 static int d_AddRef(Cpu *c) { DsObj *o = THIS; RET(o ? ++o->refs : 0, 1); }
-static int d_Release(Cpu *c) {
-    DsObj *o = THIS;
-    if (!o) RET(0, 1);
-    if (--o->refs > 0) RET(o->refs, 1);
-    if (diag_on) diag_event("dsbuf Release obj%08X kind%d t%.3f @%08X size%u",
-                           o->guest, o->kind, host_ticks() / 1e9, M32(c->esp), o->bytes);
-    if (o->kind == 1 && o->dev) { ds_device_release(o->dev); o->dev = NULL; }
-    if (o->kind == 2 && o->buf) { ds_buffer_release(o->buf); o->buf = NULL; if (o->mem && !o->owner) gfree(o->mem); o->mem = 0; }
-    if (o->kind == 2 && o->owner) {            // a duplicate drops its hold on the source (taken in Duplicate);
-        DsObj *s = obj(o->owner);              // the last one out frees the source the game already released
-        o->owner = 0;
-        if (s && --s->refs == 0 && s->buf) { ds_buffer_release(s->buf); s->buf = NULL; if (s->mem) gfree(s->mem); s->mem = 0; }
+static int release_obj(DsObj *o, uint32_t caller) {
+    if (!o) return 0;
+    int refs = o->refs - 1;
+    while (o && --o->refs == 0) {
+        DsObj *owner = obj(o->owner);
+        if (diag_on) diag_event("dsbuf Release obj%08X kind%d t%.3f @%08X size%u",
+                               o->guest, o->kind, host_ticks() / 1e9, caller, o->bytes);
+        if (o->wd.watched) {
+            for (unsigned i = 0; i < 8; ++i) if (wd_list[i] == o) wd_list[i] = NULL;
+        }
+        if (o->kind == 1) ds_device_release(o->dev);
+        if (o->kind == 2) {
+            ds_buffer_release(o->buf);
+            if (o->mem && !o->owner) gfree(o->mem);
+        }
+        // Keep the slot index in the guest header and reuse its vtable word as the free-list link.
+        objs[M32(o->guest + 4)] = NULL;
+        M32(o->guest + 8) = 0;
+        M32(o->guest) = free_obj_header;
+        free_obj_header = o->guest;
+        free(o);
+        o = owner;
     }
-    if (o->kind == 3) { DsObj *b = obj(o->owner); if (b) --b->refs; }
-    RET(0, 1);
+    return refs;
+}
+static int d_Release(Cpu *c) {
+    RET(release_obj(THIS, M32(c->esp)), 1);
 }
 static int d_CreateSoundBuffer(Cpu *c) {       // (this, DSBUFFERDESC*, ppBuffer, outer)
     DsObj *d = THIS;
     uint32_t desc = arg(c, 1);
     uint32_t flags = M32(desc + 4), bytes = M32(desc + 8), wfx = M32(desc + 16);
     DsObj *b = new_obj(2, vt_buf);
+    M32(arg(c, 2)) = 0;
+    if (!b) RET((uint32_t)DSERR_OUTOFMEMORY, 4);
 #if NFS_GAME == NFS_GAME_PRIVATE
     if(game_sound_mix_muted() && !(flags & DSBCAPS_PRIMARYBUFFER))flags |= DSBCAPS_CTRLVOLUME;
 #endif
-    if (!(flags & DSBCAPS_PRIMARYBUFFER)) { b->mem = gmalloc(bytes ? bytes : 16); b->bytes = bytes; }
-    DsResult r = ds_device_create_buffer(d->dev, flags, bytes, gp(wfx), b->mem ? G + b->mem : NULL, &b->buf);
+    if (!(flags & DSBCAPS_PRIMARYBUFFER)) {
+        b->mem = gmalloc_try(bytes ? bytes : 16);
+        b->bytes = bytes;
+        if (!b->mem) { release_obj(b, M32(c->esp)); RET((uint32_t)DSERR_OUTOFMEMORY, 4); }
+    }
+    DsResult r = ds_device_create_buffer(d->dev, flags, bytes, gp(wfx), gp(b->mem), &b->buf);
     b->dev = d->dev;
     if (diag_on) diag_event("dsbuf Create b%08X dev%08X @%08X rc%08X flags%X size%u ch%u hz%u bits%u block%u",
                            b->guest, d->guest, M32(c->esp), (uint32_t)r, flags, bytes,
@@ -335,21 +367,23 @@ static int d_CreateSoundBuffer(Cpu *c) {       // (this, DSBUFFERDESC*, ppBuffer
                            wfx ? M16(wfx + 14) : 0, wfx ? M16(wfx + 12) : 0);
     if (boot_trace) fprintf(stderr, "      CreateSoundBuffer(flags %X, %u bytes, %s) -> %08X\n", flags, bytes,
                             wfx ? (M16(wfx + 2) == 6 ? "6 ch" : M16(wfx + 2) == 2 ? "stereo" : "mono") : "no format", (uint32_t)r);
-    if (r < 0) { if (b->mem) gfree(b->mem); b->mem = 0; M32(arg(c, 2)) = 0; RET((uint32_t)r, 4); }
+    if (r < 0) { release_obj(b, M32(c->esp)); RET((uint32_t)r, 4); }
     M32(arg(c, 2)) = b->guest;
     RET(0, 4);
 }
 static int d_GetCaps(Cpu *c) { RET((uint32_t)ds_device_get_caps(THIS->dev, G + arg(c, 1)), 2); }
 static int d_DuplicateSoundBuffer(Cpu *c) {    // (this, src, pp)
     DsObj *d = THIS, *s = obj(arg(c, 1));
-    if (!s) RET((uint32_t)DSERR_INVALIDPARAM, 3);
+    M32(arg(c, 2)) = 0;
+    if (!s || s->kind != 2) RET((uint32_t)DSERR_INVALIDPARAM, 3);
     DsObj *b = new_obj(2, vt_buf);
+    if (!b) RET((uint32_t)DSERR_OUTOFMEMORY, 3);
     DsResult r = ds_device_duplicate_buffer(d->dev, s->buf, &b->buf);
-    b->dev = d->dev;
-    b->mem = s->mem; b->bytes = s->bytes;      // the host copy shares the source's memory; Lock/Unlock translate through it
-    b->owner = s->guest;                       // not the owner: Release must not gfree it
     if (diag_on) diag_event("dsbuf Duplicate b%08X src%08X @%08X rc%08X", b->guest, s->guest, M32(c->esp), (uint32_t)r);
-    if (r < 0) RET((uint32_t)r, 3);
+    if (r < 0) { release_obj(b, M32(c->esp)); RET((uint32_t)r, 3); }
+    b->dev = d->dev;
+    b->mem = s->mem; b->bytes = s->bytes;
+    b->owner = s->guest;
     ++s->refs;                                 // keeps the shared memory alive
     M32(arg(c, 2)) = b->guest;
     RET(0, 3);
@@ -531,9 +565,12 @@ int win32_dsound(Cpu *c, const char *fn) {
         ds_config_default(&cfg);
         cfg.notify = notify_cb;
         DsObj *d = new_obj(1, vt_ds);
+        M32(arg(c, 1)) = 0;
+        if (!d) RET((uint32_t)DSERR_OUTOFMEMORY, 3);
         DsResult r = ds_device_create(&cfg, &d->dev);
         if (boot_trace) fprintf(stderr, "      DirectSoundCreate -> %08X\n", (uint32_t)r);
-        if (r < 0) { M32(arg(c, 1)) = 0; RET((uint32_t)r, 3); }
+        if (r < 0) { release_obj(d, M32(c->esp)); RET((uint32_t)r, 3); }
+        d->device_order = ++device_order;
         M32(arg(c, 1)) = d->guest;
         RET(0, 3);
     }
@@ -543,9 +580,12 @@ int win32_dsound(Cpu *c, const char *fn) {
 
 // The newest live DirectSound device (Snd re-creates its device when it stalls). movies.c plays movie audio on it.
 DsDevice *dsound_current_device(void) {
-    for (unsigned i = nobjs; i-- > 0;)
-        if (objs[i]->kind == 1 && objs[i]->dev) return objs[i]->dev;
-    return NULL;
+    DsObj *newest = NULL;
+    for (unsigned i = 0; i < nobjs; ++i) {
+        DsObj *o = objs[i];
+        if (o && o->kind == 1 && o->dev && (!newest || o->device_order > newest->device_order)) newest = o;
+    }
+    return newest ? newest->dev : NULL;
 }
 
 // ---------------- the game's output mode (recomp/hooks.txt) ----------------

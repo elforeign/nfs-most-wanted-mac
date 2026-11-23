@@ -45,6 +45,7 @@ static inline void wf(uint32_t a, float f) { memcpy(G + a, &f, 4); }
 
 static int mode = -1;   // 0 original, 1 neutral
 static int wl_mode(void) {
+    if (lighting_mode_d65()) return 1;
     if (mode < 0) {
         const char *e = getenv("NFS_WORLD_LIGHTING");
         mode = !(e && (!strcasecmp(e, "original") || !strcasecmp(e, "pc") || !strcmp(e, "0")));
@@ -94,7 +95,8 @@ static void ambient_rgb(uint32_t tod, float out[3]) {
     int active = in_game && wl_mode();
     for (int i = 0; i < 3; ++i) before[i] = out[i] = fminf(1.0f, rf(tod + 0x30 + 4 * i));
     if (active) {
-        lighting_colour_desaturate(out, 2.0f / 3.0f);
+        if (lighting_mode_d65()) lighting_colour_d65(out);
+        else lighting_colour_desaturate(out, 2.0f / 3.0f);
     }
     // Once at the first in-game TOD after a load; FE setters rearm the line.
     if (!in_game) reported = 0;
@@ -127,7 +129,8 @@ static int neutral_sun(uint32_t tod, float out[3]) {
     float nl = len > 0 ? fmaxf(-1, fminf(1, sz/len)) : 0;
     float original[3];
     for (int i = 0; i < 3; ++i) original[i] = fminf(1, k * rf(tod + 0x20 + 4*i));
-    sun_white(asinf(nl) * 57.29577951308232f, out);
+    if (lighting_mode_d65()) out[0] = out[1] = out[2] = 1;
+    else sun_white(asinf(nl) * 57.29577951308232f, out);
     float peak = fmaxf(out[0], fmaxf(out[1], out[2]));
     float scale = fminf(lighting_colour_luminance(original), 1 / peak);
     for (int i = 0; i < 3; ++i) out[i] *= scale / k;

@@ -2,7 +2,8 @@
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
-Always-on numeric history for both games: [Black box](blackbox.md).
+Always-on numeric history for both games includes MW movie state and NIS
+Load, Play and Unload calls in F10 and hang/stall output. [Black box](blackbox.md)
 
 ## Car render rejection trace
 

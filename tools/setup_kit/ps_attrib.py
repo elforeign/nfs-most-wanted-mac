@@ -110,8 +110,15 @@ def torque_samples(attrib, vehicle, idle, maximum):
     return tuple(torque(idle + (maximum - idle) * i / 8) for i in range(9))
 
 
-def performance(attrib, native, car, donor):
+def performance(attrib, native, car, donor, *, wheels=None):
     """Write stock values into the shared MW wire schema."""
+    sibling = car_performance.sibling_record(native, car, donor, wheels=wheels)
+    if sibling is not None:
+        return sibling
+    return source_performance(attrib, native, car, donor)
+
+
+def source_performance(attrib, native, car, donor):
     own = pvehicle_key(attrib, car)
     vehicle = attrib.linked_key('pvehicle', own, 'vehicle')
     retail = hash32(donor.lower())
@@ -159,6 +166,7 @@ def performance(attrib, native, car, donor):
 def sidecars(attributes, donor_data, car, donor):
     attrib, native = FitAttributes(attributes), FitAttributes(donor_data)
     decoded = values(attributes, car, attrib=attrib)
+    wheels = wheel_fit(decoded, native, car, donor)
     return {'PHYSICS.BIN': physics(decoded, car, donor),
-            'WHEELFIT.BIN': wheel_fit(decoded, native, car, donor),
-            'PERFORMANCE.BIN': performance(attrib, native, car, donor)}
+            'WHEELFIT.BIN': wheels,
+            'PERFORMANCE.BIN': performance(attrib, native, car, donor, wheels=wheels)}

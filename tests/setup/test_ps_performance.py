@@ -1,7 +1,8 @@
 """Compare ProStreet source projections with the native MW stock layouts.
 
 Donor-only baseline: 0/31 source matches (exit 1), 31/31 donor matches.
-Default On: 31/31 source matches. Off: 31/31 donor matches.
+Plain source projection: 31/31 source matches. Off: 31/31 donor matches.
+The sibling test checks the retail-derived records.
 
 Round-two control -> fixed native stock bars and their inputs:
 F1 speed 0.95970 -> 0.90783 (109.25107 -> 107.33191 m/s).
@@ -20,7 +21,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(Path(__file__).resolve().parent)]
-from setup_kit import ps_attrib
+from setup_kit import car_performance, ps_attrib
 from setup_kit.car_convert import FitAttributes, FormatError, hash32
 from setup_kit.input_paths import input_path
 from test_car_performance import FIELDS, Record, layout, ref
@@ -237,7 +238,10 @@ def main():
         for row in rows:
             car, donor = row['origin']['folder'], row['donors']['model']
             record = Record()
-            output = ps_attrib.sidecars(source_bytes, donor_bytes, car, donor).get('PERFORMANCE.BIN')
+            if car in car_performance.SIBLINGS:
+                output = ps_attrib.source_performance(source, mw, car, donor)
+            else:
+                output = ps_attrib.sidecars(source_bytes, donor_bytes, car, donor)['PERFORMANCE.BIN']
             if output:
                 with (work / 'PERFORMANCE.BIN').open('w+b') as handle:
                     handle.write(output)
@@ -254,7 +258,7 @@ def main():
             record.source = int(bool(record.version))
             source_match, _ = native_inputs(lib, source, mw, row, record, bool(record.version))
             (on if source_match else wrong).append(car)
-        print(f'ProStreet inputs: {len(on)}/31 default On source matches, {len(off)}/31 Off donor matches')
+        print(f'ProStreet inputs: {len(on)}/31 plain source matches, {len(off)}/31 Off donor matches')
         if wrong:
             print('Source mismatch: ' + ', '.join(wrong))
         return int(len(on) != 31 or len(off) != 31)

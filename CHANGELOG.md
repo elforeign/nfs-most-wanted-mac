@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.10.0
+
+- **Added cars stay up to date:** updates now refresh the cars you added when their conversion changes; if a refresh fails, your previous cars stay.
+- **Adding cars in fewer steps:** choosing a source checks it and ticks every car that can be imported; one Import selected cars button does the rest.
+- **Exports keep your added cars,** and Setup can update an existing export in place.
+- **Fill notch area (GitHub #26):** new F10 > Display option, off by default, for borderless full screen beside the camera notch.
+- **Added cars:** the Chrysler 300C SRT8's rear deck and back glass are no longer see-through; performance bars rank added cars against every car; cars with a Most Wanted version start from its performance; the ProStreet Veyron plays its own engine sound.
+- **Setup fixes:** the last step no longer fails on a leftover car cache folder (GitHub #24); a moved game folder no longer stops updates; disc installs ask for everything up front; plain disk-full message; an interrupted update opens Setup to repair it.
+- Going back to an older version after this update needs Setup to run again.
+
 ## 4.9.0
 
 - **Added cars drive like themselves:** the 30 Carbon, 31 ProStreet and 14 Undercover cars use their own stock performance instead of a Most Wanted car's; their car-select bars are on Most Wanted's scale. Import an earlier car again in Setup to get this.

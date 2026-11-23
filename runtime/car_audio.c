@@ -1,5 +1,6 @@
 #include "car_audio.h"
 #include "car_audio_runtime.h"
+#include "car_audio_tmx.h"
 #include "x360abk.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
@@ -10,7 +11,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-enum { MAX_RESOURCES=64, MAX_PACKAGES=76, MAX_ENGINES=64, MAX_TIERS=4, CALIBRATION=0x12c };
+enum { MAX_RESOURCES=64, MAX_PACKAGES=76, MAX_ENGINES=64, MAX_TIERS=4, MAX_GINSU=5, CALIBRATION=0x12c };
 typedef struct {
     const uint8_t *source, *translated, *plan, *sample_source;
     uint32_t size, translated_size, plan_size, kind, sample_count;
@@ -36,6 +37,8 @@ typedef struct {
     size_t size;
     Tier tiers[MAX_TIERS];
     Resource resource[MAX_RESOURCES];
+    CarAudioTmx tmx[2];
+    float minimum_rpm[2], maximum_rpm[2];
 } Package;
 typedef struct {
     uint32_t object, state[2];
@@ -44,10 +47,15 @@ typedef struct {
     Package *package;
     const Tier *tier;
     int diag_started;
+    int32_t resident[2][6];
+    float tmx_gains[2][6];
     CarAudioRuntimeInstance instances[2];
-    /* Four native Ginsu streams: engine/exhaust, acceleration/deceleration. */
-    struct { uint32_t data, synth, work, gin; int32_t voice; int constructed; } ginsu[4];
+    /* Carbon has four phase streams; TMX keeps each authored Ginsu track. */
+    struct { uint32_t data, synth, work, gin; int32_t voice; int constructed; unsigned layer, track; } ginsu[MAX_GINSU];
 } Engine;
+static unsigned ginsu_count(const Engine *e) {
+    return e->package->version==4?e->package->tmx[0].gin_count+e->package->tmx[1].gin_count:4;
+}
 static Package packages[MAX_PACKAGES];
 static Engine engines[MAX_ENGINES];
 static CarAudioBackend backend;
@@ -84,6 +92,12 @@ static uint32_t engine_mix_gain(const Engine *e) {
     uint32_t spatial=M32(e->object+0x10);
     return spatial?(M32(spatial)>>16)&32767:0;
 }
+static float tmx_controller_gain(const Engine *e) {
+    uint32_t member=M32(e->object+0x28);
+    /* Native target volume w5 includes the engine controller and mix group;
+     * source gain must honor that value, including the engine-volume setting. */
+    return member?fmaxf(0,fminf(1,(float)((32767.0+(int32_t)M32(member+0x18))/32767.0))):0;
+}
 static int engine_active(const Engine *e) {
     /* AEMS has no +8 test in 004EDD90. Ginsu freezes updates at +8==0;
      * its real Detach (004DC670) mutes voices and releases the controller. */
@@ -108,6 +122,10 @@ static struct {
         float source[2][PACKET_FRAMES];
     } stream[4];
 } bridge;
+static void bridge_voice_gain(int32_t handle,float gain) {
+    for(unsigned v=0;v<512;v++) if(voices[v].owned && voices[v].handle==handle)
+        voices[v].volume*=gain;
+}
 static void bridge_render(uint64_t sequence) {
     float dry[PACKET_FRAMES*2]={0},wet[PACKET_FRAMES*2]={0};
     float saved_volume[512];
@@ -120,11 +138,12 @@ static void bridge_render(uint64_t sequence) {
         Engine *e=engines+i;
         float gain=engine_active(e) && e->mix_gain && !e->recovering?fminf(1,(float)engine_mix_gain(e)/e->mix_gain):0;
         for(unsigned k=0;k<2;k++) {
+            if(e->package->version==4)
+                for(unsigned j=0;j<6;j++) bridge_voice_gain(e->resident[k][j],gain);
             CarAudioRuntimeInstance *p=e->instances+k;
             if(!p->bank) continue;
             for(size_t j=0;j<p->module->player_count;j++) if(p->players[j].owned)
-                for(unsigned v=0;v<512;v++) if(voices[v].owned && voices[v].handle==p->players[j].voice)
-                    voices[v].volume*=gain;
+                bridge_voice_gain(p->players[j].voice,gain);
         }
     }
     car_audio_backend_render(&backend,dry,wet,PACKET_FRAMES);
@@ -404,6 +423,8 @@ static const struct { const char *car, *sha; } carbon_x360_packages[] = {
     {"r8","7684f1aec405770755e2680b6c7a4d391caf429b413087a1a408f337740d8556"},
 };
 static const char *package_pin(const char *name,uint32_t version) {
+    if(version==4 && !strcasecmp(name,"veyron"))
+        return "471356c3aa5a0ba5c561c887ed61db3ca031388d22ff86d51faf6bd98c1925a7";
     if(version==1 && !strcasecmp(name,"jaguarxk"))
         return "66b587fa9e179b69180bcae26c8111d4b94c96dabc2a949f8e262c0289e2c02c";
     if(version==2) for(size_t i=0;i<sizeof carbon_pc_packages/sizeof *carbon_pc_packages;i++)
@@ -497,14 +518,28 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
     uint32_t resources=rd(b+12),layout=rd(b+16);
     if(!resources || resources>MAX_RESOURCES) goto fail;
     p->count=resources;
-    if(version==1) {
+    if(version==4) {
+        if(layout!=1 || resources!=4) goto fail;
+        p->tier_count=1;
+        for(unsigned k=0;k<2;k++) {
+            p->tiers[0].layer[k][0]=word(&in);
+            if(p->tiers[0].layer[k][0]>=p->count) goto fail;
+        }
+        const uint8_t *rpm=take(&in,16);
+        if(!rpm || !take(&in,32)) goto fail;
+        for(unsigned k=0;k<2;k++) {
+            p->minimum_rpm[k]=rf(rpm+8*k); p->maximum_rpm[k]=rf(rpm+8*k+4);
+            if(!isfinite(p->minimum_rpm[k]) || !isfinite(p->maximum_rpm[k]) ||
+               p->minimum_rpm[k]<=0 || p->minimum_rpm[k]>=p->maximum_rpm[k]) goto fail;
+        }
+    } else if(version==1) {
         if(layout>4*1024*1024 || !take(&in,layout)) goto fail;
         p->tier_count=1;
     } else {
         p->tier_count=layout; p->max_level=word(&in); p->default_level=word(&in);
         if(!layout || layout>MAX_TIERS || p->default_level>p->max_level || p->max_level>4) goto fail;
     }
-    for(unsigned tier=0;tier<p->tier_count;tier++) for(unsigned k=0;k<2;k++) {
+    for(unsigned tier=0;version!=4 && tier<p->tier_count;tier++) for(unsigned k=0;k<2;k++) {
         Tier *t=p->tiers+tier;
         const uint8_t *cal=t->calibration[k]=take(&in,CALIBRATION);
         if(!cal || !isfinite(rf(cal+0x120)) || !isfinite(rf(cal+0xe8)) || rd(cal+0x124)>99) goto fail;
@@ -516,13 +551,14 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
         Resource *r=p->resource+i;
         r->kind=word(&in); r->size=word(&in); r->plan_size=word(&in); r->sample_count=word(&in);
         const uint8_t *d=take(&in,32); if(!d) goto fail; memcpy(r->digest,d,32);
-        if((r->kind!=1 && r->kind!=2) || r->size>16*1024*1024 ||
+        if((r->kind!=1 && r->kind!=2 && !(version==4 && r->kind==3)) || r->size>16*1024*1024 ||
            r->sample_count>4096 || r->plan_size>1024*1024) goto fail;
         r->source=take(&in,r->size); r->plan=take(&in,r->plan_size); r->sample_source=in.p;
         if(!r->source || !r->plan) goto fail;
         digest(r->source,r->size,sha); if(memcmp(sha,r->digest,32)) goto fail;
         if(r->kind==1 && (r->size<40 || memcmp(r->source,"Gnsu20",6) || r->plan_size || r->sample_count)) goto fail;
         if(r->kind==2 && (r->size<0x60 || memcmp(r->source,"ABKC",4))) goto fail;
+        if(version==4 && (r->plan_size || r->sample_count>(r->kind==3?6u:0u))) goto fail;
         if(version==3 && r->kind==2) {
             Reader exec={r->plan,r->plan_size,0};
             r->translated_size=word(&exec);
@@ -534,16 +570,28 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
         for(uint32_t j=0;j<r->sample_count;j++) {
             uint32_t frames=word(&in),rate=word(&in),loop=word(&in),n=word(&in);
             if(frames>10000000 || n!=(version==3?0:(uint64_t)frames*2) || loop>frames ||
-               rate!=(frames?(version==3?48000u:44100u):0u) || !take(&in,n)) goto fail;
+               rate!=(frames?(version==3 || version==4?48000u:44100u):0u) || !take(&in,n)) goto fail;
         }
     }
     if(in.failed || in.n) goto fail;
     for(unsigned tier=0;tier<p->tier_count;tier++) for(unsigned k=0;k<2;k++) {
         const uint32_t *ids=p->tiers[tier].layer[k];
         Resource *r=p->resource+ids[0];
+        if(version==4) {
+            if(r->kind!=3 || car_audio_tmx_parse(p->tmx+k,r->source,r->size) ||
+               r->sample_count!=p->tmx[k].snr_count) goto fail;
+            const uint8_t *pcm=r->sample_source;
+            for(unsigned j=0;j<p->tmx[k].track_count;j++) if(!p->tmx[k].tracks[j].gin) {
+                if(rd(pcm)!=p->tmx[k].tracks[j].frames || rd(pcm+8)!=p->tmx[k].tracks[j].loop) goto fail;
+                pcm+=16+rd(pcm+12);
+            }
+            continue;
+        }
         if(r->kind!=2 || !r->plan_size || p->resource[ids[1]].kind!=1 || p->resource[ids[2]].kind!=1) goto fail;
     }
     p->key=key; p->vault=vault; p->version=version;
+    if(version==4 && (!p->tmx[0].gin_count || !p->tmx[1].gin_count ||
+       p->tmx[0].gin_count+p->tmx[1].gin_count>MAX_GINSU)) goto fail;
     memcpy(p->name,b+20,sizeof p->name);
     if(diag_on) diag_event("addcar_audio: loaded car=%s key=%08X vault=%llu bytes=%zu sha256=%s resources=%u tiers=%u platform=%s",
         p->name,key,(unsigned long long)vault,p->size,package_id,p->count,p->tier_count,version==3?"x360":"pc");
@@ -641,20 +689,33 @@ static int inputs(Cpu *c,Engine *e,unsigned layer,int32_t out[100]) {
         e->tier->calibration[0],CALIBRATION);
 }
 static int start_ginsu(Cpu *c,Engine *e) {
-    if(!free_native_voices(4)) return -1;
+    unsigned count=ginsu_count(e); int tmx=e->package->version==4;
+    if(!free_native_voices(count)) return -1;
     uint32_t packets=8,overhead=native_call(c,0x0081dafd,0,1,&packets);
     if(overhead<0x9c || overhead>65536) return -1;
-    for(unsigned k=0;k<4;k++) {
-        Resource *r=e->package->resource+e->tier->layer[k/2][k%2+1];
+    for(unsigned k=0;k<count;k++) {
+        unsigned layer=k/2,index=0;
+        const CarAudioTmxTrack *track=NULL;
+        if(tmx) {
+            layer=k<e->package->tmx[0].gin_count?0:1;
+            unsigned remaining=layer?k-e->package->tmx[0].gin_count:k;
+            for(index=0;index<e->package->tmx[layer].track_count;index++)
+                if(e->package->tmx[layer].tracks[index].gin && !remaining--) break;
+            track=e->package->tmx[layer].tracks+index;
+        }
+        e->ginsu[k].layer=layer; e->ginsu[k].track=index;
+        Resource *r=e->package->resource+e->tier->layer[layer][tmx?0:k%2+1];
+        uint32_t size=track?track->size:r->size;
         char pack[65],resource[65],name[192];
         hex(e->package->digest,pack); hex(r->digest,resource);
         snprintf(name,sizeof name,"SOUND/ADDCAR_AUDIO/%s/%s",pack,resource);
         int fd=car_audio_open(name); if(fd<0) return -1;
-        e->ginsu[k].gin=gmalloc_try(r->size);
+        if(track && lseek(fd,track->offset,SEEK_SET)!=(off_t)track->offset) { close(fd); return -1; }
+        e->ginsu[k].gin=gmalloc_try(size);
         if(!e->ginsu[k].gin) { close(fd); return -1; }
         size_t pos=0;
-        while(pos<r->size) {
-            ssize_t n=read(fd,G+e->ginsu[k].gin+pos,r->size-pos);
+        while(pos<size) {
+            ssize_t n=read(fd,G+e->ginsu[k].gin+pos,size-pos);
             if(n<0 && errno==EINTR) continue;
             if(n<=0) { close(fd); return -1; } pos+=(size_t)n;
         }
@@ -670,29 +731,41 @@ static int start_ginsu(Cpu *c,Engine *e) {
         e->ginsu[k].constructed=1;
         uint32_t data=e->ginsu[k].data;
         if(!(native_call(c,0x004e1c10,e->ginsu[k].synth,1,&data)&255)) return -1;
-        uint32_t rpm=float_word(rf(r->source+8));
+        uint32_t rpm=float_word(rf(G+gin+8));
         e->ginsu[k].voice=(int32_t)native_call(c,0x004e8ca0,e->ginsu[k].synth,1,&rpm);
         if(e->ginsu[k].voice<0) return -1;
+        if(tmx) {
+            uint32_t mute[]={(uint32_t)e->ginsu[k].voice,0}; native_call(c,0x0081d7ef,0,2,mute);
+        }
+        if(tmx && diag_on) {
+            uint8_t sha[32]; char id[65]; digest(G+gin,size,sha); hex(sha,id);
+            diag_event("addcar_audio: tmx recording car=%s layer=%u track=%u sha256=%s",
+                e->package->name,layer,index,id);
+        }
     }
     return 0;
 }
 static void sync_ginsu_volume(Cpu *c,Engine *e) {
-    if(!e->native_ginsu) return;
+    int tmx=e->package->version==4;
+    if(!e->native_ginsu && !tmx) return;
     uint32_t spatial=M32(e->object+0x10),state=M32(e->object+0x40);
-    for(unsigned k=0;k<4;k++) {
+    float changed=e->mix_gain?(float)engine_mix_gain(e)/e->mix_gain:0;
+    float source_gain=tmx?tmx_controller_gain(e)*fminf(1,changed):0;
+    for(unsigned k=0;k<ginsu_count(e);k++) {
         int32_t gain=state?(int32_t)M32(state+0x3c+4*(k%2)):0;
-        int32_t authored=ri(e->tier->calibration[k/2]+0x128)&65535;
+        int32_t authored=tmx?0:ri(e->tier->calibration[k/2]+0x128)&65535;
         uint32_t base=spatial && engine_active(e) && !e->recovering?M32(spatial+4)&32767:0;
-        int32_t level=(int32_t)((int64_t)gain*base*authored/(32767LL*32767*256));
+        int32_t level=tmx?(int32_t)(e->tmx_gains[e->ginsu[k].layer][e->ginsu[k].track]*base*(127.0f/32767)*source_gain):
+            (int32_t)((int64_t)gain*base*authored/(32767LL*32767*256));
         uint32_t volume[]={(uint32_t)e->ginsu[k].voice,(uint32_t)(level<0?0:level>127?127:level)};
         native_call(c,0x0081d7ef,0,2,volume);
     }
 }
 static int recover_ginsu(Cpu *c,Engine *e) {
-    if(!e->native_ginsu) return 0;
-    for(unsigned k=0;k<4;k++) if(!voice_alive(c,e->ginsu[k].voice)) {
+    if(!e->native_ginsu && e->package->version!=4) return 0;
+    for(unsigned k=0;k<ginsu_count(e);k++) if(!voice_alive(c,e->ginsu[k].voice)) {
         if(!free_native_voices(1)) return 1;
-        float frequency=MF32(e->object+0x84);
+        float frequency=e->package->version==4?e->package->minimum_rpm[e->ginsu[k].layer]:MF32(e->object+0x84);
         if(!isfinite(frequency) || frequency<=0) return -1;
         uint32_t rpm=float_word(frequency);
         e->ginsu[k].voice=(int32_t)native_call(c,0x004e8ca0,e->ginsu[k].synth,1,&rpm);
@@ -717,6 +790,70 @@ static int update_ginsu(Cpu *c,Engine *e,const int32_t words[100],unsigned layer
         uint32_t frequency[]={float_word((float)raw),float_word(60)};
         native_call(c,0x004e1cd0,e->ginsu[index].synth,2,frequency);
     }
+    return 0;
+}
+static int update_tmx(Cpu *c,Engine *e) {
+    uint32_t object=e->object,member=M32(object+0x28),rpm_object=M32(object+0x38);
+    if(!member || !rpm_object) return -1;
+    Cpu saved=*c; c->ecx=rpm_object;
+    call_guest(c,M32(M32(rpm_object)+0x44),0,NULL);
+    double normalized=c->st[c->top]; *c=saved;
+    float multiplier=MF32(object+0x3c);
+    /* Both constructors run before the first update writes the multiplier
+     * (0 at attach in a live race); the Carbon path accepts it the same way. */
+    if(!isfinite(normalized) || !isfinite(multiplier) || multiplier<0) return -1;
+    Package *p=e->package;
+    /* MW exports its live throttle at w3 in 0..1024. The source TMX uses
+     * normalized load/accelerator controls at input 2/4; both follow that
+     * observation here, as the Carbon adapter's target/current throttle does. */
+    float throttle=fmaxf(0,fminf(1,(int32_t)M32(member+0x10)*(1.0f/1024)));
+    const CarAudioPlayerBackend *callbacks=car_audio_backend_callbacks();
+    uint32_t pan=M32(member+0x40),dry=M32(member+0x38),wet=M32(member+0x3c),filter=M32(member+0x58);
+    uint32_t spatial=M32(object+0x10);
+    float gain=spatial?(M32(spatial+4)&32767)*(1.0f/32767)*tmx_controller_gain(e):0;
+    unsigned gin=0;
+    for(unsigned layer=0;layer<2;layer++) {
+        float rpm=(float)(p->minimum_rpm[layer]+(p->maximum_rpm[layer]-p->minimum_rpm[layer])*(normalized-1000)/9000);
+        rpm=fmaxf(p->minimum_rpm[layer],fminf(p->maximum_rpm[layer],rpm));
+        float input[5]={rpm,multiplier,throttle,0,throttle};
+        Resource *r=p->resource+e->tier->layer[layer][0];
+        if(car_audio_tmx_gains(p->tmx+layer,input,e->tmx_gains[layer])) return -1;
+        unsigned sample=0;
+        for(unsigned track=0;track<p->tmx[layer].track_count;track++) {
+            const CarAudioTmxTrack *recording=p->tmx[layer].tracks+track;
+            if(!recording->gin) {
+                int32_t *voice=e->resident[layer]+track;
+                if(!callbacks->status(&backend,*voice)) {
+                    callbacks->release(&backend,*voice);
+                    if(car_audio_backend_stock(&backend,r->samples+sample,50,voice)) return -1;
+                }
+                callbacks->option(&backend,*voice,0,(int32_t)fminf(65535,fminf(12,rpm/recording->frequency)*multiplier*4096));
+                callbacks->option(&backend,*voice,2,(int32_t)(e->tmx_gains[layer][track]*gain*32767));
+                callbacks->option(&backend,*voice,3,(int32_t)pan);
+                callbacks->option(&backend,*voice,5,(int32_t)wet);
+                callbacks->option(&backend,*voice,6,(int32_t)filter);
+                callbacks->option(&backend,*voice,8,(int32_t)(32767+dry));
+                if(diag_on && !e->diag_started) {
+                    uint8_t sha[32]; char id[65];
+                    digest(r->source+recording->offset,recording->size,sha); hex(sha,id);
+                    diag_event("addcar_audio: tmx resident car=%s layer=%u track=%u sha256=%s rate=%u frames=%u",
+                        p->name,layer,track,id,recording->rate,recording->frames);
+                }
+                sample++; continue;
+            }
+            unsigned k=gin++; uint32_t voice=(uint32_t)e->ginsu[k].voice;
+            uint32_t angle[]={voice,pan,0}; native_call(c,0x0081e557,0,3,angle);
+            uint32_t pitch[]={voice,(uint32_t)fmax(0,fmin(65535,4096.0*multiplier))};
+            native_call(c,0x0081e4be,0,2,pitch);
+            uint32_t cutoff[]={voice,filter}; native_call(c,0x0081e469,0,2,cutoff);
+            uint32_t send[]={voice,(32767+dry)>>8}; native_call(c,0x0081e3cb,0,2,send);
+            uint32_t reverb[]={voice,0,wet>>8}; native_call(c,0x0081e318,0,3,reverb);
+            uint32_t frequency[]={float_word(rpm),float_word(60)};
+            native_call(c,0x004e1cd0,e->ginsu[k].synth,2,frequency);
+        }
+    }
+    e->diag_started=1;
+    sync_ginsu_volume(c,e);
     return 0;
 }
 static void restore_stock(Cpu *c,uint32_t object,int ginsu) {
@@ -745,10 +882,12 @@ static void detach_engine(Cpu *c,Engine *e,int restore) {
     Package *package=e->package;
     uint32_t object=e->object; int replaced=e->replaced,ginsu=e->native_ginsu;
     for(unsigned i=0;i<2;i++) {
+        if(package->version==4) for(unsigned j=0;j<6;j++) if(e->resident[i][j]>=0)
+            car_audio_backend_callbacks()->release(&backend,e->resident[i][j]);
         car_audio_runtime_destroy(e->instances+i);
         if(e->state[i]) gfree(e->state[i]);
     }
-    for(unsigned i=0;i<4;i++) {
+    for(unsigned i=0;i<MAX_GINSU;i++) {
         if(e->ginsu[i].synth) {
             if(e->ginsu[i].constructed) { c->ecx=e->ginsu[i].synth; call_guest(c,0x004e8c50,0,NULL); }
             gfree(e->ginsu[i].synth);
@@ -810,7 +949,19 @@ static void init_engine(Cpu *c,uint32_t object,int ginsu) {
     if(!e) return;
     unsigned tier=engine_tier(c,object,p);
     e->object=object; e->package=p; e->tier=p->tiers+tier;
+    for(unsigned k=0;k<2;k++) for(unsigned j=0;j<6;j++) e->resident[k][j]=-1;
     e->mix_gain=engine_mix_gain(e);
+    if(p->version==4) {
+        if(!backend.voices && car_audio_backend_init(&backend,voices,512,44100,resolve,NULL)) goto fail;
+        for(unsigned k=0;k<2;k++) {
+            Resource *r=p->resource+e->tier->layer[k][0];
+            if(!r->samples && prepare_samples(r)) goto fail;
+        }
+        if(bridge_start(c) || start_ginsu(c,e)) goto fail;
+        e->native_ginsu=ginsu;
+        if(update_tmx(c,e)) goto fail;
+        goto replace;
+    }
     for(unsigned k=0;k<2;k++) {
         Resource *r=p->resource+e->tier->layer[k][0]; int32_t words[100];
         if(prepare_bank(r,k) || inputs(c,e,k,words)) goto fail;
@@ -819,6 +970,7 @@ static void init_engine(Cpu *c,uint32_t object,int ginsu) {
     }
     if(bridge_start(c) || (ginsu && start_ginsu(c,e))) goto fail;
     e->native_ginsu=ginsu;
+replace:;
     /* Keep the native 26-word controller buffer for live inputs, but release
      * its donor program before any source tick can produce duplicate layers. */
     uint32_t member=M32(object+0x28);
@@ -830,6 +982,14 @@ static void init_engine(Cpu *c,uint32_t object,int ginsu) {
         M32(object+0x68+i*0x18)=UINT32_MAX;
     }
     if(diag_on) {
+        if(p->version==4) {
+            char engine_id[65],exhaust_id[65];
+            hex(p->resource[e->tier->layer[0][0]].digest,engine_id);
+            hex(p->resource[e->tier->layer[1][0]].digest,exhaust_id);
+            diag_event("addcar_audio: attached car=%s object=%08X key=%08X engine=%s exhaust=%s native_ginsu=%u source=prostreet",
+                p->name,object,p->key,engine_id,exhaust_id,ginsu_count(e));
+            return;
+        }
         char ids[2][3][65];
         size_t resident=p->size;
         for(unsigned i=0;i<p->count;i++) {
@@ -863,6 +1023,11 @@ void car_audio_tick(Cpu *c,uint32_t object) {
     sync_bridge_volume(c);
     if(e->recovering) { *c=saved; return; }
     e->mix_gain=engine_mix_gain(e);
+    if(e->package->version==4) {
+        if(update_tmx(c,e)) goto fail;
+        car_audio_backend_tick(&backend);
+        *c=saved; return;
+    }
     for(unsigned k=0;k<2;k++) {
         int32_t words[100];
         if(inputs(c,e,k,words) || car_audio_runtime_update(e->instances+k,words,100)) goto fail;

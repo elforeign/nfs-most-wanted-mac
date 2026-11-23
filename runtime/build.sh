@@ -70,6 +70,7 @@ clang \
     music_balance.c \
     trigopt.c \
     car_audio.c \
+    car_audio_tmx.c \
     car_grip.c \
     car_performance.c \
     car_grip_force.c \
@@ -212,7 +213,10 @@ clang \
     guide.m \
     report.m \
     blackbox.c \
+    blackbox_render.m \
     blackbox_mw.c \
+    blackbox_mw_fe.c \
+    blackbox_mw_cinematics.c \
     onscreen_keyboard.c \
     gpuclients.m \
     slowlog.m \

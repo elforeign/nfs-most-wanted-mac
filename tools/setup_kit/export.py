@@ -1,7 +1,8 @@
 """Make a relocatable, signed personal backup of an installed app and its assets.
 
-Only a fresh destination is published. The installed app, manifests and saves are
-never changed. Clonefile shares APFS blocks; other copies are SHA-256 verified.
+Publish a fresh copy, atomically replacing an existing export when requested.
+The installed app, manifests and saves are never changed. Clonefile shares APFS
+blocks; other copies are SHA-256 verified.
 """
 import ctypes
 import errno
@@ -20,24 +21,25 @@ from . import install as ins
 MANIFEST = Path("Contents/Resources/AllInOne/roots.txt")
 IDENTITY = Path("Contents/Resources/AllInOne.export")
 RUNTIME_CAPABILITY = b"NFS_BUNDLE_ROOTS_V1\0"
+CARS_CAPABILITY = b"NFSBundleCarsV1\0"
 ASSET_KEYS = ("pc_root", "x360_root", "assets_root", "movies")
-UPDATE_MESSAGE = "Re-export from Setup to update. Keep the previous export to roll back."
+UPDATE_MESSAGE = "Re-export from Setup to update. Choose the same export to replace it safely."
 
 
 def is_export(app):
     return any(os.path.lexists(Path(app) / marker) for marker in (IDENTITY, MANIFEST))
 
 
-def runtime_supports_export(app, executable=ins.EXEC_NAME):
+def runtime_supports_export(app, executable=ins.EXEC_NAME, capability=RUNTIME_CAPABILITY):
     # Search the signed executable, never a version number or a resource that
     # could have been added to an older runtime by a newer packaging script.
     with (Path(app) / "Contents/MacOS" / executable).open("rb") as executable:
         tail = b""
         for block in iter(lambda: executable.read(1024 * 1024), b""):
             data = tail + block
-            if RUNTIME_CAPABILITY in data:
+            if capability in data:
                 return True
-            tail = data[-len(RUNTIME_CAPABILITY):]
+            tail = data[-len(capability):]
     return False
 
 
@@ -155,14 +157,50 @@ def sign_bundle(app):
         raise ins.InstallError("The exported app's signature did not verify.")
 
 
+def snapshot_cars(app, profile, embedded, metrics, clone):
+    # Imported here: a retained updater may hold only apply/install/export, which must still start.
+    from . import car_catalog
+    """Export one verified immutable generation, never caches or old generations."""
+    source = profile / "car-catalog"
+    if not ins.exists(source):
+        return
+    if not ins.real_dir(source):
+        raise ins.InstallError("The installed car catalog uses symbolic links.")
+    if not ins.exists(source / "current.json"):
+        if set(p.name for p in source.iterdir()) <= {".writer.lock"}:
+            return
+        raise ins.InstallError("The installed car catalog has no current snapshot.")
+    verified = car_catalog.verify_current(source)
+    if verified.error:
+        raise ins.InstallError("The installed car snapshot failed verification: " + verified.error)
+    if not runtime_supports_export(app, capability=CARS_CAPABILITY):
+        raise ins.InstallError("The installed runtime does not support exported cars.",
+                               "Update the ordinary installation with Setup, then export again.")
+    target = embedded / "car-catalog"
+    target.mkdir()
+    (target / "current.json").write_bytes((source / "current.json").read_bytes())
+    if verified.generation:
+        copy_tree(source / verified.generation, target / verified.generation, metrics, clone)
+    copied = car_catalog.verify_current(target)
+    if copied.error or copied != verified:
+        raise ins.InstallError("The exported car snapshot failed verification.", "Try exporting again.")
+    metrics["catalog_cars"] = sum(row["state"] == "ready" for row in (copied.catalog or {}).get("cars", []))
+
+
+def _exchange_export(staged, destination):
+    # Both paths are on the destination volume. RENAME_SWAP has no missing-name
+    # window and leaves the previous export untouched if the exchange fails.
+    if ins._libc.renamex_np(os.fsencode(staged), os.fsencode(destination), 0x00000002) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(destination))
+
+
 def export_app(app, profile, destination, clone=clone_file, verify=None, sign=sign_bundle, on_publish=None, game="mw"):
     """Return measurements; notify on_publish at rename, before fallible final sync/cleanup."""
     started = time.monotonic()
-    app, profile, destination = map(lambda p: Path(p).absolute(), (app, profile, destination))
+    app, profile, destination = map(lambda p: Path(os.path.abspath(p)), (app, profile, destination))
     if destination.suffix != ".app" or not ins.real_dir(destination.parent):
-        raise ins.InstallError("Choose a new .app in an existing ordinary folder.")
-    if ins.exists(destination):
-        raise ins.InstallError("The export destination already exists.", "Choose a new name; keep the previous export for rollback.")
+        raise ins.InstallError("Choose a .app in an existing ordinary folder.")
     if game not in ("mw", "carbon"):
         raise ins.InstallError("Unknown export product.")
     product = ins.CARBON if game == "carbon" else dict(name=ins.APP_NAME, exec=ins.EXEC_NAME, bundle_id=ins.PUBLIC_BUNDLE_ID)
@@ -172,8 +210,8 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
         if plistlib.load(info).get("CFBundleExecutable") != product["exec"]:
             raise ins.InstallError("The installed app has the wrong product executable.")
     verify = verify or (lambda p: ins.app_complete(p))
-    metrics = dict(cloned_files=0, copied_files=0, transferred_bytes=0, digest_verified_bytes=0)
-    with ins.profile_guard(profile), ins.dest_lock(app.parent):
+    metrics = dict(cloned_files=0, copied_files=0, transferred_bytes=0, digest_verified_bytes=0, catalog_cars=0)
+    with ins.profile_guard(profile), ins.dest_lock(app.parent), ins.dest_lock(destination.parent, held=app.parent):
         if ins.journal_path(profile).exists():
             raise ins.InstallError("An installation needs recovery.", "Run Setup to recover it before exporting.")
         if not verify(app):
@@ -184,8 +222,14 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
         roots = current_roots(app, profile)
         protected = [app.resolve(), profile.resolve(), *roots.values()]
         parent = destination.parent.resolve()
-        if any(parent == p or parent.is_relative_to(p) for p in protected):
+        if any(destination == p or parent == p or parent.is_relative_to(p) or
+               p.is_relative_to(destination) for p in protected):
             raise ins.InstallError("The export destination is inside the app, profile or game data.")
+        previous = ins.ident(destination)
+        if previous is not None and (not ins.real_dir(destination) or not is_export(destination) or
+                                     not ins.is_current_app(destination, product["bundle_id"]) or not verify(destination)):
+            raise ins.InstallError("The export destination already exists and is not a verified export of this game.",
+                                   "Choose an export of this game or a new name.")
         free_before = shutil.disk_usage(parent).free
         with tempfile.TemporaryDirectory(prefix=".all-in-one-", dir=parent) as tmp:
             staged = Path(tmp) / destination.name
@@ -206,6 +250,8 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
                     relative[key] = key
                     copy_tree(source, embedded / key, metrics, clone)
                     owners.append((source, key))
+            if game == "mw":
+                snapshot_cars(app, profile, embedded, metrics, clone)
             (staged / MANIFEST).write_text("# Bundle-relative asset roots; saves remain in Application Support.\n" +
                                           "".join(f"{k}={v}\n" for k, v in sorted(relative.items())))
             (staged / IDENTITY).write_text("NFS_ALL_IN_ONE_V1\n")
@@ -216,7 +262,12 @@ def export_app(app, profile, destination, clone=clone_file, verify=None, sign=si
             metrics["allocated_bytes"] = sum(s.st_blocks * 512 for s in entries)
             # No cancellation gap between publishing and recording success.
             with ins.defer_interrupts():
-                ins.rename_new(staged, destination)
+                if ins.ident(destination) != previous:
+                    raise ins.InstallError("The export destination changed during export.")
+                if previous is None:
+                    ins.rename_new(staged, destination)
+                else:
+                    _exchange_export(staged, destination)
                 if on_publish:
                     on_publish(destination)
             ins.sync_dir(parent)

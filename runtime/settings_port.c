@@ -155,6 +155,9 @@ static Setting s_fullscreen = {.id = "display.fullscreen", .category = SET_DISPL
     .help = "Borderless (recommended) keeps Cmd-Tab instant. Native uses its own Space for macOS Game Mode, but on some Macs the graphics chip can get stuck at low speed in long busy scenes. Auto picks Native on the Mac screen and Borderless on any other display. Applies at once.",
     .type = SET_CHOICE, .choices = kFullScreen, .values = kFullScreenV, .nchoices = 3, .def = 0,
     .env = "NFS_FULLSCREEN_MODE", .live_env = 1, .apply = live_picture_apply_fullscreen};
+static Setting s_notch = {.id = "display.notch", .category = SET_DISPLAY, .order = 12, .label = "Fill notch area",
+    .help = "On: Borderless full screen also draws beside the camera housing on MacBooks that have one (for example 3456x2234 on the 16-inch). Off (default) stays below it. Native full screen is decided by macOS. Applies at once.",
+    .type = SET_TOGGLE, .def = 0, .env = "NFS_FULLSCREEN_NOTCH", .live_env = 1, .apply = live_picture_apply_notch};
 
 static const char *const kOverlay[] = {"Off", "Compact", "Full"};
 static void overlay_apply(int v) { overlay_set_level(v); }
@@ -724,7 +727,7 @@ __attribute__((constructor)) static void settings_port_register(void) {
         }
     }
     REG(s_look); REG(h_out); REG(h_x360snd); REG(h_pad); REG(h_rumble); REG(h_steer); REG(h_wl); REG(h_wsurf); REG(h_wdet); REG(h_career); REG(h_cheats);
-    REG(s_window); REG(s_fullscreen); REG(s_overlay); REG(s_clip_resolution); REG(s_cliprec); REG(s_clips_open); REG(s_lan);
+    REG(s_window); REG(s_fullscreen); REG(s_notch); REG(s_overlay); REG(s_clip_resolution); REG(s_cliprec); REG(s_clips_open); REG(s_lan);
     REG(s_stream_heading); REG(s_stream_key); REG(s_stream_forget); REG(s_stream_go); REG(s_stream_stop); REG(s_stream_status);
     REG(s_replay_arm); REG(s_replay_save); REG(s_replay_key_enabled); REG(s_replay_key); REG(s_replay_pad);
     REG(s_hdr); REG(s_hdr_status); REG(s_framelimit);

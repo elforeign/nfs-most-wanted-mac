@@ -85,6 +85,13 @@ def evaluate(spline, value, *, torque=False):
 
 
 def performance(attributes, donor_data, car, donor):
+    sibling = car_performance.sibling_record(donor_data, car, donor)
+    if sibling is not None:
+        return sibling
+    return source_performance(attributes, donor_data, car, donor)
+
+
+def source_performance(attributes, donor_data, car, donor):
     """Serialize the stock inputs MW can consume. Keep its chassis and kit model."""
     attrib = FitAttributes(attributes, vaults=vaults(attributes))
     native = FitAttributes(donor_data)

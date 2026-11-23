@@ -14,6 +14,7 @@ void report_auto(const char *why, const char *diag_file);
 void portmenu_frame(void);
 static void dump_ring(FILE *f, int last);
 #if NFS_GAME == NFS_GAME_MW
+#include "blackbox_mw_cinematics.h"
 // diag.c - diagnostic mode: one run records everything needed to diagnose it afterwards.
 //
 //   BOOT_DIAG=<dir> ./boot <game>
@@ -982,6 +983,7 @@ void f_006F51F0(Cpu *c) {               // NISActivity::Load(kind, scene name, .
             M32(c->esp + 8) = forced;
         }
     }
+    blackbox_mw_nis_edge(BB_CIN_LOAD, c->ecx - 0x48, arg(c, 1));
     if (!diag_on) { f_006F51F0_orig(c); return; }
     // Load is entered through INIS at root+48; Play/UpdatePlaying use the activity root.
     nis_activity = c->ecx - 0x48;
@@ -998,6 +1000,7 @@ void f_006F51F0(Cpu *c) {               // NISActivity::Load(kind, scene name, .
 }
 void f_006F5750_orig(Cpu *c);
 void f_006F5750(Cpu *c) {               // retains the timeline milestone formerly emitted by the macro
+    blackbox_mw_nis_edge(BB_CIN_PLAY, c->ecx, 0);
     if (diag_on) {
         diag_timeline("call NISActivity::Play from %08X", M32(c->esp));
         if (c->ecx == nis_activity) {
@@ -1012,6 +1015,11 @@ void f_006F5750(Cpu *c) {               // retains the timeline milestone former
         }
     }
     f_006F5750_orig(c);
+}
+void f_006EA5A0_orig(Cpu *c);
+void f_006EA5A0(Cpu *c) {               // NISActivity::Unload
+    blackbox_mw_nis_edge(BB_CIN_UNLOAD, c->ecx, 0);
+    f_006EA5A0_orig(c);
 }
 void f_00789870_orig(Cpu *c);
 void f_00789870(Cpu *c) {               // original rigorous query within 0044B040 only

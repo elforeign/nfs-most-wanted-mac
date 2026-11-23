@@ -1,7 +1,8 @@
-"""Undercover stock to native layout comparison, with the donor-only control.
+"""Undercover source projection to native layout comparison, with the donor-only control.
 
 Donor-only: 0/14 source matches, 14/14 donor matches (exit 1).
-Default On: 14/14 source matches. Off: 14/14 donor matches.
+Plain source projection: 14/14 source matches. Off: 14/14 donor matches.
+The sibling test checks the seven retail-derived records.
 """
 
 import ctypes as ct
@@ -15,7 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / 'tools'), str(Path(__file__).resolve().parent)]
-from setup_kit import uc_attrib
+from setup_kit import car_performance, uc_attrib
 from setup_kit.car_convert import FitAttributes, hash32, read_vpak
 from setup_kit.input_paths import input_path
 from test_car_performance import FIELDS, Record, layout, ref
@@ -202,7 +203,9 @@ def main(donor_only=False):
             car, donor = row['origin']['folder'], row['donors']['model']
             record = Record()
             if not donor_only:
-                output = uc_attrib.performance(source_bytes, donor_bytes, car, donor)
+                project = (uc_attrib.source_performance if car in car_performance.SIBLINGS
+                           else uc_attrib.performance)
+                output = project(source_bytes, donor_bytes, car, donor)
                 with (work / 'PERFORMANCE.BIN').open('w+b') as handle:
                     handle.write(output)
                     handle.flush()
@@ -219,7 +222,7 @@ def main(donor_only=False):
             assert lib.car_performance_enabled()
             source_match, _ = compare(lib, source, native, row, record, bool(record.version))
             (on if source_match else wrong).append(car)
-        print(f'Undercover inputs: {len(on)}/14 default On source matches, {len(off)}/14 Off donor matches')
+        print(f'Undercover inputs: {len(on)}/14 plain source matches, {len(off)}/14 Off donor matches')
         if wrong:
             print('Source mismatch: ' + ', '.join(wrong))
         return int(len(on) != 14 or len(off) != 14)

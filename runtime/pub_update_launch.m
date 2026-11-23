@@ -14,8 +14,12 @@
 
 #if NFS_GAME == NFS_GAME_PRIVATE
 static NSString *const PublicBundleID = @"io.github.nfs-carbon-native-mac";
+static NSString *const SetupBundleID = @"org.nfscarbon-native.setup";
+static NSString *const SetupBundleName = @"NFS Carbon Native Setup.app";
 #else
 static NSString *const PublicBundleID = @"io.github.nfsmw-native-mac";
+static NSString *const SetupBundleID = @"org.nfsmw-native.setup";
+static NSString *const SetupBundleName = @"NFS Most Wanted Native Setup.app";
 #endif
 
 extern const char *game_dir;  // assigned only after app_start validates the PC root
@@ -177,6 +181,18 @@ static BOOL TrustedJob(NSString *job, NSDictionary *tools) {
     }
     return YES;
 }
+static NSURL *RecoverySetupURL(void) {
+    NSURL *registered = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:SetupBundleID];
+    if (registered && [[NSBundle bundleWithURL:registered].bundleIdentifier isEqual:SetupBundleID]) return registered;
+    NSArray<NSURL *> *volumes = [NSFileManager.defaultManager mountedVolumeURLsIncludingResourceValuesForKeys:nil
+        options:NSVolumeEnumerationSkipHiddenVolumes];
+    for (NSURL *volume in volumes) {
+        NSURL *candidate = [volume URLByAppendingPathComponent:SetupBundleName isDirectory:YES];
+        if ([[NSBundle bundleWithURL:candidate].bundleIdentifier isEqual:SetupBundleID]) return candidate;
+    }
+    return nil;
+}
+
 static void UpdateError(NSString *reason) {
     fprintf(stderr, "boot: update transfer: %s\n", reason.UTF8String);
     [NSApplication sharedApplication];
@@ -185,6 +201,30 @@ static void UpdateError(NSString *reason) {
     alert.informativeText = reason;
     [alert addButtonWithTitle:@"Quit"];
     [alert runModal];
+}
+
+static void InterruptedInstall(void) {
+    [NSApplication sharedApplication];
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Installation was interrupted";
+    alert.informativeText = @"Open Setup to repair the installation.";
+    [alert addButtonWithTitle:@"Open Setup"];
+    [alert addButtonWithTitle:@"Quit"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSURL *setup = RecoverySetupURL();
+    if (!setup) {
+        UpdateError(@"Open the Setup disk image. Then open the game and click Open Setup again.");
+        return;
+    }
+    NSTask *open = [NSTask new];
+    open.executableURL = [NSURL fileURLWithPath:@"/usr/bin/open"];
+    open.arguments = @[@"-n", @"-a", setup.path, @"--args", @"--recover"];
+    if ([open launchAndReturnError:nil]) {
+        [open waitUntilExit];
+        if (open.terminationStatus == 0) return;
+    }
+    UpdateError(@"Try opening Setup from the disk image. If macOS says it can’t verify Setup, go to System Settings > Privacy & Security > Open Anyway.");
 }
 
 // Called exactly once before the profile lock. The health receipt runs later on
@@ -234,7 +274,7 @@ void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
         // Setup journals also need recovery before roots are read; they have no
         // launch payload, so an explicit Setup repair is required for those.
         if (![pending[@"kind"] isEqual:@"launch-update-v1"]) {
-            UpdateError(@"Run Setup again to recover the interrupted installation. Your saves are unchanged.");
+            InterruptedInstall();
             exit(1);
         }
         job = pending[@"job"];

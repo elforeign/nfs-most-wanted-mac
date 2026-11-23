@@ -31,6 +31,9 @@
 
 
 
+
+
+
 """
 from pathlib import Path
 import os
@@ -507,8 +510,20 @@ def main():
         print('hdr_output_test: EDR prewarm normal 0 vs missing-downscale 2 frame builds PASS', flush=True)
         (scratch / 'post.inc').write_text(post_code)
         checked(build)
+        checked([exe, '--transport'], env=edr_env)
         checked([exe, '--composition'], env=edr_env)
         checked([exe, '--composition-msaa'], env=edr_env)
+        no_decode = production.replace('c.rgb=hdr_decode(min(pow(c.rgb,tone.xyz),float3(65504)));',
+                                       'c.rgb=min(pow(c.rgb,tone.xyz),float3(65504));')
+        assert no_decode != production
+        (scratch / 'presenter.inc').write_text(no_decode)
+        checked(build)
+        transfer = subprocess.run([exe, '--transport'], capture_output=True, text=True, env=edr_env)
+        print(transfer.stdout + transfer.stderr, end='', flush=True)
+        assert transfer.returncode == 1 and 'FAIL: presenter-only decode error 0.285959' in transfer.stderr, 'presenter-only missing decode escaped'
+        decode = subprocess.run([exe, '--composition'], capture_output=True, text=True, env=edr_env)
+        print(decode.stdout + decode.stderr, end='', flush=True)
+        assert decode.returncode == 1 and 'FAIL: midpoint decode error 0.285959' in decode.stderr, 'missing decode control escaped'
         bad_capture = production.replace('show && present_graded ? present_tex : backbuffer_tex;',
                                          'show && present_graded ? backbuffer_tex : backbuffer_tex;')
         assert bad_capture != production

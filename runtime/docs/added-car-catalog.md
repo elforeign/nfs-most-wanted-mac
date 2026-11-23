@@ -222,8 +222,12 @@ audio files under `SOUND/ENGINE`. The Xbox 360 route reads those logical ranges
 from the selected disc's numbered archives. Reimport a retained Carbon pack to
 get its source sidecar. Retained catalogs still open under their original
 approval contracts. The earlier private Jaguar XK stock sidecar is also
-readable. Missing or refused sidecars, ProStreet and Undercover additions, and
-explicit `off` or `0` use donor audio.
+readable. Missing or refused sidecars, Undercover additions, ProStreet
+additions other than the Veyron, and explicit `off` or `0` use donor audio.
+The ProStreet PC Veyron imports its own stock layers (version 4 below): engine
+`car_068-engine.tmx` and exhaust `car_062-exhaust.tmx` under `SOUND/ENGINE`,
+plus their `swtn_car_068.abk` / `swtn_car_062.abk` transient banks. Only the
+audited attributes revision is admitted; any other revision uses donor audio.
 
 The converter preserves `pvehicle.Audio[]` order. Each `caraudio` resolves to
 engine and exhaust `engineaudio`, in that order. Each layer contains its
@@ -259,6 +263,16 @@ Each bank plan starts with the length and bytes of its translated executable
 image followed by the same pointer-free execution manifest. Sample rows
 store declared frames, rate and loop start with a zero PCM byte count. The
 runtime checks those values against the source before decoding to float PCM.
+
+Version 4 identifies ProStreet PC. It keeps the 68-byte header with one tier.
+The payload starts with the engine and exhaust TMX resource indices (two
+words) and each layer's source RPM range (four floats), then the attributes
+SHA-256. Each resource row stores kind (3 TMX, 2 SWTN bank), source byte
+count, zero and the count of resident sounds, then its SHA-256 and the original
+bytes. A TMX row is followed by each resident sound's frames, rate, loop word
+and little-endian mono PCM. The runtime maps normalized RPM into each layer's
+source range and plays both layers continuously. SWTN transient programs are
+validated and retained but not executed.
 
 For race objects the port obtains the live MW engine upgrade level via
 `Physics::Upgrades::GetLevel` (00672D30, engine type 4). Carbon PC's 0053B570

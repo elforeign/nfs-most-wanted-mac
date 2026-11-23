@@ -1,4 +1,6 @@
 #include "blackbox.h"
+#include "blackbox_render.h"
+#include "blackbox_mw_fe.h"
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -12,23 +14,26 @@
 #define ERRORS 512u
 #define WINDOW 30000000000ull
 typedef struct { uint64_t seq, ns, frame; } Header;
-typedef struct { uint16_t id, flags; uint32_t draws; } Pass;
+typedef BlackboxPass Pass;
 typedef struct {
     Header h;
     uint32_t flow, valid;
     uint64_t flow_since;
     BlackboxTiming timing;
     uint32_t deferred, pass_count;
-    unsigned char reserved[52];
+    uint64_t render_serial;
+    uint32_t render_valid, attempted, unattributed, overflow, failed;
+    unsigned char reserved[20];
     Pass pass[32];
 } Frame;
 typedef struct { Header h; uint32_t stage, valid; uint64_t values[3]; } Present;
 typedef struct { Header h; uint32_t kind, valid; uint64_t values[11]; } Event;
-enum { FE_LOAD = 3, FE_PACKAGE, FE_CONTEXTS };
+enum { FE_LOAD = 3, FE_PACKAGE, FE_MW, MW_MOVIE, MW_NIS, CARBON_MOVIE, CARBON_NIS, STATE_CONTEXTS };
 #define EVENT_WORDS (sizeof(Event) / sizeof(uint64_t))
 _Static_assert(sizeof(Frame) == 376, "frame budget");
 _Static_assert(sizeof(Present) == 56, "presentation budget");
 _Static_assert(sizeof(Event) == 120, "event budget");
+_Static_assert(sizeof(BlackboxMWFE) <= sizeof(((Event *)0)->values), "MW FE event payload");
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "recorder requires lock-free atomics");
 /* The gate protects every byte of payload, including readers' memcpy. No seqlock
  * copies with data races. A contended producer drops once; it never spins. */
@@ -38,9 +43,9 @@ static SLOT(Present) presents[PRESENTS];
 static SLOT(Event) events[EVENTS], errors[ERRORS];
 /* The guest frame thread alone writes this context. Atomic words let a snapshot
  * reject an overlapping write without blocking the writer or racing its payload. */
-static struct { _Atomic uint64_t version, words[EVENT_WORDS]; } fe_context[FE_CONTEXTS];
+static struct { _Atomic uint64_t version, words[EVENT_WORDS]; } state_context[STATE_CONTEXTS];
 _Static_assert(sizeof *frames == 384 && sizeof *presents == 64 && sizeof *events == 128, "published slot budgets");
-_Static_assert(sizeof frames + sizeof presents + sizeof events + sizeof errors + sizeof fe_context < 11 * 1024 * 1024, "storage cap");
+_Static_assert(sizeof frames + sizeof presents + sizeof events + sizeof errors + sizeof state_context < 11 * 1024 * 1024, "storage cap");
 typedef struct {
     void *slots;
     size_t stride, size, count;
@@ -53,12 +58,12 @@ static Ring rings[] = {
     {errors, sizeof *errors, sizeof(Event), ERRORS, 0, 0}
 };
 typedef struct {
-    uint64_t anchor, flow_since, frame, generation, heads[4], lost[4], unavailable[4];
+    uint64_t anchor, flow_since, frame, generation, captured_at, heads[4], lost[4], unavailable[4];
     uint32_t game, flow;
     Frame frames[FRAMES];
     Present presents[PRESENTS];
     Event events[EVENTS], errors[ERRORS];
-    Event fe_context[FE_CONTEXTS];
+    Event state_context[STATE_CONTEXTS];
 } Snapshot;
 static Snapshot *frozen;
 static _Atomic uint64_t menu_generation, snapshot_losses;
@@ -247,7 +252,23 @@ static const char *const fe_labels[] = {
     "WorldMapMain.fng",
     "WS_LS_Splash.fng",
     "X360_Pause.fng",
+    "FadeScreen.fng",
+    "FadeScreenNoLoadingBar.fng",
+    "MainMenu.fng",
+    "OL_MAIN.FNG",
+    "WS_Loading.fng",
+    "WS_Loading_Controller.fng",
 };
+static const char *const mw_stage_labels[] = {
+    "<unknown>", "BeginGameFlowLoadTrack", "BeginWorldLoad", "LoadingFrontEnd",
+    "EndGameFlowLoadingFrontEnd", "UnloadingFrontEnd", "LoadingRegion",
+    "WaitForSimulation", "FinishedGameLoading", "GameFlowWaitForExitDemoResourcesLoaded",
+};
+uint32_t blackbox_mw_stage_label(const char *name) {
+    for (unsigned i = 1; i < sizeof mw_stage_labels / sizeof *mw_stage_labels; ++i)
+        if (!strcmp(name, mw_stage_labels[i])) return i;
+    return 0;
+}
 uint32_t blackbox_fe_label(const char *name) {
     for (unsigned i = 1; i < sizeof fe_labels / sizeof *fe_labels; ++i)
         if (!strcasecmp(name, fe_labels[i])) return i;
@@ -264,11 +285,11 @@ static void state_event(unsigned key, uint32_t kind, const void *state, size_t s
     publish(2, &e);
     uint64_t words[EVENT_WORDS];
     memcpy(words, &e, sizeof e);
-    atomic_store_explicit(&fe_context[key].version, e.h.seq * 2 - 1, memory_order_relaxed);
+    atomic_store_explicit(&state_context[key].version, e.h.seq * 2 - 1, memory_order_relaxed);
     atomic_thread_fence(memory_order_release);
     for (unsigned i = 0; i < EVENT_WORDS; ++i)
-        atomic_store_explicit(&fe_context[key].words[i], words[i], memory_order_relaxed);
-    atomic_store_explicit(&fe_context[key].version, e.h.seq * 2, memory_order_release);
+        atomic_store_explicit(&state_context[key].words[i], words[i], memory_order_relaxed);
+    atomic_store_explicit(&state_context[key].version, e.h.seq * 2, memory_order_release);
 }
 void blackbox_record_fe(const BlackboxFE *state, uint32_t valid, uint64_t frame, uint64_t now) {
     if (state->index < FE_LOAD) state_event(state->index, BB_FE, state, sizeof *state, valid, frame, now);
@@ -281,8 +302,30 @@ void blackbox_record_package(uint32_t label, uint32_t address, uint32_t count,
     uint32_t state[] = {label, address, count, truncated};
     state_event(FE_PACKAGE, BB_PACKAGE, state, sizeof state, 1, frame, now);
 }
+void blackbox_record_mw_fe(const BlackboxMWFE *state, uint64_t frame, uint64_t now) {
+    state_event(FE_MW, BB_MW_FE, state, sizeof *state, 1, frame, now);
+}
 static void dump_fe_event(FILE *f, const Event *v) {
-    if (v->kind == BB_FE) {
+    if (v->kind == BB_MW_FE) {
+        BlackboxMWFE m; memcpy(&m, v->values, sizeof m);
+        unsigned stage = m.stage_label < sizeof mw_stage_labels / sizeof *mw_stage_labels ? m.stage_label : 0;
+        unsigned fade_limits = BB_MW_FADE_PACKAGE_LIMIT | BB_MW_FADE_OBJECT_LIMIT | BB_MW_FADE_SCRIPT_INVALID;
+        const char *fade = !m.engine_ready || (m.limits & fade_limits) ? "unknown" :
+                           m.fade_script == BB_MW_FADE_ON_SCRIPT ? "1" : "0";
+        fprintf(f, "MW LOAD state=%u loading=%u continuation=%08X stage='%s' stage_ptr=%08X "
+                   "loading_package='%s' loading_ptr=%08X seen=%u tips_done=%u "
+                   "fade_on=%s fade_script=%08X fade_package=%08X fade_object=%08X limits=%X\n",
+                m.flow, m.flow == 4 || m.flow == 5, m.continuation, mw_stage_labels[stage],
+                m.stage_name, fe_label(m.loading_label), m.loading_name, m.screen_seen, m.tips_done,
+                fade, m.fade_script, m.fade_package, m.fade_object, m.limits);
+        fprintf(f, "MW FE manager=%08X flags=%u/%u controller_errors=%08X%08X "
+                   "requested='%s' requested_ptr=%08X garage_type=%u boot=%u pause_request=%u\n",
+                m.manager, m.manager_0, m.manager_1, m.controller_errors_hi, m.controller_errors_lo,
+                fe_label(m.requested_label), m.requested_name, m.garage_type, m.boot, m.pause_request);
+        fprintf(f, "MW PACKAGE control='%s' address=%08X hash=%08X count=%u engine_ready=%u truncated=%u signature=%08X\n",
+                fe_label(m.control_label), m.control_package, m.control_hash, m.package_count,
+                m.engine_ready, !!(m.limits & BB_MW_PACKAGE_LIMIT), m.list_signature);
+    } else if (v->kind == BB_FE) {
         BlackboxFE m; memcpy(&m, v->values, sizeof m);
         fprintf(f, "FE %s valid=%u address=%08X vt=%08X state=%d start=%d prev=%d screen='%s' next='%s' pending=%u wait=%d child=%08X\n",
                 m.index == 0 ? "root" : m.index == 1 ? "child" : "grand", v->valid,
@@ -296,6 +339,112 @@ static void dump_fe_event(FILE *f, const Event *v) {
         uint32_t p[4]; memcpy(p, v->values, sizeof p);
         fprintf(f, "PACKAGE control='%s' address=%08X count=%u truncated=%u\n", fe_label(p[0]), p[1], p[2], p[3]);
     }
+}
+typedef struct { uint32_t edge; BlackboxCinematic state; } CinematicEvent;
+_Static_assert(sizeof(CinematicEvent) <= sizeof(((Event *)0)->values), "cinematic event payload");
+
+void blackbox_record_cinematic(BlackboxKind kind, const BlackboxCinematic *state,
+                               uint32_t valid, uint64_t frame, uint64_t now) {
+    CinematicEvent p = {BB_CIN_STATE, *state};
+    state_event(kind == BB_MOVIE ? MW_MOVIE : MW_NIS, kind, &p, sizeof p, valid, frame, now);
+}
+void blackbox_cinematic_edge(BlackboxKind kind, BlackboxCinematicEdge edge,
+                            const BlackboxCinematic *state, uint32_t valid) {
+    CinematicEvent p = {edge, *state};
+    Event e = {.h = {0, blackbox_now_ns(), atomic_load_explicit(&last_frame, memory_order_relaxed)},
+               .kind = kind, .valid = valid};
+    memcpy(e.values, &p, sizeof p);
+    publish(2, &e);
+}
+typedef struct { uint32_t edge; BlackboxCarbonCinematic state; } CarbonCinematicEvent;
+_Static_assert(sizeof(CarbonCinematicEvent) <= sizeof(((Event *)0)->values), "Carbon cinematic payload");
+void blackbox_record_carbon_cinematic(BlackboxKind kind, BlackboxCinematicEdge edge,
+                                     const BlackboxCarbonCinematic *state,
+                                     uint32_t valid, uint64_t frame, uint64_t now) {
+    if (!blackbox_enabled()) return;
+    CarbonCinematicEvent p = {edge, *state};
+    if (edge == BB_CIN_STATE)
+        state_event(kind == BB_CARBON_MOVIE ? CARBON_MOVIE : CARBON_NIS,
+                    kind, &p, sizeof p, valid, frame, now);
+    else {
+        Event e = {.h = {0, now, atomic_load_explicit(&last_frame, memory_order_relaxed)},
+                   .kind = kind, .valid = valid};
+        memcpy(e.values, &p, sizeof p);
+        publish(2, &e);
+    }
+}
+static int cinematic(const Event *v) {
+    return v->kind == BB_MOVIE || v->kind == BB_NIS ||
+           v->kind == BB_CARBON_MOVIE || v->kind == BB_CARBON_NIS;
+}
+
+static unsigned context_key(const Event *v) {
+    uint32_t index;
+    memcpy(&index, v->values, sizeof index);
+    switch (v->kind) {
+    case BB_FE: return index;
+    case BB_LOAD: return FE_LOAD;
+    case BB_PACKAGE: return FE_PACKAGE;
+    case BB_MW_FE: return FE_MW;
+    case BB_MOVIE: if (index == BB_CIN_STATE) return MW_MOVIE; break;
+    case BB_NIS: if (index == BB_CIN_STATE) return MW_NIS; break;
+    case BB_CARBON_MOVIE: if (index == BB_CIN_STATE) return CARBON_MOVIE; break;
+    case BB_CARBON_NIS: if (index == BB_CIN_STATE) return CARBON_NIS; break;
+    }
+    return STATE_CONTEXTS;
+}
+static double seconds(uint64_t later, uint64_t earlier);
+static void dump_cinematic_event(FILE *f, const Event *v, uint64_t anchor) {
+    static const char *const edges[] = {
+        "state", "play", "stop", "destroy", "end", "timeout", "load", "unload"
+    };
+    if (v->kind == BB_CARBON_MOVIE || v->kind == BB_CARBON_NIS) {
+        CarbonCinematicEvent p;
+        memcpy(&p, v->values, sizeof p);
+        const BlackboxCarbonCinematic *s = &p.state;
+        const char *edge = p.edge < sizeof edges / sizeof *edges ? edges[p.edge] : "unknown";
+        if (v->kind == BB_CARBON_MOVIE)
+            fprintf(f, "CARBON MOVIE edge=%s valid=%u player=%08X class=%08X state=%u next=%u "
+                       "playing=%u filename_hash=%08X playback_clock=not_decoded_yet\n",
+                    edge, v->valid, s->address, s->class_id, s->state, s->next,
+                    s->state >= 3 && s->state <= 5, s->filename_hash);
+        else {
+            fprintf(f, "CARBON NIS edge=%s valid=%u interface=%08X class=%08X ",
+                    edge, v->valid, s->address, s->class_id);
+            if (!s->decoded) fputs("state=unavailable layout=not_decoded_yet\n", f);
+            else {
+                fprintf(f, "state=%u track=%08X clock_valid=%u ", s->state, s->track, s->clock_valid);
+                if (s->clock_valid) {
+                    float elapsed, length;
+                    memcpy(&elapsed, &s->elapsed, sizeof elapsed);
+                    memcpy(&length, &s->length, sizeof length);
+                    fprintf(f, "elapsed=%.3f length=%.3f playback_unchanged_for=%.3fs\n",
+                            elapsed, length, seconds(anchor, s->clock_since));
+                } else fputs("playback_unchanged_for=unavailable\n", f);
+            }
+        }
+        return;
+    }
+    CinematicEvent p;
+    memcpy(&p, v->values, sizeof p);
+    const BlackboxCinematic *s = &p.state;
+    const char *edge = p.edge < sizeof edges / sizeof *edges ? edges[p.edge] : "unknown";
+    if (v->kind == BB_MOVIE)
+        fprintf(f, "MW MOVIE edge=%s valid=%u player=%08X state=%u next=%u paused=%u filename_hash=%08X\n",
+                edge, v->valid, s->address, s->state, s->next, s->paused, s->id);
+    else
+        fprintf(f, "MW NIS edge=%s valid=%u activity=%08X state=%u scene_hash=%08X scene=%08X\n",
+                edge, v->valid, s->address, s->state, s->id, s->scene);
+}
+/* Optional renderer adapter; the core and guest-only fixtures need no Metal. */
+__attribute__((weak)) int blackbox_render_take(BlackboxRenderFrame *out) { (void)out; return 0; }
+__attribute__((weak)) void blackbox_render_definitions(FILE *f) { fputs("UNAVAILABLE passes async_present\n", f); }
+void blackbox_record_present(uint64_t serial, uint32_t stage, uint32_t status,
+                             uint64_t a, uint64_t b, uint64_t c) {
+    if (!blackbox_enabled()) return;
+    Present p = {.h = {0, blackbox_now_ns(), serial}, .stage = stage,
+                 .valid = status, .values = {a, b, c}};
+    publish(1, &p);
 }
 void blackbox_record_frame(uint32_t game, uint64_t frame, uint32_t flow,
                            const BlackboxTiming *timing, uint64_t now) {
@@ -314,6 +463,14 @@ void blackbox_record_frame(uint32_t game, uint64_t frame, uint32_t flow,
     Frame f = {.h = {0, now, frame}, .flow = flow, .valid = timing != NULL,
                .flow_since = atomic_load_explicit(&flow_since, memory_order_relaxed)};
     if (timing) f.timing = *timing;
+    BlackboxRenderFrame render;
+    if (blackbox_render_take(&render)) {
+        f.render_valid = 1; f.render_serial = render.serial;
+        f.attempted = render.attempted; f.deferred = render.deferred; f.failed = render.failed;
+        f.unattributed = render.unattributed; f.overflow = render.overflow;
+        f.pass_count = render.count;
+        memcpy(f.pass, render.pass, sizeof f.pass);
+    }
     if (publish(0, &f)) {
         atomic_store_explicit(&current_flow, flow, memory_order_relaxed);
         atomic_store_explicit(&last_frame, frame, memory_order_relaxed);
@@ -336,15 +493,15 @@ static Snapshot *capture(void) {
     s->flow = atomic_load_explicit(&current_flow, memory_order_relaxed);
     s->flow_since = atomic_load_explicit(&flow_since, memory_order_relaxed);
     s->game = atomic_load_explicit(&game_id, memory_order_relaxed);
-    for (unsigned k = 0; k < FE_CONTEXTS; ++k) {
-        uint64_t version = atomic_load_explicit(&fe_context[k].version, memory_order_acquire);
+    for (unsigned k = 0; k < STATE_CONTEXTS; ++k) {
+        uint64_t version = atomic_load_explicit(&state_context[k].version, memory_order_acquire);
         if (!version || (version & 1)) continue;
         uint64_t words[EVENT_WORDS];
         for (unsigned i = 0; i < EVENT_WORDS; ++i)
-            words[i] = atomic_load_explicit(&fe_context[k].words[i], memory_order_relaxed);
+            words[i] = atomic_load_explicit(&state_context[k].words[i], memory_order_relaxed);
         atomic_thread_fence(memory_order_acquire);
-        if (version == atomic_load_explicit(&fe_context[k].version, memory_order_relaxed))
-            memcpy(&s->fe_context[k], words, sizeof(Event));
+        if (version == atomic_load_explicit(&state_context[k].version, memory_order_relaxed))
+            memcpy(&s->state_context[k], words, sizeof(Event));
     }
     for (unsigned k = 0; k < 4; ++k) {
         Ring *r = &rings[k];
@@ -385,7 +542,10 @@ void blackbox_menu_at(int open, uint64_t now) {
     }
     free(frozen);
     frozen = open ? capture() : NULL;
-    if (frozen) frozen->generation = generation;
+    if (frozen) {
+        frozen->generation = generation;
+        frozen->captured_at = now;
+    }
     else if (open) atomic_fetch_add_explicit(&snapshot_losses, 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&snapshot_gate, memory_order_release);
 }
@@ -403,24 +563,52 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
     fprintf(f, "MENU_SNAPSHOT losses=%llu\n", (unsigned long long)atomic_load_explicit(&snapshot_losses, memory_order_relaxed));
     fprintf(f, "OBSERVED f%llu flow=%u unchanged_for=%.3fs\n", (unsigned long long)s->frame, s->flow,
             seconds(s->anchor, s->flow_since));
-    fprintf(f, "AVAILABLE flow frame_timing attempted_draws ticks menu%s; UNAVAILABLE %smovie nis passes async_present input errors\n",
-            s->game == BLACKBOX_CARBON ? " fe package load" : "",
-            s->game == BLACKBOX_CARBON ? "" : "fe package load ");
-    uint64_t latest_fe[FE_CONTEXTS] = {0};
+    const char *fe = s->game == BLACKBOX_MW ? " fe package load fade movie nis" :
+                     s->game == BLACKBOX_CARBON ? " fe package load movie nis" : "";
+    fprintf(f, "AVAILABLE flow frame_timing attempted_draws ticks menu%s; UNAVAILABLE%s input errors\n",
+            fe, s->game == BLACKBOX_MW || s->game == BLACKBOX_CARBON ? "" : " movie nis");
+    blackbox_render_definitions(f);
+    /* Summarize only copied observations for the latest encoded serial. An
+     * absent callback is missing-or-pending, never evidence of a blank image. */
+    const Frame *render_latest = NULL;
+    for (unsigned i = 0; i < FRAMES; ++i) {
+        const Frame *v = &s->frames[i];
+        if (v->h.seq && v->render_valid && (!render_latest || v->h.seq > render_latest->h.seq)) render_latest = v;
+    }
+    if (render_latest) {
+        unsigned stages = 0, dropped = 0;
+        uint64_t shown_seq = 0;
+        for (unsigned i = 0; i < PRESENTS; ++i) {
+            const Present *v = &s->presents[i];
+            if (!v->h.seq || v->h.frame != render_latest->render_serial ||
+                v->h.ns < cutoff || v->h.ns > (saved ? s->captured_at : now)) continue;
+            if (v->stage < 32) stages |= 1u << v->stage;
+            if (v->stage == BB_PRESENT_SHOWN && v->h.seq > shown_seq) { shown_seq = v->h.seq; dropped = v->valid; }
+        }
+        const char *shown = stages & (1u << BB_PRESENT_SHOWN) ? (dropped ? "dropped" : "observed") :
+            stages & (1u << BB_PRESENT_MISSING) ? "no_drawable" :
+            stages & (1u << BB_PRESENT_SUPPRESSED) ? "not_scheduled" : "missing_or_pending";
+        fprintf(f, "LATEST_PRESENT serial=%llu submit=%s frame_gpu=%s final_gpu=%s shown=%s\n",
+                (unsigned long long)render_latest->render_serial,
+                stages & (1u << BB_RENDER_SUBMIT) ? "observed" : "missing_or_pending",
+                stages & (1u << BB_RENDER_GPU) ? "observed" : "missing_or_pending",
+                stages & (1u << BB_PRESENT_GPU) ? "observed" : "missing_or_pending", shown);
+    }
+    uint64_t latest_state[STATE_CONTEXTS] = {0};
     for (unsigned i = 0; i < EVENTS; ++i) {
         Event *v = &s->events[i];
         if (!v->h.seq || v->h.ns > s->anchor) continue;
-        uint32_t index; memcpy(&index, v->values, sizeof index);
-        unsigned key = v->kind == BB_LOAD ? FE_LOAD : v->kind == BB_PACKAGE ? FE_PACKAGE :
-                       v->kind == BB_FE ? index : FE_CONTEXTS;
-        if (key < FE_CONTEXTS && v->h.seq > latest_fe[key]) latest_fe[key] = v->h.seq;
+        unsigned key = context_key(v);
+        if (key < STATE_CONTEXTS && v->h.seq > latest_state[key]) latest_state[key] = v->h.seq;
     }
-    for (unsigned i = 0; i < FE_CONTEXTS; ++i) {
-        const Event *v = &s->fe_context[i];
-        if (v->h.seq <= latest_fe[i] || v->h.ns > s->anchor) continue;
-        fprintf(f, "% .6f f%llu FE_CONTEXT ", seconds(v->h.ns, s->anchor), (unsigned long long)v->h.frame);
-        dump_fe_event(f, v);
-        latest_fe[i] = 0;
+    for (unsigned i = 0; i < STATE_CONTEXTS; ++i) {
+        const Event *v = &s->state_context[i];
+        if (v->h.seq <= latest_state[i] || v->h.ns > s->anchor) continue;
+        fprintf(f, "% .6f f%llu %s ", seconds(v->h.ns, s->anchor), (unsigned long long)v->h.frame,
+                cinematic(v) ? "CINEMATIC_CONTEXT" : "FE_CONTEXT");
+        if (cinematic(v)) dump_cinematic_event(f, v, s->anchor);
+        else dump_fe_event(f, v);
+        latest_state[i] = 0;
     }
     const char *const names[] = {"frames", "present", "events", "errors"};
     for (unsigned k = 0; k < 4; ++k) {
@@ -429,24 +617,54 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
         uint64_t oldest = 0, kept = 0;
         for (uint64_t i = first; i < s->heads[k]; ++i) {
             Header *h = (void *)((char *)snapshot_records(s, k) + (i % r->count) * r->size);
-            int menu = k == 2 && ((Event *)h)->kind == BB_MENU;
+            const Event *e = k == 2 ? (const Event *)h : NULL;
+            /* A hook can enter a blocking guest call after the last frame. */
+            int edge = e && cinematic(e) && context_key(e) == STATE_CONTEXTS;
+            if (edge && h->ns > (saved ? s->captured_at : now)) continue;
+            /* Completion/presentation may arrive after the last guest sample.
+             * Freeze at capture time for F10, otherwise at export time. */
+            int present = k == 1 && h->ns <= (saved ? s->captured_at : now);
+            int after_frame = edge || present || (e && e->kind == BB_MENU);
             int context = 0;
-            if (k == 2) for (unsigned j = 0; j < FE_CONTEXTS; ++j)
-                if (h->seq && h->seq == latest_fe[j]) context = 1;
-            if (!h->seq || (h->ns < cutoff && !context) || (h->ns > s->anchor && !menu)) continue;
-            if (!oldest || h->ns < oldest) oldest = h->ns;
+            if (e) for (unsigned j = 0; j < STATE_CONTEXTS; ++j)
+                if (h->seq && h->seq == latest_state[j]) context = 1;
+            if (!h->seq || (h->ns < cutoff && !context) || (h->ns > s->anchor && !after_frame)) continue;
+            if (h->ns <= s->anchor && (!oldest || h->ns < oldest)) oldest = h->ns;
             ++kept;
             fprintf(f, "% .6f f%llu ", seconds(h->ns, s->anchor), (unsigned long long)h->frame);
             if (k == 0) {
                 Frame *v = (void *)h;
                 fprintf(f, "FRAME flow=%u valid=%u dt_ms=%.3f busy_ms=%.3f wait_ms=%.3f draws=%u ticks=%u\n",
                         v->flow, v->valid, v->timing.frame_ms, v->timing.busy_ms, v->timing.wait_ms, v->timing.draws, v->timing.ticks);
+                if (v->render_valid) {
+                    fprintf(f, "RENDER serial=%llu attempted_d3d_draws=%u deferred=%u unattributed=%u pass_overflow_draws=%u passes=%u",
+                            (unsigned long long)v->render_serial, v->attempted, v->deferred,
+                            v->unattributed, v->overflow, v->pass_count);
+                    for (unsigned j = 0; j < v->pass_count; ++j)
+                        fprintf(f, " %u:%u", v->pass[j].id, v->pass[j].draws);
+                    fprintf(f, " failed=%u\n", v->failed);
+                } else fprintf(f, "RENDER unavailable\n");
+            } else if (k == 1) {
+                Present *v = (void *)h;
+                const char *stage = v->stage == BB_RENDER_SUBMIT ? "submit" : v->stage == BB_RENDER_GPU ? "frame_gpu" :
+                    v->stage == BB_PRESENT_GPU ? "final_gpu" : v->stage == BB_PRESENT_SHOWN ? "shown" :
+                    v->stage == BB_PRESENT_MISSING ? "missing" : v->stage == BB_HOST_ENCODER ? "host_encoder" : v->stage == BB_PRESENT_SUPPRESSED ? "not_scheduled" : v->stage == BB_PRESENT_TICKET_LOST ? "ticket_lost" : "unknown";
+                if (v->stage == BB_RENDER_GPU || v->stage == BB_PRESENT_GPU)
+                    fprintf(f, "PRESENT stage=%s status=%u gpu_start_ns=%llu gpu_end_ns=%llu error=%lld\n", stage, v->valid,
+                            (unsigned long long)v->values[0], (unsigned long long)v->values[1], (long long)v->values[2]);
+                else if (v->stage == BB_PRESENT_SHOWN)
+                    fprintf(f, "PRESENT stage=%s status=%u shown_ns=%llu shown=%s\n", stage, v->valid,
+                            (unsigned long long)v->values[2], v->valid ? "dropped" : "yes");
+                else fprintf(f, "PRESENT stage=%s status=%u a=%llu b=%llu c=%llu\n", stage, v->valid,
+                             (unsigned long long)v->values[0], (unsigned long long)v->values[1], (unsigned long long)v->values[2]);
             } else if (k == 2) {
                 Event *v = (void *)h;
                 if (v->kind == BB_FLOW) fprintf(f, "FLOW %u->%u\n", (unsigned)v->values[0], (unsigned)v->values[1]);
                 else if (v->kind == BB_MENU) fprintf(f, "F10 %s\n", v->values[0] ? "open" : "close");
                 else if (v->kind == BB_HEARTBEAT) fprintf(f, "STATE flow=%u unchanged_for=%.3fs\n", (unsigned)v->values[0], seconds(h->ns, v->values[1]));
-                else if (v->kind == BB_FE || v->kind == BB_LOAD || v->kind == BB_PACKAGE) dump_fe_event(f, v);
+                else if (v->kind == BB_FE || v->kind == BB_LOAD || v->kind == BB_PACKAGE || v->kind == BB_MW_FE)
+                    dump_fe_event(f, v);
+                else if (cinematic(v)) dump_cinematic_event(f, v, context ? s->anchor : h->ns);
                 else fprintf(f, "EVENT kind=%u valid=%u\n", v->kind, v->valid);
             } else fprintf(f, "RESERVED\n");
         }

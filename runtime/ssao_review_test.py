@@ -116,7 +116,7 @@ int main(void){@autoreleasepool{
         prepare=re.search(r'^.*trees_prepare\(vs, ps,.*$',src,re.M)[0]
         body=body.replace('PREPARE_TREE_CALL',prepare)
         f=td/(mode+'.m');f.write_text(body);exe=td/mode
-        run(['clang','-O1','-w','-fobjc-arc',f,'-framework','Metal','-framework','Foundation','-o',exe])
+        run(['clang','-O1','-w','-fobjc-arc','-I',ROOT/'runtime',f,'-framework','Metal','-framework','Foundation','-o',exe])
         output=run([exe]);print(mode,output.strip())
         n=int(re.search(r'failures: (\d+)',output)[1]);assert n==0 if mode=='fixed' else n>=7
     lifetime=r'''
@@ -252,10 +252,12 @@ int main(void){@autoreleasepool{
  printf("proof replay failures: %d\n",failures);return 0;
 }}
 ''')
-        run(['clang','-O1','-w','-fobjc-arc',f,'-framework','Metal','-framework','Foundation','-o',exe])
+        run(['clang','-O1','-w','-fobjc-arc','-I',ROOT/'runtime',f,'-framework','Metal','-framework','Foundation','-o',exe])
         output=run([exe]);print(mode,output.strip());n=int(re.search(r'failures: (\d+)',output)[1]);assert n=={'fixed':0,'broken':3,'clock-mutant':1}[mode]
     # Recording-only resource contract: half R8/4x resolves beside matching D16 depth.
     layout=r'''
+#include "blackbox_render.h"
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdio.h>
@@ -341,7 +343,7 @@ int main(void){@autoreleasepool{
  printf("multiply failures: %d\n",failures);return 0;
 }}'''
         f=td/(mode+'.m');f.write_text(body);exe=td/mode
-        run(['clang','-O1','-w','-fobjc-arc',f,'-framework','Metal','-framework','Foundation','-o',exe])
+        run(['clang','-O1','-w','-fobjc-arc','-I',ROOT/'runtime',f,'-framework','Metal','-framework','Foundation','-o',exe])
         output=run([exe]);print(mode,output.strip())
         assert int(re.search(r': (\d+)',output)[1])==(0 if mode=='multiply-fixed' else 1)
 

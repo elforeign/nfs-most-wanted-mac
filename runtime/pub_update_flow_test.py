@@ -3,6 +3,8 @@ Core proof: 27 good checks (12 UI, 15 preparation/launch); 17 broken controls re
 (9 UI, 8 preparation/launch), including automatic fetch and false-success controls.
 Launch fixture: inherited BOOT_BACKGROUND=1 skipped the normal-launch guard
 (broken rc=0); clear launch-mode flags in this stub child (good rc=0, broken rc=99).
+Interrupted Setup journal: Open Setup beside Quit passes 1/1 and sends --recover.
+The original Quit-only alert passes 0/1. A fixture records the action with no window.
 Uses only loopback networking. No game or desktop app is started.
 Release feed: original followed the redirect (1 destination hit) and accepted the chunked cap+1 body.
 Fixed: zero destination hits, cap+1 rejected, at-cap accepted.
@@ -481,7 +483,7 @@ def cancelled_launch(root):
     index=dict(format_version=1, job=str(job), ready=str(job/'staged/ready.json'), profile=str(root), destination=str(root))
     (root/'.update-ready.json').write_text(json.dumps(index)); (root/'.update-ready.json').chmod(0o600)
     source=(ROOT/'pub_update_launch.m').read_text()
-    a=source.index('static void UpdateError('); b=source.index('// Called exactly once', a)
+    a=source.index('static void UpdateError('); b=source.index('static void InterruptedInstall(', a)
     source=source[:a]+'static void UpdateError(NSString *reason) { fprintf(stderr, "UpdateError: %s\\n", reason.UTF8String); exit(99); }\n'+source[b:]
     source=source.replace('if (![NSBundle.mainBundle.bundleIdentifier isEqual:PublicBundleID]) return;', '')
     source=source.replace('CanonicalPath(NSBundle.mainBundle.bundlePath)', 'profile')
@@ -499,6 +501,61 @@ def cancelled_launch(root):
         assert result.returncode == (99 if broken else 0), (broken, result.returncode, result.stdout, result.stderr)
         assert (b'retained tools failed verification' in result.stderr) == broken, result.stderr
     print('Cancelled launch good=1 PASS (rc=0) broken=1 rejected (rc=99, retained-tools check); cancelled job ignored')
+
+
+def interrupted_setup_launch(root):
+    root.mkdir()
+    (root / '.install-journal.json').write_text('{"state":"preparing"}')
+    (root / '.install-journal.json').chmod(0o600)
+    source = (ROOT / 'pub_update_launch.m').read_text()
+    source = source.replace('if (![NSBundle.mainBundle.bundleIdentifier isEqual:PublicBundleID]) return;', '')
+    source = source.replace('[NSApplication sharedApplication];', '')
+    source = source.replace('NSAlert *alert = [NSAlert new];', 'FixtureAlert *alert = [FixtureAlert new];')
+    source = source.replace('static void UpdateError(', '''
+@interface FixtureAlert : NSObject
+@property(copy) NSString *messageText, *informativeText;
+- (void)addButtonWithTitle:(NSString *)title;
+- (NSModalResponse)runModal;
+@end
+@implementation FixtureAlert
+- (void)addButtonWithTitle:(NSString *)title { fprintf(stderr, "%s\\n", title.UTF8String); }
+- (NSModalResponse)runModal { return NSAlertFirstButtonReturn; }
+@end
+static void UpdateError(''')
+    start = source.index('static NSURL *RecoverySetupURL(')
+    end = source.index('@interface FixtureAlert', start)
+    source = source[:start] + '''
+static NSURL *RecoverySetupURL(void) { return [NSURL fileURLWithPath:@"/fixture/Setup.app"]; }
+''' + source[end:]
+    source = source.replace('@"/usr/bin/open"', '@"/bin/echo"')
+    source += '''
+const char *game_dir;
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        const char *profile = argv[1];
+        argc = 1;
+        pub_update_launch(&argc, &argv, profile);
+        return 0;
+    }
+}
+'''
+    button = '    [alert addButtonWithTitle:@"Open Setup"];\n'
+    assert button in source
+    broken = source.replace('            InterruptedInstall();',
+                            '            UpdateError(@"Run Setup again to recover the interrupted installation.");')
+    assert broken != source
+    env = {key: value for key, value in os.environ.items() if key not in ('BOOT_BACKGROUND', 'BOOT_DEADLINE')}
+    for fixture, expected in ((broken, False), (source, True)):
+        path = root / 'launch.m'
+        path.write_text(fixture)
+        exe = root / 'launch'
+        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-o', exe])
+        result = subprocess.run([exe, root], capture_output=True, text=True, env=env, timeout=20)
+        assert result.returncode == 1, result
+        offered_recovery = ('Open Setup\nQuit\n' in result.stderr
+                            and '-a /fixture/Setup.app --args --recover' in result.stdout)
+        assert offered_recovery == expected, result
+    print('Interrupted Setup launch: original 0/1, fixed 1/1 (Open Setup, Quit, --recover)')
 
 
 def production_transport(root):
@@ -648,6 +705,7 @@ def main():
         bridge_cases(bridge)
         ready_while_playing(root/"locked-profile")
         cancelled_launch(root/"cancelled-launch")
+        interrupted_setup_launch(root/"interrupted-setup")
         production_transport(root/'production-transport')
         feed_transport(root/'feed-transport')
         carbon_selection()

@@ -140,6 +140,7 @@ int settings_get(const char *id) { (void)id; return -1; }
 void envcube_live_reconfigure(void) {}
 int x360_post_ssao_enabled(void) { return 0; }
 void user32_fullscreen_mode_changed(void) {}
+void user32_notch_fill_changed(void) {}
 Obj *obj(uint32_t guest) {
     for (unsigned i = 0; i < next_object; ++i) if (resources[i].guest == guest) return &resources[i];
     return NULL;

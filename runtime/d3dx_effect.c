@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #include "host.h"
+#include "blackbox_render.h"
 #include "game_select.h"
 
 #define D3D_OK 0
@@ -60,6 +61,7 @@ typedef struct {
     State *states; int nstates;
     uint32_t gname;
     uint32_t vs_code, ps_code;  // guest copies of the shader bytecode (GetPassDesc)
+    uint16_t blackbox_id;
     uint64_t applied;           // fx_epoch when the pass was last applied (BeginPass/CommitChanges)
 } Pass;
 typedef struct {
@@ -1199,6 +1201,11 @@ static int e_BeginPass(Cpu *c) {
     if (!fx->cur || i >= (uint32_t)fx->cur->npasses) RET(D3DERR_INVALIDCALL, 2);
     fx->pass = &fx->cur->passes[i];
     fx->in_pass = 1;
+    if (blackbox_enabled()) {
+        if (!fx->pass->blackbox_id)
+            fx->pass->blackbox_id = blackbox_render_pass_id(fx->name, fx->cur->name, fx->pass->name);
+        blackbox_render_pass_begin(fx->pass->blackbox_id);
+    }
 #if NFS_GAME == NFS_GAME_PRIVATE
 #include "game_frontend_begin.h"
 #endif
@@ -1214,9 +1221,12 @@ static int e_CommitChanges(Cpu *c) {
     RET(D3D_OK, 1);
 }
 #if NFS_GAME == NFS_GAME_MW
-static int e_EndPass(Cpu *c) { Effect *fx = FX; fx->in_pass = 0; snprintf(diag_fx_pass, sizeof diag_fx_pass, "(no effect pass)"); RET(D3D_OK, 1); }
+static int e_EndPass(Cpu *c) { blackbox_render_pass_end(); Effect *fx = FX; fx->in_pass = 0; snprintf(diag_fx_pass, sizeof diag_fx_pass, "(no effect pass)"); RET(D3D_OK, 1); }
 #else
+#define e_EndPass blackbox_private_EndPass
 #include "game_frontend_end.h"
+#undef e_EndPass
+static int e_EndPass(Cpu *c) { blackbox_render_pass_end(); return blackbox_private_EndPass(c); }
 #endif
 static int e_End(Cpu *c) {
     Effect *fx = FX;

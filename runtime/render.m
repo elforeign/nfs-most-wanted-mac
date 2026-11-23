@@ -1116,6 +1116,7 @@ static int ssao_depth_prepare(id<MTLTexture> z) {
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];
     rp.depthAttachment.texture=ssao_half_depth;rp.depthAttachment.loadAction=MTLLoadActionDontCare;rp.depthAttachment.storeAction=MTLStoreActionStore;
     [rp setSamplePositions:ssao_samples count:4];
+    blackbox_render_host(frame_serial, BB_HOST_DEPTH);
     if(gpt_on)gpt_render_auto(rp,"ssao half depth");
     id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
     [e setRenderPipelineState:ssao_depth_pipeline];[e setDepthStencilState:ssao_write_depth];[e setFragmentTexture:z atIndex:0];
@@ -1133,6 +1134,7 @@ static void ssao_open(id<MTLTexture> z, int allow_cuts) {
     rp.depthAttachment.texture=z;rp.depthAttachment.loadAction=MTLLoadActionLoad;rp.depthAttachment.storeAction=(cuts&POST_CUTS_AO_DEPTH)?MTLStoreActionDontCare:MTLStoreActionStore;
     if(z.pixelFormat==MTLPixelFormatDepth32Float_Stencil8){rp.stencilAttachment.texture=z;rp.stencilAttachment.loadAction=MTLLoadActionDontCare;rp.stencilAttachment.storeAction=MTLStoreActionDontCare;}
     if(gpt_on)gpt_render_auto(rp,ssao_reference_record?"ssao reference coverage":"ssao half coverage");
+    blackbox_render_host(frame_serial, BB_HOST_COVERAGE);
     enc=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(enc);enc_samples=(uint32_t)rp.colorAttachments[0].texture.sampleCount;
     memset(&eb,0,sizeof eb);pass_dirty=0;if(!ssao_reference_record)ssao_cleared=frame_serial;
     // A discarded all-white MS mask can be reconstructed by the next Clear.
@@ -1202,6 +1204,7 @@ static void begin_pass(void) {
     pending_clear_flags = 0;
     rp.visibilityResultBuffer = vis_buf;           // occlusion queries (below); slots a pass doesn't count into are left alone
     if (gpt_on) gpt_render_auto(rp, soft_smoke_encoding ? "soft smoke" : gpt_phase);
+    if (soft_smoke_encoding) blackbox_render_host(frame_serial, BB_HOST_SMOKE);
     enc = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(enc);
     enc_samples = rt0 ? (uint32_t)rt0.sampleCount : ds ? (uint32_t)ds.sampleCount : 1;
@@ -1248,6 +1251,7 @@ static int soft_smoke_snapshot_copy(id<MTLTexture> z) {
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (gpt_on) gpt_render_auto(rp, "soft smoke depth nearest");
+    blackbox_render_host(frame_serial, BB_HOST_DEPTH);
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(e);
     [e setRenderPipelineState:pso]; [e setFragmentTexture:z atIndex:0];
@@ -1359,6 +1363,7 @@ static void soft_late_replay(NSArray *draws) {
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=soft_late_layer;
     rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0);rp.colorAttachments[0].storeAction=MTLStoreActionStore;
     if(gpt_on)gpt_render_auto(rp,"soft smoke particles 1x");
+    blackbox_render_host(frame_serial, BB_HOST_SMOKE);
     id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
     for(id list in draws)rt_render_list_replay(list,e);[e endEncoding];
 }
@@ -1384,6 +1389,7 @@ static void soft_late_composite(id<MTLTexture> scene) {
     MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=scene;
     rp.colorAttachments[0].loadAction=MTLLoadActionLoad;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
     if(gpt_on)gpt_render_auto(rp,"soft smoke composite 1x");
+    blackbox_render_host(frame_serial, BB_HOST_SMOKE);
     id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
     if(scaled) {
         float size[2]={(float)scene.width,(float)scene.height};
@@ -1407,6 +1413,7 @@ static void soft_proof_shot(id<MTLTexture> t,const char *name,uint64_t frame) {
     int floating=t.pixelFormat==MTLPixelFormatRGBA16Float;
     NSUInteger w=t.width,h=t.height,pitch=w*(floating?8:4);
     id<MTLBuffer> b=[mtl newBufferWithLength:pitch*h options:MTLResourceStorageModeShared];if(!b)return;
+    blackbox_render_host(frame_serial, BB_HOST_SMOKE);
     id<MTLBlitCommandEncoder> e=gpt_blit(cmd,"soft smoke proof image");
     [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1) toBuffer:b destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch*h];[e endEncoding];
     NSString *path=[NSString stringWithFormat:@"%s/soft_pair_%llu_%s.png",diag_dir,(unsigned long long)frame,name];
@@ -1446,6 +1453,7 @@ static int soft_proof_begin(id<MTLTexture> scene,id<MTLTexture> z) {
         if(!r->tex||(samples>1&&!r->ms))return 0;
         MTLRenderPassDescriptor *rp=soft_proof_pass(r,0,0);
         if(gpt_on)gpt_render_auto(rp,"soft smoke proof sample copy");
+        blackbox_render_host(frame_serial, BB_HOST_SMOKE);
         id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
         [e setRenderPipelineState:pso[samples]];[e setFragmentTexture:scene atIndex:0];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
         if(i==0)soft_proof_shot(r->tex,"scene",frame_serial);
@@ -1471,6 +1479,7 @@ void render_soft_smoke_late(id<MTLTexture> scene) {
                 MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat width:scene.width height:scene.height mipmapped:NO];
                 d.usage=MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget;d.storageMode=MTLStorageModePrivate;r->tex=[mtl newTextureWithDescriptor:d];
             }
+            blackbox_render_host(frame_serial, BB_HOST_QUAD);
             quad_into(cmd,scene,MTLRegionMake2D(0,0,scene.width,scene.height),r->tex,0,0,MTLRegionMake2D(0,0,scene.width,scene.height),0);
         }
         soft_proof_shot(scene,"scene",frame_serial);
@@ -1697,6 +1706,8 @@ static void *ring_alloc(NSUInteger n, uint32_t *off, id<MTLBuffer> __unsafe_unre
 // - Embedded effects are prewarmed even on an empty cache. Demand misses never wait on unrelated compiles.
 static dispatch_queue_t shader_q;
 static uint64_t stat_deferred;
+uint64_t render_deferred_count(void) { return stat_deferred; }
+uint64_t render_failure_count(void) { return stat_fail; }
 // BEGIN offline shader options test
 // Ignore bindings the shader never reads. This lets the load-time catalogue match
 // draw-time options without compiling permutations of unrelated bound textures.
@@ -1910,6 +1921,11 @@ static char *shader_replacement(ShaderEntry *e) {
         char *patched=headlights_shader(source?source:e->refl.msl,&e->refl,headlight==HL_CASTER,material);
         free(source);source=patched;owner->mat=e->mat;
     }
+#if NFS_GAME == NFS_GAME_MW
+    char *neutral_fog = daynight_fog_shader(source ? source : e->refl.msl,
+        e->tokens, e->ntokens, e->refl.shader_type == SM_VERTEX);
+    if (neutral_fog) { free(source); source = neutral_fog; }
+#endif
     pthread_mutex_unlock(&shader_source_mu);
     return source;
 }
@@ -4623,6 +4639,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
             for(int i=0;i<5;++i){
                 MTLRenderPassDescriptor *rp=soft_proof_pass(&soft_proof_rt[i],1,1);
                 if(gpt_on)gpt_render_auto(rp,"soft smoke proof replay");
+                blackbox_render_host(frame_serial, BB_HOST_SMOKE);
                 id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];if(gpt_on)gpt_name(e);
                 rt_render_list_replay(proof_tee->lists[i],e);[e endEncoding];
             }
@@ -4635,6 +4652,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
 void blit_quad(id<MTLTexture> src, MTLRegion sr, id<MTLTexture> dst, NSUInteger level, NSUInteger slice, MTLRegion dr, int linear) {
     end_pass();
     ensure_cmd();
+    blackbox_render_host(frame_serial, BB_HOST_QUAD);
     quad_into(cmd, src, sr, dst, level, slice, dr, linear);
 }
 void quad_into(id<MTLCommandBuffer> cb, id<MTLTexture> src, MTLRegion sr, id<MTLTexture> dst, NSUInteger level, NSUInteger slice, MTLRegion dr, int linear) {

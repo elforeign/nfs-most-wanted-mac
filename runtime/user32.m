@@ -504,11 +504,13 @@ static void pump(int wait) {
 static const NSWindowStyleMask windowed_style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
 static int ns_fullscreen(const Win *w) { return w->full; }
+// NFS_FULLSCREEN_NOTCH=1 (F10 Fill notch area): Borderless also covers the strip beside the camera housing.
+static int notch_fill(void) { const char *e = getenv("NFS_FULLSCREEN_NOTCH"); return e && (atoi(e) || !strcasecmp(e, "on")) && !app_native_fullscreen(); }
 static NSRect ns_content_rect(const Win *w) {
     NSScreen *s = [NSScreen mainScreen];
     if (ns_fullscreen(w)) {
         NSRect f = s.frame;
-        if (@available(macOS 12.0, *)) f.size.height -= s.safeAreaInsets.top;
+        if (!notch_fill()) if (@available(macOS 12.0, *)) f.size.height -= s.safeAreaInsets.top;
         return f;
     }
     CGFloat k = s.backingScaleFactor;
@@ -663,6 +665,18 @@ void user32_fullscreen_mode_changed(void) {
     Win *w = game_window();
     app_fullscreen_mode_reset();
     if (w && w->ns) ns_reconcile_mode(w);
+}
+int widescreen_display_changed(void);
+void user32_notch_fill_changed(void) {   // F10 Fill notch area: re-fit the borderless frame, then the native resolution
+    void (^refit)(void) = ^{
+        Win *w = game_window();
+        if (w && w->ns && ns_fullscreen(w) && !app_native_fullscreen() && !w->native_transition) [w->ns setFrame:ns_content_rect(w) display:YES];
+        fprintf(stderr, "boot: full screen window re-fit (notch area %s)\n", notch_fill() ? "filled" : "below");
+    };
+    if (NSThread.isMainThread) refit(); else dispatch_async(dispatch_get_main_queue(), refit);
+#if NFS_GAME == NFS_GAME_MW
+    widescreen_display_changed();   // the other game takes its native resolution at launch
+#endif
 }
 void user32_toggle_fullscreen(void) { Win *w = game_window(); if (w) ns_set_fullscreen(w, !w->full); }
 // portmenu.m: before the menu takes the input, keys and mouse buttons held now go up for the game (as on focus loss).
@@ -1215,7 +1229,7 @@ void user32_display_pixels(int *w, int *h) {
     const char *fake = getenv("NFS_DISPLAY_PIXELS");
     if (fake && sscanf(fake, "%dx%d", w, h) == 2 && *w > 0 && *h > 0) { *w &= ~7; *h &= ~7; return; }
     *w = (int)(screen_w * screen_scale) & ~7;
-    *h = (int)((screen_h - screen_top_inset) * screen_scale) & ~7;
+    *h = (int)((screen_h - (notch_fill() ? 0 : screen_top_inset)) * screen_scale) & ~7;
 }
 
 // ---------------- wsprintf ----------------

@@ -2,6 +2,12 @@
 
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
+Carbon movie requests and per-frame movie/NIS observations also reach F10 and
+hang/stall black-box history without `BOOT_DIAG`. For witnessed INIS class
+`009EC6E8`, the report includes state, elapsed/length and unchanged playback age,
+so advancing frames do not imply advancing playback. Other classes explicitly
+remain not decoded yet. See [blackbox.md](blackbox.md) for layouts and fixture proof.
+
 **Tries that did not hang (41 runs, 0 hang or stall reports):** 4-way concurrent starts x4, 6-way x2, 4-way under 18
 busy cores, 4-way during a full `build_all.py` (18 cores), 3-way at 60 Hz and at 120 Hz, 3-way with
 `BOOT_TEST_GILYIELD=1` (test only: hands the GIL over at every import, as an overloaded machine does after 2 ms; it would

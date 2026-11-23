@@ -1,5 +1,9 @@
 """Headless staging proofs using synthetic PC/Xbox sources and stub compilers.
 
+Moved-source regression: saved choices, renamed PC folder, real stage-only CLI:
+original path-only control resumes 0/1 updates; verified retained inputs resume
+1/1. Locate rejects 1/1 wrong replacements and accepts 1/1 matching moved sources.
+
 Verification: 17/17 tests pass (remembered disc update and speed.exe round-trip; earlier choices still load). Good/broken controls: 3/3 good pipeline oracles (failed build has no readiness,
 stage preserves active files, remembered Xbox extras survive); 3/3 deliberately
 broken pipelines must fail those same oracles (publish after failure, install
@@ -35,6 +39,96 @@ s = b.staging
 
 
 class StageTests(Fixture):
+    def test_moved_source_update_and_path_only_control(self):
+        self.build()
+        self.pc.rename(self.home / 'Moved PC')
+        # Restoring the original path-only behavior reproduces the original
+        # missing-source failure through the same CLI and update pipeline.
+        with mock.patch.object(s, 'resolve_source', side_effect=lambda state, path, **kw: Path(path)):
+            broken = self.run_stage(self.home / 'broken-update', remembered=True)
+        self.assert_failed(self.home / 'broken-update', broken)
+        self.assert_ready(self.home / 'update', self.run_stage(remembered=True))
+        print('Moved-source update: original resumed 0/1; verified retained copy resumed 1/1')
+
+    def test_earlier_install_without_receipts_revalidates_kept_pc(self):
+        self.build()
+        (self.paths.state / 'source-inputs.json').unlink()
+        self.pc.rename(self.home / 'Moved PC')
+        self.assert_ready(self.home / 'update', self.run_stage(remembered=True))
+
+    def test_kept_pc_does_not_replace_an_unrelated_missing_choice(self):
+        self.build()
+        other = self.home / 'Another game copy'
+        with self.assertRaisesRegex(ins.InstallError, "Can't find Another game copy"):
+            s.resolve_source(self.paths.state, other, profile=self.paths.data, pc=True)
+
+    def test_locate_verifies_content_retries_and_remembers(self):
+        self.build()
+        kept = s.installed_pc(self.paths.data)
+        # Make the retained copy fail verification so the original is needed.
+        write(kept / 'tampered.bin', b'changed')
+        moved = self.home / 'Moved PC'
+        self.pc.rename(moved)
+        wrong = self.home / 'Different PC'
+        write(wrong / 'different.bin', b'not the source')
+        requests = []
+        answers = iter([wrong, moved])
+        def locate(request):
+            requests.append(dict(request))
+            return str(next(answers))
+        self.assertEqual(s.resolve_source(self.paths.state, self.pc, profile=self.paths.data,
+                                        pc=True, locate=locate), moved)
+        self.assertEqual(len(requests), 2)
+        self.assertIn('does not verify', requests[-1]['error'])
+        self.assertEqual(requests[0]['title'], "Can't find " + self.pc.name)
+        self.assertEqual(requests[0]['body'], f'It was at {self.pc}. If you moved it, choose its new location. Your settings and cars are kept.')
+        self.assertEqual(s.resolve_source(self.paths.state, self.pc, profile=self.paths.data, pc=True), moved)
+        self.assert_ready(self.home / 'update', self.run_stage(remembered=True))
+
+    def test_deleted_source_skip_preserves_active_install(self):
+        self.build()
+        source = self.home / 'optional.iso'
+        write(source, b'original media')
+        s.remember_sources(self.paths.state, [source])
+        source.unlink()
+        before = ins.digest_tree(self.paths.data)
+        with self.assertRaisesRegex(ins.InstallError, 'settings and cars are kept'):
+            s.resolve_source(self.paths.state, source, locate=lambda request: None)
+        self.assertEqual(ins.digest_tree(self.paths.data), before)
+
+    def test_moved_xbox_locate_resumes_cli_with_nonce_replies(self):
+        self.remember_xbox()
+        moved = self.home / 'Moved Xbox.iso'
+        self.xbox.rename(moved)
+        replies = self.paths.state / 'source-replies'
+        seen = []
+        class ReplyStream(io.StringIO):
+            def write(stream, text):
+                result = super().write(text)
+                if text.startswith('{'):
+                    event = json.loads(text)
+                    if event.get('ev') == 'source-missing':
+                        seen.append(event)
+                        write(replies / (event['token'] + '.json'), json.dumps(dict(path=str(moved))))
+                return result
+        # Drive the actual app/backend reply protocol without a dialog.
+        out = ReplyStream()
+        with self.pipeline_stubs(), mock.patch.object(b, 'ROOT', self.source), \
+             mock.patch.object(b, 'build', side_effect=functools.partial(b.build, source_root=self.source)), \
+             mock.patch.object(b, 'Runner', side_effect=lambda log, env, work: FakeRunner(log, env, work)), \
+             mock.patch.object(b, 'prepare_x360', side_effect=lambda source, *a, **kw: self.xbox_prepare(moved, *a, **kw)), \
+             mock.patch('sys.stdout', out):
+            self.xbox = moved
+            rc = b.main(['--stage-only', '--stage', str(self.home / 'update'), '--work', str(self.paths.work),
+                         '--events', '--source-replies', str(replies)])
+        self.assertEqual(rc, 0, out.getvalue()[-1000:])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen[0]['token']), 32)
+        from test_car_setup_flow import validate_event
+        validate_event(self, seen[0])
+        self.assertTrue((self.home / 'update/ready.json').is_file())
+        self.assertEqual(list(replies.iterdir()), [])
+
     def run_stage(self, target=None, remembered=False, fail=None, extra=(), default_work=False, builder=None):
         target = target or self.home / "update"
         build = builder or functools.partial(b.build, source_root=self.source)
@@ -180,7 +274,7 @@ class StageTests(Fixture):
         with mock.patch.object(b, "preflight", side_effect=AssertionError("should not build")):
             result = self.run_stage(remembered=True)
         self.assert_failed(self.home / "update", result)
-        self.assertIn("X360_SOURCE_MISSING", result[1][-1]["msg"])
+        self.assertIn("Can't find " + self.xbox.name, result[1][-1]["msg"])
 
     def test_importer_cannot_silently_drop_xbox(self):
         self.remember_xbox()

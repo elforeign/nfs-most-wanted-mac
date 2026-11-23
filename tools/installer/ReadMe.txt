@@ -28,8 +28,10 @@ What you can use:
   - Have a .rar or .bin/.cue? Unpack it to a folder first.
 
 Opening the app the first time:
-  This app is not notarized by Apple, so macOS blocks it the first time. Open it once, click Done,
-  then go to System Settings > Privacy & Security and click "Open Anyway" next to its name.
+  1. Open Setup from this disk image.
+  2. If macOS says it can’t verify Setup, click Done.
+  3. Go to System Settings > Privacy & Security > Open Anyway for Setup.
+  4. Confirm that you want to open Setup.
 
 Then:
   1. Install Apple's Command Line Tools if asked (free).

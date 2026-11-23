@@ -20,6 +20,7 @@ __attribute__((weak)) void render_soft_smoke_reload(void) {}
 __attribute__((weak)) void x360_post_ssao_reload(void) {}
 int x360_post_ssao_enabled(void);               // x360_post.m
 void user32_fullscreen_mode_changed(void);      // user32.m
+void user32_notch_fill_changed(void);           // user32.m
 uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *args);
 
 #define LOADED_FLAG 0x00982C39u                  // LoadedFlagMaybe: the next frame runs the full device Reset
@@ -56,3 +57,4 @@ void live_picture_apply_reload(int v) {          // contact shadows, soft smoke
     if (diag_on) { const char *e = getenv("NFS_SOFT_SMOKE"); diag_event("live picture: contact shadows=%d soft smoke switch=%s", x360_post_ssao_enabled(), e ? e : "unset"); }
 }
 void live_picture_apply_fullscreen(int v) { (void)v; user32_fullscreen_mode_changed(); }   // window only, no device Reset
+void live_picture_apply_notch(int v) { (void)v; user32_notch_fill_changed(); }   // borderless frame and native resolution

@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """T11: Setup app protocol, cancel, environment and legacy-updater checks (offline; temp dirs only).
 
+P5 item 11 Review: destination-only/broken aggregation 0/1; grouped volume fixture 1/1.
+P5 item 7 disc collection: eager-check control 0/2; explicit Check 2/2 products.
+
 X360 choices: 8/8 combinations pass; original all-enabled loading violates 7/8.
+Remembered source fields: original empty loading restores 0/2 product fixtures;
+current Setup restores 2/2 (PC, destination, disc supplements and car selections).
+Updater Locate: original missing prompt hook passes 0/1; current native UI passes
+4/4 Locate/Skip fixtures across both products, with dialogs replaced by recorders.
 Car selections: two ticked PC cars reproduce 2/2 pinned specs; defaults empty;
 zero ticks and missing sources produce zero import arguments. Edited metadata
 exits 1 (FAIL refusal), packaged metadata exits 0 (PASS). Removing the empty
@@ -23,6 +30,10 @@ its page order (Xbox 360 copy -> Review, no Most Wanted extras page) and Most Wa
 The original command (backendArguments always gave Most Wanted's --pc; pinned by SHA-256 below) violates 13 of 23
 (the three commands, their Most Wanted inputs and five source commands). The compiled app's folder, executable,
 ZIP, 7z and ISO commands also reach the real pipeline: all five accepted with the decoded ISO tree; source digests stay fixed.
+
+First-run recovery violations (old -> new): silent Gatekeeper failure 1 -> 0;
+cancelled developer-tools install strands Welcome 1 -> 0; generic car import
+success 1 -> 0. Each oracle runs against a compiled broken control.
 
 Run: python3 -I tests/setup/test_app.py        (needs swiftc; no network, no window, no game files)
 
@@ -49,6 +60,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SWIFT = ROOT / 'tools/installer/SetupApp.swift'
@@ -429,18 +441,285 @@ def updater_failures(fn):
 
 
 class AppTests(unittest.TestCase):
+    def test_P5_7_collect_disc_inputs_before_check(self):
+        """Both products: broken eager selection 0/2; collected selection 2/2."""
+        text = SWIFT.read_text()
+        picker_start = text.index('    func pickFolder(')
+        picker_end = text.index('\n    func locateSource(', picker_start)
+        text = text[:picker_start] + '''    func pickFolder(message: String, files: Bool = false, types: [UTType] = [], folders: Bool = true) -> URL? {
+            return URL(fileURLWithPath: "/disc.iso")
+        }
+''' + text[picker_end:]
+        check_start = text.index('    func runCheck(forX360: Bool) {')
+        check_end = text.index('\n    func build()', check_start)
+        text = text[:check_start] + '''    func runCheck(forX360: Bool) { x360Status += "check" }
+''' + text[check_end:]
+        hook = '''
+        if args.count > 1, args[1] == "--disc-input-test" {
+            var rows: [[String: Any]] = []
+            for product in [SetupProduct.mw, .carbon] {
+                let model = Setup(product: product)
+                if product == .mw { model.chooseKind(.disc); model.chooseDisc() }
+                else { model.choosePC() }
+                model.chooseUpdate(); model.chooseExe(); model.chooseOtherDisc(2)
+                let before = model.x360Status
+                model.runCheck(forX360: false)
+                rows.append(["before": before, "after": model.x360Status,
+                             "instructions": model.discInstructions,
+                             "args": model.installArguments(mode: .check, pc: model.pc!, x360: nil,
+                                                           dest: model.dest, work: workDir())])
+            }
+            print(jsonString(rows)); exit(0)
+        }
+'''
+        text = text.replace('        let args = CommandLine.arguments\n', '        let args = CommandLine.arguments\n' + hook)
+
+        def collected(source):
+            binary = compile_app(source)
+            rows = json.loads(subprocess.check_output([binary, '--disc-input-test'], text=True))
+            passed = 0
+            for row, version, exe in zip(rows, ('1.3', '1.4'), ('speed.exe', 'NFSC.exe')):
+                command = row['args']
+                passed += (row['before'] == '' and row['after'] == 'check'
+                           and row['instructions'] == f'A disc install needs three things: the disc (or a copy of its files), the official {version} update, and the {exe} from that update. Choose all three, then press Check.'
+                           and command[command.index('--pc-disc') + 1] == '/disc.iso')
+            return passed
+
+        self.assertEqual(collected(text.replace('        discInputsChanged()\n', '        runCheck(forX360: false)\n')), 0)
+        self.assertEqual(collected(text), 2)
+        # Both product panels use the same picker rows and Check action.
+        self.assertEqual(SWIFT.read_text().count('\n                        discInputs\n') +
+                         SWIFT.read_text().count('\n                    discInputs\n'), 2)
+        self.assertIn('Button("Add another disc")', SWIFT.read_text())
+
+    def test_P5_11_review_totals_and_retry(self):
+        """P5 item 11 Review: original 0/1; grouped volume/shortage/Retry fixture 1/1."""
+        source = SWIFT.read_text()
+        self.assertIn("struct StorageVolume", source)
+        self.assertIn('Button("Retry") { s.build() }', source)
+        self.assertIn('Button("Retry") { s.objectWillChange.send() }', source)
+        harness = r'''
+        if args.count == 2, args[1] == "--p5-space-test" {
+            let needs: [(URL, Double)] = [(URL(fileURLWithPath: "/work"), 5),
+                (URL(fileURLWithPath: "/cache"), 4), (URL(fileURLWithPath: "/data"), 3),
+                (URL(fileURLWithPath: "/destination"), 0.25)]
+            let volumes = storagePlan(needs) { path in
+                let external = path.path == "/cache"
+                return StorageVolume(id: external ? "external" : "internal", name: external ? "Cache Disk" : "Mac",
+                                     availableGB: external ? 2 : 7)
+            }
+            guard volumes.count == 2,
+                  let cache = volumes.first(where: { $0.id == "external" }), cache.requiredGB == 4, !cache.sufficient,
+                  cache.shortage == "Not enough space on Cache Disk: 2.0 GB more needed. Free up space there, then press Retry.",
+                  let internalVolume = volumes.first(where: { $0.id == "internal" }), internalVolume.requiredGB == 8.25,
+                  !internalVolume.sufficient else { exit(1) }
+            let full = storagePlan(needs) { _ in StorageVolume(id: "one", name: "One", availableGB: 20) }
+            guard full.count == 1, full[0].requiredGB == 12.25, full[0].sufficient else { exit(1) }
+            let s = Setup()
+            guard s.storageNeeds.count == 4 else { exit(1) }
+            print("P5 Review PASS: 2 volumes, 12.25 GB total, both shortages detected; Retry retained")
+            exit(0)
+        }
+'''
+        source = source.replace('        let args = CommandLine.arguments', '        let args = CommandLine.arguments\n' + harness)
+        binary = compile_app(source)
+        result = subprocess.run([str(binary), '--p5-space-test'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("P5 Review PASS", result.stdout)
+        broken = source.replace("total.requiredGB += amount", "total.requiredGB = amount")
+        self.assertNotEqual(source, broken)
+        control = subprocess.run([str(compile_app(broken)), '--p5-space-test'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(control.returncode, 1, control.stdout + control.stderr)
+
+
+    def test_updater_locate_prompt_and_reply_both_products(self):
+        prefix = r'''
+#import <Cocoa/Cocoa.h>
+static NSMutableArray *fixtureButtons;
+static NSString *fixture;
+static BOOL fixtureSkip;
+@interface LocateAlert : NSObject
+@property NSString *messageText;
+@property NSString *informativeText;
+- (void)addButtonWithTitle:(NSString *)title;
+- (NSModalResponse)runModal;
+@end
+@implementation LocateAlert
+- (void)addButtonWithTitle:(NSString *)title { [fixtureButtons addObject:title]; }
+- (NSModalResponse)runModal { return fixtureSkip ? NSAlertSecondButtonReturn : NSAlertFirstButtonReturn; }
+@end
+@interface LocatePanel : NSObject
+@property BOOL canChooseDirectories, canChooseFiles, allowsMultipleSelection;
+@property NSString *message, *prompt;
+@property NSURL *URL;
++ (instancetype)openPanel;
+- (NSModalResponse)runModal;
+@end
+@implementation LocatePanel
++ (instancetype)openPanel { LocatePanel *p = [LocatePanel new]; p.URL = [NSURL fileURLWithPath:@"/moved/source"]; return p; }
+- (NSModalResponse)runModal { return NSModalResponseOK; }
+@end
+'''
+        suffix = r'''
+void settings_add(Setting *setting) { (void)setting; }
+const char *userdata_dir(void) { return fixture.fileSystemRepresentation; }
+int main(int argc, char **argv) { @autoreleasepool {
+    fixture = [NSString stringWithUTF8String:argv[1]]; fixtureSkip = argc > 2;
+    fixtureButtons = [NSMutableArray new]; pu_job = fixture; pu_loaded = YES; pu_state = PU_BUILDING;
+    NSString *token = @"0123456789abcdef0123456789abcdef";
+    NSDictionary *request = @{@"token":token, @"title":@"Can't find Source", @"body":@"It was at /old/source. If you moved it, choose its new location. Your settings and cars are kept."};
+    [NSFileManager.defaultManager createDirectoryAtPath:[fixture stringByAppendingPathComponent:@"source-replies"] withIntermediateDirectories:YES attributes:nil error:nil];
+    int held = open([fixture stringByAppendingPathComponent:@"prepare.lock"].fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+    flock(held, LOCK_EX | LOCK_NB);
+    PUWrite([fixture stringByAppendingPathComponent:@"progress.json"], @{@"schema":@1, @"state":@"building", @"message":@"Waiting for source", @"source":request});
+    PULoad();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10), dispatch_get_main_queue(), ^{
+        NSDictionary *reply = PURead([[fixture stringByAppendingPathComponent:@"source-replies"] stringByAppendingPathComponent:[token stringByAppendingString:@".json"]]);
+        NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"buttons":fixtureButtons, @"reply":reply ?: @{}} options:0 error:nil];
+        puts([[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String); close(held); exit(0);
+    });
+    dispatch_main();
+} }
+'''
+        source = (ROOT / 'runtime/pub_update.m').read_text().replace('NSAlert *alert = [NSAlert new]',
+                    'LocateAlert *alert = [LocateAlert new]').replace('NSOpenPanel *panel = [NSOpenPanel openPanel]',
+                    'LocatePanel *panel = [LocatePanel openPanel]')
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for game, broken in ((1, False), (2, False), (1, True)):
+                text = source.replace('PULocateSource(value[@"source"]);', '(void)0;') if broken else source
+                file = directory / f'locate-{game}-{broken}.m'
+                file.write_text(prefix + text + suffix)
+                binary = file.with_suffix('')
+                result = subprocess.run(['clang', '-fobjc-arc', '-Wno-incompatible-pointer-types',
+                                         '-I', str(ROOT / 'runtime'), f'-DNFS_GAME={game}', str(file),
+                                         '-framework', 'Cocoa', '-o', str(binary)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                for skip in (False, True) if not broken else (False,):
+                    job = directory / f'job-{game}-{broken}-{skip}'
+                    job.mkdir()
+                    result = subprocess.run([str(binary), str(job)] + (['skip'] if skip else []),
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    row = json.loads(result.stdout)
+                    if broken:
+                        self.assertEqual(row, dict(buttons=[], reply={}))
+                    else:
+                        self.assertEqual(row['buttons'], ['Locate…', 'Skip this source'])
+                        self.assertEqual(row['reply'], dict(path=None if skip else '/moved/source'))
+
+    def test_remembered_source_fields_and_original_control(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / 'Carbon').mkdir()
+            saved = dict(format_version=1, pc='/old/game', x360='/old/console', destination='/apps/Game.app',
+                         pc_update='/old/patch', pc_exe='/old/exe', pc_discs=['/old/disc2'])
+            for folder in (state, state / 'Carbon'):
+                (folder / 'source-choices.json').write_text(json.dumps(saved))
+            (state / 'car-source-choices.json').write_text(json.dumps(dict(source='/old/cars', selection=['car-one'])))
+            def restored(binary):
+                count = 0
+                for product in ('mw', 'carbon'):
+                    result = subprocess.run([str(binary), '--remembered-choices-test', product, str(state)],
+                                            capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    row = json.loads(result.stdout)
+                    if (row['pc'], row['x360'], row['dest'], row['update'], row['exe'], row['discs'], row['disc']) == \
+                       ('/old/game', '/old/console', '/apps', '/old/patch', '/old/exe', ['/old/disc2'], True):
+                        if product == 'carbon' or (row['carbon'], row['selection']) == ('/old/cars', ['car-one']):
+                            count += 1
+                return count
+            self.assertEqual(restored(self.real), 2)
+            broken = compile_app(mutate('let saved = read(gameState.appendingPathComponent("source-choices.json"))',
+                                        'let saved: [String: Any] = [:]'))
+            self.assertEqual(restored(broken), 0)
+
     @classmethod
     def setUpClass(cls):
         if not shutil.which('swiftc'):
             raise unittest.SkipTest('swiftc not available')
+        profile = mock.patch.dict(os.environ, {'NFSMW_SETUP_HOME': str(_CACHE / 'home')})
+        profile.start()
+        cls.addClassCleanup(profile.stop)
         cls.real = compile_app(SWIFT.read_text())
+
+    def test_gatekeeper_open_anyway(self):
+        path = 'System Settings > Privacy & Security > Open Anyway'
+        for doc in ('GETTING_STARTED.md', 'tools/installer/ReadMe.txt'):
+            self.assertIn(path, (ROOT / doc).read_text())
+        original = 'if current.domain == NSOSStatusErrorDomain {'
+        broken = compile_app(mutate(original, 'if false {'))
+
+        def explained(binary):
+            message = subprocess.check_output([binary, '--game-open-test', '-67018'], text=True)
+            return 'macOS blocked the game' in message and path in message
+
+        self.assertFalse(explained(broken))
+        self.assertTrue(explained(self.real))
+        self.assertNotIn(path, subprocess.check_output([self.real, '--game-open-test', '-10827'], text=True))
+
+    def test_cancelled_tools_install_can_retry(self):
+        source = mutate('if canContinue { return nil }',
+                        'if canContinue { return nil }; if case .waiting = self { return nil }')
+        source = source.replace('if case let .waiting(until) = self, now < until { return true }',
+                                'if case .waiting = self { return true }')
+        broken = compile_app(source)
+
+        def can_retry(binary):
+            got = json.loads(subprocess.check_output([binary, '--developer-tools-test'], text=True))
+            return (not got['polling'] and got['waitingButton'] == got['retryButton'] == got['failedButton']
+                    == 'Retry Install…' and 'Click Retry Install.' in got['message']
+                    and not got['continueWhileMissing'] and got['continueEnabled'])
+
+        self.assertFalse(can_retry(broken))
+        self.assertTrue(can_retry(self.real))
+
+    def test_import_success_shows_activation_steps(self):
+        steps = ('In the game, press F10. Open Cars & cutscenes. '
+                 'Turn on Cars from later games. Restart the game.')
+        broken = compile_app(mutate(f'"{steps}"', '"Extras operation completed."'))
+
+        def shows_steps(binary):
+            got = json.loads(subprocess.check_output([binary, '--extras-flow-test'], text=True))
+            return got['imported'] == steps
+
+        self.assertFalse(shows_steps(broken))
+        self.assertTrue(shows_steps(self.real))
+
+    def test_recovery_uses_the_matching_product_profile(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as tmp:
+            home = Path(tmp)
+            journals = []
+            restored = []
+            for profile in (home / 'data', home / 'data/Carbon'):
+                profile.mkdir()
+                token = '1' * 32
+                original = profile / 'roots.txt'
+                backup = profile / f'.roots.txt.backup-{token}'
+                backup.write_text(profile.name)
+                stat = backup.stat()
+                journal = profile / '.install-journal.json'
+                journal.write_text(json.dumps(dict(state='preparing', token=token, dest=str(home / 'apps'),
+                                                   ids={str(original): [[stat.st_dev, stat.st_ino], None]})))
+                journals.append(journal)
+                restored.append(original)
+            env = {key: value for key, value in os.environ.items() if not key.startswith('NFSMW_SETUP_')}
+            env['NFSMW_SETUP_HOME'] = tmp
+            for product, journal, original in zip(('carbon', 'mw'), reversed(journals), reversed(restored)):
+                args = json.loads(subprocess.check_output(
+                    [self.real, '--recovery-arguments-test', product, ROOT, home / 'work'], text=True))
+                subprocess.run([sys.executable, *args], env=env, check=True, capture_output=True, timeout=30)
+                self.assertFalse(journal.exists())
+                self.assertEqual(original.read_text(), original.parent.name)
+                if product == 'carbon':
+                    self.assertTrue(journals[0].exists())
 
     def test_mw_extras_uses_the_selected_sevenzip_file_or_folder(self):
         # On 999f865a both paths are redirected to pc_src (0/2); after the fix both selections pass (2/2).
         source = SWIFT.read_text()
         start = source.index('        let previous = state\n', source.index('    private func launch('))
         end = source.index('    func consume(', start)
-        source = source[:start] + '''        print(jsonString(["arguments": arguments ?? []]))
+        source = source[:start] + '''        print(jsonString(["arguments": arguments]))
         exit(0)
     }
 
@@ -687,7 +966,7 @@ class AppTests(unittest.TestCase):
         self.assertIn('if !s.carbonProduct { featureList }', text)
         self.assertEqual(text.count('Button("Manage installed extras…")'), 2)
         self.assertEqual(text.count('            if !s.carbonProduct {\n                Button("Manage installed extras…")'), 2)
-        self.assertEqual(text.count('            }\n            Button("Export all-in-one app…")'), 2)
+        self.assertEqual(text.count('            }\n            Button(s.exportActionTitle)'), 2)
         self.assertIn('                    } else {\n                        row("Xbox 360 copy"', text)
         choose = text.split('    func chooseCarbonX360() {', 1)[1].split('\n    }\n', 1)[0]
         self.assertIn('runCheck(forX360: true)', choose, 'the console copy is validated when chosen')

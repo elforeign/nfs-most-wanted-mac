@@ -809,6 +809,68 @@ def run_gpu():
     return proof
 
 
+FOG_MAIN = r'''
+int main(int argc,char **argv) { @autoreleasepool {
+    id<MTLDevice> d=MTLCreateSystemDefaultDevice(); assert(d);
+    unsigned count=0;
+    for(int i=1;i<argc;++i) {
+        NSData *bytecode=[NSData dataWithContentsOfFile:@(argv[i])];
+        assert(bytecode.length>4 && bytecode.length%4==0);
+        SmOptions opt;sm_default_options(&opt);SmResult sm={};
+        assert(!sm_translate(bytecode.bytes,bytecode.length/4,&opt,&sm));
+        int vertex=sm.shader_type==SM_VERTEX;
+        char *sky=NULL;
+        if (lighting_mode_d65() && !vertex && sky_pass(sm.program_key))
+            sky=daynight_sky_patch(sm.msl,sky_pass(sm.program_key));
+        if (lighting_mode_d65() && vertex && sm.program_key==0x43afa2430c786f3dull)
+            sky=daynight_sky_patch_vertex(sm.msl);
+        char *patched=daynight_fog_shader(sky?sky:sm.msl,bytecode.bytes,bytecode.length/4,vertex);
+        if(lighting_mode_d65()) {
+            assert(patched && strstr(patched,"dot(") && strstr(patched,"0.2126f, 0.7152f, 0.0722f"));
+            NSError *error=nil;
+            id<MTLLibrary> library=[d newLibraryWithSource:@(patched) options:nil error:&error];
+            if(!library)fprintf(stderr,"%s: %s\n",argv[i],error.localizedDescription.UTF8String);
+            assert(library);
+        } else assert(!patched);
+        free(sky);free(patched);sm_result_free(&sm);++count;
+    }
+    printf("MW fog/dome: %u program sources %s\n",count,lighting_mode_d65()?"patched and compiled":"passed through");
+    return 0;
+} }
+'''
+
+
+def run_fog():
+    shaders = ROOT/'host/shaders'
+    archive = shaders/'build/libsmtranslate.a'
+    if not archive.is_file():
+        return []
+    corpus = shaders/'testdata'
+    vertices = [f for folder in ('world', 'tree', 'worldnormalmap', 'worldreflect', 'glossywindow')
+                for f in sorted((corpus/folder).glob('*vs*.bin'))
+                if f.name != 't6_worldnormalmap_1_1_p0_vs_1_1.bin' or folder == 'worldnormalmap']
+    programs = vertices + sorted(f for f in (corpus/'skybox').glob('*.bin') if '_p1_vs_' not in f.name)
+    assert len(programs) == 15
+    with tempfile.TemporaryDirectory(prefix='daynight-fog-metal-') as temp:
+        path = Path(temp)
+        harness = path/'fog.m'
+        harness.write_text(GPU_HARNESS[:GPU_HARNESS.index('int main(void)')] + FOG_MAIN)
+        binary = path/'fog'
+        subprocess.run(['clang', '-fobjc-arc', '-DNFS_PUBLIC=1',
+                        f'-DSKY_SOURCE="{RUNTIME/"daynight_sky.c"}"', '-I', RUNTIME,
+                        '-I', ROOT/'recomp', harness, RUNTIME/'daynight.c', archive, '-lc++',
+                        '-framework', 'Metal', '-framework', 'Foundation', '-o', binary],
+                       capture_output=True, check=True)
+        results = []
+        for profile in ('', 'neutral-d65'):
+            result = subprocess.run([binary, *programs], capture_output=True, text=True,
+                                    env={**os.environ, 'NFS_WORLD_LIGHTING': profile})
+            assert result.returncode == 0, result.stdout + result.stderr
+            results.append(result.stdout.strip())
+            print(results[-1])
+        return results
+
+
 def check_moon_frames(clear, overcast, baseline, control):
     """Full-chain held PNG proof, using the independently recorded projection."""
     import numpy as np
@@ -894,7 +956,7 @@ if __name__ == '__main__':
     elif len(sys.argv) == 4 and sys.argv[1] == '--check-game-log':
         check_game_log(sys.argv[2], float(sys.argv[3]))
     else:
-        proof = run_math() + run_gpu() + run_density() + run_moon()
+        proof = run_math() + run_gpu() + run_density() + run_moon() + run_fog()
         output = ROOT / '.metal-cache/daynight-sky-proof.txt'
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text('\n'.join(proof) + '\n')

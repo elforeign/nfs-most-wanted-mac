@@ -15,6 +15,10 @@ report the completed car transaction. No command emits install done/ready.
 Missing optional source: original unfiltered selection FAIL (1 import error);
 filtered selection PASS (1 admitted, 1 named skip); all-missing selection
 preserves pointer bytes and invokes the importer zero times.
+Damaged-catalog Retry through the CLI: normal-plan control 0/1 (exit 1);
+repair preflight 1/1 (exit 0), verified pointer and save bytes preserved.
+Moved car source: original path-only control resumes 0/1 checks; Locate verifies
+the matching moved folder and resumes 1/1, preserving the active car pointer.
 """
 import io
 import hashlib
@@ -159,6 +163,25 @@ class CarSetupLifecycle(unittest.TestCase):
 
     def import_args(self, source=None):
         return ['--cars-import', '--carbon', str(source or self.f.carbon), '--cars-spec', str(self.selection)]
+
+    def test_moved_car_source_locate_and_path_only_control(self):
+        self.call(*self.import_args())
+        before = self.pointer.read_bytes()
+        original = self.f.carbon
+        moved = self.root / 'Moved Carbon'
+        original.rename(moved)
+        args = ['--cars-check', '--carbon', str(original), '--cars-spec', str(self.selection),
+                '--source-replies', str(self.base / 'state/replies')]
+        with mock.patch.object(b.staging, 'resolve_source', side_effect=lambda state, path, **kw: Path(path)):
+            self.call(*args, success=False)
+        requests = []
+        def locate(request):
+            requests.append(request)
+            return str(moved)
+        with mock.patch.object(b.staging, 'source_locator', return_value=locate):
+            self.call(*args)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(self.pointer.read_bytes(), before)
 
     def test_missing_selected_source_is_optional(self):
         import copy
@@ -350,7 +373,7 @@ class CarSetupLifecycle(unittest.TestCase):
     def test_repair_retry_rebuilds_rejected_preparation(self):
         self.call(*self.import_args())
         pointer = self.pointer.read_bytes()
-        entry = next((self.base / 'cache/cars').glob('car-import-*/c-*'))
+        entry = next((self.data / 'car-inputs').glob('car-import-*/c-*'))
         damaged = entry / 'outputs/GEOMETRY.BIN'
         damaged.chmod(0o644)
         damaged.write_bytes(b'corrupt retained cache')
@@ -359,6 +382,21 @@ class CarSetupLifecycle(unittest.TestCase):
         self.call(*self.import_args(), '--cars-repair')
         self.assertEqual(self.pointer.read_bytes(), pointer)
 
+    def test_repair_retry_rebuilds_damaged_active_catalog(self):
+        self.call(*self.import_args())
+        pointer = self.pointer.read_bytes()
+        generation = json.loads(pointer)['generation']
+        damaged = self.pointer.parent / generation / 'catalog.json'
+        damaged.chmod(0o644)
+        damaged.write_bytes(b'broken catalog')
+        self.call(*self.import_args(), success=False)
+        self.assertEqual(self.pointer.read_bytes(), pointer)
+        self.call(*self.import_args(), '--cars-repair')
+        self.assertEqual(self.pointer.read_bytes(), pointer)
+        _, events = self.call('--cars-list')
+        self.assertTrue(events[-1]['verified'])
+        self.assertEqual(len(list(self.pointer.parent.glob('.damaged-*'))), 1)
+
     def test_optional_preparation_keeps_custom_cache_usable_by_build(self):
         cache = self.root / 'custom-cache'
         with mock.patch.dict(os.environ, {'NFSMW_SETUP_CACHE': str(cache)}):
@@ -366,7 +404,7 @@ class CarSetupLifecycle(unittest.TestCase):
             paths = b.Paths(self.base / 'work')
             b.claim(paths.cache, False, b.SETUP_CACHE_NAMES, 'cache', paths.state)
             self.assertTrue(b.owned(paths.cache, paths.state))
-            self.assertTrue((paths.cache / 'cars').is_dir())
+            self.assertTrue((self.data / 'car-inputs').is_dir())
         self.assertTrue(self.pointer.exists())
 
     def test_management_needs_neither_sources_nor_installed_pc_roots(self):

@@ -567,6 +567,7 @@ static void x_pass(id<MTLRenderPipelineState> pso, id<MTLTexture> dst, id<MTLTex
     rp.colorAttachments[0].texture = dst; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (dst1) { rp.colorAttachments[1].texture = dst1; rp.colorAttachments[1].loadAction = MTLLoadActionDontCare; rp.colorAttachments[1].storeAction = MTLStoreActionStore; }
     if (gpt_on) gpt_render(rp, "x360 pass %lux%lu%s", (unsigned long)dst.width, (unsigned long)dst.height, x_tag);
+    blackbox_render_host_stage(frame_serial, BB_HOST_POST, hc_stage);
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(e);
     [e setRenderPipelineState:pso];
@@ -737,6 +738,7 @@ int render_x360_mirror(uint32_t tex, const X360PostParams *p, float exposure, in
     }
     end_pass();
     ensure_cmd();
+    blackbox_render_host(frame_serial, BB_HOST_COLOURFILTER);
     id<MTLBlitCommandEncoder> b = gpt_blit(cmd, "blit colourfilter copy");
     [b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(t.width, t.height, 1)
              toTexture:copy destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
@@ -748,6 +750,7 @@ int render_x360_mirror(uint32_t tex, const X360PostParams *p, float exposure, in
     rp.colorAttachments[0].texture = t;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (gpt_on) gpt_render_auto(rp, "colourfilter");
+    blackbox_render_host(frame_serial, BB_HOST_COLOURFILTER);
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(e);
     [e setRenderPipelineState:pso];
@@ -778,6 +781,7 @@ static id<MTLTexture> x_crop(id<MTLTexture> src, const uint32_t r[4], id<MTLText
         *cache=[mtl newTextureWithDescriptor:d];
     }
     if (!*cache) return nil;
+    blackbox_render_host(frame_serial, BB_HOST_CROP);
     id<MTLBlitCommandEncoder> b=gpt_blit(cmd,"blit post view crop");
     [b copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(r[0],r[1],0)
         sourceSize:MTLSizeMake(r[2],r[3],1) toTexture:*cache destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
@@ -806,6 +810,7 @@ static void x_contact_depth(id<MTLTexture> depth,const X360PostParams *p,const X
     NSUInteger pitch=((w*4+255)/256)*256;
     id<MTLBuffer> buffer=[mtl newBufferWithLength:pitch*h options:MTLResourceStorageModeShared];
     if (!buffer) return;
+    blackbox_render_host(frame_serial, BB_HOST_SSAO);
     id<MTLBlitCommandEncoder> b=gpt_blit(cmd,"ssao diagnostic depth");
     [b copyFromTexture:depth sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(view?view->depth[0]:0,view?view->depth[1]:0,0)
         sourceSize:MTLSizeMake(w,h,1) toBuffer:buffer destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch*h
@@ -833,6 +838,7 @@ static void x_contact_shot(id<MTLTexture> texture,const char *variant,const char
     NSUInteger w=texture.width,h=texture.height,pitch=((w*(floating?8:4)+255)/256)*256;
     id<MTLBuffer> buffer=[mtl newBufferWithLength:pitch*h options:MTLResourceStorageModeShared];
     if (!buffer) return;
+    blackbox_render_host(frame_serial, BB_HOST_SSAO);
     id<MTLBlitCommandEncoder> b=gpt_blit(cmd,"ssao diagnostic paired image");
     [b copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1)
         toBuffer:buffer destinationOffset:0 destinationBytesPerRow:pitch destinationBytesPerImage:pitch*h];[b endEncoding];
@@ -980,6 +986,7 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
         if(!xr->ao_original||xr->ao_original.width!=scene.width||xr->ao_original.height!=scene.height||xr->ao_original.pixelFormat!=scene.pixelFormat){
             MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:scene.pixelFormat width:scene.width height:scene.height mipmapped:NO];d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModePrivate;xr->ao_original=[mtl newTextureWithDescriptor:d];
         }
+        blackbox_render_host(frame_serial, BB_HOST_SSAO);
         id<MTLBlitCommandEncoder> original=gpt_blit(cmd,"ssao diagnostic original");
         [original copyFromTexture:scene sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(scene.width,scene.height,1) toTexture:xr->ao_original destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];[original endEncoding];
         x_contact_shot(scene,"skipped","on"); // deliberately broken: the apply is absent
@@ -1002,7 +1009,7 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
         k.tune[0]=0.75f*(variant==1?8.0f:1.0f);
         const char *name=variant==4?"uncovered":variant==3?"cpu_reference":variant==2?"legacy":variant?"broken":"normal";
         int multiplied=variant==0||variant>=3;
-        if(variant>=3){id<MTLBlitCommandEncoder>b=gpt_blit(cmd,"ssao proof original copy");[b copyFromTexture:scene toTexture:xr->ao_cpu_scene];[b endEncoding];}
+        if(variant>=3){blackbox_render_host(frame_serial, BB_HOST_SSAO);id<MTLBlitCommandEncoder>b=gpt_blit(cmd,"ssao proof original copy");[b copyFromTexture:scene toTexture:xr->ao_cpu_scene];[b endEncoding];}
         if (pair) x_contact_shot(scene,name,"off");
         for (int pass=0;pass<4;++pass) {
             id<MTLTexture> __strong *chain=variant==2?reference:xr->ao;
@@ -1015,6 +1022,7 @@ static id<MTLTexture> x_contact_scene_impl(id<MTLTexture> scene, id<MTLTexture> 
             id<MTLTexture> smoke_hz=smoke?render_soft_smoke_half_depth():nil;
             id<MTLRenderPipelineState> smoke_pso=smoke_hz?x_contact_smoke_half_multiply(target.pixelFormat):smoke?x_contact_smoke_multiply(target.pixelFormat):nil;
             if (gpt_on) gpt_render(rp,"%s",smoke_pso?"ssao multiply + soft smoke":pass==3&&variant==0?"ssao multiply":labels[pass]);
+            blackbox_render_host(frame_serial, BB_HOST_SSAO);
             id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:rp];
             if (gpt_on) gpt_name(e);
             [e setRenderPipelineState:smoke_pso?:variant==2?(pass==0?legacy_kernel:pass==3?legacy_apply:legacy_blur):(pass==0?kernel:pass==3?(multiplied?multiply:apply):blur)];
@@ -1246,6 +1254,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         unsigned pixel_bytes=x_edr_processing?8:4;
         if (!writable->buffer || writable->floating!=x_edr_processing) writable->buffer=[mtl newBufferWithLength:64*64*pixel_bytes options:MTLResourceStorageModeShared];
         if (writable->buffer) {
+            blackbox_render_host(frame_serial, BB_HOST_LUMINANCE);
             id<MTLBlitCommandEncoder> b=gpt_blit(cmd,"blit x360 lum readback");
             [b copyFromTexture:xt_lum sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(64,64,1)
                 toBuffer:writable->buffer destinationOffset:0 destinationBytesPerRow:64*pixel_bytes destinationBytesPerImage:4096*pixel_bytes];
@@ -1363,6 +1372,7 @@ float render_x360_post_view(uint32_t src, uint32_t dst, uint32_t vignette, const
         rp.colorAttachments[0].storeAction=MTLStoreActionMultisampleResolve;
     }
     if (gpt_on) gpt_render_auto(rp, lamp?"x360 vt+lamp":"x360 vt");
+    blackbox_render_host(frame_serial, BB_HOST_TREATMENT);
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) { gpt_name(e); gpt_phase = "after-vt"; }
     if (view) x_destination(e,view->destination);
@@ -1630,6 +1640,7 @@ int render_lens_drops_view(uint32_t dst, const RainDrop *d, int n, uint32_t disp
     rp.colorAttachments[0].texture = out; rp.colorAttachments[0].level = dl; rp.colorAttachments[0].slice = dsl;
     rp.colorAttachments[0].loadAction = MTLLoadActionLoad; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (gpt_on) gpt_render_auto(rp, "lensdrops");
+    blackbox_render_host(frame_serial, BB_HOST_LENS);
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(e);
     if (view) x_destination(e,view->destination);

@@ -6,3 +6,4 @@ void live_picture_on_reset(struct Cpu *c);       // v_Reset: release live rebuil
 void live_picture_apply_reset(int v);           // Setting.apply: change needs the Reset (Car reflections)
 void live_picture_apply_reload(int v);          // Setting.apply: cached per-frame switches (contact shadows, soft smoke)
 void live_picture_apply_fullscreen(int v);      // Setting.apply: Full screen mode
+void live_picture_apply_notch(int v);           // Setting.apply: Fill notch area

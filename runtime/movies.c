@@ -43,6 +43,9 @@
 #include "funcs.h"
 #include "host.h"
 #include "roots.h"
+#if NFS_GAME == NFS_GAME_MW
+#include "blackbox_mw_cinematics.h"
+#endif
 
 DsDevice *dsound_current_device(void);   // dsound.c
 uint64_t diag_current_frame(void);       // diag.c
@@ -673,6 +676,9 @@ static void movie_update(Cpu *c) {
     }
     if (finished || (mv.duration > 0 && t > mv.duration + 5)) {
         uint32_t self = mv.player;
+#if NFS_GAME == NFS_GAME_MW
+        blackbox_mw_movie_edge(finished ? BB_CIN_END : BB_CIN_TIMEOUT, self);
+#endif
         movie_close(finished ? "end" : "timeout");
         M32(self + MP_NEXT) = 0;                           // Update tears down and tells the front end
     }
@@ -698,6 +704,7 @@ void f_0065F7A0(Cpu *c) {
 }
 void f_00542A40(Cpu *c) {                                  // MoviePlayer::Play (thiscall)
     uint32_t self = c->ecx;
+    blackbox_mw_movie_edge(BB_CIN_PLAY, self);
     playing_player = self;
     ds_set_movie_playing(1);                               // WMV and fallback VP6: keep movie PCM/encoding unchanged
     movie_close("next movie");
@@ -720,12 +727,14 @@ void f_00525F70(Cpu *c) {                                  // MoviePlayer::Updat
     c->esp += 4;
 }
 void f_00517610(Cpu *c) {                                  // MoviePlayer::Stop (thiscall)
+    blackbox_mw_movie_edge(BB_CIN_STOP, c->ecx);
     if (c->ecx == playing_player) playing_player = 0;
     if (mv.active && c->ecx == mv.player) movie_close("stopped");
     f_00517610_orig(c);
     ds_set_movie_playing(playing_player != 0);
 }
 void f_00525E60(Cpu *c) {                                  // MoviePlayer::~MoviePlayer (thiscall)
+    blackbox_mw_movie_edge(BB_CIN_DESTROY, c->ecx);
     if (c->ecx == playing_player) playing_player = 0;
     if (mv.active && c->ecx == mv.player) movie_close("player destroyed");
     f_00525E60_orig(c);                                    // frees MOVIE_SHAPE too

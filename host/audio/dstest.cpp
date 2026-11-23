@@ -539,6 +539,7 @@ static void test_manual_stream() {
     OK(ds_device_create_buffer(d, DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2, bytes, w.data(), mem.data(), &b));
     Streamer s{b, mem.data(), bytes};
     for (uint32_t f = 0; f < frames; ++f) put6(mem.data(), f, s.next++);
+    OK(ds_buffer_unlock(b, 0, bytes, 0, 0));
     OK(ds_buffer_play(b, DSBPLAY_LOOPING));
     std::mt19937 rng(1);
     std::vector<float> out, chunk;
@@ -578,7 +579,7 @@ static std::vector<float> capture_stream(DsBuffer *b, std::vector<float> &out, s
 }
 
 // The first refill starts at zero, behind any advancing write cursor. Complete it before Play so the
-// mixer cannot read half-written startup samples. Subsequent refills stay ahead of the write cursor.
+// mixer gets the full startup buffer. Subsequent refills stay ahead of the write cursor.
 template<class Fill>
 static void start_snd_stream(DsBuffer *b, Fill fill) {
 #ifdef DSTEST_PLAY_BEFORE_REFILL
@@ -599,6 +600,7 @@ static void realtime_stream(DsDevice *d, std::vector<float> &out, std::mutex &om
     OK(ds_device_create_buffer(d, DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2, bytes, w.data(), mem.data(), &b));
     Streamer s{b, mem.data(), bytes};
     for (uint32_t f = 0; f < frames; ++f) put6(mem.data(), f, s.next++);
+    OK(ds_buffer_unlock(b, 0, bytes, 0, 0));
     DsStats st0;
     OK(ds_device_get_stats(d, &st0));
     { std::lock_guard<std::mutex> g(om); out.clear(); }
@@ -684,15 +686,18 @@ static void test_stream_timing() {
         std::vector<float> o;
         if (startup) {
             start_snd_stream(b, [&] {
-                // Force the mixer to read when only 192 of its next 256 source frames are written.
+                // Force the mixer to read when only 192 of its next 256 source frames are committed.
                 for (uint32_t f = 0; f < 192; ++f) put6(mem.data(), f, f);
+                OK(ds_buffer_unlock(b, 0, 192 * 12, 0, 0));
                 render(256);
                 for (uint32_t f = 192; f < 2048; ++f) put6(mem.data(), f, f);
+                OK(ds_buffer_unlock(b, 192 * 12, (2048 - 192) * 12, 0, 0));
             });
             render(256);
             o = capture_stream(b, out, om, [] {});
         } else {
             for (uint32_t f = 0; f < 2048; ++f) put6(mem.data(), f, f);
+            OK(ds_buffer_unlock(b, 0, (uint32_t)mem.size(), 0, 0));
             OK(ds_buffer_play(b, DSBPLAY_LOOPING));
             render(512);
             o = capture_stream(b, out, om, [&] { render(256); });

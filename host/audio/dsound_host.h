@@ -203,10 +203,12 @@ DsResult ds_device_get_speaker_config(DsDevice *dev, uint32_t *config);
 DsResult ds_device_set_speaker_config(DsDevice *dev, uint32_t config);
 /* flags/bytes/wfx from DSBUFFERDESC (wfx = MEM(lpwfxFormat), NULL for the primary buffer). mem: `bytes` bytes of
  * caller memory for a secondary buffer (NULL for the primary). The usable size is `bytes` rounded down to the
- * block alignment. On failure the caller frees mem. */
+ * block alignment. The mixer's PCM is seeded from mem at creation and updated by Unlock. Keep mem alive until all
+ * handles sharing it have been released. On failure the caller frees mem. */
 DsResult ds_device_create_buffer(DsDevice *dev, uint32_t flags, uint32_t bytes, const void *wfx, void *mem,
                                  DsBuffer **out);
-/* IDirectSound::DuplicateSoundBuffer: shares src's memory and format, own position/volume/pan/frequency, stopped. */
+/* IDirectSound::DuplicateSoundBuffer: src must belong to dev. Shares its memory, committed PCM and format,
+ * with its own position/volume/pan/frequency. Starts stopped. */
 DsResult ds_device_duplicate_buffer(DsDevice *dev, DsBuffer *src, DsBuffer **out);
 
 /* Pull `frames` of mixed 6-ch float (DS_SINK_MANUAL only; advances the clock by exactly that many frames). */
@@ -233,7 +235,7 @@ DsResult ds_device_get_stats(DsDevice *dev, DsStats *stats);
 DsResult ds_device_output_info(DsDevice *dev, DsOutputMode *mode, int *live, uint64_t *underruns);
 
 /* ------------------------------------------------------------------ IDirectSoundBuffer8 */
-void ds_buffer_release(DsBuffer *buf); /* final release; after it returns the mixer no longer reads mem */
+void ds_buffer_release(DsBuffer *buf); /* final release of this handle */
 /* dsbcaps: a DSBCAPS (20 bytes) with dwSize set. */
 DsResult ds_buffer_get_caps(DsBuffer *buf, void *dsbcaps);
 /* Writes the buffer's WAVEFORMATEX(-TENSIBLE) to wfx_out (may be NULL); *written = bytes needed/written. */
@@ -247,6 +249,7 @@ DsResult ds_buffer_set_current_position(DsBuffer *buf, uint32_t offset);
  * off2/len2 may be NULL: a wrapping lock is then truncated at the end of the buffer (as on Windows). */
 DsResult ds_buffer_lock(DsBuffer *buf, uint32_t offset, uint32_t bytes, uint32_t flags, uint32_t *off1,
                         uint32_t *len1, uint32_t *off2, uint32_t *len2);
+/* Publish the written ranges to the mixer together, including to any duplicates. */
 DsResult ds_buffer_unlock(DsBuffer *buf, uint32_t off1, uint32_t len1, uint32_t off2, uint32_t len2);
 DsResult ds_buffer_play(DsBuffer *buf, uint32_t flags);
 DsResult ds_buffer_stop(DsBuffer *buf);

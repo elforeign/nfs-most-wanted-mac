@@ -16,6 +16,7 @@ No runtime admission or source-only semantic promotion is asserted.
 import contextlib
 import copy
 import hashlib
+import os
 from pathlib import Path
 import struct
 import sys
@@ -517,8 +518,18 @@ class GripTransport(unittest.TestCase):
 
     def test_actual_authored_counts(self):
         path = input_path('NFSC')/'GLOBAL/attributes.bin'
-        if not path.is_file():
-            self.skipTest('private source vault absent; synthetic conversion proof still runs')
+        mw = Path(os.environ.get('NFS_GAME') or ROOT.parent / 'Need For Speed Most Wanted Black Edition')
+        native = mw / 'GLOBAL/attributes.bin'
+        if not (path.is_file() and native.is_file()):
+            self.skipTest('retail source or MW performance vault absent; synthetic proof still runs')
+        # The R32 writer also pins the retail Golf GTI's stock performance.
+        f = self.fixture
+        donor = f.donor.with_name('A3')
+        f.donor.rename(donor)
+        f.donor = donor
+        (donor / 'GEOMETRY.BIN').write_bytes(pc_fixture.geometry('A3', False))
+        (donor / 'TEXTURES.BIN').write_bytes(pc_fixture.texture('A3', 5))
+        (donor.parents[1] / 'GLOBAL/attributes.bin').write_bytes(native.read_bytes())
         raw = path.read_bytes()
         self.assertEqual(hashlib.sha256(raw).hexdigest(),
                          'b1c9ba06e476519db69ef3878a6b2796a0e7be90708355527601f3d58c129a4b')
@@ -535,7 +546,6 @@ class GripTransport(unittest.TestCase):
             self.assertEqual(hashlib.sha256(be).hexdigest(),
                              '24cc0188954147db87c8889363d6d0338a6dac40ab5d3b2780873cd1173b904d')
         for car, oracle in (('CCX', CCX_YAW), ('R32', R32_YAW)):
-            f = self.fixture
             target = f.car.with_name(car)
             f.car.rename(target)
             f.car = target

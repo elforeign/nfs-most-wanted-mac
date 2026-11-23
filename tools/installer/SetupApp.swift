@@ -18,6 +18,8 @@
 //   Setup --carbon-product-test    the Carbon product's backend commands, app name and page order beside Most Wanted's
 
 import AppKit
+import CoreServices
+import Security
 import SwiftUI
 import UniformTypeIdentifiers
 import CryptoKit
@@ -237,7 +239,7 @@ enum Outcome: Equatable {
 }
 
 enum RunMode: String {
-    case check, build, exportApp, carsCheck, carsImport, carsList, carsRemove, carsRestore
+    case check, build, exportApp, recover, carsCheck, carsImport, carsList, carsRemove, carsRestore
     var carOperation: String? {
         switch self {
         case .carsCheck: return "check"
@@ -318,7 +320,7 @@ struct RunState {
             }
             return .success(app: nil)
         }
-        if mode == .check { return .success(app: nil) }
+        if mode == .check || mode == .recover { return .success(app: nil) }
         guard let app = appPath else {
             return .failed(FailureInfo(stage: currentStage,
                                        message: "The setup ended without installing the app.",
@@ -357,8 +359,8 @@ func setupHome() -> URL? {
     return nil
 }
 func supportDir() -> URL {
-    if let h = setupHome() { return h.appendingPathComponent("state") }
-    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NFSMW-Setup")
+    let fallback = setupHome()?.appendingPathComponent("state") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NFSMW-Setup")
+    return setupStoragePath("STATE", default: fallback)
 }
 func logsDir() -> URL {
     if let h = setupHome() { return h.appendingPathComponent("logs") }
@@ -385,11 +387,116 @@ func hasCommandLineTools() -> Bool {
     runQuick("/usr/bin/xcode-select", ["-p"]).status == 0 && runQuick("/usr/bin/xcrun", ["--find", "clang"]).status == 0
 }
 
-func freeSpaceGB(at url: URL) -> Double? {
-    var probe = url
+enum DeveloperToolsStatus: Equatable {
+    case missing, waiting(until: TimeInterval), retry, ready
+
+    var canContinue: Bool { self == .ready }
+    var installButton: String? {
+        if canContinue { return nil }
+        return self == .missing ? "Install…" : "Retry Install…"
+    }
+    var message: String {
+        switch self {
+        case .missing: return "Install Apple’s free developer tools to build the game."
+        case .waiting: return "Finish installing Apple’s tools. If you cancelled, click Retry Install."
+        case .retry: return "Apple’s tools are still missing. Click Retry Install."
+        case .ready: return "Installed."
+        }
+    }
+
+    static func requested(status: Int32, now: TimeInterval) -> Self {
+        // xcode-select exits when it submits the request. It cannot report the dialog's eventual result.
+        status == 0 ? .waiting(until: now + 300) : .retry
+    }
+
+    mutating func poll(installed: Bool, now: TimeInterval) -> Bool {
+        if installed { self = .ready; return false }
+        if case let .waiting(until) = self, now < until { return true }
+        self = .retry
+        return false
+    }
+}
+
+func gameOpenFailure(_ error: NSError) -> String {
+    let openAnyway = "Go to System Settings > Privacy & Security > Open Anyway. Confirm that you want to open the game."
+    var cause: NSError? = error
+    while let current = cause {
+        if current.domain == NSOSStatusErrorDomain {
+            switch current.code {
+            case Int(errSecCSVetoed), Int(errSecCSSignatureUntrusted):
+                return "macOS blocked the game because it couldn’t verify it. " + openAnyway
+            case Int(kLSNoLaunchPermissionErr), Int(userCanceledErr):
+                return "If macOS says it can’t verify the game, click Done in that warning. " + openAnyway
+            default: break
+            }
+        }
+        cause = current.userInfo[NSUnderlyingErrorKey] as? NSError
+    }
+    return "Try opening the game from Finder."
+}
+
+struct StorageVolume: Identifiable {
+    var id: String
+    var name: String
+    var requiredGB: Double = 0
+    var availableGB: Double?
+    var sufficient: Bool { availableGB.map { $0 >= requiredGB } ?? true }
+    var shortage: String {
+        let more = max(0.1, ceil((requiredGB - (availableGB ?? 0)) * 10) / 10)
+        return "Not enough space on \(name): \(String(format: "%.1f", more)) GB more needed. Free up space there, then press Retry."
+    }
+}
+
+func storageVolume(at url: URL) -> StorageVolume {
+    var probe = url.resolvingSymlinksInPath()
     while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 { probe.deleteLastPathComponent() }
-    guard let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-          let bytes = v.volumeAvailableCapacityForImportantUsage else { return nil }
+    let v = try? probe.resourceValues(forKeys: [.volumeURLKey, .volumeNameKey, .volumeAvailableCapacityForImportantUsageKey])
+    let root = v?.volume ?? probe
+    return StorageVolume(id: root.path, name: v?.volumeName ?? root.lastPathComponent,
+                         availableGB: v?.volumeAvailableCapacityForImportantUsage.map { Double($0) / 1_000_000_000 })
+}
+
+func storagePlan(_ needs: [(URL, Double)], probe: (URL) -> StorageVolume = storageVolume) -> [StorageVolume] {
+    var totals: [String: StorageVolume] = [:]
+    for (path, amount) in needs {
+        let volume = probe(path)
+        var total = totals[volume.id] ?? volume
+        total.requiredGB += amount
+        totals[volume.id] = total
+    }
+    return totals.values.sorted { $0.id < $1.id }
+}
+
+func setupStoragePath(_ key: String, default fallback: URL) -> URL {
+    if let path = ProcessInfo.processInfo.environment["NFSMW_SETUP_" + key], !path.isEmpty {
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    }
+    return fallback
+}
+
+func setupCacheDir() -> URL {
+    let fallback = setupHome()?.appendingPathComponent("cache") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/NFSMW-Setup")
+    let path = setupStoragePath("CACHE", default: fallback).resolvingSymlinksInPath()
+    if path.path.range(of: #"^[A-Za-z0-9_./-]+$"#, options: .regularExpression) != nil { return path }
+    var buffer = [CChar](repeating: 0, count: 4096)
+    let count = confstr(_CS_DARWIN_USER_CACHE_DIR, &buffer, buffer.count)
+    let base = count > 0 && count <= buffer.count ? String(cString: buffer) : ""
+    let safe = URL(fileURLWithPath: base).resolvingSymlinksInPath()
+    if !base.isEmpty, FileManager.default.fileExists(atPath: safe.path),
+       safe.path.range(of: #"^[A-Za-z0-9_./-]+$"#, options: .regularExpression) != nil {
+        return safe.appendingPathComponent("NFSMW-Setup")
+    }
+    return URL(fileURLWithPath: "/private/tmp/nfsmw-setup-cache-\(getuid())/NFSMW-Setup")
+}
+
+func gameSizeGB(_ source: URL?) -> Double {
+    guard let source, let files = FileManager.default.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else { return 4 }
+    var bytes: Int64 = 0
+    for case let file as URL in files {
+        if let v = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]), v.isRegularFile == true {
+            bytes += Int64(v.fileSize ?? 0)
+        }
+    }
     return Double(bytes) / 1_000_000_000
 }
 
@@ -489,6 +596,21 @@ enum SetupProduct: String {
     var title: String { self == .mw ? "NFS Most Wanted Native" : "NFS Carbon Native" }
 }
 
+func recoveryArguments(product: SetupProduct, source: URL, work: URL) -> [String] {
+    // Reuse Setup's profile selection, locking and transaction recovery without starting a new build.
+    let script = """
+        import sys
+        sys.path.insert(0, sys.argv[1])
+        from setup_kit.backend import Paths, CARBON_PRODUCT
+        from setup_kit.install import recover_interrupted
+        profile = Paths(sys.argv[2]).data
+        if sys.argv[3] == "carbon":
+            profile = profile / CARBON_PRODUCT["data"]
+        recover_interrupted(profile)
+        """
+    return ["-I", "-c", script, source.appendingPathComponent("tools").path, work.path, product.rawValue]
+}
+
 // carbon: the Carbon product (a plain flag: tests compile this function on its own).
 func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, carbon: Bool = false,
                       pcUpdate: URL? = nil, pcExe: URL? = nil, pcDiscs: [URL] = [], x360Extras: X360Extras? = nil) -> [String] {
@@ -503,6 +625,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
                  mode == .check ? "--check" : "--build", "--game", "carbon", "--carbon", pc.path]
         if let u = pcUpdate { a += ["--pc-update", u.path] }
         if let e = pcExe { a += ["--pc-exe", e.path] }
+        for d in pcDiscs { a += ["--pc-disc", d.path] }
         if let x = x360 { a += ["--x360", x.path] }
         a += ["--dest", dest.path, "--work", work.path, "--events"]
         if let digest = bundledPrebuiltDigest() { a += ["--prebuilt-manifest-sha256", digest] }
@@ -521,7 +644,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "9ec6badf75f80037e87c5dff270636b82a8ac2a7238da98947ec6ddce657397f"
+let carSelectionsSHA256 = "2b2b38cc6189a2638c95213d98f6d910a4ac61320f777888fba68873cc6b572e"
 let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
 
 func carSourceName(_ game: String, _ platform: String) -> String {
@@ -556,13 +679,16 @@ struct CarChoice: Identifiable {
     func reason(_ recognition: CarRecognition?) -> String? {
         guard let recognition else { return "Choose a source to check availability." }
         guard recognition.game == game && recognition.platform == platform else {
-            return "Needs a " + carSourceName(game, platform) + " source; skipped."
+            return "Needs a " + carSourceName(game, platform) + " source."
         }
-        guard recognition.approval_available else { return "Packaged approval is unavailable." }
+        guard recognition.approval_available else { return "This source cannot be imported with this version of Setup." }
         let status = recognition.cars.first { $0.car_hash == carHash }?.status
         if status == "importable" { return nil }
-        return status == "unknown" ? "Source files differ from the reviewed copy; skipped."
-            : "Missing from this " + (carGameNames[game] ?? game) + " copy; skipped."
+        return status == "unknown" ? "The source files do not match a supported copy."
+            : "Missing from this " + (carGameNames[game] ?? game) + " copy."
+    }
+    func sourceStatus(_ recognition: CarRecognition?) -> String {
+        carSourceName(game, platform) + " — " + (reason(recognition) ?? "Ready")
     }
     static func load(_ url: URL) throws -> [CarChoice] {
         let data = try Data(contentsOf: url)
@@ -618,12 +744,26 @@ struct ExtrasFlow {
     var completed = false
     var message = "Choose a later-game source, or skip extras."
     mutating func begin() { busy = true; skipped = false; completed = false; message = "Checking extras…" }
-    mutating func finish(_ outcome: Outcome) {
+    mutating func finish(_ outcome: Outcome, mode: RunMode) {
         busy = false
         switch outcome {
-        case .success: completed = true; message = "Extras operation completed."
+        case .success:
+            completed = true
+            message = mode == .carsImport
+                ? "In the game, press F10. Open Cars & cutscenes. Turn on Cars from later games. Restart the game."
+                : "Extras operation completed."
         case .cancelled: completed = false; message = "Extras cancelled. Retry or skip."
-        case let .failed(f): completed = false; message = f.message + "\n" + f.fix
+        case let .failed(f):
+            completed = false
+            // The backend log retains the full error, including file hashes and policy details.
+            let detail = f.message.lowercased()
+            if detail.contains("space") || detail.contains("disk full") {
+                message = "There is not enough free space for these cars. Free some space and try again."
+            } else if detail.contains("missing") || detail.contains("not found") {
+                message = "Required car files could not be found. Check your source and try again."
+            } else {
+                message = "The car operation could not finish. See the log for details, then try again."
+            }
         }
     }
     mutating func skip() { guard !busy else { return }; skipped = true; message = "Extras skipped." }
@@ -725,21 +865,22 @@ func quitPlan(childActive: Bool, building: Bool) -> QuitPlan {
 
 // MARK: - App model
 
-enum Page: Int { case welcome, pc, x360, extras, review, build, finished }
+enum Page: Int { case welcome, pc, x360, extras, review, build, finished, recovery }
 
 /// An installed game folder (or its .zip), or the PC disc images, which also take the 1.3 update and, as both carry a
 /// copy-protected speed.exe, a speed.exe that has the 1.3 code.
 enum PCKind: Int { case folder, disc }
 
 final class Setup: ObservableObject {
-    static let shared = Setup()
+    static let shared = Setup(recover: CommandLine.arguments.dropFirst().contains("--recover"))
     let product: SetupProduct
     var carbonProduct: Bool { product == .carbon }
 
     @Published var showReadMe = false
     @Published var page: Page = .welcome
-    @Published var tools = hasCommandLineTools()
-    @Published var installingTools = false
+    @Published var tools: DeveloperToolsStatus = hasCommandLineTools() ? .ready : .missing
+    @Published var recoveryComplete = false
+    @Published var recoveryMessage = "Repair the game installation so you can open it again."
     @Published var pcKind = PCKind.folder
     @Published var pc: URL?
     @Published var pcUpdate: URL?
@@ -757,11 +898,14 @@ final class Setup: ObservableObject {
     @Published var extras = ExtrasFlow()
     @Published var managingExtras = false
     @Published var installedCars: CarResult?
+    @Published var carCheckFailed = false
+    @Published var carImportNeedsRepair = false
     @Published var features: (x360: Bool, missing: [String])?
     @Published var dest: URL
     @Published var checking = false
     @Published var running = false
     @Published var exporting = false
+    @Published var updatingExport = false
     @Published var stopping = false
     @Published var state = RunState()
     @Published var outcome: Outcome?
@@ -775,20 +919,59 @@ final class Setup: ObservableObject {
     private var splitter = LineSplitter()
     private var stderrTail: [String] = []
     private var lastLog = ""
+    private var toolsTimer: Timer?
 
-    init(product: SetupProduct = .bundled) {
+    init(product: SetupProduct = .bundled, recover: Bool = false, rememberedState: URL? = nil) {
         self.product = product
+        if recover { page = .recovery }
         let apps = URL(fileURLWithPath: "/Applications")
         dest = FileManager.default.isWritableFile(atPath: apps.path) ? apps
             : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
+        let state = rememberedState ?? supportDir()
+        let gameState = carbonProduct ? state.appendingPathComponent("Carbon") : state
+        func read(_ url: URL) -> [String: Any] {
+            guard let data = try? Data(contentsOf: url),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return value
+        }
+        let saved = read(gameState.appendingPathComponent("source-choices.json"))
+        let pins = read(gameState.appendingPathComponent("source-inputs.json"))["sources"] as? [String: [String: Any]] ?? [:]
+        func input(_ value: Any?) -> URL? {
+            guard let path = value as? String, path.hasPrefix("/") else { return nil }
+            let relocated = pins[path]?["location"] as? String
+            return URL(fileURLWithPath: relocated ?? path)
+        }
+        if saved["format_version"] as? Int == 1 {
+            pc = input(saved["pc"]); x360 = input(saved["x360"])
+            pcUpdate = input(saved["pc_update"]); pcExe = input(saved["pc_exe"])
+            for (index, path) in (saved["pc_discs"] as? [String] ?? []).enumerated() { pcDiscs[index + 2] = input(path) }
+            if pcUpdate != nil || pcExe != nil || !pcDiscs.isEmpty { pcKind = .disc }
+            if let app = input(saved["destination"]) { dest = app.deletingLastPathComponent() }
+        }
+        if !carbonProduct {
+            let cars = read(state.appendingPathComponent("car-source-choices.json"))
+            carbon = input(cars["source"])
+            selectedCarIDs = Set(cars["selection"] as? [String] ?? [])
+        }
     }
 
     var installedApp: URL { dest.appendingPathComponent(product.title + ".app") }
-    var freeGB: Double? { freeSpaceGB(at: dest) }
     var requiredGB: Double { carbonProduct ? requiredFreeGB : x360Extras.requiredGB(hasX360: x360 != nil) }
     /// After the Xbox 360 page: Most Wanted's extras page; Carbon has none (its car import is Most Wanted's).
     var afterX360: Page { carbonProduct ? .review : .extras }
-    var enoughSpace: Bool { (freeGB ?? requiredGB) >= requiredGB }
+    var storageNeeds: [(URL, Double)] {
+        let gib = Double(1024 * 1024 * 1024) / 1_000_000_000
+        let unpacked = workDir().appendingPathComponent(carbonProduct ? "carbon_src" : "pc_src")
+        let source = FileManager.default.fileExists(atPath: unpacked.path) ? unpacked : pc
+        let size = gameSizeGB(source)
+        let xbox = x360 == nil ? 0 : carbonProduct ? 0.04 : Double(x360Extras.bytes) / 1_000_000_000
+        let shared = x360 != nil && !carbonProduct && x360Extras.textures && !x360Extras.arrest ? 0.146 : 0
+        let fallback = setupHome()?.appendingPathComponent("data") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NFSMW-port")
+        let data = setupStoragePath("DATA", default: fallback)
+        return [(workDir(), size + 4 * gib + xbox + shared), (setupCacheDir(), 4 * gib + xbox),
+                (carbonProduct ? data.appendingPathComponent("Carbon") : data, size + 0.5 * gib + xbox), (dest, 0.25 * gib)]
+    }
+    var storageVolumes: [StorageVolume] { storagePlan(storageNeeds) }
 
     func pickFolder(message: String, files: Bool = false, types: [UTType] = [], folders: Bool = true) -> URL? {
         let panel = NSOpenPanel()
@@ -799,6 +982,27 @@ final class Setup: ObservableObject {
         panel.message = message
         panel.prompt = "Choose"
         return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    func locateSource(_ request: [String: Any]) {
+        guard let token = request["token"] as? String, token.count == 32,
+              token.allSatisfy({ $0.isHexDigit }), let title = request["title"] as? String,
+              let body = request["body"] as? String else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = body + ((request["error"] as? String).map { "\n\n" + $0 } ?? "")
+        alert.addButton(withTitle: "Locate…")
+        alert.addButton(withTitle: "Skip this source")
+        var path: String? = nil
+        if alert.runModal() == .alertFirstButtonReturn {
+            path = pickFolder(message: body, files: true)?.path
+            // Cancelling the picker leaves the recovery decision available.
+            if path == nil { locateSource(request); return }
+        }
+        let response: [String: Any] = ["path": path as Any? ?? NSNull()]
+        if let data = try? JSONSerialization.data(withJSONObject: response) {
+            try? data.write(to: workDir().appendingPathComponent("source-replies/" + token + ".json"), options: .atomic)
+        }
     }
 
     // A file inside the game folder (speed.exe) stands for that folder; a .zip stays itself.
@@ -814,8 +1018,9 @@ final class Setup: ObservableObject {
             guard let url = pickFolder(message: "Choose your Carbon PC game folder, NFSC.exe, a .zip/.7z of the folder, or an original PC disc (.iso, ISO-compatible .mdf, or a mounted or copied disc folder).",
                                        files: true, types: [.folder, .exe, .zip] + ["7z", "iso", "mdf"].compactMap { UTType(filenameExtension: $0) }) else { return }
             pc = pcRoot(url, carbon: true); features = nil; x360 = nil; x360Status = ""
-            pcUpdate = nil; pcExe = nil
-            runCheck(forX360: false)
+            pcUpdate = nil; pcExe = nil; pcDiscs = [:]; missingDiscs = []
+            discInputsChanged()
+            if !carbonDiscSource { runCheck(forX360: false) }
             return
         }
         // The game folder, or an archive Setup unpacks into its own work folder.
@@ -842,16 +1047,20 @@ final class Setup: ObservableObject {
         guard let url = pickFolder(message: "Choose disc 1 of your PC game: its .iso image, or the disc mounted in Finder. Keep the images of the other discs in the same folder.",
                                    files: true, types: [.folder] + iso) else { return }
         pc = url; pcDiscs = [:]; missingDiscs = []; features = nil; x360 = nil; x360Status = ""
-        runCheck(forX360: false)
+        discInputsChanged()
     }
 
     /// A disc that is not beside the first one (another folder or drive). The backend reads its number from the disc.
     func chooseOtherDisc(_ number: Int) {
-        let iso = [UTType(filenameExtension: "iso")].compactMap { $0 }
+        let iso = (carbonProduct ? ["iso", "mdf"] : ["iso"]).compactMap { UTType(filenameExtension: $0) }
         guard let url = pickFolder(message: "Choose disc \(number) of your PC game: its .iso image, or the disc mounted in Finder.",
                                    files: true, types: [.folder] + iso) else { return }
         pcDiscs[number] = url
-        if pc != nil { runCheck(forX360: false) }
+        discInputsChanged()
+    }
+
+    func discInputsChanged() {
+        pcOK = false; pcStatus = ""; features = nil
     }
 
     func isCarbonDiscSource(_ url: URL) -> Bool {
@@ -869,6 +1078,14 @@ final class Setup: ObservableObject {
 
     var carbonDiscSource: Bool { carbonProduct && pc.map(isCarbonDiscSource) == true }
 
+    var discSource: Bool { carbonProduct ? carbonDiscSource : pcKind == .disc }
+
+    var discInstructions: String {
+        let version = carbonProduct ? "1.4" : "1.3"
+        let exe = carbonProduct ? "NFSC.exe" : "speed.exe"
+        return "A disc install needs three things: the disc (or a copy of its files), the official \(version) update, and the \(exe) from that update. Choose all three, then press Check."
+    }
+
     var otherDiscRows: [Int] { Array(Set(missingDiscs).union(pcDiscs.keys)).sorted() }
 
     func chooseUpdate() {
@@ -877,7 +1094,7 @@ final class Setup: ObservableObject {
                                    : "Choose the PC game's official 1.3 update (nfsmwpatch1.3.exe). Setup only reads it; it is never run.",
                                    files: true, types: [.exe]) else { return }
         pcUpdate = url
-        if pc != nil { runCheck(forX360: false) }
+        discInputsChanged()
     }
 
     func chooseExe() {
@@ -886,7 +1103,7 @@ final class Setup: ObservableObject {
                                    : "Choose a speed.exe that has the version 1.3 code. The one on the discs and in the update is copy-protected.",
                                    files: true, types: [.exe]) else { return }
         pcExe = url
-        if pc != nil { runCheck(forX360: false) }
+        discInputsChanged()
     }
 
     func x360Root(_ url: URL) -> URL {
@@ -908,6 +1125,9 @@ final class Setup: ObservableObject {
         guard !busy, let url = pickFolder(message: "Choose your Carbon, ProStreet or Undercover game folder, or an Xbox 360 disc image or archive.", files: true) else { return }
         carbon = url
         state.recognition = nil
+        state.carPlan = nil
+        selectedCarIDs = []
+        carImportNeedsRepair = false
         runCars(.carsCheck)
     }
 
@@ -931,6 +1151,19 @@ final class Setup: ObservableObject {
         state.carPlan = nil
     }
 
+    var readyCarIDs: Set<String> {
+        Set(carChoices.filter { $0.reason(state.recognition) == nil }.map { $0.id })
+    }
+
+    var allReadyCarsSelected: Bool { !readyCarIDs.isEmpty && readyCarIDs.isSubset(of: selectedCarIDs) }
+
+    func toggleAllCars() {
+        selectedCarIDs = allReadyCarsSelected ? [] : readyCarIDs
+        state.carPlan = nil
+    }
+
+    var canImportCars: Bool { !busy && carbon != nil && availableCarSelection }
+
     var availableCarSelection: Bool {
         carChoices.contains { selectedCarIDs.contains($0.id) && $0.reason(state.recognition) == nil }
     }
@@ -947,24 +1180,54 @@ final class Setup: ObservableObject {
             extras.message = "No available cars are ticked. No cars were imported."
             return
         }
+        let previousExtras = extras
         extras.begin(); checking = true
+        if mode == .carsCheck { carCheckFailed = false }
         // Disc installs need the checked copy, which includes the PC update. Extras can read archives directly.
         let mw = managingExtras ? nil : (pcKind == .disc ? workDir().appendingPathComponent("pc_src") : pc)
         let args = carArguments(mode: mode, carbon: carbon, selection: selection,
                                 work: workDir(), mw: requiresSource && selection != nil ? mw : nil,
                                 slots: slots, generation: generation, measure: measure, repair: repair)
-        launch(mode: mode, pc: pc ?? dest, x360: nil, arguments: args) { [weak self] outcome, state in
+        launch(mode: mode, arguments: args) { [weak self] outcome, state in
             guard let self else { return }
             self.checking = false
-            self.extras.finish(outcome)
+            self.extras.finish(outcome, mode: mode)
+            if mode == .carsList {
+                // A refresh must not replace the completed import or its turn-on steps.
+                self.extras = previousExtras
+                if case .success = outcome, let result = state.carResult {
+                    self.installedCars = result
+                } else {
+                    self.extras.message += "\nThe installed car list could not be refreshed. Reopen Manage installed extras to try again."
+                }
+                return
+            }
+            if mode == .carsCheck {
+                if case .success = outcome {
+                    self.selectedCarIDs = self.readyCarIDs
+                } else {
+                    self.carCheckFailed = true
+                    self.selectedCarIDs = []
+                }
+            }
+            if mode == .carsImport {
+                if case .success = outcome { self.carImportNeedsRepair = false }
+                else { self.carImportNeedsRepair = true }
+            }
             if case .success = outcome {
-                if let result = state.carResult, mode == .carsList { self.installedCars = result }
-                if mode == .carsCheck, let recognition = state.recognition {
-                    let count = recognition.cars.filter { $0.status == "importable" }.count
-                    self.extras.message = "Recognized \(carSourceName(recognition.game, recognition.platform)): \(count) verified source pairs. "
-                        + (state.carPlan?.approved == true ? "Selected outputs passed packaged approval. Import to activate them."
-                           : recognition.approval_available ? "Packaged approval is available; selected outputs must still verify."
-                           : "No packaged output approval is available. Import is unavailable.")
+                if mode == .carsCheck || mode == .carsImport, let source = self.carbon {
+                    let saved: [String: Any] = ["source": source.path, "selection": self.selectedCarIDs.sorted()]
+                    if let data = try? JSONSerialization.data(withJSONObject: saved) {
+                        try? data.write(to: supportDir().appendingPathComponent("car-source-choices.json"), options: .atomic)
+                    }
+                }
+                if mode == .carsCheck {
+                    self.extras.message = self.readyCarIDs.isEmpty
+                        ? "No cars in this source can be imported. Choose another source."
+                        : "Ready. Import the selected cars, or change the selection."
+                }
+                if mode == .carsImport || mode == .carsRemove || mode == .carsRestore {
+                    self.runCars(.carsList)
                 }
             }
         }
@@ -987,11 +1250,33 @@ final class Setup: ObservableObject {
     }
 
     func installTools() {
-        runQuick("/usr/bin/xcode-select", ["--install"])
-        installingTools = true
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] t in
+        toolsTimer?.invalidate()
+        if hasCommandLineTools() { tools = .ready; return }
+        let request = runQuick("/usr/bin/xcode-select", ["--install"])
+        tools = .requested(status: request.status, now: ProcessInfo.processInfo.systemUptime)
+        guard case .waiting = tools else { return }
+        toolsTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] t in
             guard let self else { t.invalidate(); return }
-            if hasCommandLineTools() { self.tools = true; self.installingTools = false; t.invalidate() }
+            if !self.tools.poll(installed: hasCommandLineTools(), now: ProcessInfo.processInfo.systemUptime) {
+                t.invalidate()
+            }
+        }
+    }
+
+    func recoverInstall() {
+        guard !busy else { return }
+        checking = true
+        recoveryMessage = "Repairing the installation…"
+        let args = recoveryArguments(product: product, source: sourceDir(), work: workDir())
+        launch(mode: .recover, arguments: args) { [weak self] outcome, _ in
+            guard let self else { return }
+            self.checking = false
+            if case .success = outcome {
+                self.recoveryComplete = true
+                self.recoveryMessage = "Repair finished. Open the game again."
+            } else {
+                self.recoveryMessage = "Repair stopped. Quit the game if it’s open. Try the repair again."
+            }
         }
     }
 
@@ -1003,12 +1288,12 @@ final class Setup: ObservableObject {
     }
 
     // One backend run, check or build; all state changes happen on the main queue.
-    private func launch(mode: RunMode, pc: URL, x360: URL?, destination: URL? = nil,
-                        arguments: [String]? = nil,
+    private func launch(mode: RunMode, arguments: [String],
                         finish: @escaping (Outcome, RunState) -> Void) {
         let previous = state
         state = RunState(); lines = []; stderrTail = []; splitter = LineSplitter(); cancelled = false; stopping = false
-        if mode == .carsList {
+        if mode == .recover { state.currentStage = "install" }
+        if mode == .carsList || mode == .carsImport || mode == .carsRemove || mode == .carsRestore {
             state.recognition = previous.recognition
             state.carPlan = previous.carPlan
         }
@@ -1019,7 +1304,7 @@ final class Setup: ObservableObject {
             try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
             let env = childEnvironment(inherited: ProcessInfo.processInfo.environment, python: python,
                                        roots: work.appendingPathComponent("roots.txt").path)
-            let c = try ChildProcess(exe: python, args: arguments ?? installArguments(mode: mode, pc: pc, x360: x360, dest: destination ?? dest, work: work),
+            let c = try ChildProcess(exe: python, args: arguments + ["--source-replies", work.appendingPathComponent("source-replies").path],
                                      env: env, cwd: sourceDir().path)
             child = c
             c.run(onOut: { [weak self] data in
@@ -1052,6 +1337,9 @@ final class Setup: ObservableObject {
     func consume(_ newLines: [String]) {
         for line in newLines where !line.isEmpty {
             lines.append(line)
+            if let data = line.data(using: .utf8),
+               let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               request["ev"] as? String == "source-missing" { locateSource(request) }
             if let ev = parseEvent(line) {
                 state.apply(ev)
                 if case let .error(_, _, _, log) = ev, !log.isEmpty { lastLog = log }
@@ -1064,7 +1352,8 @@ final class Setup: ObservableObject {
         guard let pc else { return }
         checking = true
         if forX360 { x360Status = "Checking…" } else { pcStatus = "Checking…"; pcOK = false }
-        launch(mode: .check, pc: pc, x360: forX360 ? x360 : nil) { [weak self] outcome, st in
+        let args = installArguments(mode: .check, pc: pc, x360: forX360 ? x360 : nil, dest: dest, work: workDir())
+        launch(mode: .check, arguments: args) { [weak self] outcome, st in
             guard let self else { return }
             self.checking = false
             if let f = st.features { self.features = f }
@@ -1082,7 +1371,7 @@ final class Setup: ObservableObject {
                 let text = [f.message, f.fix].filter { !$0.isEmpty }.joined(separator: "\n")
                 if forX360 { self.x360Status = text; self.x360 = nil } else {
                     self.pcStatus = text; self.pcOK = false
-                    if self.pcKind == .disc { self.missingDiscs = missingDiscNumbers(f.message) }
+                    if self.discSource { self.missingDiscs = missingDiscNumbers(f.message) }
                 }
             case .cancelled: break
             }
@@ -1095,7 +1384,8 @@ final class Setup: ObservableObject {
         page = .build; running = true; outcome = nil; started = Date()
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "Building " + product.title)
-        launch(mode: .build, pc: pc, x360: x360) { [weak self] outcome, _ in
+        let args = installArguments(mode: .build, pc: pc, x360: x360, dest: dest, work: workDir())
+        launch(mode: .build, arguments: args) { [weak self] outcome, _ in
             guard let self else { return }
             if let a = self.activity { ProcessInfo.processInfo.endActivity(a) }
             self.activity = nil
@@ -1107,6 +1397,18 @@ final class Setup: ObservableObject {
 
     var busy: Bool { child != nil }
 
+    private var exportPreference: String { "export." + (carbonProduct ? "carbon" : "mw") }
+    var lastExportSource: URL? {
+        UserDefaults.standard.string(forKey: exportPreference + ".source").map { URL(fileURLWithPath: $0) }
+    }
+    var lastExportTarget: URL? {
+        UserDefaults.standard.string(forKey: exportPreference + ".target").map { URL(fileURLWithPath: $0) }
+    }
+    var exportActionTitle: String {
+        if let target = lastExportTarget, FileManager.default.fileExists(atPath: target.path) { return "Update this export" }
+        return "Export all-in-one app…"
+    }
+
     func exportAllInOne() {
         guard !busy else { return }
         let source = NSOpenPanel()
@@ -1114,25 +1416,35 @@ final class Setup: ObservableObject {
         source.canChooseFiles = true
         source.allowedContentTypes = [.applicationBundle]
         source.allowsMultipleSelection = false
-        source.directoryURL = URL(fileURLWithPath: installedPath).deletingLastPathComponent()
+        let preferredSource = lastExportSource ?? installedApp
+        source.directoryURL = preferredSource.deletingLastPathComponent()
+        source.nameFieldStringValue = preferredSource.lastPathComponent
         source.message = "Choose the installed game app to export. Quit the game first."
         guard source.runModal() == .OK, let app = source.url else { return }
         let save = NSSavePanel()
         save.allowedContentTypes = [.applicationBundle]
-        save.nameFieldStringValue = app.deletingPathExtension().lastPathComponent + " All-in-one.app"
-        save.message = "Choose a new name. Keep the previous export to roll back. Saves and settings stay in Application Support."
+        save.directoryURL = lastExportTarget?.deletingLastPathComponent()
+        save.nameFieldStringValue = lastExportTarget?.lastPathComponent ?? (app.deletingPathExtension().lastPathComponent + " All-in-one.app")
+        save.prompt = exportActionTitle == "Update this export" ? "Update this export" : "Export"
+        save.message = "Choose a name or update an existing export. Your old copy is kept if the update fails. Saves and settings stay in Application Support."
         guard save.runModal() == .OK, let target = save.url else { return }
         exporting = true
+        updatingExport = FileManager.default.fileExists(atPath: target.path)
         page = .build; running = true; outcome = nil; started = Date()
         activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                          reason: "Exporting the all-in-one app")
-        launch(mode: .exportApp, pc: app, x360: nil, destination: target) { [weak self] outcome, _ in
+        let args = installArguments(mode: .exportApp, pc: app, x360: nil, dest: target, work: workDir())
+        launch(mode: .exportApp, arguments: args) { [weak self] outcome, _ in
             guard let self else { return }
             if let a = self.activity { ProcessInfo.processInfo.endActivity(a) }
             self.activity = nil
             self.running = false
             self.outcome = outcome
-            if case .success = outcome { self.page = .finished }
+            if case .success = outcome {
+                UserDefaults.standard.set(app.path, forKey: self.exportPreference + ".source")
+                UserDefaults.standard.set(target.path, forKey: self.exportPreference + ".target")
+                self.page = .finished
+            }
         }
     }
 
@@ -1152,7 +1464,20 @@ final class Setup: ObservableObject {
     }
 
     var installedPath: String { if case let .success(app?) = outcome { return app }; return installedApp.path }
-    func openGame() { NSWorkspace.shared.open(URL(fileURLWithPath: installedPath)) }
+    func openGame() {
+        let config = NSWorkspace.OpenConfiguration()
+        config.promptsUserIfNeeded = false // Gatekeeper still displays its warning.
+        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: installedPath), configuration: config) { _, error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "The game couldn’t open"
+                alert.informativeText = gameOpenFailure(error as NSError)
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
     func showGame() { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: installedPath)]) }
 
     /// The run's own log when the backend named it, else the newest log in the logs folder.
@@ -1217,6 +1542,7 @@ struct ContentView: View {
             case .review: review
             case .build: buildPage
             case .finished: finished
+            case .recovery: recovery
             }
         }
         .padding(20)
@@ -1240,26 +1566,43 @@ struct ContentView: View {
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             GroupBox(label: Text("Apple's developer tools").bold()) {
                 HStack {
-                    if s.tools { Label("Installed.", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                    else if s.installingTools { Label("Finish Apple's installer window; this continues by itself.", systemImage: "hourglass") }
-                    else { Text("Needed to build the game (free, from Apple).") }
+                    if s.tools.canContinue { Label(s.tools.message, systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
+                    else { Text(s.tools.message) }
                     Spacer()
-                    if !s.tools && !s.installingTools { Button("Install…") { s.installTools() } }
+                    if let title = s.tools.installButton { Button(title) { s.installTools() } }
                 }.padding(4)
             }
-            nav(back: nil, next: .pc, nextEnabled: s.tools)
+            nav(back: nil, next: .pc, nextEnabled: s.tools.canContinue)
             if !s.carbonProduct {
                 Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
             }
-            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
-            Text("Back up an existing install with its game files inside one app. Re-export from Setup to update.")
+            Button(s.exportActionTitle) { s.exportAllInOne() }.disabled(s.busy)
+            Text("Back up an existing install with its game files inside one app. Update it here after changing your install.")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    var recovery: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recover an interrupted installation").font(.headline)
+            Text(s.recoveryMessage)
+            HStack {
+                Button("Back to Welcome") { s.page = .welcome }.disabled(s.checking)
+                Spacer()
+                if !s.recoveryComplete {
+                    Button("Repair Installation") { s.recoverInstall() }
+                        .buttonStyle(.borderedProminent).disabled(s.checking)
+                }
+            }
         }
     }
 
     var pcPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             if s.carbonProduct { carbonPCBox } else { mwPCBox }
+            if s.pc != nil && !s.pcOK && !s.discSource {
+                Button("Check remembered source") { s.runCheck(forX360: false) }.disabled(s.checking)
+            }
             nav(back: .welcome, next: .x360, nextEnabled: s.pcOK)
         }
     }
@@ -1280,8 +1623,7 @@ struct ContentView: View {
                     Button("Choose…") { s.choosePC() }.disabled(s.checking)
                 }
                 if s.carbonDiscSource {
-                    choice("Carbon update", s.pcUpdate, "The official update for your PC disc edition") { s.chooseUpdate() }
-                    choice("NFSC.exe", s.pcExe, "Your compatible Carbon game executable") { s.chooseExe() }
+                    discInputs
                 }
                 if !s.pcStatus.isEmpty { pcStatusLabel }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
@@ -1303,18 +1645,28 @@ struct ContentView: View {
                             Button("Choose…") { s.choosePC() }.disabled(s.checking)
                         }
                     } else {
-                        Text("Setup installs the game from your discs into its own work folder, without Windows. It also needs the game's 1.3 update and, because the speed.exe on the discs and in the update is copy-protected, a speed.exe that has the 1.3 code.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         choice("Discs", s.pc, "Disc 1 (.iso or mounted disc), the other discs beside it") { s.chooseDisc() }
-                        ForEach(s.otherDiscRows, id: \.self) { n in
-                            choice("Disc \(n)", s.pcDiscs[n], "Not found with the chosen disc: choose it") { s.chooseOtherDisc(n) }
-                        }
-                        choice("1.3 update", s.pcUpdate, "nfsmwpatch1.3.exe") { s.chooseUpdate() }
-                        choice("speed.exe", s.pcExe, "A speed.exe with the version 1.3 code") { s.chooseExe() }
+                        discInputs
                     }
                     if !s.pcStatus.isEmpty { pcStatusLabel }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
             }
+    }
+
+    var discInputs: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(s.discInstructions)
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ForEach(s.otherDiscRows, id: \.self) { n in
+                choice("Disc \(n)", s.pcDiscs[n], "Choose another disc of the set") { s.chooseOtherDisc(n) }
+            }
+            Button("Add another disc") { s.chooseOtherDisc((s.pcDiscs.keys.max() ?? 1) + 1) }.disabled(s.checking)
+            choice(s.carbonProduct ? "Carbon update" : "1.3 update", s.pcUpdate,
+                   s.carbonProduct ? "The official 1.4 update for your PC disc edition" : "nfsmwpatch1.3.exe") { s.chooseUpdate() }
+            choice(s.carbonProduct ? "NFSC.exe" : "speed.exe", s.pcExe,
+                   s.carbonProduct ? "Your compatible Carbon game executable" : "A speed.exe with the version 1.3 code") { s.chooseExe() }
+            Button("Check") { s.runCheck(forX360: false) }.disabled(s.checking || s.pc == nil)
+        }
     }
 
     func choice(_ title: String, _ url: URL?, _ placeholder: String, _ action: @escaping () -> Void) -> some View {
@@ -1372,63 +1724,44 @@ struct ContentView: View {
                     Text("Import cars from your own Carbon PC or Xbox 360, ProStreet PC, or Undercover PC copy. Enable later-game cars in game settings.")
                         .font(.caption).foregroundStyle(.secondary)
                     choice("Later-game source", s.carbon, "Folder or ISO", s.chooseCarbon)
-                    if let recognition = s.state.recognition, recognition.approval_available {
+                    if let recognition = s.state.recognition {
                         GroupBox(carSourceName(recognition.game, recognition.platform) + " cars") {
                             VStack(alignment: .leading, spacing: 4) {
+                                Button(s.allReadyCarsSelected ? "Select none" : "Select all") { s.toggleAllCars() }
+                                    .disabled(s.readyCarIDs.isEmpty)
                                 ForEach(s.carChoices.filter { $0.game == recognition.game && $0.platform == recognition.platform }) { car in
                                     Toggle(car.name, isOn: Binding(get: { s.selectedCarIDs.contains(car.id) },
                                                                   set: { s.selectCar(car, enabled: $0) }))
-                                    if let reason = car.reason(s.state.recognition) {
-                                        Text(reason).font(.caption).foregroundStyle(.secondary)
-                                    }
+                                        .disabled(car.reason(s.state.recognition) != nil)
+                                    Text(car.sourceStatus(s.state.recognition)).font(.caption).foregroundStyle(.secondary)
                                 }
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
                         }.disabled(s.busy)
                     }
-                    Text("All cars start unticked. Tick the cars you want, then check and import them. Missing sources are skipped.")
+                    Text("Available cars start ticked. Untick any cars you do not want to import.")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(s.extras.message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    if let recognition = s.state.recognition, s.state.carPlan == nil {
-                        ScrollView {
-                            VStack(alignment: .leading) {
-                                ForEach(recognition.cars, id: \.car_hash) { car in
-                                    Text("\(car.car_hash): \(car.status == "importable" ? "source verified; output needs approval" : car.status)")
-                                }
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }.frame(maxHeight: 100)
-                    }
                     if let plan = s.state.carPlan {
-                        ScrollView {
-                            VStack(alignment: .leading) {
-                                ForEach(plan.cars, id: \.slot) { car in
-                                    Text(car.name + ": " + (car.approved ? "Approved and importable" : car.reason))
-                                        .font(.caption)
-                                }
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }.frame(maxHeight: 80)
                         ForEach(plan.volumes, id: \.device) { volume in
-                            Text(volume.required_bytes.map { "Extras on volume \(volume.device): \(ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file)) required." }
-                                 ?? "Extras on volume \(volume.device): conversion output size is unknown until measured.")
+                            Text(volume.required_bytes.map { "Extras: \(ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file)) required." }
+                                 ?? "The required space will be checked when importing.")
                                 .font(.caption)
                         }
-                        Text(plan.approved ? "Selected outputs approved." : "Selected outputs have not passed packaged approval.")
-                            .font(.caption)
                     }
                     if let progress = s.state.carProgress {
                         Text("\(progress.phase) \(progress.slot >= 0 ? "— slot \(progress.slot)" : ""): \(progress.done)/\(progress.total)")
                             .font(.caption).monospacedDigit()
                     }
                     HStack {
-                        Button("Retry check") { s.runCars(.carsCheck, measure: true) }.disabled(s.busy || s.carbon == nil)
-                        Button("Import selected extras") { s.runCars(.carsImport) }
-                            .disabled(s.busy || s.carbon == nil || !s.availableCarSelection || s.state.carPlan?.approved != true)
-                        Button("Retry import") { s.runCars(.carsImport, repair: true) }
-                            .disabled(s.busy || s.carbon == nil || !s.availableCarSelection || s.state.recognition?.approval_available != true)
-                        Button("Refresh installed extras") { s.runCars(.carsList) }.disabled(s.busy)
+                        if s.carCheckFailed {
+                            Button("Retry check") { s.runCars(.carsCheck) }.disabled(s.busy || s.carbon == nil)
+                        }
+                        Button("Import selected cars") { s.runCars(.carsImport, repair: s.carImportNeedsRepair) }
+                            .disabled(!s.canImportCars)
                         if s.busy { Button("Cancel extras") { s.cancel() }.disabled(s.stopping) }
                     }
                     if let installed = s.installedCars {
-                        if !installed.message.isEmpty { Text(installed.message).font(.caption).foregroundStyle(.orange) }
+                        if !installed.message.isEmpty { Text("Some installed cars need attention. See the log for details.").font(.caption).foregroundStyle(.orange) }
                         ScrollView {
                             VStack(alignment: .leading) {
                                 ForEach(installed.cars.filter { $0.state == "ready" }, id: \.slot) { car in
@@ -1440,7 +1773,7 @@ struct ContentView: View {
                                 }
                                 ForEach(installed.generations.filter { $0.verified }, id: \.generation) { generation in
                                     HStack {
-                                        Text("Retained \(generation.generation.prefix(14))…").font(.caption)
+                                        Text("Previous car set").font(.caption)
                                         Button("Restore") { s.runCars(.carsRestore, generation: generation.generation) }.disabled(s.busy)
                                     }
                                 }
@@ -1473,7 +1806,9 @@ struct ContentView: View {
     }
 
     var review: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let volumes = s.storageVolumes
+        let enoughSpace = volumes.allSatisfy { $0.sufficient }
+        return VStack(alignment: .leading, spacing: 12) {
             GroupBox(label: Text("Review").bold()) {
                 VStack(alignment: .leading, spacing: 6) {
                     row(s.carbonProduct ? "Carbon PC" : s.pcKind == .disc ? "PC discs" : "PC game", s.pc?.path ?? "")
@@ -1493,11 +1828,13 @@ struct ContentView: View {
                         row("Install in", s.dest.path)
                         Button("Change…") { s.chooseDest() }
                     }
-                    let free = s.freeGB.map { String(format: "%.0f GB free", $0) } ?? "free space unknown"
-                    Label("Needs about \(String(format: "%.1f", s.requiredGB)) GB while building; \(free) there.",
-                          systemImage: s.enoughSpace ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(s.enoughSpace ? .green : .orange)
-                    if s.enoughSpace == false { Text("Free some space or choose another place.").font(.caption) }
+                    ForEach(volumes) { volume in
+                        let free = volume.availableGB.map { String(format: "%.1f GB free", $0) } ?? "free space unknown"
+                        Label("\(volume.name): needs about \(String(format: "%.1f", volume.requiredGB)) GB; \(free).",
+                              systemImage: volume.sufficient ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(volume.sufficient ? .green : .orange)
+                        if !volume.sufficient { Text(volume.shortage).font(.caption) }
+                    }
                     if FileManager.default.fileExists(atPath: s.installedApp.path) {
                         Text(s.carbonProduct ? "NFS Carbon Native is already there. It is replaced only after the new one is complete."
                              : "NFS Most Wanted Native is already there. A 3.x copy is kept as \"NFS Most Wanted Native 3.x\"; a 4.0 copy is replaced only after the new one is complete.")
@@ -1509,7 +1846,8 @@ struct ContentView: View {
             HStack {
                 Button("Back") { s.page = s.carbonProduct ? .x360 : .extras }
                 Spacer()
-                Button("Build") { s.build() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(!s.enoughSpace || s.running)
+                if !enoughSpace { Button("Retry") { s.objectWillChange.send() } }
+                Button("Build") { s.build() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(!enoughSpace || s.running)
             }
         }
     }
@@ -1585,14 +1923,14 @@ struct ContentView: View {
             if s.exporting {
                 Button("Export again…") { s.exportAllInOne() }.buttonStyle(.borderedProminent)
             } else {
-                Button("Build again") { s.build() }.buttonStyle(.borderedProminent)
+                Button("Retry") { s.build() }.buttonStyle(.borderedProminent)
             }
         }
     }
 
     var finished: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("The game is ready (\(s.elapsedText())).", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.headline)
+            Label(s.exporting && s.updatingExport ? "Updated. Your old copy was replaced." : "The game is ready (\(s.elapsedText())).", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.headline)
             Text(s.installedPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             Text("The first launch takes a little longer while the Mac prepares the game's shaders.").font(.caption).foregroundStyle(.secondary)
             // Install-stage notes for the player, e.g. the 3.x career copy (backend migrate_3x_saves).
@@ -1609,7 +1947,7 @@ struct ContentView: View {
             if !s.carbonProduct {
                 Button("Manage installed extras…") { s.manageExtras() }.disabled(s.busy)
             }
-            Button("Export all-in-one app…") { s.exportAllInOne() }.disabled(s.busy)
+            Button(s.exportActionTitle) { s.exportAllInOne() }.disabled(s.busy)
         }
     }
 }
@@ -1732,6 +2070,15 @@ func installCancelTest(_ a: [String]) -> Never {
 struct Entry {
     static func main() {
         let args = CommandLine.arguments
+        if args.count == 4, args[1] == "--remembered-choices-test", let product = SetupProduct(rawValue: args[2]) {
+            let model = Setup(product: product, rememberedState: URL(fileURLWithPath: args[3]))
+            print(jsonString(["pc": model.pc?.path ?? "", "x360": model.x360?.path ?? "", "dest": model.dest.path,
+                              "carbon": model.carbon?.path ?? "", "selection": model.selectedCarIDs.sorted(),
+                              "update": model.pcUpdate?.path ?? "", "exe": model.pcExe?.path ?? "",
+                              "discs": model.pcDiscs.keys.sorted().compactMap { model.pcDiscs[$0]?.path },
+                              "disc": model.pcKind == .disc]))
+            exit(0)
+        }
         if args.count == 6, args[1] == "--car-selections-test" {
             do {
                 let choices = try CarChoice.load(URL(fileURLWithPath: args[2]))
@@ -1814,23 +2161,48 @@ struct Entry {
             flow.begin()
             flow.skip()
             let busySkipRefused = !flow.skipped
-            flow.finish(.failed(FailureInfo(stage: "cars", message: "failed", fix: "retry", log: "")))
+            flow.finish(.failed(FailureInfo(stage: "cars", message: "failed", fix: "retry", log: "")), mode: .carsCheck)
             let failureIsOptional = !flow.completed && !flow.busy
             flow.begin()
             let retryReset = !flow.completed && !flow.skipped && flow.busy
-            flow.finish(.cancelled)
+            flow.finish(.cancelled, mode: .carsImport)
             let cancelled = !flow.completed && !flow.busy
             flow.skip()
             let skipped = flow.skipped
             flow.begin()
-            flow.finish(.success(app: nil))
+            flow.finish(.success(app: nil), mode: .carsImport)
             let completed = flow.completed
+            let imported = flow.message
             let retryAfterSkip = !flow.skipped
             flow.begin()
             let retryAfterSuccess = !flow.completed && flow.busy
             print(jsonString(["busySkipRefused": busySkipRefused, "failureIsOptional": failureIsOptional,
                               "retryReset": retryReset, "cancelled": cancelled, "skipped": skipped,
-                              "completed": completed, "retryAfterSuccess": retryAfterSuccess, "retryAfterSkip": retryAfterSkip, "pageOrder": Page.x360.rawValue < Page.extras.rawValue && Page.extras.rawValue < Page.review.rawValue]))
+                              "completed": completed, "retryAfterSuccess": retryAfterSuccess, "retryAfterSkip": retryAfterSkip, "pageOrder": Page.x360.rawValue < Page.extras.rawValue && Page.extras.rawValue < Page.review.rawValue,
+                              "imported": imported]))
+            exit(0)
+        }
+        if args.count > 1, args[1] == "--developer-tools-test" {
+            var cancelled = DeveloperToolsStatus.requested(status: 0, now: 0)
+            let waitingButton = cancelled.installButton ?? ""
+            let polling = cancelled.poll(installed: false, now: 301)
+            let retryButton = cancelled.installButton ?? ""
+            let message = cancelled.message
+            let continueWhileMissing = cancelled.canContinue
+            let failed = DeveloperToolsStatus.requested(status: 1, now: 0)
+            _ = cancelled.poll(installed: true, now: 302)
+            print(jsonString(["polling": polling, "waitingButton": waitingButton, "retryButton": retryButton,
+                              "message": message, "failedButton": failed.installButton ?? "",
+                              "continueWhileMissing": continueWhileMissing, "continueEnabled": cancelled.canContinue]))
+            exit(0)
+        }
+        if args.count == 3, args[1] == "--game-open-test", let code = Int(args[2]) {
+            print(gameOpenFailure(NSError(domain: NSOSStatusErrorDomain, code: code)))
+            exit(0)
+        }
+        if args.count == 5, args[1] == "--recovery-arguments-test", let product = SetupProduct(rawValue: args[2]) {
+            print(jsonString(recoveryArguments(product: product, source: URL(fileURLWithPath: args[3]),
+                                               work: URL(fileURLWithPath: args[4]))))
             exit(0)
         }
         if args.count > 1, args[1] == "--env-test" {

@@ -216,13 +216,21 @@ enum class State { Stopped, Playing, Draining };
 
 struct DsDevice;
 
+struct PcmBacking {
+    uint8_t *samples = nullptr;
+    unsigned refs = 1;   // live handles sharing the backing, under DsDevice::m
+    ~PcmBacking() { free(samples); }
+};
+
 struct DsBuffer {
     DsDevice *dev = nullptr;
     bool primary = false;
     std::atomic<bool> lost{false};  // the device was released
     uint32_t flags = 0;
     Format fmt;
-    uint8_t *mem = nullptr;
+    uint8_t *committed = nullptr;   // cached PCM pointer for the mixer
+    const uint8_t *mem = nullptr;   // caller's Lock memory, read only at create and Unlock
+    PcmBacking *backing = nullptr;
     uint32_t bytes = 0, nframes = 0;
     std::vector<Route> routes;
     std::vector<float> gain_cur, gain_tgt;
@@ -248,6 +256,7 @@ struct DsDevice {
     std::mutex m;
     std::vector<DsBuffer *> buffers;   // all live buffers including the primary
     bool alive = true;
+    bool release_complete = false;    // final buffer may destroy the device after output teardown
     uint32_t coop = 0;
     uint32_t speaker = DSSPEAKER_5POINT1;
     float master = 1.0f;
@@ -433,7 +442,7 @@ uint32_t wrap_frame(const DsBuffer &b, uint64_t upos) { return b.nframes ? (uint
 
 // ------------------------------------------------------------------ decode / resample / route
 void convert(const DsBuffer &b, uint32_t i, size_t run, float *dst) {
-    const uint8_t *s = b.mem + (size_t)i * b.fmt.block;
+    const uint8_t *s = b.committed + (size_t)i * b.fmt.block;
     size_t n = run * b.fmt.channels;
     switch (b.fmt.bits) {
     case 8:
@@ -1333,7 +1342,6 @@ DsResult ds_device_create(const DsConfig *cfg_in, DsDevice **out) {
 
 void ds_device_release(DsDevice *d) {
     if (!d) return;
-    bool empty;
     {
         std::lock_guard<std::mutex> rg(d->reconf);  // no output restart (SetFormat) can start after this
         {
@@ -1367,7 +1375,11 @@ void ds_device_release(DsDevice *d) {
             if (d->ready) d->ready->close();
             d->ready.reset();
         }
+    }
+    bool empty;
+    {
         std::lock_guard<std::mutex> g(d->m);
+        d->release_complete = true;
         empty = d->buffers.empty();
     }
     if (empty) destroy_device(d);
@@ -1410,8 +1422,9 @@ DsResult ds_device_set_speaker_config(DsDevice *d, uint32_t config) {
 
 DsResult ds_device_create_buffer(DsDevice *d, uint32_t flags, uint32_t bytes, const void *wfx, void *mem,
                                  DsBuffer **out) {
-    if (!d || !out) return DSERR_INVALIDPARAM;
+    if (!out) return DSERR_INVALIDPARAM;
     *out = nullptr;
+    if (!d) return DSERR_INVALIDPARAM;
     auto b = std::make_unique<DsBuffer>();
     b->dev = d;
     b->flags = flags;
@@ -1420,14 +1433,15 @@ DsResult ds_device_create_buffer(DsDevice *d, uint32_t flags, uint32_t bytes, co
             return DSERR_INVALIDPARAM;
         // Each call gets its own handle; all primary handles share the device's format and master volume.
         std::lock_guard<std::mutex> g(d->m);
+        if (!d->alive) return DSERR_UNINITIALIZED;
         b->primary = true;
         b->fmt = d->primary_fmt;
         b->freq = (uint32_t)b->fmt.rate;
         b->nframes = (uint32_t)(b->fmt.rate / 10);
         b->bytes = b->nframes * b->fmt.block;
         b->volume = d->master_volume;
-        *out = b.get();
-        d->buffers.push_back(b.release());
+        d->buffers.push_back(b.get());
+        *out = b.release();
         return DS_OK;
     }
     if (!parse_format(wfx, b->fmt)) {
@@ -1441,7 +1455,12 @@ DsResult ds_device_create_buffer(DsDevice *d, uint32_t flags, uint32_t bytes, co
     b->nframes = bytes / b->fmt.block;
     if (!b->nframes) return DSERR_INVALIDPARAM;
     b->bytes = b->nframes * b->fmt.block;
-    b->mem = (uint8_t *)mem;
+    b->mem = static_cast<const uint8_t *>(mem);
+    auto pcm = std::make_unique<PcmBacking>();
+    pcm->samples = static_cast<uint8_t *>(malloc(b->bytes));
+    if (!pcm->samples) return DSERR_OUTOFMEMORY;
+    b->committed = pcm->samples;
+    memcpy(b->committed, b->mem, b->bytes);
     b->freq = (uint32_t)b->fmt.rate;
     b->routes = make_routes(b->fmt);
     std::lock_guard<std::mutex> g(d->m);
@@ -1450,20 +1469,24 @@ DsResult ds_device_create_buffer(DsDevice *d, uint32_t flags, uint32_t bytes, co
     update_gains(*b, d->master);
     DSLOG("CreateSoundBuffer: %d ch %d-bit%s %d Hz, %u bytes, flags %08x", b->fmt.channels, b->fmt.bits,
           b->fmt.is_float ? " float" : "", b->fmt.rate, b->bytes, flags);
-    *out = b.get();
-    d->buffers.push_back(b.release());
+    d->buffers.push_back(b.get());
+    b->backing = pcm.release();
+    *out = b.release();
     return DS_OK;
 }
 
 DsResult ds_device_duplicate_buffer(DsDevice *d, DsBuffer *src, DsBuffer **out) {
-    if (!d || !src || !out || src->primary) return DSERR_INVALIDPARAM;
-    if (src->lost) return DSERR_BUFFERLOST;
+    if (!out) return DSERR_INVALIDPARAM;
+    *out = nullptr;
+    if (!d || !src || src->dev != d || src->primary) return DSERR_INVALIDPARAM;
     std::lock_guard<std::mutex> g(d->m);
-    auto *b = new DsBuffer;
+    if (src->lost) return DSERR_BUFFERLOST;
+    auto b = std::make_unique<DsBuffer>();
     b->dev = d;
     b->flags = src->flags;
     b->fmt = src->fmt;
     b->mem = src->mem;
+    b->committed = src->committed;
     b->bytes = src->bytes;
     b->nframes = src->nframes;
     b->routes = src->routes;
@@ -1472,8 +1495,10 @@ DsResult ds_device_duplicate_buffer(DsDevice *d, DsBuffer *src, DsBuffer **out) 
     b->pan = src->pan;
     set_step(*b, d->cfg.mix_rate);
     update_gains(*b, d->master);
-    d->buffers.push_back(b);
-    *out = b;
+    d->buffers.push_back(b.get());
+    b->backing = src->backing;
+    ++b->backing->refs;
+    *out = b.release();
     return DS_OK;
 }
 
@@ -1542,13 +1567,16 @@ DsResult ds_device_output_info(DsDevice *d, DsOutputMode *mode, int *live, uint6
 void ds_buffer_release(DsBuffer *b) {
     if (!b) return;
     DsDevice *d = b->dev;
+    PcmBacking *last_backing = nullptr;
     bool free_dev;
     {
         std::lock_guard<std::mutex> g(d->m);
         d->buffers.erase(std::remove(d->buffers.begin(), d->buffers.end(), b), d->buffers.end());
-        free_dev = !d->alive && d->buffers.empty();
+        if (b->backing && --b->backing->refs == 0) last_backing = b->backing;
+        free_dev = d->release_complete && d->buffers.empty();
     }
     delete b;
+    delete last_backing;
     if (free_dev) destroy_device(d);
 }
 
@@ -1668,9 +1696,12 @@ DsResult ds_buffer_lock(DsBuffer *b, uint32_t offset, uint32_t bytes, uint32_t f
 
 DsResult ds_buffer_unlock(DsBuffer *b, uint32_t off1, uint32_t len1, uint32_t off2, uint32_t len2) {
     if (DsResult r = check_live(b)) return r;
-    // The mixer reads the memory directly, so there is nothing to commit; just check the regions.
     if (b->primary) return DSERR_INVALIDCALL;
     if ((uint64_t)off1 + len1 > b->bytes || (len2 && (uint64_t)off2 + len2 > b->bytes)) return DSERR_INVALIDPARAM;
+    std::lock_guard<std::mutex> g(b->dev->m);
+    if (b->lost) return DSERR_BUFFERLOST;
+    if (len1) memcpy(b->committed + off1, b->mem + off1, len1);
+    if (len2) memcpy(b->committed + off2, b->mem + off2, len2);
     return DS_OK;
 }
 

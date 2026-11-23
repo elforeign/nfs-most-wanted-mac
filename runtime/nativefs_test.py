@@ -31,6 +31,7 @@ presentation_type = host[host.index('typedef struct {\n    uint64_t shown[5];'):
 
 ROW_MAIN = r'''
 void live_picture_apply_fullscreen(int v){(void)v;}
+void live_picture_apply_notch(int v){(void)v;}
 @ROW@
 static int failures;
 #define CHECK(x) do { if(!(x)){fprintf(stderr,"FAIL: %s\n",#x);++failures;} }while(0)
@@ -44,6 +45,7 @@ int main(int argc, char **argv) {
     CHECK(initial==(!strcasecmp(wanted,"native")?1:!strcasecmp(wanted,"auto")?2:0));
     CHECK(s_fullscreen.category==SET_DISPLAY && !strcmp(s_fullscreen.label,"Full screen"));
     CHECK(s_fullscreen.def==0 && !s_fullscreen.restart && s_fullscreen.live_env && s_fullscreen.apply==live_picture_apply_fullscreen);
+    CHECK(s_notch.type==SET_TOGGLE && s_notch.def==0 && s_notch.order==12 && s_notch.live_env && s_notch.apply==live_picture_apply_notch);   // Fill notch area: Off, live
     CHECK(s_fullscreen.nchoices==3 && !strcmp(s_fullscreen.choices[2],"Auto") && !strcmp(s_fullscreen.choices[0],"Borderless") && !strcmp(s_fullscreen.choices[1],"Native"));
     char boot_mode[32];snprintf(boot_mode,sizeof boot_mode,"%s",getenv("NFS_FULLSCREEN_MODE")?:"");
     if(initial)CHECK(!strcasecmp(boot_mode,initial==2?"auto":"native"));

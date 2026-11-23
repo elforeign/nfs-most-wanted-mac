@@ -9,6 +9,37 @@ Video > Time Of Day slider remains the daylight control while paused.
 12 is noon, 18 is dusk, 0 (or 24) is midnight. This test override takes priority
 over the clock mode and slider.
 
+`NFS_WORLD_LIGHTING=neutral-d65` selects the startup Neutral D65 lighting
+profile and enables the clock in both games. It preserves linear luminance
+when setting direct, specular and ambient light to D65. In Carbon, the night
+blend uses the existing vertex bake's luminance and adds the live moon from
+the opposing orbit. The in-game car keys and fills follow the profile through
+the existing rig adapter. `NFS_TEST_DAYNIGHT_MOON_ONLY=1` with `BOOT_DIAG`
+suppresses the generic world vertex bake at full night to isolate its live
+moon. Setting the diagnostic to a frame number greater than 1 delays isolation
+until after that frame, allowing both variants to be captured in one run.
+The explicit D65 profile is off by default and requires a restart.
+It selects the neutral setting in both Most Wanted treatment chains.
+In Carbon it bypasses the colour LUTs in the plain and enhanced programs
+across both cities and all hours. Bloom and exposure still run. Fog keeps
+its luminance and distances, with the dome taking the same horizon fog.
+SDR and EDR share the existing D65 output primaries.
+The grade and output transfer have separate offline proofs. In both Palmont and
+Rockport, plain and enhanced treatment preserve an equal-channel D65 reference
+at day weights 0/.5/1 (chromaticity error <= .003); multiplying bypass blue by
+1.10 fails at .02623448. This is a code-value grade test using the reference
+sRGB EOTF for chromaticity, independent of the presenter's implementation.
+MW's ordinary Neutral noon is a warm direct/cool ambient mixture: its 18% card
+is checked against the computed source-white, luminance and ambient reference,
+not required to be D65. The explicit Neutral D65 profile is a separate mode.
+`runtime/hdr_output_test.m` tests presenter transport without either game's
+post chain: sRGB code .5 becomes linear .21398926 in FP16 (reference .214041,
+error .00005188 <= .001); missing decode yields .5 (error .285959), rejected.
+These checks do not establish Carbon float composition parity with MW HDR.
+Carbon's begin seam bypasses shared HDR composition; its scene radiance and
+highlight treatment require their own implementation and proof. Display
+PQ/HLG transport and measured panel white remain unverified.
+
 The clock lives for the process, seeded once from the game's phase. Free roam
 advances by `dt/150` hours (60 real minutes per day), holds while paused and
 wraps at 24. Every race holds its first frame's hour. Returning to free roam
@@ -55,7 +86,7 @@ the clock night as native colours are; all other draws see c251.w = 0 and the
 unchanged day colour. Uses the mesh normal (tree bounds are not decoded).
 `recomp/private_daynight_trees_test.py` checks the program tail.
 
-`NFS_DAYNIGHT_GRADE` (later image, On by default, `0`/`off` turns it off, only with `NFS_DAYNIGHT=on`):
+`NFS_DAYNIGHT_GRADE` (later image, On by default with the clock, `0`/`off` restores the native LUTs):
 Carbon's final visual treatment samples a 3D colour grade made for Palmont (a blue
 cast: the Rockport noon road goes from R/B 1.07 before it to 0.84 after it, Most
 Wanted shows 1.08). With the switch on, both treatment programs (plain and enhanced)
@@ -68,7 +99,11 @@ writer omits the source dome, its scenery instance and cloud texture. The grade
 region now comes from the camera row. The native alternate dome retains its
 previous zero grade weight. The native dome’s day/night gradient,
 cloud scroll and moon sampling are unchanged.
-`recomp/private_daynight_grade_test.py` checks both programs. BOOT_DIAG logs
+`recomp/private_daynight_grade_test.py` checks both programs and the native-dome/
+camera-row scope independently. Neutral D65 uses weight 1 in both cities at
+every hour, independent of the overlay, camera row and dome; its bypass omits
+saturation to retain code values above 1. `0`/`off` restores the native LUTs
+in this profile too. BOOT_DIAG logs
 `carbon_daynight_grade: weight=... draws day=... zero=...` every 2 s.
 
 The chosen daylight interval is 06:00–18:00. The original phase maps linearly

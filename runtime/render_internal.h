@@ -2,6 +2,7 @@
 // render_present.m, render_post.m). Not a public interface: host.h has that. Objects stay file-scope in render.m
 // (they were `static` there); this header names the ones the other files use.
 #pragma once
+#include "blackbox_render.h"
 #import <ImageIO/ImageIO.h>
 #import <CoreServices/CoreServices.h>
 #include <pthread.h>

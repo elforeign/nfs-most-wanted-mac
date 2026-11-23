@@ -20,17 +20,17 @@ removes the attachment. Snapshot capture and text formatting use copied host
 records; exporters never inspect guest memory.
 
 Every hang/stall report appends the same numeric history before backtraces, with
-or without diagnostics. Hang history ends at the last published frame, and the
-header gives the subsequent no-frame interval. Automatic Carbon hang reports also
-create the ordinary problem-report folder. Its frame timestamp advances even
+or without diagnostics. The 30-second window is anchored to the last published
+frame. Hooked MW cinematic calls can also appear after that frame, through
+snapshot capture. The header gives the subsequent no-frame interval. Automatic
+Carbon hang reports also create the ordinary problem-report folder. Its frame timestamp advances even
 when diagnostics are off. The recorder does not change watchdog thresholds.
 
-Storage is bounded: 16,384 frame slots (384 bytes), 65,536 reserved presentation
+Storage is bounded: 16,384 frame slots (384 bytes), 65,536 presentation
 slots (64 bytes), 4,096 state slots and 512 reserved error slots (128 bytes each).
 Publication gates and sequence numbers are inside these sizes: 10.5625 MiB plus
-ring bookkeeping and five latest FE context slots (11,076,416 bytes), plus bounded label and adapter state,
-below 11 MiB. A menu snapshot
-adds 10,384,096 bytes until closing;
+ring bookkeeping, ten latest state context slots, and bounded label and adapter
+state, below 11 MiB. A menu snapshot adds about 9.9 MiB until closing;
 export may temporarily add another snapshot and formatted text. No allocation,
 formatting, file I/O, guest calls or waiting occurs in frame/event publication.
 A producer tries its slot once and counts a loss if occupied. Readers acquire the
@@ -42,11 +42,11 @@ disjoint. Sparse state history uses heartbeats for context; records are grouped
 by stream, chronologically within each stream. Startup may contain less than 30 s.
 At 546 fps the frame ring covers approximately 30 s; higher rates can shorten it.
 
-Carbon FE/package/load observations are available through the tap described below.
-MW FE/package/load, movie/NIS, per-pass draws, asynchronous presentation, physical
-input and error feeds are **unavailable**; their typed storage is reserved. An observed flow or long frame alone does not name
-a cause. Standalone sections contain only fixed labels and numbers, never user
-strings, paths, typed text or device identifiers.
+MW and Carbon provide FE, package and load observations. MW also provides the
+active script on the fade object and movie/NIS observations. Both games provide
+pass draws and asynchronous presentation. Carbon includes movie requests/state and the
+witnessed NIS class/clock below. Physical input and error feeds are unavailable for
+both games. Standalone sections contain only fixed labels and numbers.
 
 `blackbox_test.py` runs without assets through `offline_tests.sh`. It compiles the
 production adapters and export hooks: 0 missing sentinel records across 12 exports
@@ -57,6 +57,36 @@ snapshot/publication, forced contention, capacity exhaustion and the off switch.
 The report privacy fixture seeds names, paths and secrets into `blackbox.txt` and
 checks both redaction and fail-closed deletion. Real in-game median CPU cost and
 the reported fault's blocking condition require separate game measurements.
+
+MW samples one FE/load/fade record per change. The latest record remains
+available in exports even when its timestamp precedes the retained window. The
+record includes the FE manager flags, eight controller-error bytes, requested
+package, garage type, boot flag and pause request. The loading row identifies
+native loading flows 4 and 5, continuation address, stage, loading package and
+the screen-seen and tips-done bytes. Package names and stage text use fixed
+retail labels. Unrecognized labels show as `<unknown>`.
+
+The package row identifies the first package with control in native order, the
+observed list count and a signature of its entries. The fade lookup follows
+the native active-list search with an idle-list fallback. It reads the active
+script hash for object `027FF2DC` in `FadeScreen.fng`. The script hash
+`5079C8F8` means `fade_on=1`. Incomplete fade observations print
+`fade_on=unknown`. Each package traversal visits at most 24 entries and an
+object lookup visits at most 64 nodes, including children. The `limits` mask
+marks an incomplete control list (1), incomplete fade package search (2),
+incomplete fade object search (4) or invalid script pointer (8).
+
+MW records movie player address, native state, next state, pause byte and a
+bounded filename hash on change. Movie hooks record Play, Stop, destruction and
+host playback end or timeout. Native playback exposes state and next state
+through the samples. MW also samples the activity behind INIS,
+its state, scene hash and scene pointer. Load, Play and Unload calls appear even
+if they all occur between frame samples. Hook rows describe call entry, so the
+state can be the one preceding the call. The latest sampled state remains
+visible when older than the retained window. A zero address with valid state
+indicates absence, and unknown hashes show as zero. Exports contain numeric
+hashes and guest addresses. Movie filenames and requested scene names are never
+copied as text.
 
 An excerpt from the diagnostics-off forced-black-screen F10 fixture:
 
@@ -107,3 +137,84 @@ republication. After 4,097 root changes wrap the event ring, a hang export still
 includes all four unchanged context rows. The fixture also checks a 24-entry
 cyclic walk, unknown-label rejection, zero guest-memory changes, probe off 0
 events and probe on 600 draw lines even when `NFS_BLACKBOX=0` with diagnostics on.
+
+Carbon samples the movie player at `*(00A97BB4)`: class, state `+120`, next
+state `+124`, and a bounded hash of the inline filename `+1C`. Native playing
+states are 3, 4 and 5. The existing movie-request provider records a play request
+before calling its original function, including requests shorter than one frame.
+Only the hash enters history; arbitrary filenames never enter reports. Movie
+playback clocks are not decoded yet.
+
+Carbon samples INIS at `*(00B4D964)`. Interface class `009EC6E8` has state
+`+2E0` and track `+390`; track class `009C5FE0` has float elapsed `+20` and
+length `+28`. These layouts are pinned by native image fragments in
+`private_blackbox_cinematics_test.py`. Presence/class/state are read each frame;
+clock values are sampled at most four times a second, plus identity changes.
+Within the current object/state/track, `playback_unchanged_for` measures time
+since the last observed clock change,
+anchored to the last frame or the preserved F10 snapshot. It excludes subsequent
+no-frame time, which the header reports separately. Historical clock samples
+show age at their event time; the latest context shows age at the report anchor.
+Invalid clocks report age unavailable. Other NIS classes retain their numeric
+class and explicitly say `state=unavailable layout=not_decoded_yet`; no fields
+from the witnessed layout are assumed for them.
+
+The offline frozen-clock fixture advances 8,000 frames over 40 seconds and
+preserves F10 evidence through an 80-second pause: inherited code 0/1 reports,
+tap 1/1, removed feed 0/1. It checks hang output, clock progress, unsupported
+classes, invalid clocks/pointers, short requests, zero guest writes, unchanged
+native-call CPU results, and zero guest reads or added clocks with recording off.
+Nine alternating pairs of 500,000 frames measure the adapter at 14.3 to 18.9
+ns/frame idle (paired median increase 4.7 ns) and 14.3 to 20.5 ns/frame with
+frozen movie/NIS state (increase 6.2 ns). These are offline measurements; aggregate
+solo game A/B remains separate. No new switch or playback control is added.
+
+Effect BeginPass/EndPass taps accumulate deltas from the existing cumulative D3D
+attempt counter, including repeated invocations of a pass. The shared frame tap
+copies at most 32 distinct pass IDs into the existing 384-byte frame slot. The
+RENDER row has its own original render serial; the guest reporting serial can
+be different. `attempted_d3d_draws` is independent of the previous PerfFrame
+sample printed on FRAME. Deferred shader draws and failed shader/pipeline draws
+are separate deltas. Draws outside a recognized pass remain `unattributed`;
+`pass_overflow_draws` counts attempted draws beyond the 32-entry frame budget.
+The 32-pass limit is proposed until representative FE/race runs in both games
+show zero overflow. Nonzero draws do not establish that a picture was visible.
+
+A 256-entry numeric dictionary identifies effect/technique/pass hashes, with
+fixed retail labels for recognized effect categories. Raw effect, technique or
+pass strings never enter reports. Dictionary saturation is counted and new
+identities become unattributed. Definitions remain immutable after publication.
+Host post, copy, resolve and final encoder IDs are separate observations with
+their original serial, never counted as attempted D3D draws. Post detail uses
+the existing HC stage IDs. Host encoder records consume presentation ring space:
+coverage depends on actual encoder/stage frequency and can be shorter than the
+four-presentation-records-per-frame estimate. The coverage row explicitly reports
+wrap, publication losses and a short retained window.
+
+Presentation records describe actual frame submission after render-thread replay,
+frame command-buffer completion, final command-buffer completion and drawable
+presentation. Each callback captures the original render serial, independently
+of callback order or later frames. GPU rows include start/end timestamps, numeric
+command-buffer status and signed error code. Shown rows contain the drawable
+presentation timestamp and distinguish shown from dropped. A missing drawable is
+explicit; `not_scheduled` means the existing present-copy policy did not schedule
+a presentation. It does not infer a blocking cause. LATEST_PRESENT summarizes
+observed versus missing-or-pending callbacks for the latest copied render serial.
+Callbacks after the last frame remain visible through snapshot capture; F10
+preserves that capture through later frames and callbacks. There are no GPU waits.
+Per-encoder GPU time is unavailable in the recorder; the existing optional
+`BOOT_DIAG_GPUPASS` log supplies that separate measurement without a new switch.
+
+`blackbox_render_test.py` compiles the production effect-pass hooks: the frame
+exports 7 attempted draws (3+4 across two named effect passes), deferred=2 and
+original render serial 42. Removing BeginPass attribution exports 0 attributed
+draws and fails the same check. Production presentation blocks run against fake
+platform objects, with callbacks executed in reverse: 18/18 original serials
+versus 0/18 when the captured serial is replaced. The fixture also checks frozen
+F10 history, frame-crossing passes, overflow, unknown IDs, off-path counter reads
+and an offline per-frame microbench. No game, GPU, audio or controller is used.
+
+The ordinary final completion uses one shared block and 32 fixed numeric tickets,
+so serial capture allocates no new block per frame. Ticket exhaustion emits an
+explicit loss record. Added renderer state is bounded below 16 KiB; the original
+frame/presentation slot sizes and permanent recorder storage cap remain unchanged.

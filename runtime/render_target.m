@@ -113,6 +113,7 @@ void msaa_resolve(RenderTex *r) {
         probe_applied(PROBE_MSAA, 1);
     }
     if (gpt_on) gpt_render(rp, "resolve %s %lux%lu x%lu", r == &bb_rt ? "bb" : r == &ad_rt ? "autodepth" : "rt", (unsigned long)r->ms.width, (unsigned long)r->ms.height, (unsigned long)r->ms.sampleCount);
+    blackbox_render_host(frame_serial, BB_HOST_RESOLVE);
     { id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp]; if (gpt_on) gpt_name(e); [e endEncoding]; }
     r->stale = 0;
     ++stat_resolves;

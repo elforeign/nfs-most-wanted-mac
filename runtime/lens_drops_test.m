@@ -8,6 +8,8 @@
 // Rim step (limit .06): steepest neighbour-pixel step across the rim over the
 // frame value: .012207 for b168e2cc's defocused edge, .022786 at 063ddc17 -> .107422.
 #include "render_internal.h"
+uint64_t frame_serial=1;
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
 #include "lens_drops.h"
 #include <math.h>
 #include <stdarg.h>

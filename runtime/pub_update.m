@@ -54,8 +54,9 @@ static NSString *const PrepareScript =
 @"import contextlib, json, os, shutil, signal, subprocess, sys, tarfile, time\n"
 @"from pathlib import Path\n"
 @"job, setup, profile, destination = map(Path, sys.argv[1:])\n"
-@"def progress(state, message):\n"
+@"def progress(state, message, source=None):\n"
 @"    value = dict(schema=1, state=state, message=message)\n"
+@"    if source is not None: value['source'] = source\n"
 @"    tmp = job / 'progress.prepare.tmp'\n"
 @"    with tmp.open('w') as f:\n"
 @"        json.dump(value, f); f.flush(); os.fsync(f.fileno())\n"
@@ -120,6 +121,8 @@ static NSString *const PrepareScript =
 @"            if not line: continue\n"
 @"            print(line, file=sys.stderr, flush=True)\n"
 @"            value = json.loads(line)\n"
+@"            if value.get('ev') == 'source-missing':\n"
+@"                progress('building', value['title'], value)\n"
 @"            if value.get('ev') == 'stage':\n"
 @"                self.title = value['title']; progress('building', self.title)\n"
 @"            if value.get('ev') == 'progress':\n"
@@ -144,7 +147,7 @@ static NSString *const PrepareScript =
 @"        time.sleep(1)\n"
 @"    check_cancel()\n"
 @"    with contextlib.redirect_stdout(stream):\n"
-@"        rc = backend.main(['--stage-only', " PU_STAGE_GAME "'--stage', str(job / 'staged'), '--dest', str(destination), '--events'])\n"
+@"        rc = backend.main(['--stage-only', " PU_STAGE_GAME "'--stage', str(job / 'staged'), '--dest', str(destination), '--events', '--source-replies', str(job / 'source-replies')])\n"
 @"    if rc or stream.error: raise RuntimeError(stream.error or 'Rebuild failed. Open the log')\n"
 @"    check_cancel()\n"
 @"    ready = job / 'staged/ready.json'\n"
@@ -264,6 +267,35 @@ extern const char *userdata_dir(void);
 static NSString *pu_job, *pu_asset, *pu_checksum;
 static unsigned long long pu_size;
 static NSTask *pu_worker;
+static NSString *pu_source_token;
+
+static void PULocateSource(NSDictionary *request) {
+    NSString *token = request[@"token"], *title = request[@"title"], *body = request[@"body"];
+    if (![token isKindOfClass:NSString.class] || token.length != 32 ||
+        [token rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location != NSNotFound ||
+        ![title isKindOfClass:NSString.class] || ![body isKindOfClass:NSString.class] || [token isEqual:pu_source_token]) return;
+    NSString *reply = [[pu_job stringByAppendingPathComponent:@"source-replies"] stringByAppendingPathComponent:[token stringByAppendingString:@".json"]];
+    if (PURead(reply)) return;
+    pu_source_token = token;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (pu_state == PU_CANCELLING) return;
+        NSAlert *alert = [NSAlert new]; alert.messageText = title; alert.informativeText = body;
+        NSString *error = request[@"error"];
+        if ([error isKindOfClass:NSString.class]) alert.informativeText = [body stringByAppendingFormat:@"\n\n%@", error];
+        [alert addButtonWithTitle:@"Locate…"]; [alert addButtonWithTitle:@"Skip this source"];
+        NSString *path = nil;
+        if ([alert runModal] == NSAlertFirstButtonReturn) {
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            panel.canChooseDirectories = YES; panel.canChooseFiles = YES; panel.allowsMultipleSelection = NO;
+            panel.message = body; panel.prompt = @"Choose";
+            if ([panel runModal] != NSModalResponseOK) { pu_source_token = nil; return; }
+            path = panel.URL.path;
+        }
+        if (!PUWrite(reply, @{@"path":path ?: NSNull.null})) {
+            pu_source_token = nil; pu_error("Cannot save the source choice. Check folder access and retry");
+        }
+    });
+}
 static BOOL pu_loaded, pu_local_error;
 static char pu_help[1400];
 static NSString *PUProfile(void) { return PUCanonical([NSString stringWithUTF8String:userdata_dir()]); }
@@ -317,6 +349,8 @@ static void PULoad(void) {
     if (!pu_job) return;
     NSDictionary *value = PURead([pu_job stringByAppendingPathComponent:@"progress.json"]);
     NSString *state = value[@"state"], *message = value[@"message"];
+    if (pu_state != PU_CANCELLING && [value[@"source"] isKindOfClass:NSDictionary.class] && [state isEqual:@"building"] && PUAlive())
+        PULocateSource(value[@"source"]);
     if (![state isKindOfClass:NSString.class] || (message && ![message isKindOfClass:NSString.class])) {
         pu_error("Update progress is missing. Retry or open the log"); return;
     }

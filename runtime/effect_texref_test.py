@@ -80,6 +80,10 @@ HARNESS = r'''
 #include <stdlib.h>
 #include <stdio.h>
 #include "d3dx_effect_under_test.c"
+int blackbox_enabled(void) { return 0; }
+uint16_t blackbox_render_pass_id(const char *a,const char *b,const char *c) { (void)a;(void)b;(void)c;return 0; }
+void blackbox_render_pass_begin(uint16_t id) { (void)id; }
+void blackbox_render_pass_end(void) {}
 uint8_t *G; int boot_trace;
 uint32_t galloc(uint32_t n) { static uint32_t top = 0x40000; uint32_t a = top; top += (n + 15) & ~15u; return a; }
 uint32_t gstr(const char *s) { (void)s; return 0; }

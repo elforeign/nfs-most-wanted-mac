@@ -179,6 +179,7 @@ static void limiter_proof() {
     auto &r = *receiver;
     Fixture f(r);
     for (auto &x : f.source) x *= 12;
+    if (ds_buffer_unlock(f.b, 0, f.source.size() * sizeof(float), 0, 0)) std::abort();
     ds_capture_start(Receiver::receive, &r);
     f.render(); f.render();
     ds_capture_stop();

@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "post_cuts.h"
+#include "blackbox_render.h"
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
 #include "shader.inc"
 #include "load.inc"
 #include "destination.inc"

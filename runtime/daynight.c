@@ -1,6 +1,7 @@
 // An optional full orbit; the original advance and blend run unchanged when Off.
 #include "daynight.h"
 #include "game_select.h"
+#include "lighting_colour.h"
 #include <math.h>
 
 // Optional private palette; the exported tree builds with its own chosen sky.
@@ -106,9 +107,11 @@ static struct {
 __attribute__((constructor)) static void daynight_configure(void) {
     fixed = 0;
     const char *e = getenv("NFS_DAYNIGHT");
-    enabled = e && (!strcmp(e, "1") || !strcasecmp(e, "on"));
+    int d65 = lighting_mode_d65();
+    enabled = d65 || (e && (!strcmp(e, "1") || !strcasecmp(e, "on")));
     e = getenv("NFS_DAYNIGHT_CARS");
-    cars_enabled = enabled && e && (!strcmp(e, "1") || !strcasecmp(e, "on"));
+    cars_enabled = d65 ? !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")))
+                       : enabled && e && (!strcmp(e, "1") || !strcasecmp(e, "on"));
     e = getenv("NFS_TEST_DAYNIGHT_HOUR");
     if (enabled && e && *e) {
         char *end;
@@ -234,6 +237,11 @@ void f_00769580(Cpu *c) {
         after.diffuse[i] *= clock_weight;
         after.specular[i] *= clock_weight;
     }
+    if (lighting_mode_d65()) {
+        lighting_colour_d65(after.diffuse);
+        lighting_colour_d65(after.ambient);
+        lighting_colour_d65(after.specular);
+    }
     record_io(tod, &after, 1);
     if (cars_enabled) {
         car_light.sun = luma_ratio(after.diffuse, before.diffuse, 1, 1);
@@ -288,11 +296,13 @@ static void rig_by_hour(Cpu *c) {
     if (diag_on && postfx_look_variant("carsoff")) return;
     for (int light = 0; light < 3; ++light) {
         float f = light ? car_light.sky : car_light.sun;
-        if (f == 1) continue;
-        for (int i = 0; i < 3; ++i) {
-            uint32_t a = context + 0x10 + 0x10 * light + 4 * i;
-            write_float(a, read_float(a) * f);
-        }
+        int d65 = lighting_mode_d65();
+        if (f == 1 && !d65) continue;
+        float rgb[3];
+        uint32_t a = context + 0x10 + 0x10 * light;
+        memcpy(rgb, G + a, sizeof rgb);
+        if (d65) lighting_colour_d65(rgb);
+        for (int i = 0; i < 3; ++i) write_float(a + 4 * i, rgb[i] * f);
     }
 }
 __attribute__((noinline)) static void setup_local_light(Cpu *c) {

@@ -26,18 +26,18 @@ def is_xbox_iso(source):
     return True
 
 
-def prepare(source, work, events, update=None, exe=None):
+def prepare(source, work, events, update=None, exe=None, extra=()):
     from . import backend as b
 
     source = Path(source)
     if source.is_file() and source.name.casefold() == "nfsc.exe":
         source = source.parent
     if carbon_disc.is_disc(source):
-        return prepare_disc(source, work, events, update, exe)
+        return prepare_disc(source, work, events, update, exe, extra)
     if is_xbox_iso(source):
         raise b.SetupError("This is an Xbox 360 disc image.",
                            "Add it under Xbox 360 files (optional). Choose your PC game first.")
-    if update or exe:
+    if update or exe or extra:
         raise b.SetupError("The Carbon update and a separate NFSC.exe are only used with original Carbon PC discs.", FIX)
     if source.is_file() and source.suffix.lower() == ".iso":
         try:
@@ -79,8 +79,7 @@ def prepare(source, work, events, update=None, exe=None):
     def space(total):
         if total > b.ZIP_MAX_BYTES:
             raise b.SetupError("The Carbon archive is larger than 8 GB.", FIX)
-        if shutil.disk_usage(work).free < total + 512 * 1024**2:
-            raise b.SetupError("There is not enough free space to unpack the Carbon archive.", FIX)
+        b.require_space(work, total + 512 * 1024**2)
 
     root = b.unpacked(work, dict(path=str(source), sha256=before), events,
                       "the Carbon archive", unpack, name="carbon_src")
@@ -103,14 +102,11 @@ def find_root(top):
     return candidates[0]
 
 
-def prepare_disc(source, work, events, update, exe):
+def prepare_disc(source, work, events, update, exe, extra=()):
     """Patch a temporary disc tree, discard its executables, then validate the player's copy."""
     from . import backend as b
 
-    if not update:
-        raise b.SetupError("The Carbon PC discs need the official Carbon update.", DISC_FIX)
-    if not exe:
-        raise b.SetupError("The Carbon PC discs need your compatible NFSC.exe.", DISC_FIX)
+    b.require_disc_inputs(update, exe, "1.4", "NFSC.exe", DISC_FIX)
     update, exe = Path(update), Path(exe)
     if not update.is_file():
         raise b.SetupError("The chosen Carbon update is missing or not a file.", DISC_FIX)
@@ -120,8 +116,8 @@ def prepare_disc(source, work, events, update, exe):
     def inputs():
         discs = {}
         try:
-            discs = b.pc_disc.disc_set(source, allow_mdf=True, missing_fix=carbon_disc.MISSING_FIX)
-            return dict(layout=1, discs=[dict(path=str(d.path.resolve()),
+            discs = b.pc_disc.disc_set(source, extra, allow_mdf=True, missing_fix=carbon_disc.MISSING_FIX)
+            return dict(tools=b.extraction_tools("carbon_source.py", "carbon_disc.py", "carbon_patch.py"), layout=1, discs=[dict(path=str(d.path.resolve()),
                         sha256=b.sha_file(d.path) if d.handle else b.digest_tree(d.path))
                         for d in discs.values()], update=dict(path=str(update), sha256=b.sha_file(update)),
                         exe=dict(path=str(exe), sha256=b.sha_file(exe)))
@@ -138,7 +134,7 @@ def prepare_disc(source, work, events, update, exe):
             temporary = Path(work) / "tmp"
             temporary.mkdir(exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="carbon-disc-", dir=temporary) as td:
-                raw = carbon_disc.prepare(source, Path(td), events)
+                raw = carbon_disc.prepare(source, Path(td), events, extra)
                 patch.apply(raw, out, progress=events.progress)
                 shutil.copyfile(exe, out / "NFSC.exe")
                 b.validate_carbon(out)

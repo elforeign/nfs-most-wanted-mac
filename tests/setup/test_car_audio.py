@@ -225,7 +225,8 @@ class GraphProof(unittest.TestCase):
                 ca.graph(fixture(), 'source', bad)
         for game, platform in [('carbon', 'x360'), ('prostreet', 'pc'), ('undercover', 'pc')]:
             r = ca.inventory(b'', ['source'], {}, game=game, platform=platform)
-            self.assertIn('unsupported audio source/platform', r['unsupported']['source'])
+            message = 'unsupported ProStreet attributes/car' if game == 'prostreet' else 'unsupported audio source/platform'
+            self.assertIn(message, r['unsupported']['source'])
         good = ca.graph(fixture(), 'source', resources())
         bad = copy.deepcopy(good)
         bad['tiers'].reverse()
@@ -286,8 +287,9 @@ def private_proof():
     for code, game in [('P', 'prostreet'), ('U', 'undercover')]:
         rejected = ca.inventory(b'', groups[code], {}, game=game)
         assert len(rejected['unsupported']) == len(groups[code])
-        assert all('schema and resources not audited' in reason for reason in rejected['unsupported'].values())
-    print('unsupported roster:', {code: len(values) for code, values in groups.items()})
+        reason = 'unsupported ProStreet attributes/car' if game == 'prostreet' else 'schema and resources not audited'
+        assert all(reason in message for message in rejected['unsupported'].values())
+    print('rejected empty-input roster:', {code: len(values) for code, values in groups.items()})
     tier_layers = 0
     for car, g in report['supported'].items():
         tiers = a.field(h('pvehicle'), h(car.lower()), h('Audio'))['values']

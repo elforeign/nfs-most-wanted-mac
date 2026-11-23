@@ -14,6 +14,7 @@ is used.
 """
 import argparse
 import base64
+from contextlib import ExitStack, nullcontext
 import hashlib
 import json
 import os
@@ -208,7 +209,56 @@ def _clear(profile):
 
 def _names(profile, record):
     names, generation, temporary = ins._plan(Path(profile), record)
+    if record.get("cars") is True:
+        path = Path(profile) / "car-catalog/current.json"
+        names.append((path, path.with_name(".current.json.new-" + record["token"]), None))
     return names, generation, temporary
+
+
+def _prepare_cars(ready, profile, descriptor, record, locks):
+    if "cars" not in descriptor or descriptor["app"] != ins.APP_BUNDLE:
+        return
+    from setup_kit import stage
+
+    root = profile / "car-catalog"
+    with ExitStack() as guard:
+        try:
+            base = guard.enter_context(stage.lock_car_update(root))
+            body = stage.prepare_car_pointer(ready.parent / "cars", root, base, descriptor["cars"])
+        except (OSError, ValueError, KeyError, TypeError):
+            print(stage.CAR_REFRESH_KEPT, file=sys.stderr, flush=True)
+            return
+
+        record["cars"] = True
+        _journal(profile, record, "preparing")  # reserve the pointer candidate for recovery
+        path, candidate, _ = _names(profile, record)[0][-1]
+        try:
+            ins.write_synced(candidate, body, 0o600)
+            ins.sync_dir(path.parent)
+            _step("prepared-car-pointer")
+        except OSError:
+            ins.remove(candidate)
+            record.pop("cars")
+            print(stage.CAR_REFRESH_KEPT, file=sys.stderr, flush=True)
+        else:
+            locks.enter_context(guard.pop_all())
+
+
+def _skip_car_exchange(profile, record, path, candidate, old_id, new_id):
+    """Preserve the old pointer when its optional exchange could not complete."""
+    if record.get("cars") is not True or path != profile / "car-catalog/current.json":
+        return False
+    from setup_kit import stage
+
+    if ins.ident(path) == new_id and ins.ident(candidate) == old_id:
+        ins.exchange(path, candidate)
+    if ins.ident(path) != old_id or ins.ident(candidate) != new_id:
+        return False
+    ins.remove(candidate)
+    ins.sync_dir(path.parent)
+    del record["cars"], record["ids"][str(path)]
+    print(stage.CAR_REFRESH_KEPT, file=sys.stderr, flush=True)
+    return True
 
 
 def _retire_ready(record):
@@ -335,10 +385,18 @@ def recover_locked(profile, record):
             raise ValueError("invalid state")
     except (KeyError, TypeError, ValueError) as e:
         raise ins.InstallError("The update journal is damaged.", "Run Setup again to repair this installation.") from e
-    if record["state"] == "acknowledged":
-        return _finish(profile, record)
-    _start_rollback(profile, record)
-    return _rollback(profile, record)
+    with _car_writer(profile, record):
+        if record["state"] == "acknowledged":
+            return _finish(profile, record)
+        _start_rollback(profile, record)
+        return _rollback(profile, record)
+
+
+def _car_writer(profile, record):
+    if record.get("cars") is True:
+        from setup_kit import car_catalog
+        return car_catalog._writer(Path(profile) / "car-catalog")
+    return nullcontext()
 
 
 def apply_ready(ready, profile, destination, verify=None, running=None, held=None,
@@ -353,7 +411,7 @@ def apply_ready(ready, profile, destination, verify=None, running=None, held=Non
     running = running or (lambda: ins.assert_not_running(pattern=product["running"]))
     if not profile.is_absolute() or not ins.real_dir(profile):
         raise ins.InstallError("The update profile must be an existing plain absolute directory.")
-    with ins.profile_guard(profile), ins.dest_lock(destination.parent, held):
+    with ins.profile_guard(profile), ins.dest_lock(destination.parent, held), ExitStack() as locks:
         ins._recover(profile, held=destination.parent)
         running()
         descriptor, app, data = read_ready(ready, profile, destination)
@@ -402,6 +460,8 @@ def apply_ready(ready, profile, destination, verify=None, running=None, held=Non
             # Recheck the stage and destination after long copies, before any exchange.
             read_ready(ready, profile, destination)
             running()
+            _prepare_cars(ready, profile, descriptor, record, locks)
+            names, _, _ = _names(profile, record)
             record["ids"] = {str(path): [ins.ident(path), ins.ident(candidate)] for path, candidate, unused in names}
             _journal(profile, record, "exchanging")
             ins.sync_volumes(profile, destination.parent)
@@ -409,11 +469,16 @@ def apply_ready(ready, profile, destination, verify=None, running=None, held=Non
                 old_id, new_id = record["ids"][str(path)]
                 if ins.ident(path) != old_id or ins.ident(candidate) != new_id:
                     raise ins.InstallError("An update destination changed during application.")
-                if old_id is None:
-                    ins.rename_new(candidate, path)
-                else:
-                    ins.exchange(path, candidate)
-                ins.sync_dir(path.parent)
+                try:
+                    if old_id is None:
+                        ins.rename_new(candidate, path)
+                    else:
+                        ins.exchange(path, candidate)
+                    ins.sync_dir(path.parent)
+                except OSError:
+                    if _skip_car_exchange(profile, record, path, candidate, old_id, new_id):
+                        continue
+                    raise
                 _step("exchange-" + path.name)
             verify(destination)
             # The child caches roots on startup. Preserve that launch snapshot
@@ -451,8 +516,9 @@ def acknowledge(profile, token, held=None):
         if receipt != dict(token=token, identity=ins.ident(app)):
             raise ins.InstallError("Startup acknowledgment does not match the installed app.")
         verify_app(app, record.get("bundle_id", ins.PUBLIC_BUNDLE_ID))
-        _journal(profile, record, "acknowledged")
-        return _finish(profile, record)
+        with _car_writer(profile, record):
+            _journal(profile, record, "acknowledged")
+            return _finish(profile, record)
 
 
 def supervise(profile, destination, ready=None, parent=None, timeout=ACK_SECONDS):

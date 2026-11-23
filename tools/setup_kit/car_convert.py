@@ -650,11 +650,16 @@ def decoded_models(models, mw=None, slot=None, texture_aliases=None, material_ro
                 aliases = normal_resource_aliases(car)
                 models[n]['textures'] = [aliases.get(h, (h, None))[0] for h in models[n]['textures']]
                 assembled.append(n)
+        fixed_bases = set()
         for lod in 'ABCD':
             roof, base = f'{car}_KIT00_ROOF_{lod}', f'{car}_BASE_{lod}'
             if roof in original and base in refnames:
                 anchors = [original[n] for n in (base, roof) if n in original]
-                models[base] = assemble(base, [original[roof]], marker_parts=anchors); assembled.append(base)
+                # Fixed deck and back glass must survive every body-kit choice.
+                rear_window = f'{car}_KIT00_REAR_WINDOW_{lod}'
+                fixed = [original[n] for n in (roof, base, rear_window) if n in original]
+                models[base] = assemble(base, fixed, marker_parts=anchors); assembled.append(base)
+                fixed_bases.add(base)
             target = f'{car}_KIT00_BODY_{lod}'
             keys = [f'{car}_KIT00_{p}_{lod}' for p in ('BODY', 'FRONT_BUMPER', 'REAR_BUMPER', 'SKIRT', 'EXHAUST')]
             doors = [n for side in ('LEFT', 'RIGHT')
@@ -666,7 +671,7 @@ def decoded_models(models, mw=None, slot=None, texture_aliases=None, material_ro
 
 
                 keys += doors
-                if base in original: keys.append(base)
+                if base in original and base not in fixed_bases: keys.append(base)
                 for end in ('FRONT', 'REAR'):
                     badge = f'{car}_KIT00_{end}_BUMPER_BADGING_SET_{lod}'
                     if badge in original: keys.append(badge)
@@ -2007,7 +2012,11 @@ def _convert_decoded(*, car, donor, source, source_tex, models, textures, shared
     physics = car_physics.metadata(attributes, car, donor)
     if physics is not None:
         files['PHYSICS.BIN'] = physics
-    files['PERFORMANCE.BIN'] = car_performance.metadata(attributes, car, donor) if platform == 'pc' else performance
+    if car in car_performance.SIBLINGS:
+        native = tracked.read(mw_root / 'GLOBAL/attributes.bin')
+        files['PERFORMANCE.BIN'] = car_performance.sibling_record(native, car, donor, wheels=wheels)
+    else:
+        files['PERFORMANCE.BIN'] = car_performance.metadata(attributes, car, donor) if platform == 'pc' else performance
     files['GRIP.BIN'] = car_grip.optional_metadata(attributes, car, donor) if platform == 'pc' else grip
     files['PAINT.BIN'], paint = car_paint.metadata(shared_raw,
         lambda: unpack_file(tracked.read(mw_root / 'GLOBAL/GLOBALB.LZC')), car, donor, attributes)

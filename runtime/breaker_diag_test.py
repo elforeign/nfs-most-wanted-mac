@@ -18,6 +18,7 @@ import build_all
 HARNESS = r'''
 #include "host.h"
 #include "funcs.h"
+#include "blackbox_mw_cinematics.h"
 #include <stdlib.h>
 #include <stdarg.h>
 #include <assert.h>
@@ -200,7 +201,10 @@ def main():
         harness=HARNESS.replace('STUBS',stubtext).replace('TRANSLATED',translated)
         (tmp/'t.c').write_text(harness)
         def run(tag):
-            subprocess.run(['clang','-O1','-I'+str(tmp),'-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),'-I'+str(ROOT/'recomp/out'),str(tmp/'t.c'),'-o',str(tmp/'t')],check=True,capture_output=True)
+            subprocess.run(['clang','-O1','-I'+str(tmp),'-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),
+                            '-I'+str(ROOT/'recomp/out'),str(tmp/'t.c'),str(ROOT/'runtime/blackbox.c'),
+                            str(ROOT/'runtime/blackbox_mw_cinematics.c'),'-o',str(tmp/'t')],
+                           check=True,capture_output=True)
             result=subprocess.run([str(tmp/'t'),str(tmp/'memory.bin')],capture_output=True,text=True)
             print(tag,result.returncode,result.stdout.strip(),result.stderr.strip()); return result.returncode
         if run('normal'): return 1

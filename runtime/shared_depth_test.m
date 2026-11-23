@@ -30,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "shared_depth.h"
+#include "blackbox_render.h"
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
 #include "pre_treatment.h"
 #include "shared_depth_reference.h"
 #include "shared_depth_current.h" // extracted shipping AO by shared_depth_test.py

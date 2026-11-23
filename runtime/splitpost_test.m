@@ -6,6 +6,8 @@
 // Two six-frame SP snapshots match pre-split renderer (57,396 shader-consumed command/readback bytes).
 // Recording encoder companion; no GPU/device creation. Production renderer is included by the Python runner.
 #import "render_internal.h"
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
+void blackbox_render_host_stage(uint64_t serial,uint32_t id,uint32_t detail) { (void)serial;(void)id;(void)detail; }
 #include <stdarg.h>
 #include <math.h>
 static unsigned checks,failures,copies,composites,lens,waits,owner,single_testing,pc_lens_local;

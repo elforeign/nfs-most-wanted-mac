@@ -94,6 +94,7 @@
 00567F10    diag.c: Countdown::BeginCountdown (timeline.log)
 006F5750    diag.c: NISActivity::Play (timeline.log)
 006F51F0    diag.c: NISActivity::Load (BOOT_DIAG nis: scene name/hash)
+006EA5A0    diag.c: NISActivity::Unload (black box lifecycle)
 0044B040    diag.c: AnimatedCars_SetMainAndWheels (BOOT_DIAG nis: bounded per-actor samples)
 00789870    diag.c: GetWorldHeightAtPointRigorous (BOOT_DIAG nis: original placement query)
 00691110    diag.c: SuspensionSpline::SetNISPosition (BOOT_DIAG nis: init/result, rigid body/contact)
@@ -301,7 +302,7 @@
 00752940    car85.c: LoadedWheel (RideInfo model namespace)
 00752B60    car85.c: LoadedCar model hashes (RideInfo model namespace)
 00678CE0    car_performance_attrib_impl.h: keep estimated top speed within the imported ECU cutoff
-006794E0    car_performance_attrib_impl.h: retail bounds for admitted performance ratings
+006794E0    car_performance_attrib_impl.h: original all-car bounds preserve source rating order
 00683EB0    car_performance_attrib_impl.h: diagnostics for normalized added-car ratings
 00755800    car85.c: CarRenderInfo parts (RideInfo model namespace)
 00750B20    car85.c: CarRenderConn::OnLoaded (owned stock-rim blur period)

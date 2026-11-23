@@ -83,6 +83,7 @@ def stock_packs(car, donor, geometry, textures, globals_raw, rotor_data,
 
 def convert(car, donor, source, mw):
     """Convert the selected PC snapshot with the player's Most Wanted template."""
+    from . import car_audio_pack, car_audio_prostreet
     shared = cc.unpack_file(source['GLOBAL/GLOBALB.LZC'])
     bins = stock_packs(
         car, donor, source[f'CARS/{car}/GEOMETRY.BIN'], source[f'CARS/{car}/TEXTURES.BIN'],
@@ -91,6 +92,10 @@ def convert(car, donor, source, mw):
         mw[f'CARS/{TEMPLATE}/GEOMETRY.BIN'], mw[f'CARS/{TEMPLATE}/TEXTURES.BIN'],
         cc.unpack_file(mw['GLOBAL/GLOBALB.LZC']))
     bins.update(ps_attrib.sidecars(source['GLOBAL/ATTRIBUTES.BIN'], mw['GLOBAL/ATTRIBUTES.BIN'], car, donor))
+    attributes = source['GLOBAL/ATTRIBUTES.BIN']
+    if car_audio_prostreet.admitted(attributes, car):
+        paths = car_audio_pack.resource_paths(attributes, car, source, game='prostreet')
+        bins['AUDIO.BIN'] = car_audio_pack.build(attributes, car, {p: source[p] for p in paths}, game='prostreet')
     collision = cc.collision_sidecar(shared, car, donor)
     if collision is not None:
         bins['COLLISION.BIN'] = collision

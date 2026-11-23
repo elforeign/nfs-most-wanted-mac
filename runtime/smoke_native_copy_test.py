@@ -35,6 +35,9 @@ PRE = r'''
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <stdint.h>
+#include "blackbox_render.h"
+static uint64_t frame_serial=1;
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
 #include <stdlib.h>
 static id<MTLDevice> mtl;
 static id<MTLCommandQueue> queue;

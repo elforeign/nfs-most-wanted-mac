@@ -76,10 +76,10 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.9.0"
+PUBLIC_VERSION = "4.10.0"
 # Carbon's app: its names (install.CARBON), its data, Setup state and update folder name, and its own version.
 CARBON_PRODUCT = dict(CARBON, data="Carbon")
-CARBON_VERSION = "1.2.0"
+CARBON_VERSION = "1.3.0"
 CARBON_EXE_SHA256 = "baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3"  # NFSC.exe (car_sources.json pin)
 CARBON_RUNNING = re.compile(re.escape(CARBON_PRODUCT["name"]) + r"\.app/Contents/MacOS/")
 CARBON_X360_BYTES = 40_000_000  # the two Xbox archives (38.4 MB), kept whole
@@ -692,9 +692,15 @@ def find_pc_root(top, suffix=".zip"):
     return candidates[0]
 
 
+def extraction_tools(*names):
+    """Bind resumable disc output to the installer and patcher implementations."""
+    return {name: sha_file(Path(__file__).with_name(name)) for name in
+            ("backend.py", "install.py", "pc_disc.py", "rtpatch.py") + names}
+
+
 def unpacked(work, key, events, what, unpack, name="pc_src"):
     """<work>/<name> made by unpack(out), which returns the game folder or ISO in it. Reused while the inputs' key (paths,
-    sizes, modification times) and the unpacked files' digest are unchanged; never left half made."""
+    sizes, modification times and extraction tools) and the unpacked files' digest are unchanged; never left half made."""
     out = work / name
     stamp = work / (name + ".json")
     try:
@@ -731,8 +737,7 @@ def extract_pc_zip(source, work, events):
             except (zipfile.BadZipFile, OSError) as e:
                 raise SetupError(f"The .zip can't be read: {e}", fix) from None
             members, total = zip_members(archive)
-            if shutil.disk_usage(work).free < total + 512 * 1024**2:
-                raise SetupError("There is not enough free disk space to unpack the .zip.", "Free space on the work volume, then try again.")
+            require_space(work, total + 512 * 1024**2)
             out.mkdir(parents=True)
             unpack_zip(archive, members, total, out, lambda i, written: i % 50 == 0 and events.progress(i, len(members)))
         return find_pc_root(out)
@@ -905,8 +910,7 @@ def unpack_sevenzip(source, members, total, out, events, fix=X360_ARCHIVE_FIX):
 
 def unpack_pc_sevenzip(source, out, events, fix):
     members, total = sevenzip_members(source, fix, ZIP_MAX_BYTES)
-    if shutil.disk_usage(out.parent).free < total + 512 * 1024**2:
-        raise SetupError("There is not enough free disk space to unpack the .7z.", fix)
+    require_space(out.parent, total + 512 * 1024**2)
     out.mkdir(parents=True)
     unpack_sevenzip(source, members, total, out, events, fix)
 
@@ -927,9 +931,7 @@ def extract_x360_archive(source, work, events):
     st = source.stat()
     def unpack(out):
         def space(total):
-            if shutil.disk_usage(work).free < total + 512 * 1024**2:
-                raise SetupError("There is not enough free disk space to unpack the Xbox 360 archive.",
-                                 "Free space on the work volume, then try again.")
+            require_space(work, total + 512 * 1024**2)
             out.mkdir(parents=True)
             events.progress(0, total)
         if source.suffix.lower() == ".zip":
@@ -955,6 +957,13 @@ UPDATE_NEEDED = ("Choose the PC game's official 1.3 update (nfsmwpatch1.3.exe) a
                  "the game; the update is only read, never run.")
 
 
+def require_disc_inputs(update, exe, version, exe_name, fix=""):
+    missing = [item for value, item in ((update, f"official {version} update"),
+                                       (exe, f"{exe_name} from that update")) if not value]
+    if missing:
+        raise SetupError("\n".join(f"Missing: {item}. Choose it above." for item in missing), fix)
+
+
 def extract_pc_disc(source, update, exe, work, events, source_root=ROOT, extra=()):
     """Install the game from PC disc images (read only) into <work>/pc_src as EA's installer does: every disc's
     archives and disc 1's loose files, then the 1.3 update's files and, when chosen, a speed.exe that has the 1.3 code
@@ -970,7 +979,7 @@ def extract_pc_disc(source, update, exe, work, events, source_root=ROOT, extra=(
     def disc_stamp(d):  # a disc folder's own time stays put when a file in it is overwritten: stamp every file
         return stat(d.path) if d.handle else [str(d.path)] + [stat(d.path / name) for name, _, _ in sorted(d.files.values())]
     try:
-        key = dict(movie_layout=1, discs=[disc_stamp(d) for d in discs.values()], update=stat(update) if update else None,
+        key = dict(tools=extraction_tools(), movie_layout=1, discs=[disc_stamp(d) for d in discs.values()], update=stat(update) if update else None,
                    exe=stat(exe) if exe else None)
         return unpacked(work, key, events, "the disc images",
                         lambda out: _install_discs(discs, update, exe, out, work, events, source_root))
@@ -997,7 +1006,7 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
     # Which speed.exe the game ends up with is settled first, before gigabytes are unpacked.
     patch = rtpatch.Update(update) if update else None
     if patch is None and not current(first.read("speed.exe", rtpatch.MAX_FILE)):
-        raise SetupError("Your discs have an earlier version of the PC game than 1.3.", UPDATE_NEEDED)
+        require_disc_inputs(update, exe, "1.3", "speed.exe")
     new_exe = None
     if exe:
         if not exe.is_file() or not 0 < exe.stat().st_size <= rtpatch.MAX_FILE:
@@ -1008,8 +1017,7 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
         record = patch.record("speed.exe")
         new_exe = patch.decode(record, lambda n: events.progress(n, record.size))
         if not current(new_exe):
-            raise SetupError("The speed.exe on your discs and in the 1.3 update is copy-protected, so Setup can't translate its code.",
-                             "Choose a speed.exe that has the version 1.3 code as well. Setup checks it and only reads it.")
+            require_disc_inputs(update, exe, "1.3", "speed.exe")
     archives = []
     budget = ZipDirectoryBudget()
     with ExitStack() as stack:
@@ -1025,8 +1033,7 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
         total = sum(size for *_, size in archives) + sum(disc.size(name) for disc, name in loose_files)
         if total > ZIP_MAX_BYTES or len(loose_files) + sum(len(members) for _, _, members, _ in archives) > ZIP_MAX_FILES:
             raise SetupError("The discs hold far more than the game (more than 8 GB or 20,000 files).", pc_disc.FIX)
-        if shutil.disk_usage(work).free < total + 512 * 1024**2:
-            raise SetupError("There is not enough free disk space to unpack the discs.", "Free space on the work volume, then try again.")
+        require_space(work, total + 512 * 1024**2)
         out.mkdir(parents=True)
         done = 0
         for label, archive, members, size in archives:
@@ -1539,15 +1546,85 @@ def check_space(paths, pc=None, dest=None, stage_only=False, car_plan=None, x360
                 raise SetupError("There is not enough free disk space for the selected extras.",
                                  "Free space on the listed extras volumes and retry.")
         return
+    requirements = space_requirements(paths, pc, dest, stage_only, x360_bytes, x360_shared_bytes)
+    paths.space_requirements = requirements
+    for path, required in requirements.values():
+        free = shutil.disk_usage(existing_parent(path)).free
+        if free < required:
+            raise space_error(path, required - free)
+
+
+def existing_parent(path):
+    path = Path(path).resolve()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return path
+
+
+def volume_root(path):
+    path = existing_parent(path)
+    device = path.stat().st_dev
+    while path != path.parent and path.parent.stat().st_dev == device:
+        path = path.parent
+    return path
+
+
+def space_requirements(paths, pc, dest, stage_only=False, x360_bytes=0, x360_shared_bytes=0):
     size = sum(p.stat().st_size for p in pc.rglob("*") if p.is_file())
-    # Keep two copies until commit (staging and permanent); allow 4 GiB for
-    # generated C, libraries and toolchain output. Check every relevant volume.
-    for path, required in ((paths.work, size + 4 * 1024**3 + x360_bytes + x360_shared_bytes), (paths.cache, 4 * 1024**3 + x360_bytes),
-                           (dest if stage_only else paths.data, size + 512 * 1024**2 + x360_bytes), (dest, 256 * 1024**2)):
-        while not path.exists():
-            path = path.parent
-        if shutil.disk_usage(path).free < required:
-            raise SetupError("There is not enough free disk space for Setup.", "Free space on the work and installation volumes, then try again.")
+    # Staging, publication and compiler/cache output coexist until commit.
+    volumes = {}
+    for path, required in ((paths.work, size + 4 * 1024**3 + x360_bytes + x360_shared_bytes),
+                           (paths.cache, 4 * 1024**3 + x360_bytes),
+                           (dest if stage_only else paths.data, size + 512 * 1024**2 + x360_bytes),
+                           (dest, 256 * 1024**2)):
+        root = volume_root(path)
+        device = root.stat().st_dev
+        volumes[device] = (root, volumes.get(device, (root, 0))[1] + required)
+    return volumes
+
+
+def volume_name(root):
+    try:
+        result = subprocess.run(["/usr/sbin/diskutil", "info", "-plist", str(root)],
+                                capture_output=True, timeout=2)
+        name = plistlib.loads(result.stdout).get("VolumeName")
+        if name:
+            return name
+    except (OSError, ValueError, plistlib.InvalidFileException, subprocess.TimeoutExpired):
+        pass
+    return root.name or "startup volume"
+
+
+def require_space(path, required):
+    free = shutil.disk_usage(existing_parent(path)).free
+    if free < required:
+        raise space_error(path, required - free)
+
+
+def space_error(path, shortage):
+    root = volume_root(path)
+    # Round up: even a late write without a known size needs visible headroom.
+    gb = max(1, (max(1, shortage) + 99_999_999) // 100_000_000) / 10
+    message = f"Not enough space on {volume_name(root)}: {gb:.1f} GB more needed. Free up space there, then press Retry."
+    return SetupError(message, "Free up space there, then press Retry.")
+
+
+def storage_failure(error, paths):
+    """Unwrap archive/patcher errors as well as direct failed writes."""
+    current, seen = error, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno == errno.ENOSPC:
+            path = current.filename2 or current.filename
+            if not path:
+                candidates = [getattr(paths, key) for key in ("work", "cache", "data", "logs")] if paths else [Path.cwd()]
+                candidates += [row[0] for row in getattr(paths, "space_requirements", {}).values()]
+                path = min(candidates, key=lambda p: shutil.disk_usage(existing_parent(p)).free)
+            root = volume_root(path)
+            required = getattr(paths, "space_requirements", {}).get(root.stat().st_dev, (root, 0))[1]
+            return space_error(root, max(1, required - shutil.disk_usage(root).free))
+        current = current.__cause__ or current.__context__
+    return error
 
 
 SAVE_DIR = "NFS Most Wanted"            # the game's own folder under SHGetFolderPath (4.0: <data>/NFS Most Wanted)
@@ -1657,7 +1734,34 @@ def migrate_3x_saves(paths, events):
     return aliases
 
 
+def resolve_build_sources(args, paths, source_root=None):
+    state = carbon_state(paths) if getattr(args, 'game', 'mw') == 'carbon' else paths.state
+    profile = paths.data / CARBON_PRODUCT['data'] if getattr(args, 'game', 'mw') == 'carbon' else paths.data
+    locate = getattr(args, '_locate', None)
+    primary = 'carbon' if getattr(args, 'game', 'mw') == 'carbon' else 'pc'
+    value = getattr(args, primary, None)
+    if value:
+        def verifier(kept):
+            try:
+                return validate_carbon(kept) if primary == 'carbon' else validate_pc(kept, source_root or ROOT)
+            except SetupError as exc:
+                raise InstallError(str(exc)) from exc
+        resolved = staging.resolve_source(state, clean_path(value), profile=profile, pc=True,
+                                         locate=locate, verify_kept=verifier)
+        setattr(args, primary, str(resolved))
+        if resolved == staging.installed_pc(profile):
+            args.pc_update = args.pc_exe = None
+            args.pc_disc = []
+    for name in ('x360', 'pc_update', 'pc_exe'):
+        value = getattr(args, name, None)
+        if value:
+            setattr(args, name, str(staging.resolve_source(state, clean_path(value), locate=locate)))
+    if getattr(args, 'pc_disc', None):
+        args.pc_disc = [str(staging.resolve_source(state, clean_path(p), locate=locate)) for p in args.pc_disc]
+
+
 def build(args, paths, events, runner, source_root=ROOT):
+    resolve_build_sources(args, paths, source_root)
     stage_only = getattr(args, "stage_only", False)
     # Carbon (--game carbon) reads only the Carbon folder: the shared stages without Most Wanted (no PC copy, no
     # speed.exe translation, the tables made without a game folder, the libraries), then it translates NFSC.exe and
@@ -1689,7 +1793,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     pc_update = clean_path(args.pc_update) if getattr(args, "pc_update", None) else None
     pc_exe = clean_path(args.pc_exe) if getattr(args, "pc_exe", None) else None
     pc_discs = [clean_path(p) for p in getattr(args, "pc_disc", None) or []]
-    extras = [p for p in (carbon, pc_update, pc_exe) if p] if carbon else pc_extras(pc, pc_update, pc_exe, pc_discs)
+    extras = [p for p in (carbon, pc_update, pc_exe, *pc_discs) if p] if carbon else pc_extras(pc, pc_update, pc_exe, pc_discs)
     check_locations(paths, pc, x360, dest, source_root, extras, data_home=data_home)
     if stage_only:
         check_stage_locations(args.stage, paths, pc, x360, destination, source_root, extras, carbon=bool(carbon))
@@ -1716,7 +1820,7 @@ def build(args, paths, events, runner, source_root=ROOT):
     events.progress()
     events.stage("pc")
     if carbon:
-        carbon = carbon_source.prepare(carbon, paths.work, events, pc_update, pc_exe)
+        carbon = carbon_source.prepare(carbon, paths.work, events, pc_update, pc_exe, pc_discs)
         pc_hash, carbon_hash = None, digest_tree(carbon, source_files=True)
     elif is_pc_archive(pc):  # an archive of the game folder: only read
         extract = extract_pc_zip if pc.suffix.lower() == ".zip" else extract_pc_sevenzip
@@ -1736,6 +1840,10 @@ def build(args, paths, events, runner, source_root=ROOT):
                    if x360 and x360.is_file() and x360.suffix.lower() in (".zip", ".7z") else x360)
     stage = paths.work / "stage"
     if args.check:
+        check_space(paths, carbon or pc, clean_path(args.stage) if stage_only else dest,
+                    stage_only=stage_only,
+                    x360_bytes=(CARBON_X360_BYTES if carbon else x360_extras.required_bytes(chosen)) if x360 else 0,
+                    x360_shared_bytes=146_000_000 if x360 and not carbon and "textures" in chosen and "arrest" not in chosen else 0)
         check_out = paths.work / CHECK_X360
         if x360 is None:  # the app checks the PC game on its own too: keep an earlier X360 check for the build
             prepare_x360(None, check_out, pc, events, runner.env)
@@ -1930,13 +2038,13 @@ def build(args, paths, events, runner, source_root=ROOT):
             raise SetupError("Your Xbox 360 copy changed while Setup was reading it.", "Leave it unchanged and run Setup again.")
         if stage_only:
             events.stage("stage")
-            ready = staging.publish(clean_path(args.stage), app, staged_data, roots, destination, paths.data,
+            ready = publish_mw_update(clean_path(args.stage), app, staged_data, roots, destination, paths.data,
                                     PUBLIC_VERSION, dict(pc=str(selected_pc), x360=str(x360) if x360 else None,
                                     pc_update=str(pc_update) if pc_update else None, pc_exe=str(pc_exe) if pc_exe else None,
                                     pc_discs=[str(p) for p in pc_discs], **x360_extras.identity(chosen),
                                     pc_sha256=pc_hash, x360_sha256=x360_hash, source_id=identity(inventory),
                                     executable_fingerprint=fingerprint, dependencies=dependencies, toolchain=toolchain),
-                                    on_commit=lambda path: setattr(events, "ready", path))
+                                    cache=paths.cache / "cars", on_commit=lambda path: setattr(events, "ready", path))
             return ready
         events.stage("install")
         def committed(path):
@@ -1945,6 +2053,7 @@ def build(args, paths, events, runner, source_root=ROOT):
             with ignored_cancellation():
                 try:
                     staging.save_choices(paths.state, selected_pc, x360, path, pc_update, pc_exe, pc_discs, chosen)
+                    staging.remember_sources(paths.state, [selected_pc, x360, pc_update, pc_exe, *pc_discs], paths.data)
                 except (OSError, InstallError) as e:
                     events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
         installed = transactional_install(app, staged_data, roots, paths.data, dest, lambda p: verify_app(p, runner), log=setup_log,
@@ -2014,6 +2123,8 @@ def build_carbon(carbon_data, stage, source, inventory, data_home, dest, paths, 
                 try:
                     staging.save_choices(carbon_state(paths), choices["carbon"], choices.get("x360"), path,
                                          choices.get("pc_update"), choices.get("pc_exe"))
+                    staging.remember_sources(carbon_state(paths), [choices.get(name) for name in
+                                             ('carbon', 'x360', 'pc_update', 'pc_exe')], data_home)
                 except (OSError, InstallError) as e:
                     events.emit("warn", id="install", msg=f"The app was installed, but source choices could not be saved: {e}. Run Setup again before updating.")
     installed = transactional_install(app, carbon_data, roots, data_home, dest, verify, log=setup_log,
@@ -2055,6 +2166,20 @@ def car_api():
     # Keep optional conversion dependencies out of the required build's import
     # path; its normal preflight reports any missing bundled Python packages.
     return importlib.import_module('.car_import', __package__)
+
+
+def publish_mw_update(target, app, data, roots, destination, profile, version, provenance, *, cache, on_commit=None):
+    def prepare_cars(target, profile, pc):
+        try:
+            return staging.prepare_car_refresh(target, profile, cache, pc)
+        except Cancelled:
+            raise
+        except Exception:
+            print(staging.CAR_REFRESH_KEPT, file=sys.stderr, flush=True)
+            return None
+
+    return staging.publish(target, app, data, roots, destination, profile, version, provenance,
+                           on_commit=on_commit, prepare_cars=prepare_cars)
 
 
 @contextmanager
@@ -2133,8 +2258,9 @@ def car_installed_inputs(paths):
 
 
 def car_locations(paths, inputs):
-    """Only catalog/cache/logs are writable; source and save trees are protected."""
-    managed = [paths.data / 'car-catalog', paths.cache, paths.work, paths.state / OWN_DIR]
+    """Protect source and save trees when locating car preparations and catalogs."""
+    managed = [paths.data / 'car-catalog', paths.data / staging.CAR_INPUTS,
+               paths.cache, paths.work, paths.state / OWN_DIR]
     protected = [ROOT, paths.legacy, paths.data / SAVE_DIR] + list(inputs) + car_installed_inputs(paths)
     for directory in (paths.cache, paths.work, paths.state / OWN_DIR):
         if overlaps(directory, paths.data):
@@ -2215,6 +2341,10 @@ def cars_command(args):
     defaults = Paths(args.work or Path.home())
     paths = Paths(args.work or defaults.state / 'car-work')
     specs = car_specs(args.cars_spec)
+    original_car_source = args.carbon
+    if args.carbon and not Path(args.carbon).expanduser().exists():
+        args.carbon = str(staging.resolve_source(paths.state, clean_path(args.carbon),
+                                                locate=getattr(args, '_locate', None)))
     carbon = carbon_input(args.carbon, picked=True) if args.carbon else None
     inputs = ([carbon] if carbon else []) + ([car_import._path(args.cars_spec)] if args.cars_spec else [])
     mw = None
@@ -2232,7 +2362,8 @@ def cars_command(args):
     for managed in (paths.data, paths.cache, paths.work):
         car_import._path(managed)
     car_locations(paths, inputs)
-    engine = car_import.CarImporter(paths.data / 'car-catalog', paths.cache / 'cars')
+    engine = staging.car_importer(paths.data, paths.cache / 'cars',
+                                  mutating=operation in ('import', 'remove', 'restore'))
     if specs or operation in ('list', 'remove', 'restore'):
         # Adopt the same cache ownership as a required build before creating
         # car preparations. A later build must accept this cache, including an
@@ -2296,7 +2427,11 @@ def cars_command(args):
                 # Imports plan without conversion, then convert once inside
                 # the activation transaction. Explicit measured checks stay dry.
                 try:
-                    preflight = engine.plan(carbon, mw_pc=mw, cars=specs, cancel=cancel)
+                    preflight = None
+                    # Retry owns recovery and space checks when the normal dry
+                    # plan cannot read the damaged active catalog.
+                    if not (args.cars_repair and car_import.catalog.verify_current(engine.root).error):
+                        preflight = engine.plan(carbon, mw_pc=mw, cars=specs, cancel=cancel)
                     if args.cars_measure and operation == 'check':
                         check_space(paths, car_plan=preflight)
                         plan = engine.plan(carbon, mw_pc=mw, cars=specs,
@@ -2348,6 +2483,11 @@ def cars_command(args):
                     except OSError:
                         pass
                 car_result(events, operation, result)
+                if original_car_source and operation in ('check', 'import'):
+                    try:
+                        staging.remember_sources(paths.state, [clean_path(args.carbon)])
+                    except (OSError, InstallError) as exc:
+                        events.emit('warn', id='cars', msg=f'Source choices could not be saved: {exc}')
             return 0
         except (Exception, KeyboardInterrupt) as exc:
             try:
@@ -2378,6 +2518,7 @@ def main(argv=None):
     ap.add_argument('--cars-mw-pc', help='MW donor folder or .zip/.7z before first installation; otherwise use installed roots')
     ap.add_argument('--cars-measure', action='store_true', help='measure conversion without activating it')
     ap.add_argument('--cars-repair', action='store_true', help='rebuild a rejected preparation from original sources')
+    ap.add_argument('--source-replies', help='private directory for Locate source replies from the app')
     ap.add_argument("--app", help="installed .app to export (required with --export-all-in-one)")
     ap.add_argument("--stage", help="new directory for the prepared update and ready.json (required with --stage-only)")
     ap.add_argument("--pc", help="installed PC game folder, a .zip/.7z of it (unpacked into --work), or a PC disc image (.iso, or "
@@ -2399,12 +2540,22 @@ def main(argv=None):
     log_path = None
     car_mode = any((args.cars_check, args.cars_import, args.cars_list, args.cars_remove, args.cars_restore))
     try:
+        args._locate = None
+        if args.source_replies:
+            replies = clean_path(args.source_replies)
+            locations = Paths(args.work or tempfile.gettempdir())
+            protected = [ROOT, locations.data, locations.legacy] + [clean_path(p) for p in
+                [args.pc, args.x360, args.carbon, args.pc_update, args.pc_exe, args.cars_spec, args.cars_mw_pc] +
+                (args.pc_disc or []) if p]
+            if not replies.is_relative_to(locations.state) or any(overlaps(replies, path) for path in protected):
+                raise SetupError('Source replies must be in a separate folder inside Setup state.')
+            args._locate = staging.source_locator(replies, lambda request: print(json.dumps(request), flush=True))
         if car_mode:
             return cars_command(args)
         if args.game == "carbon" and not ((args.build or args.check) and args.carbon or args.stage_only or args.export_all_in_one) or args.game == "carbon" and (
-                args.pc or args.pc_disc):
+                args.pc):
             raise SetupError("--game carbon requires --build and --carbon (or --check and --carbon, or --stage-only), and reads only the Carbon folder "
-                             "and, optionally, --x360 (your Carbon Xbox 360 copy), without --pc or --pc-disc.")
+                             "and, optionally, --x360 (your Carbon Xbox 360 copy), without --pc.")
         if any((args.carbon if args.game == "mw" else None, args.cars_spec, args.cars_mw_pc, args.cars_measure, args.cars_repair)):
             raise SetupError("Extras options require a --cars-* operation.")
         if args.export_all_in_one:
@@ -2477,6 +2628,7 @@ def main(argv=None):
                 raise SetupError("--stage-only requires --dest or a remembered destination.")
             if remembered_destination:
                 staging.validate_destination(clean_path(args.dest), required=True)
+        resolve_build_sources(args, paths)
         extras = [clean_path(p) for p in [args.pc_update, args.pc_exe] + (args.pc_disc or []) if p]
         if args.stage_only:
             check_stage_locations(args.stage, paths, clean_path(args.pc) if args.pc else None, clean_path(args.x360) if args.x360 else None,
@@ -2528,10 +2680,11 @@ def main(argv=None):
                         log.write(traceback.format_exc().encode())
                     except OSError:
                         pass
+                    e = storage_failure(e, paths)
                     if isinstance(e, OSError):
-                        fix = "Free disk space, then try Setup again." if e.errno == errno.ENOSPC else (
-                            "Choose a writable destination or ask an administrator to install the staged app." if e.errno in (errno.EACCES, errno.EPERM)
-                            else "Reconnect the source volume, check folder access and open the log.")
+                        fix = ("Choose a writable destination or ask an administrator to install the staged app."
+                               if e.errno in (errno.EACCES, errno.EPERM) else
+                               "Reconnect the source volume, check folder access and open the log.")
                     else:
                         fix = getattr(e, "fix", "Run Setup again.")
                     events.emit("error", id=events.current, msg=str(e) or "Setup was interrupted.", fix=fix, log=str(log_path))
@@ -2546,6 +2699,7 @@ def main(argv=None):
     except (Exception, KeyboardInterrupt) as e:
         if events is not None and events.report_committed():
             return 0
+        e = storage_failure(e, paths)
         # Includes failures before a log can be opened. stdout remains parseable.
         obj = dict(ev="error", id=events.current if events else ("cars" if car_mode else "preflight"), msg=str(e) or "Setup was interrupted.", fix=getattr(e, "fix", "Choose a writable work directory and try again."), log=str(log_path or ""))
         print(json.dumps(obj) if args.events else obj["msg"], flush=True)

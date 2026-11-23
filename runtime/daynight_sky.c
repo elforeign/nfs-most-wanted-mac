@@ -2,7 +2,9 @@
 #include "daynight_sky.h"
 #include "daynight.h"
 #include "host.h"
+#include "lighting_colour.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -14,7 +16,7 @@ static unsigned moon_flare_draws[32], moon_flare_polys[32];
 
 __attribute__((constructor)) static void sky_configure(void) {
     const char *e = getenv("NFS_DAYNIGHT");
-    enabled = e && (!strcmp(e, "1") || !strcasecmp(e, "on"));
+    enabled = lighting_mode_d65() || (e && (!strcmp(e, "1") || !strcasecmp(e, "on")));
 }
 
 // J2 exposes the sampled orbit in the object, but no clock accessor. The phase
@@ -163,6 +165,93 @@ static char *splice(const char *src, const char *at, size_t cut, const char *tex
     return out;
 }
 
+#define D65_MSL_Y "float3(0.2126f, 0.7152f, 0.0722f)"
+#define D65_MSL_RGB(rgb) "    " rgb " = float3(dot(" rgb ", " D65_MSL_Y "));\n"
+
+// Apply white only to the decoded fog varying (or the separate fog
+// addend on the low-detail normal-map path). The extinction math stays
+// in the original vertex program, including its distance and view inputs.
+char *daynight_fog_shader(const char *src, const uint32_t *tokens, uint32_t count, int vertex) {
+    if (!lighting_mode_d65() || !src) return NULL;
+    uint64_t key = 1469598103934665603ull;
+    for (size_t i = 0; i < (size_t)count * 4; ++i)
+        key = (key ^ ((const uint8_t *)tokens)[i]) * 1099511628211ull;
+    const char *anchor = NULL, *white = NULL;
+    if (vertex) {
+        // These translated console paths export a separate in-scatter term.
+        if (strstr(src, "vertex GlassOut ")) {
+            anchor = "GlassOut o; o.pos = oPos;";
+            white = D65_MSL_RGB("oColor1.xyz");
+        } else if (strstr(src, "vertex TreesOut ")) {
+            anchor = "TreesOut o; o.pos = oPos;";
+            white = D65_MSL_RGB("oTexCoord2.xyz");
+        } else if (strstr(src, "vertex WaterOut ")) {
+            anchor = "o.t6=oTexCoord6;";
+            white = D65_MSL_RGB("oTexCoord6.xyz");
+        } else if (strstr(src, "vertex GrassOut ")) {
+            // The grass variants put fog in different interpolants. Their
+            // common scatter scale is applied once, before the output write.
+            static const char scale[] = " * g.k[9].www));\n";
+            const char *at = strstr(src, scale);
+            if (at && at - src >= 6) {
+                const char *rgb = at - 6; // rN.xyz at the scatter scale's input
+                if (rgb[0] == 'r' && rgb[1] >= '0' && rgb[1] <= '9' &&
+                    !memcmp(rgb + 2, ".xyz", 4)) {
+                    char neutral[96];
+                    snprintf(neutral, sizeof neutral,
+                             "    %.6s = float3(dot(%.6s, " D65_MSL_Y "));\n", rgb, rgb);
+                    return splice(src, at + sizeof scale - 1, 0, neutral);
+                }
+            }
+        }
+        if (!anchor)
+        switch (key) {
+            case 0x090160e8e9a32d2cull: case 0xed211730ccb25f1eull: // WORLD
+            case 0x96681b7c39f397a7ull: // tree
+                anchor = "    r.texcoord2 = so.tex[2];";
+                white = D65_MSL_RGB("so.tex[2].xyz");
+                break;
+            case 0x6d1a1765677d50deull: case 0x3883f8ffc7e49878ull: // normal map
+            case 0x3b7041897590c529ull: case 0x74e7d294d4b2ecd6ull: // lit glass
+                anchor = "    r.texcoord4 = so.tex[4];";
+                white = D65_MSL_RGB("so.tex[4].xyz");
+                break;
+            case 0xbb253668a28870f5ull: case 0x8bbb8dfef2edae21ull: // reflective world
+                anchor = "    r.texcoord5 = so.tex[5];";
+                white = D65_MSL_RGB("so.tex[5].xyz");
+                break;
+            case 0xeaa7aabc9baf0607ull: // unshadowed glass
+                anchor = "    r.texcoord3 = so.tex[3];";
+                white = D65_MSL_RGB("so.tex[3].xyz");
+                break;
+            case 0x6ec3dbaf015942f1ull: // low-detail normal map
+                anchor = "    // mad oD0.xyz, r0, r1, r2\n";
+                white = D65_MSL_RGB("r2.xyz");
+                break;
+            case 0x43afa2430c786f3dull: // dome scattering, grey at the horizon
+                anchor = "    r.texcoord3 = so.tex[3];";
+                white = "    float3 sky_ray = si.v[0].xyz - c[10].xyz;\n"
+                        "    float sky_height = saturate(sky_ray.z / max(length(sky_ray), 1e-5f));\n"
+                        "    so.tex[3].xyz = mix(float3(dot(so.tex[3].xyz, " D65_MSL_Y
+                        ")), so.tex[3].xyz, smoothstep(0.0f, 0.25f, sky_height));\n";
+                break;
+        }
+    } else {
+        switch (sky_pass(key)) {
+            case 1: // The base pass separates the cloud RGB before adding it.
+                anchor = "    // mad r0.xyz, r1, r0.w, t0 ";
+                white = D65_MSL_RGB("r1.xyz");
+                break;
+            case 2: case 3: // Separate cloud texture passes.
+                anchor = "    return r;\n";
+                white = D65_MSL_RGB("r.c0.rgb");
+                break;
+        }
+    }
+    const char *at = anchor ? strstr(src, anchor) : NULL;
+    return at ? splice(src, at, 0, white) : NULL;
+}
+
 // The dome's vertex program leaves texcoord4 unused: carry the view ray
 // (dome-local position minus eye) and the game's own cloud scroll in it.
 char *daynight_sky_patch_vertex(const char *src) {
@@ -181,6 +270,19 @@ char *daynight_sky_patch(const char *src, int pass) {
     const char *ret = args ? strstr(args, "    return r;\n") : NULL;
     if (!ret || !member || member > stage) return NULL;
     char *a = splice(src, ret, 0, pass == 1 ? sky_night_msl : "    r.c0.a *= 1.0f - dn[0].x;\n");
+    if (a && pass == 1 && lighting_mode_d65()) {
+        static const char native_sky[] =
+            "float3 sky = (1.0f - P.z * 0.000142857f) * dn[0].yzw + lunar * float3(0.99f, 1.0f, 0.92f);";
+        const char *at = strstr(a, native_sky);
+        // Use the same horizon scattering as the day pass, retaining the
+        // night atmosphere at elevation and the white lunar emission.
+        char *neutral = at ? splice(a, at, sizeof native_sky - 1,
+            "float3 atmosphere = (1.0f - P.z * 0.000142857f) * dn[0].yzw;\n"
+            "        float3 horizon = float3(dot(pi.texcoord3.xyz, " D65_MSL_Y "));\n"
+            "        float3 sky = mix(horizon, atmosphere, smoothstep(0.0f, 0.25f, V.z)) + lunar * 0.992098f;") : NULL;
+        free(a);
+        a = neutral;
+    }
     char *b = a ? splice(a, a + (args - src), 0, ", constant float4 *dn [[buffer(6)]], texture2d<float> dn_tex [[texture(14)]], sampler dn_smp [[sampler(14)]]") : NULL;
     free(a);
     if (!b || pass != 1) return b;

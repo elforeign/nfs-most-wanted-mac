@@ -10,6 +10,11 @@
 // SDR baseline: 2 ramps x 256x4 pixels x 4 bytes = 8192 identical bytes.
 // M expected: 1025-point [0,8] ramp, H=4: above_one=896, peak=4, HUD=1;
 // midpoint .5 -> .214041140482 (FP16 .21398926). Both 1x/4x MSAA; bloom/DOF on/off.
+// L4 decode control: sending the same code-value texel as linear gives
+// .5, error .285959, and fails the .001 transfer tolerance.
+// Separate presenter-only transport (no scene/post chain): .5 -> .21398926,
+// error .00005188 <= .001; missing-decode control .5, error .28595886 fails.
+// This proves the shared transfer, not a game-specific float composition path.
 // Continuous gamma exponents .8/1/1.2 keep HUD=1; gain-two HUD export clamps to 1.
 // Off/H=1 BGRA8 match 8192 bytes each; H=1 drawable sRGB roundtrip matches 8192.
 // Broken HUD HDR scaling / omitted source bound: HUD=4, exit 1 (normal HUD=1/exit 0).
@@ -26,6 +31,10 @@
 // with 2016 differing bytes (exit 1). Native observations PENDING host GPU check.
 // Native probe: 20/20 converted bytes + 4/4 unchanged SDR bytes; zeroed readback
 // control differs in 17/20 converted bytes (exit 1); native observations pending.
+#include "blackbox_render.h"
+static uint64_t frame_serial;
+void blackbox_render_host(uint64_t serial,uint32_t id) { (void)serial;(void)id; }
+void blackbox_render_host_stage(uint64_t serial,uint32_t id,uint32_t detail) { (void)serial;(void)id;(void)detail; }
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -408,6 +417,34 @@ static int edr(int broken) {
     CHECK(fabs((float)pixel[0]-.2158605)<.0002,"decode once: %.8f",(float)pixel[0]);
     puts("hdr_output_test: float LUT bypass, SDR decode once, SDR capture tone-map/sRGB encode PASS");return 0;
 }
+// Isolate presenter transport from lighting and both treatment programs.
+// Supply code-value FP16 with a declared composition domain. This fixture
+// does not invoke or assert any game's scene/composition routing.
+static int transport(void) {
+    const float codes[]={0,.02f,.5f,1};
+    __fp16 input[4][4];
+    for(int i=0;i<4;++i){for(int k=0;k<3;++k)input[i][k]=codes[i];input[i][3]=1;}
+    id<MTLTexture> src=texture(MTLPixelFormatRGBA16Float,4,1);
+    id<MTLTexture> dst=texture(MTLPixelFormatRGBA16Float,4,1);
+    [src replaceRegion:MTLRegionMake2D(0,0,4,1) mipmapLevel:0 withBytes:input bytesPerRow:32];
+    fs_composing=1;fs_headroom=4; // explicit code-value transport domain
+    CHECK(render_hdr_composition_headroom()==4,"transport fixture domain");
+    cmd=[queue commandBuffer];CHECK(hdr_output_blit(cmd,src,dst,0,0),"presenter-only transfer");
+    CHECK(!finish(),"transport finish");
+    __fp16 output[4][4];
+    [dst getBytes:output bytesPerRow:32 fromRegion:MTLRegionMake2D(0,0,4,1) mipmapLevel:0];
+    double error=fabs((double)output[2][0]-.21404114048223255);
+    printf("hdr_output_test: presenter-only .5 -> %.8f error=%.8f\n",(double)output[2][0],error);
+    CHECK(error<=.001,"presenter-only decode error %.6f",error);
+    for(int i=0;i<4;++i) {
+        double code=(float)input[i][0];
+        double reference=code<=.04045?code/12.92:pow((code+.055)/1.055,2.4);
+        CHECK(fabs((float)output[i][0]-reference)<.001,"presenter piecewise transfer %d",i);
+        CHECK(output[i][0]==output[i][1] && output[i][0]==output[i][2],"presenter equal-channel grey %d",i);
+    }
+    fs_composing=0;
+    return 0;
+}
 static double decode(double x) { return x<=.04045?x/12.92:pow((x+.055)/1.055,2.4); }
 static double encode(double x) { return x<=.0031308?12.92*x:1.055*pow(x,1/2.4)-.055; }
 static double shoulder(double x,double h) { return x<=1?x:1+(h-1)*(1-exp(-(x-1)/(h-1))); }
@@ -515,6 +552,14 @@ static int composition(unsigned samples) {
         else CHECK([pixels isEqualToData:held_reference],"prewarmed held pixels differ");
         const __fp16 *v=read.contents;int above=0,bad=0;float peak=0;
         float hud_white=v[(W-1)*4];CHECK(hud_white==1,"HUD paper white %.8f",hud_white);
+        if(!effects && !grade) {
+            const double expected = .214041140482;
+            double decoded_error = fabs(v[64*4]-expected);
+            printf("hdr_output_test: D65 transfer .5 -> %.8f error=%.8f\n",
+                   (double)v[64*4],decoded_error);
+            CHECK(decoded_error<.001,"midpoint decode error %.6f",decoded_error);
+            CHECK(v[64*4]==v[64*4+1] && v[64*4]==v[64*4+2],"EDR midpoint chroma");
+        }
         for(int x=0;x<=1024;++x) {
             above+=v[x*4]>1;peak=fmaxf(peak,v[x*4]);
             for(int c=0;c<3;++c)bad+=!isfinite((float)v[x*4+c])||v[x*4+c]<0||v[x*4+c]>4;
@@ -526,7 +571,7 @@ static int composition(unsigned samples) {
         printf("hdr_output_test: composition samples=%u effects=%d gamma=%.1f above_one=%d peak=%.8f HUD=%.8f bad=%d midpoint=%.8f\n",samples,effects,exponent,above,peak,hud_white,bad,(float)v[64*4]);
         CHECK(hud_white==1,"HUD paper white %.8f",hud_white);
         CHECK(!bad && above>800,"composition range above=%d bad=%d",above,bad);
-        if(!effects && !grade)CHECK(above==896 && fabs(v[64*4]-.21404114)<.0002,"midpoint/ramp decode");
+        if(!effects && !grade)CHECK(above==896,"ungraded ramp");
         if(frames++)steady_calls+=post_cached_calls-frame_calls;
       }
     }
@@ -713,6 +758,7 @@ int main(int argc,const char **argv) {@autoreleasepool{
     if(argc==2 && !strcmp(argv[1],"--prewarm"))return prewarm(1);
     if(argc==2 && !strcmp(argv[1],"--prewarm-msaa"))return prewarm(4);
     if(argc==2 && !strcmp(argv[1],"--prewarm-lamps"))return prewarm_lamps();
+    if(argc==2 && !strcmp(argv[1],"--transport"))return transport();
     if(argc==2 && !strcmp(argv[1],"--composition"))return composition(1);
     if(argc==2 && !strcmp(argv[1],"--composition-msaa"))return composition(4);
     return edr(argc==2 && !strcmp(argv[1],"--broken"));

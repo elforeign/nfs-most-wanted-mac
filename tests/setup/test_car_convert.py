@@ -1,8 +1,11 @@
-"""Illumination regression: old 54/54 zero-lit synthetic vertices; fixed 0/54.
-Added-car sync: 30 source cars audited, 29 produce 232 compared files; nine
-sorted material trailers, missing-kit aliases and donor platform +08 defaults
-are decoded policy differences. One source has an unused unresolved texture
-table entry and retains Setup's pre-existing fail-closed refusal.
+"""Fixed rear deck/back glass: pinned old assembly fails 4/4 LODs; corrected passes 4/4.
+BASE/BODY triangle overlaps: 0/20 kit/LOD pairs after moving fixed coverage.
+Local 300C source deck/glass triangles: A=210/104, B=53/62, C=33/32, D=31/20.
+Illumination regression: old 54/54 zero-lit synthetic vertices; fixed 0/54.
+Added-car sync: 30 source cars audited, 30 produce 270 compared files; three
+sorted material trailers, fixed BASE relocation, missing-kit aliases and donor
+platform +08 defaults are decoded policy differences. The unused source texture
+table entry stays unreferenced and does not block its conversion.
 Classified rims: old CCX 1728 zero-RGB vertices; fixed 0; stock-paint R8 2402 and 997TT 8200 -> 0 (catalog check).
 Bare stock-lit/missing-stock fixture: old 3 failures (2 dark each), fixed 0; finish: old 0 rows -> fixed 1.
 Missing source paint attributes: old 1/1 conversion errors; fixed 1/1 donor retained, 1 log line.
@@ -40,8 +43,10 @@ passes for 848 solids / 21 textures / 13 unchanged inputs; the writer mutant
 fails that same public-file parity check.
 """
 import contextlib
+from collections import Counter
 import hashlib
 import io
+import inspect
 import os
 from pathlib import Path
 import re
@@ -338,13 +343,77 @@ def assert_written_hashes(test, directory, expected):
     test.assertEqual(actual, expected, 'published output hashes')
 
 
-def assert_geometry_parity(test, actual, expected):
-    """Only standalone row order may differ; every geometry byte stays exact."""
+def draw_triangles(m):
+    """Count oriented, byte-exact vertices and their resolved draw bindings."""
+    result = Counter()
+    for r, label in zip(m['records'], m['names']):
+        bindings = tuple(m['textures'][r[i]] for i in range(24, 29))
+        light = None if r[29] == 255 else m['lights'][r[29]]
+        start, count = cc.u32(r, 68), cc.u32(r, 92)
+        for tri in m['indices'][start:start + count].reshape(-1, 3):
+            vertices = tuple(m['vertices'][i].tobytes() for i in tri)
+            key = (min(vertices[i:] + vertices[:i] for i in range(3)),
+                   bindings, light, label.split(b'\0')[0])
+            result[key] += 1
+    return result
+
+
+def assert_fixed_topology_parity(test, actual, expected, source):
+    """Classify only BASE deck/glass relocation; every other solid stays exact."""
+    a, b = (cc.validate_geometry(data) for data in (actual, expected))
+    test.assertEqual(a.keys(), b.keys(), 'solid inventory changed')
+    changed = set()
+    for name in a:
+        if not re.search(r'_BASE_[ABCD]$', name):
+            continue
+        prefix, lod = name.rsplit('_BASE_', 1)
+        roof, body, window = (f'{prefix}_KIT00_{part}_{lod}'
+                              for part in ('ROOF', 'BODY', 'REAR_WINDOW'))
+        source_prefix = next(iter(source)).split('_')[0]
+        source_base = source.get(f'{source_prefix}_BASE_{lod}')
+        if roof not in a:
+            continue
+        # New BASE retains the roof transform and adds authored deck/glass.
+        # Classify the removed BODY draws using independent source triangle positions.
+        deck_positions = position_triangles(source_base, world=False) if source_base else set()
+        old_body = draw_triangles(b[body])
+        deck = Counter()
+        for key, count in old_body.items():
+            points = tuple(sorted(tuple(struct.unpack_from('<3f', v)) for v in key[0]))
+            if points in deck_positions:
+                deck[key] = count
+        test.assertEqual(sum(deck.values()), len(source_base['indices']) // 3 if source_base else 0,
+                         'source deck does not identify exactly the removed BODY coverage')
+        expected_base = draw_triangles(b[name]) + deck
+        if window in b:
+            expected_base += draw_triangles(b[window])
+        test.assertTrue(draw_triangles(a[name]) == expected_base, name + ': unclassified BASE triangles/bindings')
+        test.assertTrue(draw_triangles(a[body]) == old_body - deck, body + ': unclassified BODY triangles/bindings')
+        test.assertEqual(a[name]['header'][64:128], b[name]['header'][64:128], 'BASE transform changed')
+        test.assertEqual(cc.marker_records(a[name]), cc.marker_records(b[name]), 'BASE marker anchors changed')
+        removed = set(cc.marker_records(b[body])) - set(cc.marker_records(a[body]))
+        deck_markers = cc.marker_records(cc.assemble(body, [b[body]], marker_parts=[source_base])) if source_base else []
+        test.assertTrue(removed <= set(deck_markers), 'removed marker was not carried by the deck')
+        test.assertTrue(set(cc.marker_records(a[body])) <= set(cc.marker_records(b[body])))
+        changed.update((name, body))
+    raw_a, raw_b = (dict(cc.solids(data)) for data in (actual, expected))
+    for name in a.keys() - changed:
+        test.assertTrue(raw_a[cc.name_hash(name)] == raw_b[cc.name_hash(name)], name + ': unrelated solid changed')
+    test.assertTrue(changed, 'no fixed BASE relocation explains the geometry difference')
+
+
+def assert_geometry_parity(test, actual, expected, source=None):
+    """Classify fixed BASE relocation and row order; refuse other geometry changes."""
     if actual == expected:
         return 'byte-identical'
     end = cc.u32(actual, 4) + 8
-    test.assertEqual(actual[:end], expected[:end], 'geometry envelope/solids differ')
+    moved = actual[:end] != expected[:end]
+    if moved and source is not None:
+        assert_fixed_topology_parity(test, actual, expected, source)
+    else:
+        test.assertEqual(actual[:end], expected[:end], 'geometry envelope/solids differ')
     def rows(data):
+        end = cc.u32(data, 4) + 8
         result = {}
         for kind, offset, size in cc.children(data, end):
             test.assertEqual(kind, 0x135200)
@@ -354,8 +423,8 @@ def assert_geometry_parity(test, actual, expected):
             result[key] = row
         return result
     test.assertEqual(rows(actual), rows(expected), 'standalone material payloads differ')
-    test.assertTrue(rows(actual), 'no material rows explain the difference')
-    return 'standalone material rows sorted by identity'
+    test.assertTrue(moved or rows(actual), 'no classified difference')
+    return 'fixed BASE deck/back glass; identical standalone material rows' if moved else 'standalone material rows sorted by identity'
 
 
 def assert_solidmap_parity(test, actual, expected, geometry, donor_geometry, donor, car):
@@ -410,6 +479,147 @@ def assert_texture_parity(test, actual, expected, donor_textures):
     test.assertEqual(actual, bytes(normalized), 'unclassified texture-container difference')
     test.assertTrue(changed)
     return 'native donor platform +08 defaults: ' + ','.join(changed)
+
+
+
+# Original roof/stock-body assembly, independent of the corrected policy.
+ORIGINAL_FIXED_BASE_ASSEMBLY = r'''        for lod in 'ABCD':
+            roof, base = f'{car}_KIT00_ROOF_{lod}', f'{car}_BASE_{lod}'
+            if roof in original and base in refnames:
+                anchors = [original[n] for n in (base, roof) if n in original]
+                models[base] = assemble(base, [original[roof]], marker_parts=anchors); assembled.append(base)
+            target = f'{car}_KIT00_BODY_{lod}'
+            keys = [f'{car}_KIT00_{p}_{lod}' for p in ('BODY', 'FRONT_BUMPER', 'REAR_BUMPER', 'SKIRT', 'EXHAUST')]
+            doors = [n for side in ('LEFT', 'RIGHT')
+                     if (n := f'{car}_KIT00_DOOR_{side}_{lod}') in original]
+            if target in original:
+
+
+                keys = [k for k in keys if k in original]
+
+
+                keys += doors
+                if base in original: keys.append(base)
+                for end in ('FRONT', 'REAR'):
+                    badge = f'{car}_KIT00_{end}_BUMPER_BADGING_SET_{lod}'
+                    if badge in original: keys.append(badge)
+                models[target] = assemble(target, [original[k] for k in keys]); assembled.append(target)
+'''
+ORIGINAL_FIXED_BASE_ASSEMBLY_SHA = 'da8fe16be04da8a490cbc0e475d22cc3bdca9980ac1d97ff096b323a9c0256f6'
+
+
+def original_fixed_base_assembly():
+    assert hashlib.sha256(ORIGINAL_FIXED_BASE_ASSEMBLY.encode()).hexdigest() == ORIGINAL_FIXED_BASE_ASSEMBLY_SHA
+    source = inspect.getsource(cc.decoded_models)
+    start = source.index('        fixed_bases = set()')
+    end = source.index('        # INTERIORHI', start)
+    namespace = dict(vars(cc))
+    exec(source[:start] + ORIGINAL_FIXED_BASE_ASSEMBLY + source[end:], namespace)
+    return namespace['decoded_models']
+
+
+def position_triangles(m, *, world=True):
+    """Canonical world-coordinate triangles, independent of material/draw order."""
+    positions = m['vertices'][:, :12].copy().view('<f4').reshape(-1, 3)
+    matrix = cc.np.frombuffer(m['header'][64:128], '<f4').reshape(4, 4)
+    if world:
+        positions = (positions[:, :, None] * matrix[None, :3, :3]).sum(axis=1) + matrix[3, :3]
+    return {tuple(sorted(tuple(p[:3]) for p in positions[tri]))
+            for tri in m['indices'].reshape(-1, 3)}
+
+
+class FixedBaseAssembly(unittest.TestCase):
+    def fixture(self):
+        models = {}
+        for lod in 'ABCD':
+            # Each part has distinct geometry so duplications cannot mask losses.
+            parts = ['BASE', 'KIT00_ROOF', 'KIT00_REAR_WINDOW']
+            parts += [f'KIT{k:02d}_BODY' if k == 0 else f'KITW{k:02d}_BODY' for k in range(5)]
+            for z, part in enumerate(parts):
+                name = f'CAR_{part}_{lod}'
+                m = cc.model(triangle(name, True))
+                vertices = m['vertices'].view('<f4').reshape(-1, 9)
+                vertices[:, 2] = z
+                header = bytearray(m['header'])
+                struct.pack_into('<f', header, 40, z)
+                struct.pack_into('<f', header, 56, z)
+                m.update(header=bytes(header))
+                models[name] = m
+        donor = geometry('CAR', False)
+        refs = cc.validate_geometry(donor)
+        for lod in 'ABCD':
+            for k in range(1, 5):
+                name = f'CAR_KIT{k:02d}_BODY_{lod}'
+                refs[name] = cc.native_wheel_model(triangle(name, False))
+        donor, _ = cc.write_geometry(donor, refs)
+        return models, donor
+
+    def coverage_failures(self, convert):
+        source, donor = self.fixture()
+        out, _ = convert(source, donor)
+        failures = []
+        for lod in 'ABCD':
+            base = position_triangles(out[f'CAR_BASE_{lod}'])
+            fixed = set().union(*(position_triangles(source[f'CAR_{part}_{lod}'])
+                                  for part in ('BASE', 'KIT00_ROOF', 'KIT00_REAR_WINDOW')))
+            bodies = [position_triangles(out[f'CAR_KIT{k:02d}_BODY_{lod}']) for k in range(5)]
+            if not fixed <= base or any(base & body for body in bodies):
+                failures.append(lod)
+            for k, body in enumerate(bodies):
+                part = 'KIT00_BODY' if k == 0 else f'KITW{k:02d}_BODY'
+                self.assertTrue(position_triangles(source[f'CAR_{part}_{lod}']) <= body)
+        return failures
+
+    def test_fixed_deck_and_back_glass_all_kits(self):
+        self.assertEqual(self.coverage_failures(original_fixed_base_assembly()), list('ABCD'))
+        self.assertEqual(self.coverage_failures(cc.decoded_models), [])
+        print('fixed deck/back glass: old fails 4/4 LODs; new passes 4/4; BASE/BODY overlaps 0/20')
+
+    def test_optional_300c_fixed_geometry(self):
+        root = os.environ.get('NFS_CARBON_PC')
+        if not root:
+            self.skipTest('local PC source required; synthetic four-LOD control still runs')
+        donor_root = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition'))
+        source = {m['name']: m for _, raw in cc.solids(
+            (Path(root) / 'CARS/300C/GEOMETRY.BIN').read_bytes()) for m in [cc.model(raw)]}
+        donor = (donor_root / 'CARS/CTS/GEOMETRY.BIN').read_bytes()
+        old, _ = original_fixed_base_assembly()(source, donor, 'CTS')
+        current, _ = cc.decoded_models(source, donor, 'CTS')
+        failures = 0
+        for lod, counts in zip('ABCD', ((210, 104), (53, 62), (33, 32), (31, 20))):
+            parts = [source[f'300C_{part}_{lod}'] for part in ('BASE', 'KIT00_REAR_WINDOW')]
+            self.assertEqual(tuple(len(m['indices']) // 3 for m in parts), counts)
+            fixed = set().union(*(position_triangles(m) for m in parts))
+            before = position_triangles(old[f'CTS_BASE_{lod}'])
+            after = position_triangles(current[f'CTS_BASE_{lod}'])
+            self.assertFalse(before & fixed)
+            self.assertTrue(fixed <= after)
+            failures += not fixed <= before
+            for name, body in current.items():
+                if re.fullmatch(f'CTS_KIT0[0-4]_BODY_{lod}', name):
+                    self.assertFalse(after & position_triangles(body), name + ': duplicate fixed coverage')
+            print(f'300C {lod}: deck/glass {counts[0]}/{counts[1]} retained; old 0/0; BASE/BODY overlap 0')
+        self.assertEqual(failures, 4)
+
+    def test_no_roof_keeps_original_stock_body_fallback(self):
+        source, donor = self.fixture()
+        for lod in 'ABCD':
+            del source[f'CAR_KIT00_ROOF_{lod}']
+        out, _ = cc.decoded_models(source, donor)
+        for lod in 'ABCD':
+            deck = position_triangles(source[f'CAR_BASE_{lod}'])
+            self.assertEqual(position_triangles(out[f'CAR_BASE_{lod}']), deck)
+            self.assertTrue(deck <= position_triangles(out[f'CAR_KIT00_BODY_{lod}']))
+
+    def test_absent_optional_deck_or_rear_window(self):
+        source, donor = self.fixture()
+        for lod in 'ABCD':
+            del source[f'CAR_BASE_{lod}']
+            del source[f'CAR_KIT00_REAR_WINDOW_{lod}']
+        out, _ = cc.decoded_models(source, donor)
+        for lod in 'ABCD':
+            self.assertEqual(position_triangles(out[f'CAR_BASE_{lod}']),
+                             position_triangles(source[f'CAR_KIT00_ROOF_{lod}']))
 
 
 class CarConversion(unittest.TestCase):
@@ -1103,16 +1313,17 @@ class InstalledCarParity(unittest.TestCase):
                           ','.join(f'{h:08X}' for h in missing), flush=True)
                     continue
                 assert_written_hashes(self, work / 'setup', result['outputs'])
+                source_models = {m['name']: m for _, raw in cc.solids(
+                    (source_root / 'CARS' / car / 'GEOMETRY.BIN').read_bytes()) for m in [cc.model(raw)]}
                 classifications = []
                 for name in sorted(result['outputs']):
                     actual, expected = ((work / kind / name).read_bytes() for kind in ('setup', 'reference'))
                     if name == 'GEOMETRY.BIN':
-                        reason = assert_geometry_parity(self, actual, expected)
-                        reordered += reason != 'byte-identical'
+                        reason = assert_geometry_parity(self, actual, expected, source_models)
+                        reordered += (actual[cc.u32(actual, 4)+8:] != expected[cc.u32(expected, 4)+8:])
                         if reason != 'byte-identical':
                             keys = [cc.u32(actual, o+20) for c, o, z in cc.children(actual, cc.u32(actual, 4)+8)]
-                            self.assertEqual(keys, sorted(keys))
-                            classifications.append(name + ': sorted standalone rows ' + ','.join(f'{k:08X}' for k in keys))
+                            classifications.append(name + ': fixed BASE deck/back glass; standalone rows ' + ','.join(f'{k:08X}' for k in keys))
                     elif name == 'SOLIDMAP.BIN':
                         reason = assert_solidmap_parity(self, actual, expected,
                             (work / 'setup/GEOMETRY.BIN').read_bytes(),
@@ -1154,8 +1365,8 @@ class InstalledCarParity(unittest.TestCase):
                     controls = 3
                 print('added-car parity:', car, len(result['outputs']), 'outputs exact after classification;',
                       '; '.join(classifications) or 'all bytes identical', flush=True)
-        self.assertEqual(refusals, 1, 'source-table policy refusal census changed')
-        self.assertEqual(files, (len(rows)-refusals)*8)
+        self.assertEqual(refusals, 0, 'source-table policy refusal census changed')
+        self.assertEqual(files, (len(rows)-refusals)*9)
         self.assertEqual(controls, 3)
         print('added-car parity total:', len(rows), 'cars,', files, 'files;', reordered,
               'sorted material trailers;', refusals, 'classified policy refusal;', controls, 'mutations rejected')
@@ -1218,7 +1429,9 @@ class InstalledCarParity(unittest.TestCase):
                     expected = hashlib.sha256((work / 'baseline' / name).read_bytes()).hexdigest()
                     if name == 'GEOMETRY.BIN':
                         assert_geometry_parity(self, (work / 'public' / name).read_bytes(),
-                                               (work / 'baseline' / name).read_bytes())
+                                               (work / 'baseline' / name).read_bytes(),
+                                               {m['name']: m for _, raw in cc.solids((car / 'GEOMETRY.BIN').read_bytes())
+                                                for m in [cc.model(raw)]})
                     else:
                         self.assertEqual(actual, expected, f'{name}: unclassified difference from material-neutral reference')
                     default_hash = hashlib.sha256((work / 'default' / name).read_bytes()).hexdigest()

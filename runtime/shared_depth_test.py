@@ -81,7 +81,12 @@ for name, digest in [
         ('x_contact_scene_impl', 'aef5fdabc06e36905e1a9dbe6c09de5e0ad43f6a17106e6af5617494579d9ba7'),
         ('x_contact_smoke_multiply', '1b3dc082f9f90f7d7ca93b2279006588f23933d4970aaf0d2cabe3ea80edfa14'),
         ('x_contact_smoke_half_multiply', 'f152e7d641c50b62816363a335a1c3dac8ff293808910166e14e7fc52dbedb3b')]:
-    assert hashlib.sha256(function(post, name).encode()).hexdigest() == digest, name
+    # Keep the original render-body witness, excluding only the new numeric
+    # observation calls. The compiled production fixture below retains them.
+    body = function(post, name)
+    body = re.sub(r'(?m)^[ \t]*blackbox_render_host\(frame_serial, BB_HOST_SSAO\);\n', '', body)
+    body = body.replace('blackbox_render_host(frame_serial, BB_HOST_SSAO);', '')
+    assert hashlib.sha256(body.encode()).hexdigest() == digest, name
 # The fixture compiles the current shipping fragment unchanged, with its real
 # texture slots. The original baseline is pinned independently above.
 assert 'geometry.read' in current and 'ao_normal(' not in current

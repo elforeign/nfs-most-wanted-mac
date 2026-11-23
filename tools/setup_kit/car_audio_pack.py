@@ -149,7 +149,11 @@ def x360_resource_paths(attributes, car):
                    for _, paths in layers for path in paths})
 
 
-def build(attributes, car, resources, *, platform='pc', legacy_xk=False):
+def build(attributes, car, resources, *, game='carbon', platform='pc', legacy_xk=False):
+    if game == 'prostreet' and platform == 'pc' and not legacy_xk:
+        from . import car_audio_prostreet
+        return car_audio_prostreet.build(attributes, car, resources)
+    require(game == 'carbon', 'audio unsupported game/platform')
     require(0 < len(car) < 16 and car.isascii() and car.replace('_', '').isalnum(), 'audio unsupported car')
     require(platform in ('pc', 'x360'), 'audio unsupported platform')
     console = platform == 'x360'
@@ -245,8 +249,12 @@ def build(attributes, car, resources, *, platform='pc', legacy_xk=False):
     return package
 
 
-def resource_paths(attributes, car, candidates):
+def resource_paths(attributes, car, candidates, *, game='carbon'):
     """Resolve the graph's complete resource closure against relative source paths."""
+    if game == 'prostreet':
+        from . import car_audio_prostreet
+        return car_audio_prostreet.resource_paths(attributes, car, candidates)
+    require(game == 'carbon', 'audio unsupported game')
     require(hashlib.sha256(attributes).hexdigest() in ATTRIBUTES, 'audio unsupported attributes revision')
     attrib = car_audio.AudioAttributes(attributes)
     names, seen = set(), set()
@@ -281,11 +289,11 @@ def resource_paths(attributes, car, candidates):
     return sorted(paths.values())
 
 
-def from_directory(attributes, car, root, read, *, legacy_xk=False):
+def from_directory(attributes, car, root, read, *, game='carbon', legacy_xk=False):
     """Read only graph-reachable resources through the converter input tracker."""
     paths = (p.relative_to(root).as_posix() for p in (root / 'SOUND/ENGINE').rglob('*') if p.is_file())
-    selected = resource_paths(attributes, car, paths)
-    return build(attributes, car, {path: read(root / path) for path in selected}, legacy_xk=legacy_xk)
+    selected = resource_paths(attributes, car, paths, game=game)
+    return build(attributes, car, {path: read(root / path) for path in selected}, game=game, legacy_xk=legacy_xk)
 
 
 def resource_name(package_digest, resource_digest):

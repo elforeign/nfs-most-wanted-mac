@@ -25,8 +25,9 @@ This project does not provide, link to, or explain how to obtain any game file. 
 
 1. Download the Setup disk image from the
    [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest) and open it.
-2. Open **NFS Most Wanted Native Setup**. The app is not notarized by Apple, so the first time macOS blocks it: click **Done**, then go to
-   **System Settings > Privacy & Security** and click **Open Anyway** next to its name. You only do this once.
+2. Open **NFS Most Wanted Native Setup**. If macOS says it can’t verify Setup, click **Done**.
+   Go to **System Settings > Privacy & Security > Open Anyway** for Setup.
+   Confirm that you want to open Setup.
 3. Choose your PC game using an option above. For discs, Setup finds the other discs beside disc 1 and asks for any it can't find. Optionally add your Xbox 360 files and choose where the app goes.
 4. If asked, install Apple's Command Line Tools and wait for them.
 5. Click **Build**. You see each step and its progress. The first build compiles the whole game on your Mac, so it
@@ -50,6 +51,8 @@ containing one of those.
 
 The cars appear in Quick Race car selection and the Career car lot. Each uses the price and
 Blacklist unlock requirement of the Most Wanted car it’s based on.
+Setup keeps verified car inputs with your installed data, so deleting its cache leaves
+those inputs available for updates and additional imports.
 
 ## Export one app for backup
 
@@ -63,8 +66,9 @@ and volumes use copies checked with SHA-256. The result shows elapsed time, allo
 shared blocks), and the observed change in volume free space (including metadata and other disk activity).
 Allow room for a complete copy when backing up to another volume; clones do not make that backup free.
 
-Exports display **Re-export from Setup to update**. Build the new version with Setup and export it under a new
-name. **Rollback means keeping and opening the previous complete export**; Setup refuses to overwrite an export.
+Exports display **Re-export from Setup to update**. Build the new version with Setup, then choose the old export
+again and press **Update this export**: Setup replaces it only after the new copy is complete and signed. Exports
+carry the cars you added. **For a rollback copy, export under a different name** and keep the previous export.
 **Saves and settings stay in `~/Library/Application Support/NFSMW-port/`** and need their own backup.
 An app backup alone does not include your careers. Exports are personal backups containing your game files.
 
@@ -94,6 +98,7 @@ With your own Xbox 360 copy, Setup can add its world, music, police radio, cutsc
 - The game's logs: `~/Library/Logs/NFSMW-port/`
 - Setup’s saved choices: `~/Library/Application Support/NFSMW-Setup/source-choices.json`. Keep this file for Update now, along with the original PC and any selected Xbox 360 sources.
 - Setup’s cache: `~/Library/Caches/NFSMW-Setup/` (can be deleted after building; later builds may need to download or prepare files again).
+- Added-car repair inputs: `~/Library/Application Support/NFSMW-port/car-inputs/`. Keep these with the installed cars; clearing Setup’s cache leaves them intact.
 - Setup's logs: `~/Library/Logs/NFSMW-Setup/`
 
 ## Updating
@@ -101,6 +106,8 @@ With your own Xbox 360 copy, Setup can add its world, music, police radio, cutsc
 In 4.3, use **F10 > Display & performance > Online > Check for updates**, then **Update now** when offered. Follow the status, quit and reopen when ready. Cancel update stops it before the next launch; Retry update starts again after a failure or cancellation.
 
 Keep Setup’s saved source choices and the sources they point to. If they moved or were deleted, run the latest Setup and select them again. Careers and settings are kept.
+Updates automatically refresh selected extra cars when their conversion tools or approvals change.
+If a car refresh fails, the previous verified cars stay active and the app update proceeds.
 
 **From 4.2.0 or earlier:** download the newer Setup from the releases page, quit the game and build again manually. The 4.2.0 update check opens a browser; it cannot prepare updates. Your game folder is only read, never changed.
 

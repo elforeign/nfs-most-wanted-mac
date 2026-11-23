@@ -45,6 +45,7 @@ NATIVE = r'''
 #include "car85.c"
 #include "temporal_state_fixture.h"
 #include "carsave_public.h"
+#include "bundle_roots.h"
 #include "settings.h"
 uint8_t *G;
 int diag_on;

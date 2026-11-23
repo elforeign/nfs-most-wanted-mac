@@ -110,28 +110,11 @@ void f_00678CE0(Cpu *c) {
     if (layout) MF32(stats+4)=car_performance_clamp_top_speed(G+layout,MF32(stats+4));
 }
 
-/* Retail rating normalization compares raw acceleration time, top speed and
- * handling in this list. Use the bounds from retail rows while source
- * performance is active, so imported cars cannot shift retail ratings. */
+/* The weakest retail rating is already zero. Include added cars in the
+ * original stock/upgraded bounds so slower source values remain ordered
+ * instead of all clamping to that endpoint. */
 void f_006794E0(Cpu *c) {
-    if (!performance_allocations) { f_006794E0_orig(c); return; }
-    uint32_t head=M32(c->ecx+4);
-    float direction=MF32(c->esp+4);
-    uint32_t dest=M32(c->esp+8);
-    float bounds[3]={0,0,0};
-    unsigned seen=0;
-    for (uint32_t row=M32(head);row!=head;row=M32(row)) {
-        unsigned j=0;
-        while (j<nadditions && additions[j].key!=M32(row+0x2c)) ++j;
-        if (j<nadditions) continue;
-        for (unsigned i=0;i<3;++i) {
-            float value=MF32(row+8+4*i);
-            if (!seen || direction*bounds[i]<direction*value) bounds[i]=value;
-        }
-        ++seen;
-    }
-    memcpy(G+dest,bounds,sizeof bounds);
-    c->esp+=12;
+    f_006794E0_orig(c);
 }
 
 void f_00683EB0(Cpu *c) {

@@ -195,10 +195,12 @@ def _car_packs(folder):
     return (f'CARS/{folder}/GEOMETRY.BIN', f'CARS/{folder}/TEXTURES.BIN')
 
 
-def _mw_names(game, donor):
+def _mw_names(game, donor, folder):
     packs = _car_packs(donor)
     if game == 'carbon':
-        return (*packs, *MW_SHARED)
+        from .car_performance import SIBLINGS
+        sibling_inputs = ('GLOBAL/attributes.bin',) if folder in SIBLINGS else ()
+        return (*packs, *MW_SHARED, *sibling_inputs)
     from .ps_namespace import TEMPLATE
     shared = ('GLOBAL/ATTRIBUTES.BIN',)
     if game == 'prostreet':
@@ -219,7 +221,8 @@ def _source_names(platform, folder, identities, game='carbon', audio_names=()):
     names = [*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game]]
     if platform == 'x360':
         names += ['GLOBAL/GLOBALB.BUN', 'CARS/TEXTURES.BIN', 'GLOBAL/INGAMEA.BUN']
-    names += [n for n in audio_names if game == 'carbon' and n.startswith('SOUND/ENGINE/')]
+    audio_source = game == 'carbon' or (game, platform, folder) == ('prostreet', 'pc', 'VEYRON')
+    names += [n for n in audio_names if audio_source and n.startswith('SOUND/ENGINE/')]
     known = {sources.path_hash(n): n for n in names}
     _require(set(identities) <= known.keys(), 'unmapped converter logical dependency')
     return {n: known[n] for n in identities}
@@ -298,8 +301,10 @@ def _later_route(game):
     from . import ps_namespace, v25_batch, v25_car
     modules = [ps_namespace, v25_batch, v25_car]
     if game == 'prostreet':
-        from . import car_performance, ps_attrib
-        return ps_namespace, modules + [ps_attrib, car_performance]
+        from . import (car_performance, ps_attrib, car_audio_prostreet, car_audio,
+                       car_audio_pack, car_audio_codec, car_audio_abi, car_audio_bank)
+        return ps_namespace, modules + [ps_attrib, car_performance, car_audio_prostreet,
+            car_audio, car_audio_pack, car_audio_codec, car_audio_abi, car_audio_bank]
     _require(game == 'undercover', 'unsupported PC converter')
     from . import car_performance, ps_attrib, uc_attrib, uc_batch, ucpc_car
     return ucpc_car, modules + [ps_attrib, uc_attrib, uc_batch, ucpc_car, car_performance]
@@ -438,9 +443,11 @@ class CarImporter:
             for name in ('GEOMETRY.BIN', 'TEXTURES.BIN'):
                 if not (mw_pc / 'CARS' / car['donors']['model'] / name).is_file():
                     raise MissingAssets('required MW PC donor pack is missing')
-            if game != 'carbon' and any(not _mw_asset(mw_pc, name, game).is_file()
-                                        for name in _mw_names(game, car['donors']['model'])):
+            names = _mw_names(game, car['donors']['model'], car['folder'])
+            if game != 'carbon' and any(not _mw_asset(mw_pc, name, game).is_file() for name in names):
                 raise MissingAssets('required MW PC material template or shared pack is missing')
+            if game == 'carbon' and 'GLOBAL/attributes.bin' in names and not (mw_pc / 'GLOBAL/attributes.bin').is_file():
+                raise MissingAssets('required MW PC stock performance data is missing')
         if game == 'carbon' and not (mw_pc / 'GLOBAL/GLOBALB.LZC').is_file():
             raise MissingAssets('required MW PC shared pack is missing')
         return carbon, mw_pc, optional, recognition
@@ -530,19 +537,24 @@ class CarImporter:
             for key, pin in source_pins.items():
                 _require(key in logical and _logical(reader, logical[key], tick=tick) == packed_geometry.get(key, pin),
                          'selected logical source changed')
-            if game == 'carbon':
+            if game in ('carbon', 'prostreet'):
                 from . import car_audio_pack
+                if game == 'prostreet':
+                    from . import car_audio_prostreet
                 attribute_id = sources.path_hash('GLOBAL/ATTRIBUTES.BIN')
                 x360 = platform == 'x360'
                 attributes_pins = (car_audio_pack.X360_ATTRIBUTES,) if x360 else car_audio_pack.ATTRIBUTES
-                mac_audio = source_pins[attribute_id]['sha256'] in attributes_pins
+                mac_audio = (source_pins[attribute_id]['sha256'] in attributes_pins if game == 'carbon' else
+                    platform == 'pc' and folder == 'VEYRON' and
+                    source_pins[attribute_id]['sha256'] == car_audio_prostreet.ATTRIBUTES)
                 donor_export = mac_audio and x360 and _x360_donor_export(physical)
                 mac_audio = mac_audio and not donor_export
                 if mac_audio:
                     attr = sources._read(reader, logical[attribute_id])
                     audio_pins = converter.x360_audio_inputs(attr, folder, logical) if x360 else None
                     audio_paths = (audio_pins if x360 else
-                        car_audio_pack.resource_paths(attr, folder, (n for n in physical if n.startswith('SOUND/ENGINE/'))))
+                        car_audio_pack.resource_paths(attr, folder,
+                            (n for n in physical if n.startswith('SOUND/ENGINE/')), game=game))
                     for name in audio_paths:
                         key = sources.path_hash(name)
                         _require(key not in source_pins, 'colliding audio input')
@@ -554,7 +566,7 @@ class CarImporter:
                             _require(source_pins[key] == audio_pins[name],
                                      'Console engine audio does not match the approved file: ' + name + '.')
                         names[key] = name
-            mw_names = _mw_names(game, car['donors']['model'])
+            mw_names = _mw_names(game, car['donors']['model'], folder)
             mw_paths = {name: _mw_asset(mw, name, game) for name in mw_names}
             extraction = sum(p['size'] for p in source_pins.values())
             reviewed = later_rows.get(car['slot'])
@@ -670,6 +682,19 @@ class CarImporter:
                 unchanged()
                 owned.write('receipt.json', catalog.encoded(dict(schema=REVISION, key=key, identity=identity, row=row)))
                 self._boundary('prepared', receipt, cancel, progress)
+                if approved and catalog._entry_stat(work_fd, entry.name) is not None:
+                    # The content-addressed entry appeared after the plan
+                    # looked. Renaming a directory over an existing one is
+                    # refused (EACCES on a sealed stage), so reuse a verified
+                    # entry and quarantine a rejected one before publishing.
+                    try:
+                        cached = self._cached(entry, identity, policy)
+                    except CacheError:
+                        os.rename(entry.name, '.rejected-' + uuid.uuid4().hex, src_dir_fd=work_fd, dst_dir_fd=work_fd)
+                        os.fsync(work_fd)
+                    else:
+                        return dict(row=cached, entry=entry, approved=True, reason='',
+                                    output_bytes=sum(p['size'] for p in pins.values()))
                 if approved:
                     owned.seal()
                     catalog._bound(stage, owned.fd)
@@ -788,6 +813,9 @@ class CarImporter:
                 dict(sha256=catalog.RETAIL_ATTRIBUTES_POLICY_SHA256, revision=9),
                 dict(sha256=catalog.PS_PERFORMANCE_POLICY_SHA256, revision=9),
                 dict(sha256=catalog.PRE_UC_PERFORMANCE_POLICY_SHA256, revision=11),
+                dict(sha256=catalog.PRE_SIBLING_PERFORMANCE_POLICY_SHA256, revision=12),
+                dict(sha256=catalog.PRE_CACHE_PUBLISH_POLICY_SHA256, revision=13),
+                dict(sha256=catalog.PRE_PROSTREET_AUDIO_POLICY_SHA256, revision=14),
             )
             _require(retained_policy or identity['approval'] == dict(sha256=policy.sha256,
                 revision=catalog._policy(policy)['revision']), 'cache approval revision is stale')

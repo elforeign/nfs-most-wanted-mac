@@ -225,6 +225,9 @@ def graph(attributes, car, resources, *, game='carbon', platform='pc'):
     Ordered Audio entries retain authored tier indices; reference edges retain
     field IDs and element indices, including secondary engineaudio dependencies.
     """
+    if game == 'prostreet' and platform == 'pc':
+        from . import car_audio_prostreet
+        return car_audio_prostreet.graph(attributes, car, resources)
     require(game == 'carbon' and platform == 'pc',
             f'unsupported audio source/platform: {game}/{platform}; schema and resources not audited')
     attrib = AudioAttributes(attributes)

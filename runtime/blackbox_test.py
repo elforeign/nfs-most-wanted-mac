@@ -4,7 +4,7 @@ Fixed: 0 missing sentinel records / 12 exports; removed export hooks: 12 / 12.
 concurrent snapshot/publication, deterministic contention and capacity loss.
 The production snippets are compiled, not replaced by a second export implementation.
 Offline auto-discovery: runtime/offline_tests.sh; selected by runtime/impact_tests.py.
-Also covers runtime/blackbox_mw.c, runtime/report.m, runtime/portmenu.m, runtime/diag.c,
+Also covers runtime/blackbox_mw.c, runtime/blackbox_mw_fe.c, runtime/report.m, runtime/portmenu.m, runtime/diag.c,
 recomp/private_runtime/game_diagnostics.h, recomp/private_runtime/carbon_blackbox.c,
 recomp/private_runtime/features/blackbox.json, runtime/runtime_sources.json,
 runtime/switches.tsv and runtime/docs/blackbox.md. No private assets are required.
@@ -47,6 +47,7 @@ PRELUDE = r'''
 #include "game_select.h"
 #include "present_image_diag.h"
 void carbon_blackbox_fe(uint64_t frame, uint32_t flow, uint64_t now) { (void)frame; (void)flow; (void)now; }
+void carbon_blackbox_cinematics(uint64_t frame, uint64_t now) { (void)frame; (void)now; }
 void present_image_diag_tick(uint32_t ticks, uint32_t flow) { (void)ticks; (void)flow; }
 static uint64_t virtual_ns = 100000000000ull;
 static int fixture_clock(clockid_t id, struct timespec *t) {
@@ -141,7 +142,7 @@ int main(int argc,char **argv) {
     /* Frame rate beyond capacity must say coverage is short. */
     for(unsigned i=0;i<20000;++i) { virtual_ns+=1000000;frame(91000+i,6); }
     f=fopen("capacity.txt","w");blackbox_export_at(f,BB_STALL,virtual_ns);fclose(f);
-    printf("storage=%zu snapshot=%zu lost=%llu\n",sizeof frames+sizeof presents+sizeof events+sizeof errors+sizeof rings+sizeof fe_context,
+    printf("storage=%zu snapshot=%zu lost=%llu\n",sizeof frames+sizeof presents+sizeof events+sizeof errors+sizeof rings+sizeof state_context,
            sizeof(Snapshot),(unsigned long long)atomic_load(&rings[0].lost));
     return 0;
 }
@@ -186,13 +187,17 @@ def main():
         for broken in (False, True):
             build = WORK / (game + ('-broken' if broken else ''))
             build.mkdir(exist_ok=True)
-            (build / 'adapter.inc').write_text(adapter.read_text())
+            (build / 'adapter.inc').write_text(adapter.read_text() +
+                                               ('uint8_t *G;\n' if game == 'mw' else ''))
             (build / 'hooks.inc').write_text(hooks(game, broken))
             (build / 'fixture.c').write_text(PRELUDE)
             cmd = ['clang', '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                    '-DNFS_GAME=' + ('NFS_GAME_MW' if game == 'mw' else 'NFS_GAME_PRIVATE'),
                    '-Wno-unused-variable', '-fsanitize=address,undefined', '-I'+str(R), '-I'+str(build),
-                   str(build / 'fixture.c'), '-o', str(build / 'fixture')]
+                   '-I'+str(ROOT / 'recomp'), str(build / 'fixture.c')]
+            if game == 'mw':
+                cmd.extend(str(R / unit) for unit in ('blackbox_mw_fe.c', 'blackbox_mw_cinematics.c'))
+            cmd.extend(['-o', str(build / 'fixture')])
             compiled = subprocess.run(cmd, capture_output=True, text=True)
             assert compiled.returncode == 0, compiled.stderr[-5000:]
             for diag_on in (0, 1):

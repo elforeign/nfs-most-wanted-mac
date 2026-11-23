@@ -2,7 +2,8 @@
 
 Reads the rows from settings_port.c / pub_settings.c, one decoded line each: Car reflections
 queue the device Reset (live_picture_apply_reset), Contact shadows and Soft smoke reload the cached switches
-(live_picture_apply_reload), Full screen mode re-enters the window mode (live_picture_apply_fullscreen); none may
+(live_picture_apply_reload), Full screen mode re-enters the window mode (live_picture_apply_fullscreen), Fill notch area re-fits the borderless
+frame (live_picture_apply_notch); none may
 say Restart. HDR output and Fog stay restart rows (shader key). Fails on the pre-change files: 5 rows still marked
 restart. Broken control: the same check against the rows with `.restart = 1` put back must reject all 5.
 """
@@ -16,6 +17,7 @@ ROWS = {          # id -> (source, handler)
     'graphics.look_contact_shadows': ('settings_port.c', 'live_picture_apply_reload'),
     'graphics.look_soft_smoke': ('settings_port.c', 'live_picture_apply_reload'),
     'display.fullscreen': ('settings_port.c', 'live_picture_apply_fullscreen'),
+    'display.notch': ('settings_port.c', 'live_picture_apply_notch'),
 }
 STILL_RESTART = ('graphics.hdr_output', 'graphics.look_fog')
 

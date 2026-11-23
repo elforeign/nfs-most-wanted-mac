@@ -3,7 +3,8 @@
 
 Carbon export: correct product passes 1/1; MW product dispatch fails 1/1.
 Carbon profile: correct routing passes 1/1; MW profile routing fails the same
-embedded-PC digest oracle 1/1. Cancellation and overwrite leave no new export.
+embedded-PC digest oracle 1/1. Cancellation leaves no new export; same-product
+exports can be refreshed in place while the ordinary-install updater stays off.
 
 Relocation control: original preference-first selection resolves 1 external PC
 root; fixed selection resolves 4/4 embedded roots after moving the signed app.
@@ -265,6 +266,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         before = {key: ins.digest_tree(path) for key, path in self.roots.items()}
         app_before = ins.digest_tree(self.app)
         self.export(game='carbon')
+        self.export(game='carbon')  # Same-product Carbon export refreshes in place.
         self.assertTrue(ins.codesign_ok(self.destination))
         with (self.destination / 'Contents/Info.plist').open('rb') as info:
             self.assertEqual(plistlib.load(info)['CFBundleIdentifier'], ins.CARBON['bundle_id'])
@@ -279,8 +281,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         for key, root in roots.items():
             self.assertTrue(root.is_relative_to(moved))
             self.assertEqual(ins.digest_tree(root), before[key])
-        with self.assertRaisesRegex(ins.InstallError, 'destination already exists'):
-            ex.export_app(self.app, self.profile, moved, game='carbon')
+        self.assertTrue(ins.codesign_ok(moved))
         # Deliberately route Carbon through MW's product validation.
         with self.assertRaisesRegex(ins.InstallError, 'Most Wanted'):
             ex.export_app(self.app, self.profile, self.destination, game='mw')
@@ -462,8 +463,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         with patch.object(ex, "is_export", return_value=False):
             ex.refuse_update(self.destination)  # deliberately broken guard accepts it
         self.assertFalse(ex.is_export(self.app))
-        with self.assertRaisesRegex(ins.InstallError, "destination already exists"):
-            self.export()
+        self.export()  # Setup replaces exports; the in-app/install guards remain.
         install_dest = self.d / "ordinary-install"
         install_dest.mkdir()
         self.destination.rename(install_dest / ins.APP_BUNDLE)

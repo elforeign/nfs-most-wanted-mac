@@ -236,6 +236,7 @@ static void gamma_blit(void) {
     if (!pso) return;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = present_tex; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    blackbox_render_host(frame_serial, BB_HOST_GAMMA);
     if (gpt_on) gpt_render_auto(rp, "gamma");
     id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
     if (gpt_on) gpt_name(e);
@@ -397,7 +398,7 @@ static int hdr_output_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTe
     return 1;
 }
 void render_hdr_world_copy(id<MTLTexture> src,id<MTLTexture> dst) {
-    ensure_cmd();if(!hdr_output_blit(cmd,src,dst,2,0))abort();
+    ensure_cmd();blackbox_render_host(frame_serial, BB_HOST_HDR);if(!hdr_output_blit(cmd,src,dst,2,0))abort();
 }
 void render_hdr_output_init(void) {
     static int initialized;
@@ -469,9 +470,11 @@ static int present_copy(void) {
             d.usage=MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget;d.storageMode=MTLStorageModePrivate;
             hdr_present_tex=[mtl newTextureWithDescriptor:d];
         }
+        blackbox_render_host(frame_serial, BB_HOST_HDR);
         if(!hdr_present_tex || !hdr_output_blit(cmd,backbuffer_tex,hdr_present_tex,0,present_graded))return 0;
     } else if (present_graded) gamma_blit();
     else {
+        blackbox_render_host(frame_serial, BB_HOST_COPY);
         id<MTLBlitCommandEncoder> b = gpt_blit(cmd, "blit present copy");
         [b copyFromTexture:backbuffer_tex toTexture:present_tex];
         [b endEncoding];
@@ -484,13 +487,14 @@ static int present_copy(void) {
         }
         // H=1 executes exactly the old BGRA8 copy/LUT above, then only decodes
         // those bytes for the still-linear layer. No HDR tone or power mapping.
+        blackbox_render_host(frame_serial, BB_HOST_HDR);
         if(!hdr_present_tex || !hdr_output_blit(cmd,present_tex,hdr_present_tex,0,0))return 0;
     }
     presenting = 1;
     return 1;
 }
 static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, id<MTLTexture> src, float clip_headroom,
-                                                             double duration, const PresentTiming *timing) {
+                                                             double duration, const PresentTiming *timing, uint64_t serial) {
     @autoreleasepool {
         PresentTiming ticket = timing ? *timing : (PresentTiming){0};
         if(diag_on)pipeline_frame_scope(1);
@@ -505,11 +509,16 @@ static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, 
             if (timing && diag_on) {
                 [d addPresentedHandler:^(id<MTLDrawable> dr) {
                     presented(dr);
+                    blackbox_render_present(serial, BB_PRESENT_SHOWN, dr.presentedTime > 0 ? 0 : 1, 0, 0, dr.presentedTime);
                     if (diag_on) diag_event("present-shown frame=%llu presentedTime=%.9f",
                                            (unsigned long long)ticket.frame, dr.presentedTime);
                 }];
-            } else [d addPresentedHandler:^(id<MTLDrawable> dr) { presented(dr); }];
+            } else [d addPresentedHandler:^(id<MTLDrawable> dr) {
+                presented(dr);
+                blackbox_render_present(serial, BB_PRESENT_SHOWN, dr.presentedTime > 0 ? 0 : 1, 0, 0, dr.presentedTime);
+            }];
             id<MTLCommandBuffer> cb = [queue commandBuffer];
+            blackbox_render_host(serial, BB_HOST_FINAL);
             quad_into(cb, src, MTLRegionMake2D(0, 0, src.width, src.height), d.texture, 0, 0,
                       MTLRegionMake2D(0, 0, d.texture.width, d.texture.height), 1);
             if (timing) present_image_encode(cb, d, ticket.frame);
@@ -519,9 +528,11 @@ static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, 
                 if (b.error) hdr_output_error("present-command-buffer", b.error);
             }];
             if (timing && diag_on) [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                blackbox_render_complete(serial, BB_PRESENT_GPU, (uint32_t)b.status, b.GPUStartTime, b.GPUEndTime, b.error.code);
                 if (diag_on) diag_event("present-gpu frame=%llu stage=present GPUEndTime=%.9f",
                                        (unsigned long long)ticket.frame, b.GPUEndTime);
             }];
+            else if (blackbox_enabled()) blackbox_render_final(cb, serial);
             // Retain the minimum request. Actual versus scheduled refresh
             // anchoring is measured by the per-frame timestamps, not assumed.
             double present_call = (timing && diag_on) ? host_ticks() / 1e9 : 0;
@@ -536,6 +547,7 @@ static __attribute__((always_inline)) inline void present_draw(CAMetalLayer *l, 
             uint64_t n = __atomic_add_fetch(&hdr_nil_drawables, 1, __ATOMIC_RELAXED);
             if (!(n & (n - 1))) hdr_output_diag("nil-drawable", MTLPixelFormatInvalid);
         }
+        if (!d) blackbox_render_present(serial, BB_PRESENT_MISSING, 0, 0, 0, 0);
         if (timing && diag_on && !d) diag_event("present-submit frame=%llu nextDrawable=%.9f drawable=missing minimum=%.9f",
                                      (unsigned long long)ticket.frame, drawable_return, duration);
         if(diag_on)pipeline_frame_scope(0);
@@ -553,11 +565,11 @@ static void present_show(PresentTiming timing) {
     // Capture diagnostic timing only when enabled; the ordinary draw uses NULL.
     if (diag_on) {
         rt_after_commit(cmd, ^{
-            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, &timing); });
+            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, &timing, timing.frame); });
         });
     } else {
         rt_after_commit(cmd, ^{
-            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, NULL); });
+            dispatch_async(q, ^{ present_draw(l, src, clip_headroom, duration, NULL, timing.frame); });
         });
     }
 }
@@ -604,6 +616,7 @@ void render_present(void) {
     void probe_present(id<MTLCommandBuffer> cb, id<MTLTexture> shown);
     probe_present(cmd, backbuffer_tex);   // BOOT_DIAG_PROBE: what is shown, captured (probe.m)
     int show = present_copy();
+    if (!show) blackbox_render_present(frame_serial, BB_PRESENT_SUPPRESSED, 0, 0, 0, 0);
     // BOOT_SHOT=frame:path.png[,frame:path.png...] saves the back buffer (debugging without a screen)
     id<MTLBuffer> shot = nil;
     char shot_path[512] = "";
@@ -685,6 +698,7 @@ void render_present(void) {
     gpt_frame(cmd, serial);
     gpt_phase = "game";
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> b) {
+        blackbox_render_complete(serial, BB_RENDER_GPU, (uint32_t)b.status, b.GPUStartTime, b.GPUEndTime, b.error.code);
         if (diag_on) diag_event("present-gpu frame=%llu stage=frame GPUEndTime=%.9f",
                                (unsigned long long)serial, b.GPUEndTime);
         pthread_mutex_lock(&presentation_mu);
@@ -708,6 +722,9 @@ void render_present(void) {
         pthread_mutex_unlock(&done_mu);
     }];
     [cmd commit];
+    if (blackbox_enabled()) rt_after_commit(cmd, ^{
+        blackbox_render_present(serial, BB_RENDER_SUBMIT, 0, 0, 0, 0);
+    });
     if (diag_on) rt_after_commit(cmd, ^{
         diag_event("present-commit frame=%llu stage=frame observed=%.9f",
                    (unsigned long long)timing.frame, host_ticks() / 1e9);

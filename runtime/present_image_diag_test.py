@@ -24,6 +24,6 @@ with tempfile.TemporaryDirectory() as tmp:
 # The shared entry points bypass fingerprint setup, submission and tick tracking with BOOT_DIAG off.
 assert 'if (diag_on) present_image_diag_init(layer);' in (RUNTIME / 'd3d9.m').read_text()
 present = (RUNTIME / 'render_present.m').read_text()
-assert 'present_draw(l, src, clip_headroom, duration, NULL)' in present
+assert 'present_draw(l, src, clip_headroom, duration, NULL, timing.frame)' in present
 assert 'if (timing) present_image_encode(cb, d, ticket.frame);' in present
 assert 'if (diag_on && head) present_image_diag_tick(' in (RUNTIME / 'report.m').read_text()

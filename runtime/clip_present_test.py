@@ -16,6 +16,12 @@ RT = Path(__file__).resolve().parent
 source = (RT/'render_present.m').read_text()
 present = source[source.index('static __attribute__((always_inline)) inline void present_draw('):source.index('\nvoid render_present(void) {')]
 PRE = r'''
+#include "blackbox_render.h"
+int blackbox_enabled(void) { return 0; }
+void blackbox_render_final(id<MTLCommandBuffer> buffer, uint64_t serial) { (void)buffer;(void)serial; }
+void blackbox_render_complete(uint64_t serial, uint32_t stage, uint32_t status, double start, double end, int64_t error) { (void)serial;(void)stage;(void)status;(void)start;(void)end;(void)error; }
+void blackbox_render_host(uint64_t serial, uint32_t id) { (void)serial;(void)id; }
+void blackbox_render_present(uint64_t serial, uint32_t stage, uint32_t status, double start, double end, double shown) { (void)serial;(void)stage;(void)status;(void)start;(void)end;(void)shown; }
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>

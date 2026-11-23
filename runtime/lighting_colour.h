@@ -1,10 +1,31 @@
 #ifndef LIGHTING_COLOUR_H
 #define LIGHTING_COLOUR_H
 
+#include <stdlib.h>
+#include <strings.h>
+
+// The explicit startup profile wins over the saved legacy lighting controls.
+static inline int lighting_mode_d65(void) {
+    static int selected = -1;
+    int active = __atomic_load_n(&selected, __ATOMIC_RELAXED);
+    if (active < 0) {
+        const char *value = getenv("NFS_WORLD_LIGHTING");
+        active = value && !strcasecmp(value, "neutral-d65");
+        __atomic_store_n(&selected, active, __ATOMIC_RELAXED);
+    }
+    return active;
+}
+
 // Linear Rec.709 Y; no transfer-function decoding or gamut clipping.
 static inline float lighting_colour_luminance(const float rgb[3]) {
     return 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
 }
+// D65 has equal linear Rec.709 primaries. Keep the source luminance.
+static inline void lighting_colour_d65(float rgb[3]) {
+    float y = lighting_colour_luminance(rgb);
+    rgb[0] = rgb[1] = rgb[2] = y;
+}
+
 // In-place desaturation toward Y. factor=0 retains colour; factor=1 is grey.
 static inline void lighting_colour_desaturate(float rgb[3], float factor) {
     float y = lighting_colour_luminance(rgb);

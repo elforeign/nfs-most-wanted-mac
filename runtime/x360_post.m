@@ -15,6 +15,7 @@
 #include <math.h>
 
 #include "x360_internal.h"
+#include "lighting_colour.h"
 #include "lens_drops.h"
 #include "settings.h"
 #include "sign_diag.h"
@@ -193,7 +194,7 @@ static float colour_amount(void) {
         if (cc) return (float)atoi(cc) / 100.0f;
         if (look_old()) return 1.0f;
     }
-    return (float)s_colour.value / 100.0f;
+    return lighting_mode_d65() ? 0.0f : (float)s_colour.value / 100.0f;
 }
 static float bez(const float P[4], float t) { float u = 1.0f - t; return u * u * u * P[0] + 3.0f * u * u * t * P[1] + 3.0f * u * t * t * P[2] + t * t * t * P[3]; }
 // The colour filter on a look (tint rgb, CBI, desaturation, BBI, BlackBloomCurve .y x4, ColourBloomCurve .y x4):
