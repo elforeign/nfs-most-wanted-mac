@@ -214,8 +214,8 @@ def metadata(sound):
 # Each mutation changes production code in memory, without editing the checkout.
 # All are checked by the same tests as the passing implementation.
 MUTATIONS = {
-    'truncation': ("_words(data, 0x14, '<I')[0] == len(data)",
-                   "_words(data, 0x14, '<I')[0] >= len(data)"),
+    'truncation': ("_words(data, 0x14, endian + 'I')[0] == len(data)",
+                   "_words(data, 0x14, endian + 'I')[0] >= len(data)"),
     'block-bounds': ('size == expected', 'size >= 8'),
     'channel-layout': ('for row in zip(*(p[:take] for p in planar)) for value in row',
                        'for p in planar for value in p[:take]'),

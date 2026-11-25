@@ -351,6 +351,30 @@ static uint32_t hostent_for(uint32_t ip_net, const char *name) {
     M32(he + 0x20) = 0;
     return he;
 }
+// Copy the local services database result into the 32-bit guest servent ABI.
+static uint32_t servent_for(const struct servent *service) {
+    static uint32_t entry;
+    if (!service) { wsa_err = 11004; return 0; }       // WSANO_DATA
+    size_t aliases = 0, bytes = 16 + strlen(service->s_name) + 1 + strlen(service->s_proto) + 1;
+    while (service->s_aliases && service->s_aliases[aliases])
+        bytes += 4 + strlen(service->s_aliases[aliases++]) + 1;
+    bytes += 4;                                     // terminating alias pointer
+    if (bytes > 4096) { wsa_err = 10055; return 0; }   // WSAENOBUFS
+    if (!entry) entry = galloc(4096);
+    uint32_t text = entry + 16 + 4 * (uint32_t)(aliases + 1);
+    M32(entry) = text;
+    strcpy((char *)G + text, service->s_name); text += strlen(service->s_name) + 1;
+    M32(entry + 4) = entry + 16;
+    M32(entry + 8) = (uint16_t)service->s_port;        // network order, padded Win32 int
+    M32(entry + 12) = text;
+    strcpy((char *)G + text, service->s_proto); text += strlen(service->s_proto) + 1;
+    for (size_t i = 0; i < aliases; ++i) {
+        M32(entry + 16 + 4 * i) = text;
+        strcpy((char *)G + text, service->s_aliases[i]); text += strlen(service->s_aliases[i]) + 1;
+    }
+    M32(entry + 16 + 4 * aliases) = 0;
+    return entry;
+}
 static const char *const our_hostname = "nfsmw-port";
 
 int win32_ws2(Cpu *c, const char *fn) {
@@ -367,6 +391,11 @@ int win32_ws2(Cpu *c, const char *fn) {
         } else if (cmd != 0x32) rc = 3;               // NRC_ILLCMD
         G[ncb + 1] = rc;
         RET(rc, 1);
+    }
+    // MW uses ordinal 10 for ioctl; named inet_addr must bypass that legacy alias.
+    if (!strcmp(fn, "inet_addr")) {
+        const char *text = gptr(arg(c, 0));
+        RET(text ? inet_addr(text) : INADDR_NONE, 1);
     }
     if (fn[0] == '#') {
         switch (atoi(fn + 1)) {
@@ -732,7 +761,7 @@ int win32_ws2(Cpu *c, const char *fn) {
             if (r) { char m[64]; snprintf(m, sizeof m, "%s level %d opt %d: errno %d", fn[2] == '1' ? "setsockopt" : "getsockopt", level, name, errno); log_once(m); }
             RET(r ? (uint32_t)fail(errno) : 0, 5);
         }
-        case 10: {                                    // ioctlsocket(s, cmd, arg*)
+        case 10: case 12: {                           // legacy MW / standard ioctlsocket(s, cmd, arg*)
             Sock *s = sock_of(arg(c, 0));
             if (!s) { wsa_err = 10038; RET(0xFFFFFFFF, 3); }
             if (arg(c, 1) == 0x8004667E) { s->guest_nonblock = M32(arg(c, 2)) != 0; RET(0, 3); }   // FIONBIO
@@ -757,6 +786,29 @@ int win32_ws2(Cpu *c, const char *fn) {
             sa_to_guest(&a, arg(c, 1), arg(c, 2));
             RET(0, 3);
         }
+        case 11: {                                    // inet_ntoa(in_addr), passed by value
+            static uint32_t text;
+            if (!text) text = galloc(INET_ADDRSTRLEN);
+            struct in_addr address = {.s_addr = arg(c, 0)};
+            inet_ntop(AF_INET, &address, (char *)G + text, INET_ADDRSTRLEN);
+            RET(text, 1);
+        }
+        case 51: {                                    // gethostbyaddr(addr, len, type): no DNS
+            if (arg(c, 2) != AF_INET) { wsa_err = 10047; RET(0, 3); }
+            if (!arg(c, 0) || arg(c, 1) != 4) { wsa_err = 10014; RET(0, 3); }
+            struct in_addr address;
+            memcpy(&address.s_addr, G + arg(c, 0), 4);
+            char text[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &address, text, sizeof text);
+            RET(hostent_for(address.s_addr, text), 3);
+        }
+        case 55: {                                    // getservbyname(name, proto): local database
+            const char *name = gptr(arg(c, 0));
+            if (!name) { wsa_err = 10014; RET(0, 2); }
+            RET(servent_for(getservbyname(name, gptr(arg(c, 1)))), 2);
+        }
+        case 56:                                      // getservbyport(port in network order, proto)
+            RET(servent_for(getservbyport((uint16_t)arg(c, 0), gptr(arg(c, 1)))), 2);
         case 57: {                                    // gethostname(buf, len)
             if (arg(c, 1) <= strlen(our_hostname)) { wsa_err = 10014; RET(0xFFFFFFFF, 2); }
             strcpy((char *)G + arg(c, 0), our_hostname);

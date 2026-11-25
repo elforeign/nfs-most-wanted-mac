@@ -209,6 +209,14 @@ def split_shadow_operands(addr, code):
                      'M32((uint32_t)(0x919650u))', 'split_shadow_player_plat()')),
         0x006D6AA0: ((0x006D6B68, 'cmp dword ptr [ecx + 4], 1',
                      'M32((uint32_t)(c->ecx + 0x4u))', 'split_shadow_id(c->ecx)'),),
+        # Queue insertion and submission must retain the source's shadow
+        # technique too; otherwise P2's car shader is forced back to level 0.
+        0x006E0200: ((0x006E0289, 'cmp dword ptr [edx + 4], 1',
+                     'M32((uint32_t)(c->edx + 0x4u))', 'split_shadow_id(c->edx)'),),
+        0x006E0770: ((0x006E089F, 'cmp dword ptr [edx + 4], 1',
+                     'M32((uint32_t)(c->edx + 0x4u))', 'split_shadow_id(c->edx)'),),
+        0x006E0AB0: ((0x006E0BED, 'cmp dword ptr [edx + 4], 1',
+                     'M32((uint32_t)(c->edx + 0x4u))', 'split_shadow_id(c->edx)'),),
         0x0074E160: ((0x0074E812, 'cmp dword ptr [edi + 4], 1',
                      'M32((uint32_t)(c->edi + 0x4u))', 'split_shadow_id(c->edi)'),),
         0x006C83D0: ((0x006C83DE, 'mov ecx, dword ptr [0x9196b8]',
