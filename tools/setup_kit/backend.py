@@ -2518,7 +2518,7 @@ def cars_command(args):
         raise SetupError('--cars-repair requires --cars-import.')
     if operation == 'import' and not args.cars_spec:
         raise SetupError("--cars-import requires --cars-spec (local car selection JSON).")
-    if operation not in ('check', 'import') and any((args.carbon, args.cars_spec, args.cars_mw_pc,
+    if operation not in ('check', 'import') and any((args.carbon, args.cars_spec, args.cars_mw_pc, args.cars_uc_x360,
                                                     args.cars_measure, args.cars_repair)):
         raise SetupError("Source/selection options apply only to car check/import.")
     # Paths normally resolves aliases for the build. CarImporter requires no
@@ -2537,6 +2537,11 @@ def cars_command(args):
                                                 locate=getattr(args, '_locate', None)))
     carbon = carbon_input(args.carbon, picked=True) if args.carbon else None
     inputs = ([carbon] if carbon else []) + ([car_import._path(args.cars_spec)] if args.cars_spec else [])
+    uc_x360 = car_import._path(args.cars_uc_x360) if args.cars_uc_x360 else None
+    if uc_x360 is not None:
+        if not uc_x360.is_file():
+            raise SetupError('Choose an Undercover Xbox 360 disc image for engine sounds.')
+        inputs.append(uc_x360)
     mw = None
     mw_archive = False
     if operation == 'import' or (operation == 'check' and specs):
@@ -2571,6 +2576,8 @@ def cars_command(args):
                     if carbon.is_file() and carbon.suffix.lower() in (".zip", ".7z"):
                         carbon = extract_x360_archive(carbon, paths.work, events)
                     recognition = car_sources.recognise(carbon)
+                if uc_x360 is not None and (recognition['game'], recognition['platform']) != ('undercover', 'pc'):
+                    raise SetupError('The Undercover sound disc accompanies an Undercover PC car source.')
                 engine._tick(cancel)
                 try:
                     car_catalog.packaged_policy()
@@ -2621,11 +2628,11 @@ def cars_command(args):
                     # Retry owns recovery and space checks when the normal dry
                     # plan cannot read the damaged active catalog.
                     if not (args.cars_repair and car_import.catalog.verify_current(engine.root).error):
-                        preflight = engine.plan(carbon, mw_pc=mw, cars=specs, cancel=cancel)
+                        preflight = engine.plan(carbon, mw_pc=mw, cars=specs, uc_x360=uc_x360, cancel=cancel)
                     if args.cars_measure and operation == 'check':
                         check_space(paths, car_plan=preflight)
                         plan = engine.plan(carbon, mw_pc=mw, cars=specs,
-                                           measure=True, cancel=cancel, progress=progress)
+                                           uc_x360=uc_x360, measure=True, cancel=cancel, progress=progress)
                     else:
                         plan = preflight
                 except car_import.CacheError:
@@ -2635,6 +2642,8 @@ def cars_command(args):
                     # deliberately refuses the corrupt preparation first.
                     events.emit('warn', id='cars', msg='A retained preparation needs repair; rebuilding it from the verified source.')
                 if plan is not None:
+                    for note in plan.get('notes', []):
+                        events.emit('warn', id='cars', msg=note)
                     check_space(paths, car_plan=plan)
                     car_plan_event(events, plan, specs)
                     if plan['measured']:
@@ -2648,8 +2657,8 @@ def cars_command(args):
                 if not specs:
                     result = engine.list_cars()
                 else:
-                    result = engine.reimport(carbon, mw_pc=mw, cars=specs, cancel=cancel, progress=progress) if args.cars_repair else \
-                        engine.import_cars(carbon, mw_pc=mw, cars=specs, cancel=cancel, progress=progress)
+                    result = engine.reimport(carbon, mw_pc=mw, cars=specs, uc_x360=uc_x360, cancel=cancel, progress=progress) if args.cars_repair else \
+                        engine.import_cars(carbon, mw_pc=mw, cars=specs, uc_x360=uc_x360, cancel=cancel, progress=progress)
             elif operation == 'remove':
                 result = engine.remove(args.cars_remove, cancel=cancel, progress=progress)
             elif operation == 'restore':
@@ -2706,6 +2715,7 @@ def main(argv=None):
                     help='carbon: --check or --build Carbon from --carbon alone, with an optional --x360 (no --pc, no Most Wanted copy)')
     ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')
     ap.add_argument('--cars-mw-pc', help='MW donor folder or .zip/.7z before first installation; otherwise use installed roots')
+    ap.add_argument('--cars-uc-x360', help='Optional Undercover Xbox 360 disc ISO for Undercover PC engine sounds')
     ap.add_argument('--cars-measure', action='store_true', help='measure conversion without activating it')
     ap.add_argument('--cars-repair', action='store_true', help='rebuild a rejected preparation from original sources')
     ap.add_argument('--source-replies', help='private directory for Locate source replies from the app')

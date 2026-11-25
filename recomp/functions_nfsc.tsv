@@ -1,9 +1,9 @@
 # Function starts of NFSC.exe (from a Ghidra analysis of the exe): addresses only.
 # No names are tested by the private build. No code or bytes; thunk rows excluded.
 # image-sha256 baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3
-# starts-count 32343
-# starts-sum 3a3a554bfc
-# starts-sha256 6be76d4a88b549ee65b9627996f6737631514bde68f29f8fcaa28618cd8ec25f
+# starts-count 32348
+# starts-sum 3a3c086e4c
+# starts-sha256 b3c43b84e910a42e55bd80bc612e7a1110fdace5794ac87df8b03d27c837d96d
 00401050
 00401080
 004010a0
@@ -6381,6 +6381,10 @@
 0056fed0
 0056fef0
 0056ff80
+0056ffb0
+00570000
+00570010
+00570080
 005700c0
 00570230
 00570250
@@ -6453,6 +6457,7 @@
 00572170
 00572190
 005721a0
+00572210
 00572260
 005722d0
 005722f0

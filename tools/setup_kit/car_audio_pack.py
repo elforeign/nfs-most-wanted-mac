@@ -150,6 +150,9 @@ def x360_resource_paths(attributes, car):
 
 
 def build(attributes, car, resources, *, game='carbon', platform='pc', legacy_xk=False):
+    if game == 'undercover' and platform == 'pc' and not legacy_xk:
+        from . import car_audio_undercover
+        return car_audio_undercover.build(attributes, car, resources)
     if game == 'prostreet' and platform == 'pc' and not legacy_xk:
         from . import car_audio_prostreet
         return car_audio_prostreet.build(attributes, car, resources)
@@ -251,6 +254,9 @@ def build(attributes, car, resources, *, game='carbon', platform='pc', legacy_xk
 
 def resource_paths(attributes, car, candidates, *, game='carbon'):
     """Resolve the graph's complete resource closure against relative source paths."""
+    if game == 'undercover':
+        from . import car_audio_undercover
+        return car_audio_undercover.resource_paths(attributes, car, candidates)
     if game == 'prostreet':
         from . import car_audio_prostreet
         return car_audio_prostreet.resource_paths(attributes, car, candidates)

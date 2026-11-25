@@ -276,7 +276,8 @@ int main(int argc,char **argv) {
 }
 '''
 
-def live(folder, package, *, original=False, broken_mix=False, double_mix=False, broken_rpm=False, stock=False, control=False):
+def live(folder, package, *, original=False, broken_mix=False, double_mix=False, broken_rpm=False, stock=False, control=False,
+         harness_main=None, implementation=None, check=None):
     proof = module(ROOT/'runtime/car_audio_runtime_test.py', 'ps_native_proof')
     driver = module(ROOT/'runtime/car_audio_test.py', 'ps_live_proof')
     source = input_path('NFSC/NFSC.exe').read_bytes()
@@ -284,7 +285,8 @@ def live(folder, package, *, original=False, broken_mix=False, double_mix=False,
     (folder/'memory.bin').write_bytes(proof.memory_bytes(native.read_bytes()))
     code, declarations, dispatch, stubs = driver.native_fragments(proof, source)
     (folder/'native.c').write_text(code)
-    implementation = (ROOT/'runtime/car_audio.c').read_text()
+    if implementation is None:
+        implementation = (ROOT/'runtime/car_audio.c').read_text()
     if control:
         for car, pin in json.loads((folder/'control_pins.json').read_text()).items():
             implementation=re.sub(r'(\{"'+car+r'",")[0-9a-f]{64}("\})', lambda m: m[1]+pin+m[2], implementation)
@@ -317,7 +319,7 @@ def live(folder, package, *, original=False, broken_mix=False, double_mix=False,
     (folder/'car_audio.c').write_text(implementation)
     posaudio = (ROOT/'runtime/posaudio.c').read_text()
     wrappers = posaudio[posaudio.index('#define VOICE_HOOK'):posaudio.index('\nvoid posaudio_diag_second')]
-    harness = driver.HARNESS[:driver.HARNESS.index('int main(int argc,char **argv)')] + (ALL_MAIN if stock else MAIN)
+    harness = driver.HARNESS[:driver.HARNESS.index('int main(int argc,char **argv)')] + (harness_main or (ALL_MAIN if stock else MAIN))
     harness = harness.replace('NATIVE_DECLARATIONS', declarations).replace('NATIVE_DISPATCH', dispatch)
     harness = harness.replace('NATIVE_STUBS', stubs).replace('VOICE_WRAPPERS', wrappers)
     harness = harness.replace('void diag_event(const char *fmt,...) { (void)fmt; }',
@@ -337,7 +339,9 @@ def live(folder, package, *, original=False, broken_mix=False, double_mix=False,
                              str(stock_dir/'GIN_Murcielago.gin'),str(stock_dir/'GIN_Murcielago_DCL.gin')],
                             capture_output=True, text=True, timeout=40)
     print(result.stdout[-10000:], end='')
-    if stock:
+    if check is not None:
+        check(result)
+    elif stock:
         assert result.returncode == (1 if control else 0), result.stderr[-5000:]+result.stdout[-1000:]
         expected=10 if control else 62
         assert f'{expected}/62, {expected}/62; cars=31' in result.stdout
@@ -589,7 +593,7 @@ int main(int argc,char **argv) {
 }
 ''')
     original=(ROOT/'runtime/car_catalog.c').read_text()
-    guard='NEED(kind!=CAR_CATALOG_AUDIO || carbon ||\n             (pc && equal(j,game,"prostreet")),'
+    guard='NEED(kind!=CAR_CATALOG_AUDIO || carbon ||\n             (pc && (equal(j,game,"prostreet") || equal(j,game,"undercover"))),'
     assert original.count(guard)==1
     for broken in (True,False):
         implementation=folder/'catalog_impl.c'

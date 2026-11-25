@@ -15,13 +15,14 @@ typedef struct {
     CarAudioTmxEnd ends[6];
 } CarAudioTmxBin;
 typedef struct {
-    unsigned track_count, gin_count, snr_count;
+    unsigned track_count, gin_count, snr_count, bin_count;
+    float minimum_rpm, maximum_rpm;
     CarAudioTmxTrack tracks[6];
     CarAudioTmxControl controls[4];
     CarAudioTmxBin bins[4];
 } CarAudioTmx;
 
-/* The reviewed v1000 profiles: three to six resident/Ginsu tracks.
+/* The reviewed LE v1000 and BE v0001 profiles: three to six resident/Ginsu tracks.
  * Borrows no storage, allocates nothing, and never opens an audio device. */
 int car_audio_tmx_parse(CarAudioTmx *, const uint8_t *, size_t);
 int car_audio_tmx_gains(const CarAudioTmx *, const float inputs[5], float gains[6]);

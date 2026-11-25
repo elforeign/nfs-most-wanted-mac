@@ -6,7 +6,7 @@
 - **Low DualSense battery:** at 10 % or less, the F10 menu shows a line about it and a race starts with a short note.
 - **Fill notch area (GitHub #26)** now also fills the menus.
 - **Signed updates:** from this version on, Update now accepts only updates signed for this project.
-- **Added cars:** adding Carbon cars works again on macOS 15 and older (GitHub #24); all 31 ProStreet cars play their own engine and exhaust sounds; ProStreet and Undercover cars keep their own torque curves and light their headlights and brake lights as in their own game. The update refreshes cars you already added.
+- **Added cars:** adding Carbon cars works again on macOS 15 and older (GitHub #24); all 31 ProStreet cars play their own engine and exhaust sounds; Undercover cars play their own too when you choose your Undercover Xbox 360 disc image; ProStreet and Undercover cars keep their own torque curves and light their headlights and brake lights as in their own game. The update refreshes cars you already added.
 - **Split-screen (in testing):** a saved Controllers = 2 choice turns on two-player mode (GitHub #27); each player's rumble goes to their own controller; a third controller can replace an unplugged one.
 - **Fixed:** holding Cross as a race ends no longer skips the results screen; problem reports also hide your Mac's name and user name; Setup says exactly which `speed.exe` it accepts.
 - The F10 Online (beta) tab is gone; online play is not part of this port.

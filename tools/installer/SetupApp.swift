@@ -644,7 +644,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "0fa2f898a91629531c7c9a992a3a2709b83f8b2d69e47c6620b434386137a355"
+let carSelectionsSHA256 = "5378dc30bf3a85981c7d90ac501934375edd541b87d726f8bb797b1fddebd697"
 let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
 
 func carSourceName(_ game: String, _ platform: String) -> String {
@@ -720,7 +720,8 @@ func writeCarSelection(choices: [CarChoice], selected: Set<String>, recognition:
 }
 
 func carArguments(mode: RunMode, carbon: URL?, selection: URL?, work: URL, mw: URL? = nil,
-                  slots: [Int] = [], generation: String? = nil, measure: Bool = false, repair: Bool = false) -> [String] {
+                  slots: [Int] = [], generation: String? = nil, measure: Bool = false, repair: Bool = false,
+                  undercoverDisc: URL? = nil) -> [String] {
     guard let operation = mode.carOperation else { return [] }
     if operation == "import" && selection == nil { return [] }
     var args = ["-I", sourceDir().appendingPathComponent("tools/setup.py").path, "--cars-" + operation]
@@ -730,6 +731,7 @@ func carArguments(mode: RunMode, carbon: URL?, selection: URL?, work: URL, mw: U
         if let carbon { args += ["--carbon", carbon.path] }
         if let selection { args += ["--cars-spec", selection.path] }
         if let mw { args += ["--cars-mw-pc", mw.path] }
+        if let undercoverDisc { args += ["--cars-uc-x360", undercoverDisc.path] }
         if measure { args.append("--cars-measure") }
         if repair { args.append("--cars-repair") }
     }
@@ -893,6 +895,7 @@ final class Setup: ObservableObject {
     @Published var x360Status = ""
     @Published var x360Extras = X360Extras.load(try? Data(contentsOf: supportDir().appendingPathComponent("source-choices.json")))
     @Published var carbon: URL?
+    @Published var undercoverDisc: URL?
     @Published var carChoices: [CarChoice] = []
     @Published var selectedCarIDs: Set<String> = []
     @Published var extras = ExtrasFlow()
@@ -1124,11 +1127,22 @@ final class Setup: ObservableObject {
     func chooseCarbon() {
         guard !busy, let url = pickFolder(message: "Choose your Carbon, ProStreet or Undercover game folder, or an Xbox 360 disc image or archive.", files: true) else { return }
         carbon = url
+        undercoverDisc = nil
         state.recognition = nil
         state.carPlan = nil
         selectedCarIDs = []
         carImportNeedsRepair = false
         runCars(.carsCheck)
+    }
+
+    func chooseUndercoverDisc() {
+        guard !busy, let url = pickFolder(message: "Choose your Undercover Xbox 360 disc image (.iso) for engine sounds.", files: true) else { return }
+        guard url.pathExtension.lowercased() == "iso" else {
+            extras.message = "Choose an Undercover Xbox 360 disc image (.iso)."
+            return
+        }
+        undercoverDisc = url
+        state.carPlan = nil
     }
 
     /// Carbon's console copy: its artwork has nothing to choose, so it is checked (and prepared) at once.
@@ -1187,7 +1201,8 @@ final class Setup: ObservableObject {
         let mw = managingExtras ? nil : (pcKind == .disc ? workDir().appendingPathComponent("pc_src") : pc)
         let args = carArguments(mode: mode, carbon: carbon, selection: selection,
                                 work: workDir(), mw: requiresSource && selection != nil ? mw : nil,
-                                slots: slots, generation: generation, measure: measure, repair: repair)
+                                slots: slots, generation: generation, measure: measure, repair: repair,
+                                undercoverDisc: requiresSource ? undercoverDisc : nil)
         launch(mode: mode, arguments: args) { [weak self] outcome, state in
             guard let self else { return }
             self.checking = false
@@ -1725,6 +1740,14 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     choice("Later-game source", s.carbon, "Folder or ISO", s.chooseCarbon)
                     if let recognition = s.state.recognition {
+                        if recognition.game == "undercover" && recognition.platform == "pc" {
+                            choice("Undercover Xbox 360 sounds (optional)", s.undercoverDisc, "Disc image (.iso)", s.chooseUndercoverDisc)
+                            if s.undercoverDisc != nil {
+                                Button("Use donor sounds") { s.undercoverDisc = nil; s.state.carPlan = nil }
+                            }
+                            Text("The disc supplies the cars' own engine sounds. Without engine recordings, cars keep MW donor sounds.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         GroupBox(carSourceName(recognition.game, recognition.platform) + " cars") {
                             VStack(alignment: .leading, spacing: 4) {
                                 Button(s.allReadyCarsSelected ? "Select none" : "Select all") { s.toggleAllCars() }
@@ -2079,7 +2102,7 @@ struct Entry {
                               "disc": model.pcKind == .disc]))
             exit(0)
         }
-        if args.count == 6, args[1] == "--car-selections-test" {
+        if (args.count == 6 || args.count == 7), args[1] == "--car-selections-test" {
             do {
                 let choices = try CarChoice.load(URL(fileURLWithPath: args[2]))
                 let recognition = try JSONDecoder().decode(CarRecognition.self, from: Data(args[4].utf8))
@@ -2087,7 +2110,8 @@ struct Entry {
                 let work = URL(fileURLWithPath: args[3])
                 let selection = try writeCarSelection(choices: choices, selected: selected, recognition: recognition, work: work)
                 let command = carArguments(mode: .carsImport, carbon: URL(fileURLWithPath: "/carbon"),
-                                           selection: selection, work: work)
+                                           selection: selection, work: work,
+                                           undercoverDisc: args.count == 7 ? URL(fileURLWithPath: args[6]) : nil)
                 print(jsonString(["arguments": command, "names": choices.map { $0.name },
                                   "ids": choices.map { $0.id }, "defaults": Array(Setup().selectedCarIDs),
                                   "reasons": choices.map { $0.reason(recognition) ?? "" },

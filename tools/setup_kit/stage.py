@@ -219,21 +219,21 @@ def car_importer(profile, cache, *, mutating=False):
                 self._cached(new, car_catalog._decode(receipt)["identity"], policy, retained=True)
                 return new
 
-        def import_cars(self, carbon, *, mw_pc, cars, mw_x360=None, cancel=None, progress=None, repair_cache=False):
+        def import_cars(self, carbon, *, mw_pc, cars, mw_x360=None, uc_x360=None, cancel=None, progress=None, repair_cache=False):
             car_import._require(type(repair_cache) is bool, 'invalid cache repair option')
             cars = list(cars)
             if repair_cache:
                 # Retry uses the installed-output transaction, which can recover
                 # catalog metadata before replacing the damaged generation.
-                self._locations(carbon, mw_pc, mw_x360)
-                return _merge_car_import(self, carbon, mw_pc, cars, mw_x360, cancel, progress, True)
+                self._locations(carbon, mw_pc, mw_x360, uc_x360)
+                return _merge_car_import(self, carbon, mw_pc, cars, mw_x360, cancel, progress, True, uc_x360)
             try:
                 return super().import_cars(carbon, mw_pc=mw_pc, cars=cars, mw_x360=mw_x360,
-                                           cancel=cancel, progress=progress, repair_cache=repair_cache)
+                                           uc_x360=uc_x360, cancel=cancel, progress=progress, repair_cache=repair_cache)
             except MissingCarPreparation:
                 # Old Setup could lose its preparation when the user cleared
                 # the cache. Its verified installed outputs can still be merged.
-                return _merge_car_import(self, carbon, mw_pc, cars, mw_x360, cancel, progress, repair_cache)
+                return _merge_car_import(self, carbon, mw_pc, cars, mw_x360, cancel, progress, repair_cache, uc_x360)
 
         def _publication_bytes(self, rows, policy):
             try:
@@ -413,7 +413,7 @@ def _car_pointer(generation, doc, selection):
                 compatibility=doc["compatibility"], selection=sorted(selection))
 
 
-def _merge_car_import(engine, source, mw_pc, cars, mw_x360, cancel, progress, repair_cache):
+def _merge_car_import(engine, source, mw_pc, cars, mw_x360, cancel, progress, repair_cache, uc_x360=None):
     """Finish a normal import using verified installed outputs for pre-retention rows."""
     from . import car_import
 
@@ -421,10 +421,10 @@ def _merge_car_import(engine, source, mw_pc, cars, mw_x360, cancel, progress, re
     with engine._transaction(cancel) as receipt:
         policy = engine._policy(True)
         current, baseline = engine._snapshot(policy) if not repair_cache else (None, None)
-        source, mw, _, recognition = engine._inspect(source, mw_pc, mw_x360, cars)
+        source, mw, _, recognition = engine._inspect(source, mw_pc, mw_x360, cars, uc_x360)
         later_rows = engine._later_rows(recognition, policy)
         preparations = [engine._prepare(source, mw, recognition, car, policy, receipt, cancel, progress,
-                                        later_rows=later_rows, repair_cache=repair_cache) for car in cars]
+                                        later_rows=later_rows, repair_cache=repair_cache, uc_x360=uc_x360) for car in cars]
         engine._finish_preparations(preparations, receipt, policy, current)
         if repair_cache:
             current, baseline = _car_repair_snapshot(engine, policy, preparations)

@@ -456,7 +456,25 @@ static const struct { const char *car, *sha; } prostreet_packages[] = {
     {"ttn","cae8f8424e354e4d6e976ee2f984830c139f85c34ff86162f1e900ecba243108"},
     {"veyron","5fef0aea88488249d4d0064343686fb2f0c586049c4bdc6dfbd2475f1d9b0ada"},
 };
+static const struct { const char *car,*sha; } undercover_packages[]={
+    {"aud_s5_stk_08","cb5388a497c7c0c610041a690cfac1a86e21cda8cf31784266ebc55648a625c6"},
+    {"bmw_m6_stk_08","1c63b8e776541102f79841986731928b578e5c26f410f04292b4a4aaea4c45f7"},
+    {"dod_chr_bee_07","0d5cf10886953aefc44fbdab33c74a360fe842e46abf94c139d5ce469455c945"},
+    {"dod_vip_srt_08","7b0922df4f1fbd9d337f326d1d5756e5a37c0e5f002a710174763292574e870b"},
+    {"for_shl_gt_08","369225273a040bbf71ddcff2cf48b83bbf36a4a01cd7c53e1e85ccc035fe3af6"},
+    {"for_shl_ter_08","92a2957c4d71c7881ee1ef7fb489d0e36c5a086b4a13db3d269b0b914b827ff3"},
+    {"lam_gal_560_09","26de43e04813856912707efd8ee418ae74baa8667d87d5b6f8cda101a8623723"},
+    {"lam_gal_sup_08","e1e9f34665ec8e30431ffa7129ae9990ce779b7e27af39b99fd64be3d9379cd0"},
+    {"lex_is_f_08","35908749aa5cbb832779b977d1a9aa85a12373f5a963a83ea65df769e8678877"},
+    {"mer_cls_55_08","fb67143d35322fbeb276f1193287dd28110b22d9c36e70d8d43202a8f5d885d2"},
+    {"mer_slr_722_07","c1ad775ab020c27db977aa6d6e2fb06df93be387a9501f70a28dcb895fe97648"},
+    {"nis_370_z_09","736d9e36d20d6fcdbfb4938ad47d0cbce49ed1bbafe9aaa548f96b80fc05e97e"},
+    {"ren_meg_cou_08","b16cb14e760d1e37d6067e417fb3061fda3783923c470d4970efac2c1363d4fb"},
+    {"vol_sci_stk_08","f265509e9ec8cba19df8e1ad04d8a44d9faf82927c1201322df764e41f84730d"},
+};
 static const char *package_pin(const char *name,uint32_t version) {
+    if(version==6) for(size_t i=0;i<sizeof undercover_packages/sizeof *undercover_packages;i++)
+        if(!strcasecmp(name,undercover_packages[i].car)) return undercover_packages[i].sha;
     if(version==4 && !strcasecmp(name,"veyron"))
         return "471356c3aa5a0ba5c561c887ed61db3ca031388d22ff86d51faf6bd98c1925a7";
     if(version==5) for(size_t i=0;i<sizeof prostreet_packages/sizeof *prostreet_packages;i++)
@@ -555,7 +573,7 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
     if(!resources || resources>MAX_RESOURCES) goto fail;
     p->count=resources;
     if(version>=4) {
-        if(layout!=1 || resources!=(version==5?2u:4u)) goto fail;
+        if(layout!=1 || resources!=(version>=5?2u:4u)) goto fail;
         p->tier_count=1;
         for(unsigned k=0;k<2;k++) {
             p->tiers[0].layer[k][0]=word(&in);
@@ -606,7 +624,7 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
         for(uint32_t j=0;j<r->sample_count;j++) {
             uint32_t frames=word(&in),rate=word(&in),loop=word(&in),n=word(&in);
             if(frames>10000000 || n!=(version==3?0:(uint64_t)frames*2) || loop>frames ||
-               (frames?(version==5?(rate!=32000 && rate!=44000 && rate!=48000):rate!=(version==3 || version==4?48000u:44100u)):rate!=0) || !take(&in,n)) goto fail;
+               (frames?(version==6?(rate!=22050 && rate!=24000 && rate!=32000 && rate!=36000 && rate!=44100 && rate!=48000):version==5?(rate!=32000 && rate!=44000 && rate!=48000):rate!=(version==3 || version==4?48000u:44100u)):rate!=0) || !take(&in,n)) goto fail;
         }
     }
     if(in.failed || in.n) goto fail;
@@ -631,10 +649,7 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
     if(version>=4) {
         float low[2],high[2];
         for(unsigned k=0;k<2;k++) {
-            Resource *r=p->resource+p->tiers[0].layer[k][0];
-            uint32_t bounds=rd(r->source+0x4c);
-            if(bounds>r->size-8) goto fail;
-            low[k]=rf(r->source+bounds); high[k]=rf(r->source+bounds+4);
+            low[k]=p->tmx[k].minimum_rpm; high[k]=p->tmx[k].maximum_rpm;
             if(!isfinite(low[k]) || !isfinite(high[k]) || low[k]<=0 || low[k]>=high[k]) goto fail;
         }
         /* Source 00509680 intersects the two TMX input bounds, then moves
@@ -646,7 +661,7 @@ int car_audio_load_stream(uint32_t key,uint64_t vault,const char *name,unsigned 
     }
     memcpy(p->name,b+20,sizeof p->name);
     if(diag_on) diag_event("addcar_audio: loaded car=%s key=%08X vault=%llu bytes=%zu sha256=%s resources=%u tiers=%u platform=%s",
-        p->name,key,(unsigned long long)vault,p->size,package_id,p->count,p->tier_count,version==3?"x360":"pc");
+        p->name,key,(unsigned long long)vault,p->size,package_id,p->count,p->tier_count,(version==3 || version==6)?"x360":"pc");
     return 1;
 fail:
     clear_package(p); return -1;
@@ -776,6 +791,7 @@ static int start_ginsu(Cpu *c,Engine *e) {
         e->ginsu[k].work=gmalloc_try(overhead+0x8a4);
         if(!e->ginsu[k].data || !e->ginsu[k].synth || !e->ginsu[k].work) return -1;
         uint32_t gin=e->ginsu[k].gin;
+        if(track && e->package->version==6) M32(gin+24)=track->frames;
         if(!(native_call(c,0x004e1280,e->ginsu[k].data,1,&gin)&255)) return -1;
         uint32_t args[]={e->ginsu[k].work,overhead+0x8a4};
         native_call(c,0x004e8be0,e->ginsu[k].synth,2,args);
@@ -1043,8 +1059,8 @@ replace:;
             char engine_id[65],exhaust_id[65];
             hex(p->resource[e->tier->layer[0][0]].digest,engine_id);
             hex(p->resource[e->tier->layer[1][0]].digest,exhaust_id);
-            diag_event("addcar_audio: attached car=%s object=%08X key=%08X engine=%s exhaust=%s native_ginsu=%u source=prostreet",
-                p->name,object,p->key,engine_id,exhaust_id,ginsu_count(e));
+            diag_event("addcar_audio: attached car=%s object=%08X key=%08X engine=%s exhaust=%s native_ginsu=%u source=%s",
+                p->name,object,p->key,engine_id,exhaust_id,ginsu_count(e),p->version==6?"undercover":"prostreet");
             return;
         }
         char ids[2][3][65];

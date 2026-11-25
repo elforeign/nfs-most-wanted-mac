@@ -475,10 +475,15 @@ class NativeCatalogTests(unittest.TestCase):
                        cc.PRE_SIBLING_PERFORMANCE_POLICY_SHA256, cc.PRE_CACHE_PUBLISH_POLICY_SHA256,
                        cc.PRE_PROSTREET_AUDIO_POLICY_SHA256, cc.PRE_TORQUE_SPLINE_POLICY_SHA256,
                        cc.PRE_CACHE_RENAME_POLICY_SHA256, cc.PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256,
-                       cc.PRE_UC_TORQUE_POLICY_SHA256):
+                       cc.PRE_UC_TORQUE_POLICY_SHA256, cc.PRE_SNR_READER_POLICY_SHA256,
+                       cc.PRE_UC_DISC_POLICY_SHA256):
             self.rewrite(lambda doc: doc.update(policy_sha256=digest))
             self.good_result()
             self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
+        # Disc-input policy migration: old reader admits 0/3; fixed admits 3/3.
+        mutant = SOURCE.read_text().replace(' && strcmp(claimed,PRE_UC_DISC_POLICY_SHA256)', '')
+        self.assertNotEqual(mutant, SOURCE.read_text())
+        self.zero(self.native(exe=self.compile(source=mutant)))
         self.rewrite(lambda doc: doc['cars'][0]['display'].update(name='Changed name'))
         self.zero()
 
@@ -542,6 +547,29 @@ class NativeCatalogTests(unittest.TestCase):
             # Each generated policy needs its matching native trust root.
             result=self.native(exe=self.compile())
             if version in (4,5):self.good_result(result)
+            else:self.zero(result)
+
+    def test_undercover_audio_version_matches_origin(self):
+        row=self.rows[0]
+        row['origin']['game']='undercover'
+        row['origin']['platform']='pc'
+        row['identity']=cc.source_identity(**row['origin'])
+        path=self.outputs[0]/'AUDIO.BIN'
+        name=row['origin']['folder'].lower().encode()
+        for version in (6,5,3):
+            path.write_bytes(struct.pack('<4s4I16s32s',b'A7CA',version,68,2,1,name,bytes(32)))
+            row['outputs'][path.name]=cc.fingerprint(path)
+            self.approve_rows();self.policy=self.load_policy()
+            cc.publish(self.store,self.rows,self.outputs,self.inputs,policy=self.policy)
+            result=self.native(exe=self.compile())
+            if version==6:
+                self.good_result(result)
+                admitted='NEED(kind!=CAR_CATALOG_AUDIO || carbon ||\n             (pc && (equal(j,game,"prostreet") || equal(j,game,"undercover"))),'
+                source=SOURCE.read_text()
+                self.assertEqual(source.count(admitted),1)
+                original=source.replace(admitted,'NEED(kind!=CAR_CATALOG_AUDIO || carbon ||\n             (pc && equal(j,game,"prostreet")),')
+                self.zero(self.native(exe=self.compile(source=original)))
+                type(self).mutants += 1
             else:self.zero(result)
 
     def test_original_bug(self):

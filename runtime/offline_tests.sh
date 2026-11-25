@@ -55,6 +55,7 @@
 #   gameplay_opts_test.py: F10 Gameplay hooks (markers, catch-up, heat, Open Map, Black Edition, bonus, movies), 12 broken controls
 #   rumble_switches_test.py: Rumble on cobbles and Prop hits by impact in feedback.c, motor levels, 6 broken controls
 # Private layout coverage: private_pad_layout_test (auto-discovered) and private_padbind_test.
+# Carbon guest input/FE lifecycle: recomp/private_padguest_test.py (auto-discovered).
 # Report location readers and empty-reader controls: private_report_position_test (auto-discovered).
 # Xbox fallback: recomp/private_carbon_xboxart_test.py is auto-discovered (24 on / 0 off).
 #   recomp/private_devrows_test.py: retail density/cheat bridge and map/surround persistence (auto-discovered).
@@ -68,6 +69,8 @@
 #   recomp/private_daynight_cars_test.py: B2 car rig by day, key dot sun .9848; kind-2 control; auto-discovered
 #   recomp/private_daylamps_test.py: Carbon traffic quad skips noon (0 draws vs 1 without the gate); auto-discovered
 #   recomp/private_ws2_test.py: named Winsock dispatch, ABI and implementation coverage (auto-discovered).
+#   recomp/private_lan_menu_test.py: Carbon discovery, native room entry and invitation/ready rejection controls (auto-discovered).
+#   recomp/private_splitworld_test.py: Carbon two-view world, odd rectangles/projections and clear controls (auto-discovered).
 # Private region coverage: private_world_test, private_files_test and test_worldmerge.
 #   recomp/private_carbon_speech_test.py: CSI v3/IDX + cached sidecars, 14135 native decodes and endian/cache controls.
 #   recomp/private_carbon_music_test.py: PC graphs, 2004 offsets, native XA decode and PC-offset control.

@@ -711,7 +711,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(set(schema['$defs']['pointer']['required']), set(cc.disabled_pointer()))
         self.assertEqual(set(schema['$defs']['policy']['required']), set(self.policy_doc))
         variants = schema['$defs']['policy']['properties']['slots']['items']['properties']['variants']['items']
-        self.assertEqual(variants['properties']['legacy'], {'type': 'integer', 'enum': list(range(1, 16))})
+        self.assertEqual(variants['properties']['legacy'], {'type': 'integer', 'enum': list(range(1, 19))})
         self.assertNotIn('legacy', variants['required'])
         self.assertEqual(schema['$defs']['catalog']['properties']['cars']['minItems'], 90)
         type(self).good += 1

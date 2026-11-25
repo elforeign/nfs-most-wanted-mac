@@ -118,8 +118,15 @@ class ArtifactChecks(unittest.TestCase):
             # importer's real index-equality guard also covers uncommitted edits.
             allowed = publish.patterns(publish.HERE / 'allowlist.txt')
             denied = publish.deny_patterns(with_carbon=True)
-            selected = [name for name in publish.tracked_files(a.ROOT)
-                        if (a.ROOT / name).is_file() and not publish.deny(name, denied)
+            # New providers must enter this working-tree fixture too; a branch
+            # under review need not stage files in its real Git index first.
+            untracked = subprocess.run(['git', '-C', str(a.ROOT), 'ls-files',
+                '--others', '--exclude-standard', '-z'], check=True,
+                capture_output=True, text=True).stdout.split('\0')
+            candidates = set(publish.tracked_files(a.ROOT)) | set(filter(None, untracked))
+            selected = [name for name in sorted(candidates)
+                        if (a.ROOT / name).is_file() and not (a.ROOT / name).is_symlink()
+                        and not publish.deny(name, denied)
                         and any(publish.matches(name, p) for p in allowed)]
             for name in selected:
                 target = indexed / name

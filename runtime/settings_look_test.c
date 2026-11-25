@@ -348,6 +348,10 @@ void portmenu_status(const char *fmt, ...) { va_list ap;va_start(ap,fmt);vsnprin
 void carbon_devrows_crew(int v) { (void)v; }
 void carbon_devrows_nitrous(int v) { (void)v; }
 void carbon_devrows_speedbreaker(int v) { (void)v; }
+void carbon_lan_menu_host(int v) { (void)v; }
+void carbon_lan_menu_browse(int v) { (void)v; }
+void carbon_lan_menu_leave(int v) { (void)v; }
+void carbon_lan_menu_status(char *b,int n) { snprintf(b,n,"Offline"); }
 #include "carbon_port_settings.h"
 
 int diag_on;
@@ -452,7 +456,7 @@ int main(int argc,char **argv) {
         CHECK(!s->hidden && (!s->locked || !strcmp(argv[2],"locked")));
     }
     if(failures) { printf("missing/invalid rows=%d\n",failures); return 1; }
-    CHECK(settings_count()==21);
+    CHECK(settings_count()==26);
     Setting *preset=settings_find("graphics.look_preset");
     CHECK(preset && preset->nchoices==3 && preset->derived && preset->own_pref && !*preset->pref);
     CHECK(settings_look_apply(PRESET_X360)==-1);

@@ -762,9 +762,10 @@ int main(int argc, char **argv) { @autoreleasepool {
                                       status='importable') for r in pc])
         selected = ['pc:' + str(r['slot']) for r in pc]
         with tempfile.TemporaryDirectory(dir=ROOT / '.metal-cache') as td:
-            def call(binary, ticks, metadata=car_selection.METADATA, source=recognition):
+            def call(binary, ticks, metadata=car_selection.METADATA, source=recognition, disc=None):
                 result = subprocess.run([str(binary), '--car-selections-test', str(metadata), td,
-                                         json.dumps(source), json.dumps(ticks)], capture_output=True, text=True, timeout=30)
+                                         json.dumps(source), json.dumps(ticks)] + ([str(disc)] if disc else []),
+                                        capture_output=True, text=True, timeout=30)
                 return result, json.loads(result.stdout) if result.returncode == 0 else None
             result, got = call(self.real, selected)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -772,6 +773,14 @@ int main(int argc, char **argv) { @autoreleasepool {
             self.assertIn('--cars-import', got['arguments'])
             self.assertEqual(got['arguments'][got['arguments'].index('--cars-spec') + 1], got['spec'])
             self.assertEqual(got['defaults'], [])
+            self.assertNotIn('--cars-uc-x360', got['arguments'])
+            disc = Path(td) / 'Undercover.iso'
+            uc = [r for r in rows if r['origin']['game'] == 'undercover']
+            uc_recognition = dict(recognition, game='undercover', cars=[
+                dict(car_hash=car_sources.path_hash('CARS/' + r['origin']['folder']), status='importable') for r in uc])
+            _, disc_got = call(self.real, ['undercover:pc:' + str(r['slot']) for r in uc],
+                               source=uc_recognition, disc=disc)
+            self.assertEqual(disc_got['arguments'][disc_got['arguments'].index('--cars-uc-x360') + 1], str(disc))
             self.assertIn('Chrysler 300C', got['names'])
             self.assertIn('Porsche 911 GT3 RS', got['names'])
             self.assertEqual(got['names'].count('Pagani Zonda F'), 1)

@@ -268,4 +268,8 @@ def convert(car, donor, source, native):
     attributes = source['GLOBAL/ATTRIBUTES.BIN']
     bins['WHEELFIT.BIN'] = mw.wheel_sidecar(attributes, car, donor, vaults=uc_attrib.vaults(attributes))
     bins['PERFORMANCE.BIN'] = uc_attrib.performance(attributes, native['GLOBAL/ATTRIBUTES.BIN'], car, donor)
+    from . import car_audio_pack, car_audio_undercover
+    if car_audio_undercover.admitted(attributes, car) and any(p.upper().startswith('SOUND/ENGINE/') for p in source):
+        paths = car_audio_pack.resource_paths(attributes, car, source, game='undercover')
+        bins['AUDIO.BIN'] = car_audio_pack.build(attributes, car, {p: source[p] for p in paths}, game='undercover')
     return bins

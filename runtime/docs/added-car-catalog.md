@@ -222,13 +222,25 @@ audio files under `SOUND/ENGINE`. The Xbox 360 route reads those logical ranges
 from the selected disc's numbered archives. Reimport a retained Carbon pack to
 get its source sidecar. Retained catalogs still open under their original
 approval contracts. The earlier private Jaguar XK stock sidecar is also
-readable. Missing or refused sidecars, Undercover additions, and explicit `off`
+readable. Missing or refused sidecars and explicit `off`
 or `0` use donor audio. All 31 reviewed ProStreet PC additions import their
 stock player engine/exhaust layers (version 5 below). The typed NG references
 at vehicle index zero select filenames; Veyron selects `car_106-engine.tmx`
 and `car_126-exhaust.tmx`. Only the audited attributes revision is admitted.
 Sweet-bank, blower and gear selectors remain decoded inventory, without
 requiring their banks for continuous playback.
+
+All 14 reviewed Undercover PC additions admit version-6 stock player audio
+from an optional Undercover Xbox 360 disc image, selected separately in Setup
+or with `--cars-uc-x360`. The PC folder need not contain `SOUND`. The importer
+uses the disc's bounded XDVDFS/ZDIR reader, snapshots only the selected TMX
+spans and fingerprints them alongside the PC attributes. Existing named TMX
+exports under `SOUND/ENGINE` also remain readable. Without recordings, the
+cars keep donor sounds with a plain note; both variants have approved contracts.
+Car provenance remains Undercover PC, since the disc supplies only audio. The 28
+ordered layers resolve to 20 unique TMXs. `pvehicle.Audio[0]` selects the typed
+NG fields `9AED4FFE` / `B3186761`, then player filename `0EB1C9D2`.
+The authored Superleggera alias uses the LP560-4 selection. Reimport is required.
 
 The converter preserves `pvehicle.Audio[]` order. Each `caraudio` resolves to
 engine and exhaust `engineaudio`, in that order. Each layer contains its
@@ -279,6 +291,37 @@ original GIN rates and up to six Ginsu voices. Resident XAS rates are 32, 44 and
 48 kHz. Released version-4 Veyron packages retain their four-resource contract.
 SWTN, blower, shift and skid programs are not executed. The nine source vehicle
 variants are not mapped to MW upgrades.
+
+Version 6 identifies the Undercover stock adapter with exactly two original
+big-endian TMXs and the same payload layout as version 5. Three or four bins
+use three input blocks (7/5/4 controls); live controls remain RPM/load/throttle
+at indices 0/2/4. Embedded GIN headers/tables stay little-endian. Before native
+Ginsu construction, only the guest GIN's frame count is set to terminal cycle
+sample plus one; all compressed blocks and tables are unchanged. Original
+TMX/resource hashes remain unchanged. Authored GIN rates include 34 kHz;
+resident PCM retains its source rate and loop position. Secondary banks and
+authored tier/upgrade behavior are deferred to their separate adapter.
+
+`runtime/car_audio_undercover_test.py` checks 28/28 ordered source identities
+through each native constructor, all 14 cars and 20 original TMXs, nonzero
+resident/Ginsu PCM, mute, retirement and balanced allocation/packet teardown.
+The original admission gives 0/28. The uncorrected Charger and rejected Scirocco
+rate controls each admit only 19/20 TMXs; wrong-car pairing gives 0/28 on both
+constructors. All 220 malformed control layouts refuse. A real Charger import
+tracks exactly two TMX inputs; altered and missing inputs both refuse without
+changing the active catalog. All 89 real converter writes preserve non-audio
+outputs, including every performance sidecar, and all 44 Carbon / 31 ProStreet
+audio package hashes remain unchanged.
+Policy 21 retains all 2,966 previous approval variants and adds 189 refreshed
+active, console-donor and source-equivalent variants. The selection catalog,
+native package table and private approvals pin all 14 Undercover sidecars.
+
+Guarded null-audio race `ucsnd2-charger-super-bee` admitted the ownable Charger
+at type 148, available with price 35,000 and bin 9. Diagnostics matched the
+stock engine/exhaust TMX hashes, attached six Ginsu and two resident tracks,
+and reported a first nonzero packet with 1,024 samples. It reached simulation
+time 60.2056 with no hang/stall reports. This establishes native playback data;
+listening acceptance remains pending.
 
 For race objects the port obtains the live MW engine upgrade level via
 `Physics::Upgrades::GetLevel` (00672D30, engine type 4). Carbon PC's 0053B570

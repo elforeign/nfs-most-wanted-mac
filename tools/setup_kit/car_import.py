@@ -221,11 +221,30 @@ def _source_names(platform, folder, identities, game='carbon', audio_names=()):
     names = [*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game]]
     if platform == 'x360':
         names += ['GLOBAL/GLOBALB.BUN', 'CARS/TEXTURES.BIN', 'GLOBAL/INGAMEA.BUN']
-    audio_source = game == 'carbon' or (game, platform) == ('prostreet', 'pc')
+    audio_source = game == 'carbon' or (game in ('prostreet', 'undercover') and platform == 'pc')
     names += [n for n in audio_names if audio_source and n.startswith('SOUND/ENGINE/')]
     known = {sources.path_hash(n): n for n in names}
     _require(set(identities) <= known.keys(), 'unmapped converter logical dependency')
     return {n: known[n] for n in identities}
+
+
+def _undercover_audio_spans(path, names):
+    """Resolve only the named TMXs through the bounded console disc reader."""
+    from . import car_audio_undercover
+    with _asset(path) as fd, car_audio_undercover.Disc(path) as disc:
+        opened, checked = os.fstat(disc.stream.fileno()), os.fstat(fd)
+        _require((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) ==
+                 (checked.st_dev, checked.st_ino, checked.st_size, checked.st_mtime_ns, checked.st_ctime_ns),
+                 'Undercover sound disc changed while opening')
+        spans = {}
+        for name in names:
+            key = sources.path_hash(name)
+            span = disc.spans.get(int(key, 16))
+            _require(span is not None, 'Undercover sound disc is missing: ' + name)
+            _require(0 < span[1] <= car_audio_undercover.MAX_BYTES, 'Undercover sound resource size limit')
+            _require(key not in spans, 'colliding Undercover sound resource')
+            spans[key] = span
+        return spans
 
 
 def _inventory(root):
@@ -306,8 +325,10 @@ def _later_route(game):
         return ps_namespace, modules + [ps_attrib, car_performance, car_audio_prostreet,
             car_audio, car_audio_pack, car_audio_codec, car_audio_abi, car_audio_bank]
     _require(game == 'undercover', 'unsupported PC converter')
-    from . import car_performance, ps_attrib, uc_attrib, uc_batch, ucpc_car
-    return ucpc_car, modules + [ps_attrib, uc_attrib, uc_batch, ucpc_car, car_performance]
+    from . import (car_performance, ps_attrib, uc_attrib, uc_batch, ucpc_car,
+                   car_audio_undercover, car_audio, car_audio_pack, car_audio_codec, car_audio_abi, car_audio_bank)
+    return ucpc_car, modules + [ps_attrib, uc_attrib, uc_batch, ucpc_car, car_performance,
+                               car_audio_undercover, car_audio, car_audio_pack, car_audio_codec, car_audio_abi, car_audio_bank]
 
 
 def _code(platform, absent, game='carbon', *, mac_audio=False):
@@ -406,13 +427,18 @@ class CarImporter:
             finally:
                 os.close(fd)
 
-    def _locations(self, carbon, mw_pc, mw_x360):
+    def _locations(self, carbon, mw_pc, mw_x360, uc_x360=None):
         carbon, mw_pc = _path(carbon), _path(mw_pc)
         if carbon.suffix.lower() == '.exe' and carbon.is_file():
             carbon = carbon.parent
         carbon = sources._folder(carbon)
         optional = _path(mw_x360) if mw_x360 is not None else None
         protected = [carbon, mw_pc] + ([optional] if optional is not None else [])
+        if uc_x360 is not None:
+            disc = _path(uc_x360)
+            if not disc.is_file():
+                raise MissingAssets('Choose an Undercover Xbox 360 disc image for engine sounds.')
+            protected.append(disc)
         for path in protected:
             if not path.exists():
                 raise MissingAssets('required input is missing: ' + path.name)
@@ -425,13 +451,15 @@ class CarImporter:
             raise MissingAssets('required MW PC directory is missing')
         return carbon, mw_pc, optional
 
-    def _inspect(self, carbon, mw_pc, mw_x360, cars):
-        carbon, mw_pc, optional = self._locations(carbon, mw_pc, mw_x360)
+    def _inspect(self, carbon, mw_pc, mw_x360, cars, uc_x360=None):
+        carbon, mw_pc, optional = self._locations(carbon, mw_pc, mw_x360, uc_x360)
         try:
             recognition = sources.recognise(carbon)
         except sources.SourceError as error:
             raise ImportError(str(error)) from error
         game, platform = recognition['game'], recognition['platform']
+        _require(uc_x360 is None or (game, platform) == ('undercover', 'pc'),
+                 'The Undercover sound disc accompanies an Undercover PC car source.')
         _require(not cars or (game, platform) in catalog.IMPORT_SOURCES,
                  'this game and platform have no approved conversion route')
         statuses = {c['car_hash']: c for c in recognition['cars']}
@@ -452,10 +480,10 @@ class CarImporter:
             raise MissingAssets('required MW PC shared pack is missing')
         return carbon, mw_pc, optional, recognition
 
-    def check(self, carbon, *, mw_pc, mw_x360=None, cars=()):
+    def check(self, carbon, *, mw_pc, mw_x360=None, uc_x360=None, cars=()):
         """Read-only recognition; source status is distinct from output approval."""
         cars = _specs(cars) if cars else []
-        source, mw, optional, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
+        source, mw, optional, recognition = self._inspect(carbon, mw_pc, mw_x360, cars, uc_x360)
         try:
             policy = catalog.packaged_policy()
             approval = dict(available=(recognition['game'], recognition['platform']) in catalog.IMPORT_SOURCES,
@@ -464,7 +492,9 @@ class CarImporter:
             approval = dict(available=False, reason=str(exc))
         return dict(inputs=dict(carbon=dict(path=str(source), game=recognition['game'], platform=recognition['platform']),
             mw_pc=dict(path=str(mw), required=True),
-            mw_x360=dict(path=str(optional) if optional else None, required=False, used=False)),
+            mw_x360=dict(path=str(optional) if optional else None, required=False, used=False),
+            uc_x360=dict(path=str(_path(uc_x360)) if uc_x360 is not None else None,
+                         required=False, used=uc_x360 is not None)),
             recognition=recognition, approval=approval, output_verified=False)
 
     @staticmethod
@@ -512,7 +542,7 @@ class CarImporter:
         return expected
 
     def _prepare(self, source, mw, recognition, car, policy, receipt, cancel, progress,
-                 *, later_rows, repair_cache=False):
+                 *, later_rows, repair_cache=False, uc_x360=None):
         game, platform, folder = recognition['game'], recognition['platform'], car['folder']
         by_car = {c['car_hash']: c for c in recognition['cars']}
         expected = recognition['shared'] + by_car[sources.path_hash('CARS/' + folder)]['files']
@@ -522,6 +552,8 @@ class CarImporter:
             logical = sources._logical(reader, physical, engine_audio=platform == 'x360')
             mac_audio = False
             audio_paths = ()
+            disc_spans = {}
+            audio_note = ''
             donor_export = False
             packed_geometry = {}
             if platform == 'x360':
@@ -537,35 +569,57 @@ class CarImporter:
             for key, pin in source_pins.items():
                 _require(key in logical and _logical(reader, logical[key], tick=tick) == packed_geometry.get(key, pin),
                          'selected logical source changed')
-            if game in ('carbon', 'prostreet'):
+            if game in ('carbon', 'prostreet', 'undercover'):
                 from . import car_audio_pack
                 if game == 'prostreet':
                     from . import car_audio_prostreet
+                if game == 'undercover':
+                    from . import car_audio_undercover
                 attribute_id = sources.path_hash('GLOBAL/ATTRIBUTES.BIN')
                 x360 = platform == 'x360'
                 attributes_pins = (car_audio_pack.X360_ATTRIBUTES,) if x360 else car_audio_pack.ATTRIBUTES
-                mac_audio = (source_pins[attribute_id]['sha256'] in attributes_pins if game == 'carbon' else
-                    platform == 'pc' and folder in car_audio_prostreet.CARS and
-                    source_pins[attribute_id]['sha256'] == car_audio_prostreet.ATTRIBUTES)
+                if game == 'undercover':
+                    mac_audio = (platform == 'pc' and folder in car_audio_undercover.CARS and
+                        source_pins[attribute_id]['sha256'] == car_audio_undercover.ATTRIBUTES and
+                        (uc_x360 is not None or any(n.startswith('SOUND/ENGINE/') for n in physical)))
+                    if not mac_audio:
+                        audio_note = 'Undercover cars keep MW donor engine sounds. Choose the optional Undercover Xbox 360 disc for their own sounds.'
+                else:
+                    mac_audio = (source_pins[attribute_id]['sha256'] in attributes_pins if game == 'carbon' else
+                        platform == 'pc' and folder in car_audio_prostreet.CARS and
+                        source_pins[attribute_id]['sha256'] == car_audio_prostreet.ATTRIBUTES)
                 donor_export = mac_audio and x360 and _x360_donor_export(physical)
                 mac_audio = mac_audio and not donor_export
                 if mac_audio:
                     attr = sources._read(reader, logical[attribute_id])
                     audio_pins = converter.x360_audio_inputs(attr, folder, logical) if x360 else None
-                    audio_paths = (audio_pins if x360 else
+                    if game == 'undercover' and uc_x360 is not None:
+                        audio_paths = sorted(p for layer in car_audio_undercover.describe(attr, folder)['layers']
+                                             for p in layer['paths'])
+                        disc_spans = _undercover_audio_spans(_path(uc_x360), audio_paths)
+                    else:
+                        audio_paths = (audio_pins if x360 else
                         car_audio_pack.resource_paths(attr, folder,
                             (n for n in physical if n.startswith('SOUND/ENGINE/')), game=game))
                     for name in audio_paths:
                         key = sources.path_hash(name)
                         _require(key not in source_pins, 'colliding audio input')
-                        if not x360:
+                        if key in disc_spans:
+                            source_pins[key] = _range(_path(uc_x360), *disc_spans[key], tick=tick)
+                            approved = later_rows.get(car['slot'], {}).get('inputs', {}).get('source', {}).get(name)
+                            _require(source_pins[key] == approved,
+                                     'Undercover engine audio does not match the approved file: ' + name)
+                        elif not x360:
                             _require(key not in logical, 'colliding audio input')
                             logical[key] = (physical[name], 0, reader.size(physical[name]))
-                        source_pins[key] = _logical(reader, logical[key], tick=tick)
+                            source_pins[key] = _logical(reader, logical[key], tick=tick)
+                        else:
+                            source_pins[key] = _logical(reader, logical[key], tick=tick)
                         if x360:
                             _require(source_pins[key] == audio_pins[name],
                                      'Console engine audio does not match the approved file: ' + name + '.')
                         names[key] = name
+            names = _source_names(platform, folder, source_pins, game, audio_paths)
             mw_names = _mw_names(game, car['donors']['model'], folder)
             mw_paths = {name: _mw_asset(mw, name, game) for name in mw_names}
             extraction = sum(p['size'] for p in source_pins.values())
@@ -596,9 +650,17 @@ class CarImporter:
                             if name in files:
                                 current[sources.path_hash(name)] = (files[name], 0, fresh.size(files[name]))
                     for name, pin in source_pins.items():
+                        if name in disc_spans:
+                            continue
                         _require(current.get(name) == logical[name] and
                                  _logical(fresh, current[name], tick=tick) == packed_geometry.get(name, pin),
                                  'source changed before activation')
+                if disc_spans:
+                    _require(_undercover_audio_spans(_path(uc_x360), audio_paths) == disc_spans,
+                             'Undercover sound disc spans changed before activation')
+                    for name, span in disc_spans.items():
+                        _require(_range(_path(uc_x360), *span, tick=tick) == source_pins[name],
+                                 'Undercover sound disc changed before activation')
                 for name, pin in mw_pins.items():
                     path = _mw_asset(mw, name, game)
                     _require(path == mw_paths[name] and catalog.fingerprint(path) == pin,
@@ -624,6 +686,7 @@ class CarImporter:
                 else:
                     unchanged()
                     return dict(row=row, entry=entry, reused=True, approved=True, unchanged=unchanged,
+                                audio_note=audio_note,
                                 extraction_bytes=0, output_bytes=sum(p['size'] for p in row['outputs'].values()))
         input_pins = dict(source={names[k]: v for k, v in source_pins.items()},
                           donor={n: v for n, v in mw_pins.items() if n.startswith('CARS/' + car['donors']['model'] + '/')},
@@ -642,8 +705,12 @@ class CarImporter:
                         pass
                 with _open_source(source) as fresh:
                     for name, pin in source_pins.items():
-                        actual = _logical(fresh, logical[name], stage=owned, target='source/' + names[name],
-                                          tick=tick, packed_geometry=packed_geometry.get(name))
+                        if name in disc_spans:
+                            actual = _range(_path(uc_x360), *disc_spans[name], stage=owned,
+                                            target='source/' + names[name], tick=tick)
+                        else:
+                            actual = _logical(fresh, logical[name], stage=owned, target='source/' + names[name],
+                                              tick=tick, packed_geometry=packed_geometry.get(name))
                         _require(actual == pin, 'source changed during selected extraction')
                 for name, pin in mw_pins.items():
                     actual = _range(mw_paths[name], 0, pin['size'], stage=owned, target='mw/' + name, tick=tick)
@@ -703,6 +770,7 @@ class CarImporter:
                             output_bytes=sum(p['size'] for p in pins.values()))
 
         return dict(row=None, entry=None, reused=False, approved=False, unchanged=unchanged,
+                    audio_note=audio_note,
                     extraction_bytes=extraction, output_bytes=None, dependency_bytes=dependencies,
                     known_output_bytes=expected_output, planned_row=planned_row, slot=car['slot'], finish=finish)
 
@@ -939,16 +1007,16 @@ class CarImporter:
         for item in cold:
             item.update(item.pop('finish')())
 
-    def plan(self, carbon, *, mw_pc, cars, mw_x360=None, measure=False, cancel=None, progress=None):
+    def plan(self, carbon, *, mw_pc, cars, mw_x360=None, uc_x360=None, measure=False, cancel=None, progress=None):
         """Plan without publishing. Unknown sizes are null, never extrapolations."""
         cars = _specs(cars)
-        self._locations(carbon, mw_pc, mw_x360)
+        self._locations(carbon, mw_pc, mw_x360, uc_x360)
         with self._transaction(cancel) as receipt:
-            source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
+            source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars, uc_x360)
             policy = self._policy(False)
             later_rows = self._later_rows(recognition, policy)
             preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress,
-                                          later_rows=later_rows)
+                                          later_rows=later_rows, uc_x360=uc_x360)
                             for car in cars]
             current = self._current(policy) if policy is not None else None
             if measure:
@@ -956,6 +1024,7 @@ class CarImporter:
             publication_bytes, minimum, compatible = self._planned_publication(preparations, policy, current)
             receipt.sample('planned')
             return dict(measured=measure, approved=all(p['approved'] for p in preparations), compatible=compatible,
+                notes=sorted({p['audio_note'] for p in preparations if p.get('audio_note')}),
                 platform=recognition['platform'], volumes=self._space(preparations, receipt, publication_bytes, minimum),
                 cars=[dict(slot=c['slot'], reused=p['reused'], approved=p['approved'],
                            reason=p.get('reason', ''), contract=p['row']) for c, p in zip(cars, preparations)],
@@ -998,18 +1067,18 @@ class CarImporter:
             raise CacheError('retained dependency cache rejected; reimport required packs')
         raise MissingAssets('retained dependency cache is missing; reimport this pack before merging')
 
-    def import_cars(self, carbon, *, mw_pc, cars, mw_x360=None, cancel=None, progress=None, repair_cache=False):
+    def import_cars(self, carbon, *, mw_pc, cars, mw_x360=None, uc_x360=None, cancel=None, progress=None, repair_cache=False):
         """Prepare, approve and publish one complete transaction; merge installed packs."""
         _require(type(repair_cache) is bool, 'invalid cache repair option')
         cars = _specs(cars)
-        self._locations(carbon, mw_pc, mw_x360)
+        self._locations(carbon, mw_pc, mw_x360, uc_x360)
         with self._transaction(cancel) as receipt:
             policy = self._policy(True)
             current, baseline = self._snapshot(policy)
-            source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars)
+            source, mw, _, recognition = self._inspect(carbon, mw_pc, mw_x360, cars, uc_x360)
             later_rows = self._later_rows(recognition, policy)
             preparations = [self._prepare(source, mw, recognition, car, policy, receipt, cancel, progress,
-                                          later_rows=later_rows, repair_cache=repair_cache)
+                                          later_rows=later_rows, repair_cache=repair_cache, uc_x360=uc_x360)
                             for car in cars]
             self._finish_preparations(preparations, receipt, policy, current)
             _require(all(p['approved'] for p in preparations),
@@ -1055,9 +1124,10 @@ class CarImporter:
             return dict(pointer=pointer, reused=sum(p['reused'] for p in preparations),
                         volumes=volumes, receipt=receipt.result())
 
-    def reimport(self, carbon, *, mw_pc, cars, mw_x360=None, cancel=None, progress=None):
+    def reimport(self, carbon, *, mw_pc, cars, mw_x360=None, uc_x360=None, cancel=None, progress=None):
         """Reuse good cache; quarantine and reconstruct a rejected preparation."""
         return self.import_cars(carbon, mw_pc=mw_pc, cars=cars, mw_x360=mw_x360,
+                                uc_x360=uc_x360,
                                 cancel=cancel, progress=progress, repair_cache=True)
 
     def list_cars(self):

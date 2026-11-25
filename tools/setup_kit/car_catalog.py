@@ -28,7 +28,7 @@ MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = 'f679645d63b3c426eb1c72286589a781e9dbceaec52e154401cf9c7ffed813c8'
+PACKAGED_POLICY_SHA256 = 'bb8e675ff566ef881a5f973844283d4f45065f9722051606a4a473d9d8b1c72f'
 LEGACY_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
 LEGACY_POLICY_REVISION = 2
 # Last policy before Carbon PC audio. Its original contracts remain reviewable.
@@ -53,6 +53,8 @@ PRE_TORQUE_SPLINE_POLICY_SHA256 = '3481940c810528f6ffe74e4ca34ca956f16b205461199
 PRE_CACHE_RENAME_POLICY_SHA256 = '1933a5cb7999c9248030687d4bafc440bdf92d5e9f9010d9dfb35f477f52f3db'
 PRE_UC_TORQUE_POLICY_SHA256 = 'd2a7671118660bf0c48c67bf91499a698619134480587f7b18800c68a8072aa7'
 PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256 = '5c52fc73694c442707aef4b023a2170d5402f609fcd0276afc1e9bfb6496ec6e'
+PRE_SNR_READER_POLICY_SHA256 = 'f679645d63b3c426eb1c72286589a781e9dbceaec52e154401cf9c7ffed813c8'
+PRE_UC_DISC_POLICY_SHA256 = '3c64d1b1d883f1ea52a9674b642ab5bfc010aefe081f9441816bb97aeb8e2be4'
 POLICY_PATH = Path(__file__).with_name('car_approvals.json')
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Z0-9_]{1,31}\Z')
@@ -466,7 +468,7 @@ def _policy(policy):
         for variant in row['variants']:
             if type(variant) is dict and 'legacy' in variant:
                 _keys(variant, ('contract', 'compatibility', 'legacy'))
-                _integer(variant['legacy'], 1, 16)
+                _integer(variant['legacy'], 1, 18)
             else:
                 _keys(variant, ('contract', 'compatibility'))
             _hex(variant['contract'])
@@ -564,7 +566,7 @@ def _row(row, expected, policy):
     _require(REQUIRED_OUTPUTS <= row['outputs'].keys() and
              all(_OUTPUT.fullmatch(name) for name in row['outputs']), 'missing required output or invalid filename')
     _require('AUDIO.BIN' not in row['outputs'] or origin['game'] == 'carbon' or
-             (origin['game'], origin['platform']) == ('prostreet', 'pc'),
+             (origin['game'] in ('prostreet', 'undercover') and origin['platform'] == 'pc'),
              'audio sidecar requires an audited source')
     contract, compatibility = contract_hash(row), slot_compatibility(row)
     _require(any(v['contract'] == contract and v['compatibility'] == compatibility for v in policy['variants']),
@@ -600,7 +602,8 @@ def _catalog(doc, policy):
                                      PRE_SIBLING_PERFORMANCE_POLICY_SHA256, PRE_CACHE_PUBLISH_POLICY_SHA256,
                                      PRE_PROSTREET_AUDIO_POLICY_SHA256, PRE_TORQUE_SPLINE_POLICY_SHA256,
                                      PRE_CACHE_RENAME_POLICY_SHA256, PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256,
-                                     PRE_UC_TORQUE_POLICY_SHA256),
+                                     PRE_UC_TORQUE_POLICY_SHA256, PRE_SNR_READER_POLICY_SHA256,
+                                     PRE_UC_DISC_POLICY_SHA256),
              'catalog policy or compatibility mismatch')
     _require(dict(doc, policy_sha256=policy.sha256) == make_catalog(doc['cars'], policy),
              'catalog policy or compatibility mismatch')

@@ -1,8 +1,9 @@
 """Bounded Undercover console car recordings, with separate normalized GINs.
 
 TMX controls and ABKC metadata are BE; embedded Gnsu20 stays LE. This reader
-retains source identities and authored rates/loops, without interpreting bank
-programs or selecting a playback/upgrade policy. Disc files are read only.
+retains source identities and authored rates/loops. The stock player adapter
+selects Audio[0]; secondary bank programs and upgrades remain unadmitted.
+Disc files are read only.
 """
 import hashlib
 import math
@@ -15,6 +16,83 @@ from .car_convert import name_hash, require, span
 from .car_audio_pack import validate_gin
 
 MAX_BYTES = 16 << 20
+ATTRIBUTES = '1ae36cd4e9efd9ccc94e33594c753681028ab45ce2cfb1ed3b8feaa5785b8971'
+CARS = frozenset('AUD_S5_STK_08 BMW_M6_STK_08 DOD_CHR_BEE_07 DOD_VIP_SRT_08 FOR_SHL_GT_08 FOR_SHL_TER_08 LAM_GAL_560_09 LAM_GAL_SUP_08 LEX_IS_F_08 MER_CLS_55_08 MER_SLR_722_07 NIS_370_Z_09 REN_MEG_COU_08 VOL_SCI_STK_08'.split())
+
+
+def admitted(attributes, car):
+    return car.upper() in CARS and hashlib.sha256(attributes).hexdigest() == ATTRIBUTES
+
+
+def describe(attributes, car):
+    """Resolve the stock pvehicle Audio[0] typed NG player filenames."""
+    from . import car_audio as ca, uc_attrib
+    from .car_convert import FitAttributes, hash32
+    require(admitted(attributes, car), 'audio unsupported Undercover attributes/car')
+    native = FitAttributes(attributes, vaults=uc_attrib.vaults(attributes))
+    attrib = object.__new__(ca.AudioAttributes)
+    attrib.defs, attrib.collections = native.defs, native.collections
+    own = hash32(uc_attrib.STOCK_ALIASES.get(car.upper(), car).lower())
+    tiers = attrib.field(hash32('pvehicle'), own, hash32('Audio'))
+    require(tiers and tiers['values'], 'Undercover audio selection missing')
+    ref = tiers['values'][0]
+    require(int(ref['class'], 16) == ca.CAR and int(ref['key'], 16), 'Undercover audio class')
+    audio = int(ref['key'], 16)
+    layers = []
+    for field, role in ((0x9aed4ffe, 'engine'), (0xb3186761, 'exhaust')):
+        value = attrib.field(ca.CAR, audio, field)
+        require(value and len(value['values']) == 1, 'Undercover NG reference')
+        ref = value['values'][0]
+        key = int(ref['key'], 16)
+        require(int(ref['class'], 16) == 0x6d483f8f and key, 'Undercover NG class')
+        value = attrib.field(0x6d483f8f, key, 0x0eb1c9d2)
+        require(value and len(value['values']) == 1, 'Undercover NG filename field')
+        filename = value['values'][0]['text']
+        require(filename and re.fullmatch(r'car_[0-9]{3}-' + role + r'-player\.tmx', filename.lower()),
+                'Undercover NG player filename')
+        layers.append(dict(role=role, key=f'{key:08x}', paths=['SOUND/ENGINE/' + filename.upper()]))
+    return dict(pvehicle=f'{own:08x}', caraudio=f'{audio:08x}', audio_index=0, layers=layers)
+
+
+def resource_paths(attributes, car, candidates):
+    names = {p.casefold() for layer in describe(attributes, car)['layers'] for p in layer['paths']}
+    found = {}
+    for path in candidates:
+        key = path.casefold()
+        if key in names:
+            require(key not in found, 'Undercover audio case collision')
+            found[key] = path
+    require(found.keys() == names, 'Undercover audio missing reachable resources')
+    return sorted(found.values())
+
+
+def build(attributes, car, resources):
+    """v6 keeps original BE TMXs and PCM at authored rates/loop positions.
+
+    GIN normalization is applied to the guest copy at attachment, preserving
+    source TMX identities and all compressed blocks/tables in the package.
+    """
+    from .car_audio_pack import HEADER, MAX_SIZE
+    layers = describe(attributes, car)['layers']
+    paths = resource_paths(attributes, car, resources)
+    require(set(paths) == set(resources), 'Undercover audio resource closure differs')
+    plans = {p: tmx(resources[p]) for p in paths}
+    index = {p.casefold(): i for i, p in enumerate(paths)}
+    ordered = [next(p for p in paths if p.casefold() == layer['paths'][0].casefold()) for layer in layers]
+    payload = bytearray(struct.pack('<2I4f', *(index[p.casefold()] for p in ordered),
+                                    *(v for p in ordered for v in plans[p]['rpm'])))
+    payload += bytes.fromhex(ATTRIBUTES)
+    for path in paths:
+        data = resources[path]
+        sounds = [track['sound'] for track in plans[path]['tracks'] if track['sound']]
+        payload += struct.pack('<4I', 3, len(data), 0, len(sounds)) + hashlib.sha256(data).digest() + data
+        for sound in sounds:
+            pcm = codec.decode_sound(sound).pcm
+            payload += struct.pack('<4I', sound.frames, sound.rate,
+                                   0 if sound.loop_start is None else sound.loop_start + 1, len(pcm)) + pcm
+    require(HEADER.size + len(payload) <= MAX_SIZE, 'Undercover audio package limit')
+    return HEADER.pack(b'A7CA', 6, HEADER.size + len(payload), len(paths), 1,
+                       car.lower().encode().ljust(16, b'\0'), hashlib.sha256(payload).digest()) + payload
 
 
 def sound_spans(zdir, files):
