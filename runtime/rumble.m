@@ -29,37 +29,49 @@
 static IOHIDManagerRef manager;
 static dispatch_queue_t hid_q;
 static CFMutableArrayRef candidates;                        // hid_q, retains every connected HID handle
-static IOHIDDeviceRef pad, target;                           // hid_q, borrowed from candidates
-static int switching;
-static int bluetooth, seq;
-static uint8_t sent_heavy = 0xFF, sent_light = 0xFF;        // hid_q: what the controller plays
-static uint64_t sent_at;
-static _Atomic uint64_t want;                               // connection epoch << 32 | heavy | light << 8
-static _Atomic uint32_t motor_generation;
-static _Atomic uint32_t selection_generation;
-static uint32_t applied_selection;                         // hid_q
-static _Atomic int queued, closed;                          // closed: the game is quitting, the motors stay off
-static _Atomic int suppressed;                              // menu / pause / focus / app holds
-static dispatch_source_t sig_term, sig_int;                 // kept alive: a released source leaves the signal ignored
-static int neutral_pending, retry_queued;                   // hid_q: neutral must succeed before gameplay
-static uint64_t clear_until, retry_generation;
-static dispatch_semaphore_t close_done;
-static void flush(void);
-static void activate_target(void);
-static void finish_clear(void) {
-    if (close_done) { dispatch_semaphore_signal(close_done); close_done = nil; }
+typedef struct {
+    IOHIDDeviceRef pad, target; // hid_q, borrowed from candidates
+    int switching, bluetooth, seq;
+    uint8_t sent_heavy, sent_light;
+    uint64_t sent_at;
+    _Atomic uint64_t want; // connection epoch << 32 | heavy | light << 8
+    _Atomic uint32_t motor_generation, selection_generation;
+    uint32_t applied_selection;
+    _Atomic int queued;
+    int neutral_pending, retry_queued;
+    uint64_t clear_until, retry_generation;
+    dispatch_semaphore_t close_done;
+    NSString *input_id;
+    NSSet<NSNumber *> *input_services;
+    int input_product;
+    id last;
+    uint64_t retry_at;
+    int last_product;
+} RumblePad;
+static RumblePad rumble_pads[2] = {
+    {.sent_heavy = 0xFF, .sent_light = 0xFF},
+    {.sent_heavy = 0xFF, .sent_light = 0xFF}
+};
+static _Atomic int closed, suppressed; // lifecycle holds apply to both pads
+static dispatch_source_t sig_term, sig_int;
+static int send(RumblePad *r, uint8_t heavy, uint8_t light);
+static void flush(RumblePad *r);
+static void activate_target(RumblePad *r);
+static void route_pad(RumblePad *r);
+static void finish_clear(RumblePad *r) {
+    if (r->close_done) { dispatch_semaphore_signal(r->close_done); r->close_done = nil; }
 }
-static void cleared(void) {
-    neutral_pending = 0; clear_until = 0; retry_queued = 0; ++retry_generation;
-    if (switching) activate_target();
-    else finish_clear();
+static void cleared(RumblePad *r) {
+    r->neutral_pending = 0; r->clear_until = 0; r->retry_queued = 0; ++r->retry_generation;
+    if (r->switching) activate_target(r);
+    else finish_clear(r);
 }
-static void invalidate_motors(void) {                       // hid_q; never mutate the game-thread model here
-    feedback_invalidate_effects();
-    want = 0; ++motor_generation;                          // publish the epoch only after invalidating the model
-    ++retry_generation; retry_queued = 0; clear_until = 0;
-    neutral_pending = 1;
-    sent_heavy = sent_light = 0xFF; sent_at = 0;
+static void invalidate_motors(RumblePad *r) {                       // hid_q; never mutate the game-thread model here
+    feedback_invalidate_slot((unsigned)(r - rumble_pads));
+    r->want = 0; ++r->motor_generation;                          // publish the epoch only after invalidating the model
+    ++r->retry_generation; r->retry_queued = 0; r->clear_until = 0;
+    r->neutral_pending = 1;
+    r->sent_heavy = r->sent_light = 0xFF; r->sent_at = 0;
 }
 
 // GameController has no public HID handle. Where available, match its physical device ID
@@ -73,53 +85,57 @@ static void invalidate_motors(void) {                       // hid_q; never muta
 @protocol RumbleHIDService
 @property(readonly) NSNumber *registryID;
 @end
-static NSString *input_id;
-static NSSet<NSNumber *> *input_services;
-static int input_product;
 
-static void activate_target(void) {
-    switching = 0;
-    if (pad) padlink_detach((void *)pad);
-    pad = target;
-    invalidate_motors();
-    if (!pad) { finish_clear(); return; }
-    CFTypeRef t = IOHIDDeviceGetProperty(pad, CFSTR(kIOHIDTransportKey));
-    bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() &&
+static void activate_target(RumblePad *r) {
+    r->switching = 0;
+    if (r->pad) padlink_detach((void *)r->pad);
+    r->pad = r->target;
+    invalidate_motors(r);
+    if (!r->pad) {
+        route_pad(&rumble_pads[r == &rumble_pads[0] ? 1 : 0]);
+        finish_clear(r); return;
+    }
+    CFTypeRef t = IOHIDDeviceGetProperty(r->pad, CFSTR(kIOHIDTransportKey));
+    r->bluetooth = t && CFGetTypeID(t) == CFStringGetTypeID() &&
                 CFStringFind(t, CFSTR("Bluetooth"), 0).location != kCFNotFound;
-    seq = 0;
-    padlink_hid((void *)pad, bluetooth);
-    flush();                                           // neutral before the next feedback publication
-    if (diag_on) diag_event("rumble: DualSense over %s", bluetooth ? "Bluetooth" : "USB");
+    r->seq = 0;
+    padlink_hid((void *)r->pad, r->bluetooth);
+    flush(r);                                           // neutral before the next feedback publication
+                                                                                 
+    route_pad(&rumble_pads[r == &rumble_pads[0] ? 1 : 0]);
+    if (diag_on) diag_event("rumble: DualSense over %s", r->bluetooth ? "Bluetooth" : "USB");
 }
 
-static void route_pad(void) {
+static void route_pad(RumblePad *r) {
     IOHIDDeviceRef match = NULL;
     CFIndex model_matches = 0, n = candidates ? CFArrayGetCount(candidates) : 0;
     for (CFIndex i = 0; i < n; ++i) {
         IOHIDDeviceRef dev = (IOHIDDeviceRef)CFArrayGetValueAtIndex(candidates, i);
-        if (input_services.count) {
+        if (r->input_services.count) {
             uint64_t registry_id;
             io_service_t service = IOHIDDeviceGetService(dev);
             if (service && IORegistryEntryGetRegistryEntryID(service, &registry_id) == KERN_SUCCESS &&
-                [input_services containsObject:@(registry_id)]) { match = dev; break; }
+                [r->input_services containsObject:@(registry_id)]) { match = dev; break; }
         }
-        if (input_id && [input_id isEqual:(__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDPhysicalDeviceUniqueIDKey))]) {
+        if (r->input_id && [r->input_id isEqual:(__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDPhysicalDeviceUniqueIDKey))]) {
             match = dev; break;
         }
-        if (input_product && !input_id && !input_services.count) {
+        if (r->input_product && !r->input_id && !r->input_services.count) {
             id product = (__bridge id)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey));
-            if ([product isEqual:@(input_product)]) { ++model_matches; match = dev; }
+            if ([product isEqual:@(r->input_product)]) { ++model_matches; match = dev; }
         }
     }
     if (model_matches > 1) match = NULL;
-    if (match == target && (switching || pad == match)) return;
-    target = match;
-    switching = pad != target;
-    if (!switching) return;
-    if (pad) {
-        invalidate_motors();
-        flush();                                       // clear the old motors before handing off
-    } else activate_target();
+    RumblePad *other = &rumble_pads[r == &rumble_pads[0] ? 1 : 0];
+    if (match && (match == other->target || match == other->pad)) match = NULL;
+    if (match == r->target && (r->switching || r->pad == match)) return;
+    r->target = match;
+    r->switching = r->pad != r->target;
+    if (!r->switching) return;
+    if (r->pad) {
+        invalidate_motors(r);
+        flush(r);                                       // clear the old motors before handing off
+    } else activate_target(r);
 }
 
 static int controller_product(id<RumbleController> controller) {
@@ -128,22 +144,21 @@ static int controller_product(id<RumbleController> controller) {
     return [category rangeOfString:@"Edge" options:NSCaseInsensitiveSearch].location != NSNotFound ? 0x0DF2 : 0x0CE6;
 }
 
-static void select_input(NSString *physical_id, NSSet<NSNumber *> *services, int product) {
-    input_id = physical_id;
-    input_services = services;
-    input_product = product;
-    route_pad();
+static void select_input(RumblePad *r, NSString *physical_id, NSSet<NSNumber *> *services, int product) {
+    r->input_id = physical_id;
+    r->input_services = services;
+    r->input_product = product;
+    for (unsigned slot = 0; slot < 2; ++slot) route_pad(&rumble_pads[slot]);
 }
 
-void rumble_select(void *controller) {
-    static id last;
-    static uint64_t retry_at;
-    static int last_product;
+void rumble_select_slot(unsigned slot, void *controller) {
+    if (slot >= 2) return;
+    RumblePad *r = &rumble_pads[slot];
     id ctl = (__bridge id)controller;
-    int same = ctl == last;
-    if (!hid_q || (same && (!retry_at || host_ticks() < retry_at))) return;
-    last = ctl;
-    retry_at = 0;
+    int same = ctl == r->last;
+    if (!hid_q || (same && (!r->retry_at || host_ticks() < r->retry_at))) return;
+    r->last = ctl;
+    r->retry_at = 0;
 
     id<RumbleController> gc = ctl;
     int product = controller_product(gc);
@@ -163,20 +178,20 @@ void rumble_select(void *controller) {
             }
         }
         if (!physical_id && !services.count) {
-            retry_at = host_ticks() + 1000000000ull;    // GameController and HID notifications can arrive in either order
+            r->retry_at = host_ticks() + 1000000000ull;    // GameController and HID notifications can arrive in either order
             CFIndex peers = 0;
             for (id<RumbleController> other in [(Class<RumbleController>)NSClassFromString(@"GCController") controllers])
                 if (controller_product(other) == product) ++peers;
             if (peers != 1) product = 0;
         }
     }
-    if (same && !physical_id && !services.count && product == last_product) return;
-    last_product = product;
-    uint32_t selection = ++selection_generation;
-    want = 0;                                           // a queued publication cannot reach the former input pad
+    if (same && !physical_id && !services.count && product == r->last_product) return;
+    r->last_product = product;
+    uint32_t selection = ++r->selection_generation;
+    r->want = 0;                                           // a queued publication cannot reach the former input pad
     dispatch_async(hid_q, ^{
-        applied_selection = selection;
-        select_input(physical_id, services, product);
+        r->applied_selection = selection;
+        select_input(r, physical_id, services, product);
     });
 }
 
@@ -188,7 +203,7 @@ static void found(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
             if (!candidates) candidates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
             if (!CFArrayContainsValue(candidates, CFRangeMake(0, CFArrayGetCount(candidates)), dev))
                 CFArrayAppendValue(candidates, dev);
-            route_pad();
+            for (unsigned slot = 0; slot < 2; ++slot) route_pad(&rumble_pads[slot]);
         }
         CFRelease(dev);
     });
@@ -199,16 +214,23 @@ static void removed(void *ctx, IOReturn r, void *sender, IOHIDDeviceRef dev) {
     dispatch_async(hid_q, ^{
         CFIndex i = candidates ? CFArrayGetFirstIndexOfValue(candidates, CFRangeMake(0, CFArrayGetCount(candidates)), dev) : kCFNotFound;
         IOHIDDeviceRef departing = i == kCFNotFound ? dev : (IOHIDDeviceRef)CFArrayGetValueAtIndex(candidates, i);
-        if (departing == pad) {
-            invalidate_motors();
-            padlink_detach((void *)pad);
-            pad = NULL;
-            switching = 0;
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            RumblePad *r = &rumble_pads[slot];
+            if (departing == r->pad) {
+                invalidate_motors(r);
+                (void)send(r, 0, 0); // best-effort neutral; a removed handle cannot be retried
+                ++r->retry_generation; r->retry_queued = 0;
+                padlink_detach((void *)r->pad);
+                r->pad = NULL;
+                r->switching = 0;
+            }
+            if (departing == r->target) { r->target = NULL; r->switching = 0; }
         }
-        if (departing == target) { target = NULL; switching = 0; }
         if (i != kCFNotFound) CFArrayRemoveValueAtIndex(candidates, i);
-        route_pad();
-        if (!pad) finish_clear();
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            route_pad(&rumble_pads[slot]);
+            if (!rumble_pads[slot].pad) finish_clear(&rumble_pads[slot]);
+        }
         CFRelease(dev);
     });
 }
@@ -228,26 +250,26 @@ static void rumble_open(void) {
     IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone);
 }
 
-static int send(uint8_t heavy, uint8_t light) {
+static int send(RumblePad *r, uint8_t heavy, uint8_t light) {
 #if NFS_GAME == NFS_GAME_PRIVATE
     if (carbon_padfx_fake()) return 1;
     carbon_padfx_count(FX_WRITE);
 #endif
-    uint8_t r[78] = {0};
+    uint8_t report[78] = {0};
     uint8_t *c;                                             // the common part: flags, motors, ...
     CFIndex n;
-    if (bluetooth) { r[0] = 0x31; r[1] = (uint8_t)(seq++ << 4 & 0xF0) | 0x02; c = r + 2; n = 78; }
-    else { r[0] = 0x02; c = r + 1; n = 48; }
+    if (r->bluetooth) { report[0] = 0x31; report[1] = (uint8_t)(r->seq++ << 4 & 0xF0) | 0x02; c = report + 2; n = 78; }
+    else { report[0] = 0x02; c = report + 1; n = 48; }
     c[0] = 0x03;                                            // valid flags 0: compatible vibration, rumble motors
     c[2] = light;                                           // right motor
     c[3] = heavy;                                           // left motor
-    if (bluetooth) {
+    if (r->bluetooth) {
         uint8_t hdr = 0xA2;
-        uLong crc = crc32(crc32(0, &hdr, 1), r, 74);
-        r[74] = crc & 0xFF; r[75] = crc >> 8 & 0xFF; r[76] = crc >> 16 & 0xFF; r[77] = crc >> 24 & 0xFF;
+        uLong crc = crc32(crc32(0, &hdr, 1), report, 74);
+        report[74] = crc & 0xFF; report[75] = crc >> 8 & 0xFF; report[76] = crc >> 16 & 0xFF; report[77] = crc >> 24 & 0xFF;
     }
-    uint64_t link = diag_on ? padlink_token((void *)pad) : 0;
-    IOReturn ok = IOHIDDeviceSetReport(pad, kIOHIDReportTypeOutput, r[0], r, n);
+    uint64_t link = diag_on ? padlink_token((void *)r->pad) : 0;
+    IOReturn ok = IOHIDDeviceSetReport(r->pad, kIOHIDReportTypeOutput, report[0], report, n);
     if (diag_on) padlink_output(link, PADLINK_RUMBLE, ok == kIOReturnSuccess);
     static int logs;
     if (diag_on && (ok != kIOReturnSuccess || logs < 20) && logs++ < 40)
@@ -257,51 +279,55 @@ static int send(uint8_t heavy, uint8_t light) {
 
 // A stop cannot depend on another pad read. Retry only neutral, every 20 ms for at most 250 ms.
 // A new connection or a successful clear cancels delayed work from the previous attempt.
-static void retry_clear(void) {
+static void retry_clear(RumblePad *r) {
     uint64_t now = host_ticks();
-    if (!clear_until) clear_until = now + 250000000ull;
-    if (now >= clear_until) { if (switching) activate_target(); else finish_clear(); return; }
-    if (retry_queued) return;
-    retry_queued = 1;
-    uint64_t token = retry_generation;
+    if (!r->clear_until) r->clear_until = now + 250000000ull;
+    if (now >= r->clear_until) { if (r->switching) activate_target(r); else finish_clear(r); return; }
+    if (r->retry_queued) return;
+    r->retry_queued = 1;
+    uint64_t token = r->retry_generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), hid_q, ^{
-        if (token != retry_generation) return;
-        retry_queued = 0;
-        if (host_ticks() >= clear_until) { if (switching) activate_target(); else finish_clear(); return; }
-        flush();
+        if (token != r->retry_generation) return;
+        r->retry_queued = 0;
+        if (host_ticks() >= r->clear_until) { if (r->switching) activate_target(r); else finish_clear(r); return; }
+        flush(r);
     });
 }
 
 // hid_q: send the latest levels when they changed (and a refresh every second, in case the controller reconnected).
-static void flush(void) {
-    queued = 0;
-    if (!pad) { finish_clear(); return; }
-    uint64_t request = want;
-    uint32_t w = closed || suppressed || neutral_pending || applied_selection != selection_generation ||
-                 (request >> 32) != motor_generation ? 0 : (uint32_t)request;
+static void flush(RumblePad *r) {
+    r->queued = 0;
+    if (!r->pad) { finish_clear(r); return; }
+    uint64_t request = r->want;
+    uint32_t w = closed || suppressed || r->neutral_pending || r->applied_selection != r->selection_generation ||
+                 (request >> 32) != r->motor_generation ? 0 : (uint32_t)request;
     uint8_t heavy = w & 0xFF, light = w >> 8 & 0xFF;
     uint64_t now = host_ticks();
-    if (heavy == sent_heavy && light == sent_light && now - sent_at < 1000000000ull) { if (!w) cleared(); return; }
-    if (send(heavy, light)) {
-        sent_heavy = heavy; sent_light = light; sent_at = now;
-        if (!w) cleared();
-    } else if (!w) { neutral_pending = 1; retry_clear(); }
+    if (heavy == r->sent_heavy && light == r->sent_light && now - r->sent_at < 1000000000ull) { if (!w) cleared(r); return; }
+    if (send(r, heavy, light)) {
+        r->sent_heavy = heavy; r->sent_light = light; r->sent_at = now;
+        if (!w) cleared(r);
+    } else if (!w) { r->neutral_pending = 1; retry_clear(r); }
 }
-static void post_levels_at(uint8_t heavy, uint8_t light, uint32_t token) {
-    want = (uint64_t)token << 32 | heavy | (uint32_t)light << 8;
-    if (!atomic_exchange(&queued, 1)) dispatch_async(hid_q, ^{ flush(); });
+static void post_levels_at(RumblePad *r, uint8_t heavy, uint8_t light, uint32_t token) {
+    r->want = (uint64_t)token << 32 | heavy | (uint32_t)light << 8;
+    if (!atomic_exchange(&r->queued, 1)) dispatch_async(hid_q, ^{ flush(r); });
 }
 
 // The game stops reading the pad while it's paused (focus lost): the motors would keep its last levels.
-void rumble_stop(void) {
+void rumble_stop_slot(unsigned slot) {
+    if (slot >= 2) return;
+    RumblePad *r = &rumble_pads[slot];
     if (!hid_q) return;
-    want = (uint64_t)motor_generation << 32;
+    r->want = (uint64_t)r->motor_generation << 32;
     dispatch_async(hid_q, ^{
-        neutral_pending = 1; clear_until = 0;
-        ++retry_generation; retry_queued = 0;
-        flush();
+        r->neutral_pending = 1; r->clear_until = 0;
+        ++r->retry_generation; r->retry_queued = 0;
+        flush(r);
     });
 }
+void rumble_select(void *controller) { rumble_select_slot(0, controller); }
+void rumble_stop(void) { for (unsigned slot = 0; slot < 2; ++slot) rumble_stop_slot(slot); }
 void rumble_suppress(int on) {
     suppressed = on;
     rumble_stop();                         // clear want on BOTH edges: resume never replays a queued old level
@@ -313,8 +339,15 @@ void rumble_suppress(int on) {
 void rumble_close(void) {
     if (!hid_q || atomic_exchange(&closed, 1)) return;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    dispatch_async(hid_q, ^{ close_done = done; clear_until = 0; flush(); });
-    long late = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC));
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC);
+    dispatch_async(hid_q, ^{
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            RumblePad *r = &rumble_pads[slot];
+            r->close_done = done; r->clear_until = 0; flush(r);
+        }
+    });
+    long late = dispatch_semaphore_wait(done, deadline);
+    late |= dispatch_semaphore_wait(done, deadline);
     if (diag_on) diag_event("rumble: close clear wait %s", late ? "expired (300 ms)" : "finished");
 }
 static dispatch_source_t close_on_signal(int sig) {
@@ -338,25 +371,29 @@ void rumble_set_enabled(int on) {                           // the F10 menu (por
     rumble_off = !on;
     if (diag_on) diag_event("rumble: now %s", on ? "on" : "off");
 }
-void rumble_update(void) {
+void rumble_update_slot(unsigned slot) {
+    if (slot >= 2) return;
+    RumblePad *r = &rumble_pads[slot];
 #if NFS_GAME == NFS_GAME_PRIVATE
     if (carbon_padfx_fake()) {
         float heavy, light;
-        feedback_levels(&heavy, &light);
+        feedback_levels_slot(slot, &heavy, &light);
         if (heavy > 0 || light > 0) carbon_padfx_count(FX_MOTOR);
         return;
     }
 #endif
     int off = rumble_off;
     if (off < 0) rumble_off = off = setting_bool_parse(getenv("NFS_RUMBLE")) == 0;
-    if (off) { float hf, lf; feedback_levels(&hf, &lf); return; }
+    if (off) { float hf, lf; feedback_levels_slot(slot, &hf, &lf); return; }
     if (!manager) {
         rumble_open();
         atexit(rumble_close);
         rumble_signals();
     }
-    uint32_t token = motor_generation;
+    uint32_t token = r->motor_generation;
     float hf, lf;
-    feedback_levels(&hf, &lf);                              // the model advances with or without a DualSense
-    if (!closed) post_levels_at((uint8_t)lroundf(hf * 255), (uint8_t)lroundf(lf * 255), token);
+    feedback_levels_slot(slot, &hf, &lf);                              // the model advances with or without a DualSense
+    if (!closed) post_levels_at(r, (uint8_t)lroundf(hf * 255), (uint8_t)lroundf(lf * 255), token);
 }
+
+void rumble_update(void) { rumble_update_slot(0); }

@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 // The F10 tabs, in order. Picture / World / Cars & cutscenes / Mirror replace the old flat Graphics list.
-enum { SET_PICTURE, SET_WORLD, SET_CARS, SET_MIRROR, SET_DISPLAY, SET_AUDIO, SET_CONTROLS, SET_GAMEPLAY, SET_ONLINE, SET_DIAGNOSTICS,
+enum { SET_PICTURE, SET_WORLD, SET_CARS, SET_MIRROR, SET_DISPLAY, SET_AUDIO, SET_CONTROLS, SET_GAMEPLAY, SET_DIAGNOSTICS,
        SET_NCATEGORIES };
 typedef enum {
     SET_TOGGLE,      // Off / On (choices may rename them, e.g. {"PC", "X360"})

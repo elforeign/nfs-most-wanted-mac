@@ -10,7 +10,7 @@
 #include <string.h>
 static NSString *ReportPrivateText(NSString *text);
 static BOOL ReportCodeChecksum(NSString *code) {
-    // Same GF(32) recurrence as roam_code_decode (x^5 + x^2 + 1).
+    // Legacy room-code GF(32) recurrence (x^5 + x^2 + 1).
     const char *alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
     unsigned check = 0;
     for (NSUInteger i = 0; i < code.length; ++i) {
@@ -155,21 +155,45 @@ static NSString *ReportPrivateText(NSString *text) {
     return nil;
 }
 
+// Match the same account and device identities in bundle files and issue previews.
+static NSString *ReportPrivacyKnownIdentity(NSString *text, NSDictionary *identity) {
+    // Underscores delimit account names in suffixed identifiers.
+    for (NSString *key in @[@"user", @"computer", @"serial", @"wifi"]) {
+        for (NSString *value in identity[key]) {
+            if (!value.length) continue;
+            NSString *pattern = [NSString stringWithFormat:@"(?<![\\p{L}\\p{M}\\p{N}])%@(?![\\p{L}\\p{M}\\p{N}])",
+                [NSRegularExpression escapedPatternForString:value]];
+            text = ReportPrivacyReplace(text, pattern, @"[redacted]"); // privacy:identity
+        }
+    }
+    // Keep ordinary lowercase words in diagnostics while masking name parts in device
+    // names and reordered or punctuation-separated forms.
+    NSString *full = [identity[@"user"] lastObject];
+    for (NSString *word in [full componentsSeparatedByCharactersInSet:NSCharacterSet.letterCharacterSet.invertedSet]) {
+        if (word.length < 2) continue;
+        NSString *written = [NSRegularExpression escapedPatternForString:word];
+        NSString *capital = [NSRegularExpression escapedPatternForString:word.uppercaseString];
+        // Preserve the Blackbox error marker when a name part is Error.
+        NSString *pattern = [NSString stringWithFormat:
+            @"(?<![\\p{L}\\p{M}\\p{N}])(?!(?-i:ERROR class=))(?-i:%@|%@)s?(?![\\p{L}\\p{M}\\p{N}])", written, capital];
+        text = ReportPrivacyReplace(text, pattern, @"[redacted]"); // privacy:name-word
+    }
+    // A Bluetooth or Continuity device may be named after someone other than the account holder.
+    text = ReportPrivacyReplace(text, @"(?<![\\p{L}\\p{M}\\p{N}])\\p{L}[\\p{L}\\p{M}\\p{N}.-]{0,31}"
+        "(?=[\\x{2019}'\\x{2018}]s\\s+(?:AirPods|iPhone|iPad|iMac|Mac|MacBook|Beats|HomePod|Apple|Watch|Magic|Studio|Vision"
+        "|DualSense|DualShock|Xbox|Controller|Gamepad|Pro\\s+Controller|Joy-Con|Headphones|Headset|Speaker"
+        "|Phone|Buds|Galaxy|Pixel|Bose|Sony|JBL)\\b)", @"[name]"); // privacy:device-owner
+    return text;
+}
+
 // Bundle attachments have the same known-identity and generic identity protection as previews.
 // Identity is explicit here so fixtures need no real machine identifiers or network scans.
 static NSString *ReportPrivacyIdentityRedact(NSString *text, NSDictionary *identity) {
     text = ReportPrivateText(text);
     NSString *home = identity[@"home"];
     if (home.length) text = [text stringByReplacingOccurrencesOfString:home withString:@"~"]; // privacy:home
-    for (NSString *key in @[@"user", @"computer", @"serial", @"wifi"]) {
-        for (NSString *value in identity[key]) {
-            if (!value.length) continue;
-            NSString *pattern = [NSString stringWithFormat:@"(?<![\\p{L}\\p{N}_])%@(?![\\p{L}\\p{N}_])",
-                [NSRegularExpression escapedPatternForString:value]];
-            text = ReportPrivacyReplace(text, pattern, @"[redacted]"); // privacy:identity
-        }
-    }
     text = ReportPrivacyReplace(text, @"\\b[\\p{L}\\p{N}._%+!'-]+@[\\p{L}\\p{N}.-]+\\.[\\p{L}]{2,}\\b", @"[email]"); // privacy:email
+    text = ReportPrivacyKnownIdentity(text, identity);
     text = ReportPrivacyReplace(text, @"\\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\\b", @"[UUID]"); // privacy:uuid
     text = ReportPrivacyReplace(text, @"\\b(?:serial(?:[ _-]?(?:number|no))?|s/n|uuid)\\s*[:=]\\s*[^\\s,;]+", @"serial: [redacted]"); // privacy:serial
     text = ReportPrivacyReplace(text, @"\\b(?:SSID|Wi[ -]?Fi(?:[ -]?name)?|wireless network)\\s*[:=]\\s*(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\\r\\n,;]+)", @"Wi-Fi: [redacted]"); // privacy:wifi
@@ -213,10 +237,31 @@ static NSString *ReportPrivacyDecodeData(NSData *data) {
     if (!data) return nil;
     if (!data.length) return @"";
     const unsigned char *bytes = data.bytes;
+    // Honor a UTF-16 byte-order mark. For unmarked diagnostic text, ASCII
+    // characters in the log create a detectable concentration of NULs on one lane.
+    NSStringEncoding utf16 = 0;
+    if (data.length >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+        utf16 = NSUnicodeStringEncoding;
+    } else {
+        NSUInteger zeros[2] = {0, 0};
+        for (NSUInteger i = 0; i < data.length; ++i)
+            if (!bytes[i]) ++zeros[i & 1];
+        unsigned lane = zeros[1] > zeros[0];
+        // An isolated NUL in mixed text or a binary prefix is not an encoding marker.
+        if (!(data.length & 1) && zeros[lane] >= 2 && zeros[lane] >= data.length / 8 &&
+            zeros[lane] > 2 * zeros[1 - lane])
+            utf16 = lane ? NSUTF16LittleEndianStringEncoding : NSUTF16BigEndianStringEncoding;
+    }
+    if (utf16) {
+        if (data.length & 1) return nil;
+        NSString *text = [[NSString alloc] initWithData:data encoding:utf16];
+        unichar nul = 0;
+        return [text stringByReplacingOccurrencesOfString:[NSString stringWithCharacters:&nul length:1] withString:@""];
+    }
     NSMutableString *text = [NSMutableString string];
     NSUInteger start = 0, i = 0;
     while (i < data.length) {
-        unsigned c = bytes[i], count = c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 :
+        unsigned c = bytes[i], count = c == 0 ? 0 : c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 :
             c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
         BOOL valid = count && count <= data.length - i;
         for (unsigned k = 1; valid && k < count; ++k) valid = (bytes[i + k] & 0xC0) == 0x80;
@@ -229,7 +274,7 @@ static NSString *ReportPrivacyDecodeData(NSData *data) {
         NSString *run = [[NSString alloc] initWithBytes:bytes + start length:i - start encoding:NSUTF8StringEncoding];
         if (!run) return nil;
         [text appendString:run];
-        [text appendFormat:@"%C", (unichar)c];
+        if (c) [text appendFormat:@"%C", (unichar)c];
         start = ++i;
     }
     NSString *run = [[NSString alloc] initWithBytes:bytes + start length:i - start encoding:NSUTF8StringEncoding];
@@ -258,12 +303,10 @@ static void ReportPrivacyCopyLog(const char *from, const char *to, long max) {
     if (file) fclose(file);
     if (!data || data.length > budget) {
         NSString *message = @"Log omitted: exceeds the 1 MiB privacy scan budget or could not be read.\n";
-#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
-        // Write sanitized bytes directly within the guarded profile's scratch tree.
+        // These new report files already live in a private folder. Write sanitized
+        // bytes there directly; a guarded run can permit these writes while
+        // refusing Foundation's atomic replacement.
         if (![message writeToFile:destination atomically:NO encoding:NSUTF8StringEncoding error:NULL])
-#else
-        if (![message writeToFile:destination atomically:YES encoding:NSUTF8StringEncoding error:NULL])
-#endif
             [NSFileManager.defaultManager removeItemAtPath:destination error:NULL];
         return;
     }
@@ -276,37 +319,31 @@ static void ReportPrivacyCopyLog(const char *from, const char *to, long max) {
         while (start < safe.length && bytes[start++] != '\n') {} // start at a complete line
         safe = [safe subdataWithRange:NSMakeRange(start, safe.length - start)];
     }
-#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
     if (!safe || ![safe writeToFile:destination options:0 error:NULL])
-#else
-    if (!safe || ![safe writeToFile:destination options:NSDataWritingAtomic error:NULL])
-#endif
         [NSFileManager.defaultManager removeItemAtPath:destination error:NULL];
 }
 
 // Includes blackbox.txt; every text attachment follows this fail-closed path.
-static void ReportPrivacyRedactBundle(NSString *folder, NSDictionary *identity) {
+static BOOL ReportPrivacyRedactBundle(NSString *folder, NSDictionary *identity) {
     NSFileManager *fm = NSFileManager.defaultManager;
-    for (NSString *name in [fm contentsOfDirectoryAtPath:folder error:NULL]) {
+    NSArray *names = folder ? [fm contentsOfDirectoryAtPath:folder error:NULL] : nil;
+    if (!names) return NO;
+    for (NSString *name in names) {
         if (![name.pathExtension.lowercaseString isEqualToString:@"txt"]) continue;
         NSString *path = [folder stringByAppendingPathComponent:name];
         NSData *data = [NSData dataWithContentsOfFile:path];
         NSString *text = ReportPrivacyDecodeData(data);
         text = ReportPrivacyIdentityRedact(text, identity);
         // Fail closed: a failed conversion/write must not leave an unredacted attachment.
-#if defined(NFS_GAME) && NFS_GAME == NFS_GAME_PRIVATE
         NSError *error = nil;
         NSString *safe = ReportEndpointRedact(text);
         if (!safe || ![safe writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:&error]) {
             fprintf(stderr, "report: text export failed: %s\n", safe ? error.localizedDescription.UTF8String : "privacy conversion failed");
-            [fm removeItemAtPath:path error:NULL];
+            if (![fm removeItemAtPath:path error:NULL]) return NO;
         }
-#else
-        if (!text || ![ReportEndpointRedact(text) writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL])
-            [fm removeItemAtPath:path error:NULL];
-#endif
     }
+    return YES;
 }
-static void ReportRedactBundle(NSString *folder) {
-    ReportPrivacyRedactBundle(folder, ReportPrivacyLocalIdentity());
+static BOOL ReportRedactBundle(NSString *folder) {
+    return ReportPrivacyRedactBundle(folder, ReportPrivacyLocalIdentity());
 }

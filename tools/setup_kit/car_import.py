@@ -221,7 +221,7 @@ def _source_names(platform, folder, identities, game='carbon', audio_names=()):
     names = [*_car_packs(folder), *sources.PC_CONVERSION_SHARED[game]]
     if platform == 'x360':
         names += ['GLOBAL/GLOBALB.BUN', 'CARS/TEXTURES.BIN', 'GLOBAL/INGAMEA.BUN']
-    audio_source = game == 'carbon' or (game, platform, folder) == ('prostreet', 'pc', 'VEYRON')
+    audio_source = game == 'carbon' or (game, platform) == ('prostreet', 'pc')
     names += [n for n in audio_names if audio_source and n.startswith('SOUND/ENGINE/')]
     known = {sources.path_hash(n): n for n in names}
     _require(set(identities) <= known.keys(), 'unmapped converter logical dependency')
@@ -545,7 +545,7 @@ class CarImporter:
                 x360 = platform == 'x360'
                 attributes_pins = (car_audio_pack.X360_ATTRIBUTES,) if x360 else car_audio_pack.ATTRIBUTES
                 mac_audio = (source_pins[attribute_id]['sha256'] in attributes_pins if game == 'carbon' else
-                    platform == 'pc' and folder == 'VEYRON' and
+                    platform == 'pc' and folder in car_audio_prostreet.CARS and
                     source_pins[attribute_id]['sha256'] == car_audio_prostreet.ATTRIBUTES)
                 donor_export = mac_audio and x360 and _x360_donor_export(physical)
                 mac_audio = mac_audio and not donor_export
@@ -620,8 +620,7 @@ class CarImporter:
                         pass
                     self._boundary('cache_rejected', receipt, cancel, progress)
                     with catalog._directory(self.work) as fd:
-                        os.rename(entry.name, '.rejected-' + uuid.uuid4().hex, src_dir_fd=fd, dst_dir_fd=fd)
-                        os.fsync(fd)
+                        catalog._set_aside(fd, entry.name, '.rejected-')
                 else:
                     unchanged()
                     return dict(row=row, entry=entry, reused=True, approved=True, unchanged=unchanged,
@@ -690,8 +689,7 @@ class CarImporter:
                     try:
                         cached = self._cached(entry, identity, policy)
                     except CacheError:
-                        os.rename(entry.name, '.rejected-' + uuid.uuid4().hex, src_dir_fd=work_fd, dst_dir_fd=work_fd)
-                        os.fsync(work_fd)
+                        catalog._set_aside(work_fd, entry.name, '.rejected-')
                     else:
                         return dict(row=cached, entry=entry, approved=True, reason='',
                                     output_bytes=sum(p['size'] for p in pins.values()))
@@ -816,6 +814,7 @@ class CarImporter:
                 dict(sha256=catalog.PRE_SIBLING_PERFORMANCE_POLICY_SHA256, revision=12),
                 dict(sha256=catalog.PRE_CACHE_PUBLISH_POLICY_SHA256, revision=13),
                 dict(sha256=catalog.PRE_PROSTREET_AUDIO_POLICY_SHA256, revision=14),
+                dict(sha256=catalog.PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256, revision=18),
             )
             _require(retained_policy or identity['approval'] == dict(sha256=policy.sha256,
                 revision=catalog._policy(policy)['revision']), 'cache approval revision is stale')

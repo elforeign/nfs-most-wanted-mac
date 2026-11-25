@@ -71,6 +71,8 @@ def fragments(old):
         bind = OLD_LAMP + '\n'
 
     return '\n'.join((
+        '#include "rt_scene.h"\nint rt_scene_enabled(void) { return 0; }\n'
+        'void rt_scene_forget(uint64_t resource_id) { (void)resource_id; }',
         section(d3d, 'static Obj **objs;', '// diag mem.log'),
         '#define THIS obj(arg(c, 0))',
         function(d3d, 'int is_dxt('), function(d3d, 'uint32_t fmt_bpp('),
@@ -85,6 +87,7 @@ def fragments(old):
         function(render, 'int render_lock_readback('),
         section(lamps, 'static NSString *folder;', 'static NSString *hex_digest('),
         function(lamps, 'int daynight_stream_wanted('),
+        'static struct { void *vbuf[16]; } eb;',  # copied ring upload invalidates cached static bindings
         'static void upload_vertices(uint32_t up_vertices, uint32_t stride, uint32_t count) {',
         '    uint32_t strides[] = {stride}, used_streams = 1, first = 0;',
         '    int indexed = 0, base_vertex = 0;',

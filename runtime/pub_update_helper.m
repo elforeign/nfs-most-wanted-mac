@@ -6,8 +6,8 @@
 // cleanup_pending retains the device/mount for retry when detach cannot finish.
 // A verified result retains a read-only mount for the next preparation step. The caller must
 // detach mount_point when finished; setup_path is valid only for this mounted job, not a receipt
-// authorizing later execution after the mount or files have changed. HTTPS + the release account
-// are the trust root; the current ad-hoc signature proves integrity, not publisher identity.
+// authorizing later execution after the mount or files have changed. Publisher pins
+// authenticate the exact manifest bytes before executable content is downloaded.
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <sys/file.h>
@@ -21,6 +21,7 @@
 #include "pub_update_rehearsal.h"
 #include "pub_update_write.h"
 #include "game_select.h"
+#include "pub_update_manifest.h"
 
 static const uint64_t ChecksumCap = 4096;
 #if defined(PUB_UPDATE_HELPER_TESTING)
@@ -33,11 +34,13 @@ static NSString *const SetupName = @"NFS Carbon Native Setup.app";
 static NSString *const SetupID = @"org.nfscarbon-native.setup";  // the Carbon Setup installer's CFBundleIdentifier
 static NSString *const Repository = @"elforeign/nfs-carbon-mac";
 static NSString *const AssetPrefix = @"NFS-Carbon-Native-Setup";
+static const char *Product = "carbon";
 #else
 static NSString *const SetupName = @"NFS Most Wanted Native Setup.app";
 static NSString *const SetupID = @"org.nfsmw-native.setup";
 static NSString *const Repository = @"elforeign/nfs-most-wanted-mac";
 static NSString *const AssetPrefix = @"NFS-Most-Wanted-Native-Setup";
+static const char *Product = "mw";
 #endif
 static int jobFD = -1;
 static NSString *jobPath, *tag, *asset, *checksum, *attachedDevice;
@@ -183,7 +186,7 @@ static NSDictionary *Download(NSString *name, uint64_t cap, uint64_t expected) {
     int fd = openat(jobFD, part.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) Fail(@"Cannot create partial download in the update job.");
     Fetch *fetch = [Fetch new];
-    fetch.fd = fd; fetch.cap = cap; fetch.expected = expected; fetch.label = name;
+    fetch.fd = fd; fetch.cap = expected ? MIN(cap, expected) : cap; fetch.expected = expected; fetch.label = name;
     fetch.done = dispatch_semaphore_create(0);
     CC_SHA256_CTX ctx; CC_SHA256_Init(&ctx); fetch.digestContext = ctx;
     NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
@@ -222,6 +225,35 @@ static NSString *ExpectedHash(void) {
     NSTextCheckingResult *m = text ? [re firstMatchInString:text options:0 range:NSMakeRange(0, text.length)] : nil;
     if (!m) Fail(@"Release checksum has no unique, valid entry for the expected DMG.");
     return [[text substringWithRange:[m rangeAtIndex:1]] lowercaseString];
+}
+static NSData *ProofBytes(NSString *name, NSUInteger cap) {
+    int fd = openat(jobFD, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return nil;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (uint64_t)st.st_size > cap) {
+        close(fd); return nil;
+    }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
+    size_t offset = 0;
+    while (offset < data.length) {
+        ssize_t n = read(fd, (char *)data.mutableBytes + offset, data.length - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); return nil; }
+        offset += (size_t)n;
+    }
+    close(fd);
+    return data;
+}
+static PUMManifest Authenticate(NSString *manifest, NSString *signature) {
+    NSData *raw = ProofBytes([manifest stringByAppendingString:@".part"], PUM_MANIFEST_MAX);
+    NSData *sig = ProofBytes([signature stringByAppendingString:@".part"], PUM_SIGNATURE_MAX);
+    PUMManifest proof;
+    if (!pum_verify(raw.bytes, raw.length, sig.bytes, sig.length,
+                    Repository.UTF8String, Product, tag.UTF8String, &proof))
+        Fail(@"Release publisher signature or manifest is invalid.");
+    if (proof.dmg.bytes > AssetCap || proof.checksum.bytes > ChecksumCap)
+        Fail(@"Signed release asset exceeds the download size limit.");
+    return proof;
 }
 static BOOL RunToolOutput(NSString *tool, NSArray<NSString *> *arguments, NSString *output) {
     int fd = openat(jobFD, "helper.log", O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -293,8 +325,10 @@ static void ClearPrevious(NSString *mount) {
     if (!fstatat(jobFD, "mount", &st, AT_SYMLINK_NOFOLLOW)) {
         if (!S_ISDIR(st.st_mode) || rmdir(mount.fileSystemRepresentation)) Fail(@"Update mount directory is not empty or safe.");
     } else if (errno != ENOENT) Fail(@"Cannot inspect the update mount directory.");
-    for (NSString *name in @[asset, checksum, [asset stringByAppendingString:@".part"], [checksum stringByAppendingString:@".part"]]) {
-        if (unlinkat(jobFD, name.fileSystemRepresentation, 0) && errno != ENOENT) Fail(@"Cannot clear the previous download.");
+    NSString *manifest = [asset stringByAppendingString:@".manifest"];
+    for (NSString *name in @[asset, checksum, manifest, [manifest stringByAppendingString:@".sig"]]) {
+        for (NSString *path in @[name, [name stringByAppendingString:@".part"]])
+            if (unlinkat(jobFD, path.fileSystemRepresentation, 0) && errno != ENOENT) Fail(@"Cannot clear the previous download.");
     }
 }
 static NSDictionary *VerifyImage(NSString *mount, NSString *version) {
@@ -355,28 +389,44 @@ int main(int argc, const char **argv) {
             ownsLock = YES;
             tag = [NSString stringWithUTF8String:argv[2]]; asset = [NSString stringWithUTF8String:argv[3]];
             checksum = [NSString stringWithUTF8String:argv[4]];
-            if (tag.length > 64 || !Matches(tag, @"\\Av[0-9]+(?:\\.[0-9]+){1,3}\\z")) Fail(@"Invalid release tag (expected v followed by a numeric version).");
+            uint32_t parts[4];
+            if (![tag hasPrefix:@"v"] || !pum_version_parts([tag substringFromIndex:1].UTF8String, parts))
+                Fail(@"Invalid release tag (expected v followed by a canonical numeric version).");
             NSString *version = [tag substringFromIndex:1];
             NSString *wanted = [NSString stringWithFormat:@"%@-v%@.dmg", AssetPrefix, version];
             if (![asset isEqual:wanted] || ![checksum isEqual:[wanted stringByAppendingString:@".sha256"]])
                 Fail(@"Asset names do not match the requested release's installer and checksum pair.");
-            uint64_t size = 0;
             if (argc == 6) {
                 NSString *s = [NSString stringWithUTF8String:argv[5]];
-                if (s.length > 12 || !Matches(s, @"\\A[1-9][0-9]*\\z") || (size = s.longLongValue) > AssetCap)
+                uint64_t hint;
+                if (!pum_decimal(s.UTF8String, UINT64_MAX, &hint))
                     Fail(@"Invalid expected DMG size.");
             }
             mount = [jobPath stringByAppendingPathComponent:@"mount"];
             ClearPrevious(mount);
             CheckCancelled();
             Progress(@"downloading", @"Starting a fresh update download.", 0, 0, nil);
-            Download(checksum, ChecksumCap, 0);
+            NSString *manifest = [asset stringByAppendingString:@".manifest"];
+            NSString *signature = [manifest stringByAppendingString:@".sig"];
+            Download(manifest, PUM_MANIFEST_MAX, 0);
+            Download(signature, PUM_SIGNATURE_MAX, 0);
+            PUMManifest proof = Authenticate(manifest, signature);
+            uint64_t size = proof.dmg.bytes;  // feed sizes are only hints
+            NSDictionary *sumDownload = Download(checksum, ChecksumCap, proof.checksum.bytes);
+            if (!pum_asset_matches(&proof.checksum, [sumDownload[@"bytes"] unsignedLongLongValue],
+                                   [sumDownload[@"sha256"] UTF8String]))
+                Fail(@"Release checksum asset differs from the signed manifest.");
             NSString *hash = ExpectedHash();
             NSDictionary *download = Download(asset, AssetCap, size);
+            if (!pum_asset_matches(&proof.dmg, [download[@"bytes"] unsignedLongLongValue],
+                                   [download[@"sha256"] UTF8String]))
+                Fail(@"Release DMG differs from the signed manifest.");
             Progress(@"verifying", @"Verifying the release checksum and Setup bundle.", [download[@"bytes"] unsignedLongLongValue], size, nil);
             if (![hash isEqualToString:download[@"sha256"]]) Fail(@"The downloaded DMG does not match the release SHA256 checksum.");
             if (renameat(jobFD, [[asset stringByAppendingString:@".part"] fileSystemRepresentation], jobFD, asset.fileSystemRepresentation) ||
-                renameat(jobFD, [[checksum stringByAppendingString:@".part"] fileSystemRepresentation], jobFD, checksum.fileSystemRepresentation) || fsync(jobFD))
+                renameat(jobFD, [[checksum stringByAppendingString:@".part"] fileSystemRepresentation], jobFD, checksum.fileSystemRepresentation) ||
+                renameat(jobFD, [[manifest stringByAppendingString:@".part"] fileSystemRepresentation], jobFD, manifest.fileSystemRepresentation) ||
+                renameat(jobFD, [[signature stringByAppendingString:@".part"] fileSystemRepresentation], jobFD, signature.fileSystemRepresentation) || fsync(jobFD))
                 Fail(@"Cannot publish the complete release download.");
             NSMutableDictionary *result = [VerifyImage(mount, version) mutableCopy];
             result[@"sha256"] = hash; result[@"dmg_bytes"] = download[@"bytes"];

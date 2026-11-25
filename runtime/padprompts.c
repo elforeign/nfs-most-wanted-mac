@@ -31,6 +31,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,8 +62,13 @@ void user32_hide_pointer(void);
 static int pad_lost;                       // the controller that was the active input has gone (fe_console.c: the game's unplugged check)
 static int pad_active = -1;                // auto: the last input came from a controller (1) or keyboard/mouse (0)
 static int pointer_hidden;                // our hide request is valid until an event can show the system pointer
-static int physical_input;                // connection/prompt overrides never count as physical input
-int prompts_last_input(void) { return physical_input; }
+static _Atomic int physical_input;                // connection/prompt overrides never count as physical input
+static _Atomic int pad_connected;
+int prompts_last_input(void) {
+    return atomic_load_explicit(&physical_input, memory_order_relaxed);
+}
+int prompts_physical_input(void) { return prompts_last_input(); }
+int prompts_pad_connected(void) { return atomic_load_explicit(&pad_connected, memory_order_relaxed); }
 static int mode(void) {
     if (env_mode < 0) {
         const char *e = getenv("NFS_BUTTON_PROMPTS");
@@ -78,12 +84,12 @@ static int console(void) {
 void prompts_pointer_visible(void) {
     pointer_hidden = 0;
 }
-void prompts_input(int pad) {              // user32.m: a key or mouse button (0), a controller button or stick (1)
+static void prompts_activity(int pad, int physical) {
     static float moved;
     if (pad != 1) prompts_pointer_visible();  // before the mouse prompt threshold: macOS shows it at the first movement
     if (pad < 0) { moved += 1; if (moved < 16) return; pad = 0; }   // mouse movement: about 16 points of it
     moved = 0;
-    physical_input = pad;
+    if (physical) atomic_store_explicit(&physical_input, pad, memory_order_relaxed);
     if (pad == 1 && !pointer_hidden) {
         user32_hide_pointer();
         pointer_hidden = 1;
@@ -94,16 +100,18 @@ void prompts_input(int pad) {              // user32.m: a key or mouse button (0
     if (mode() == 2) fprintf(stderr, "boot: button prompts: %s\n", pad ? "console" : "keyboard");
     if (diag_on) diag_event("prompts: input from the %s", pad ? "controller" : "keyboard/mouse");
 }
+void prompts_input(int pad) {
+    prompts_activity(pad, 1);
+}
 void prompts_mouse_moved(float points) {   // user32.m: mouse movement over the window
     if (points > 0) prompts_pointer_visible();  // fractional movement also unhides the system pointer
     for (float d = points; d >= 1; d -= 1) prompts_input(-1);
 }
 void prompts_pad_seen(int connected) {     // user32.m pad_read: a controller is there (at start-up: console prompts)
-    int physical = physical_input;
+    atomic_store_explicit(&pad_connected, !!connected, memory_order_relaxed);
     if (connected) pad_lost = 0;
-    if (connected && pad_active < 0) prompts_input(1);
-    else if (!connected && pad_active == 1) { prompts_input(0); pad_lost = 1; }
-    physical_input = physical;
+    if (connected && pad_active < 0) prompts_activity(1, 0);
+    else if (!connected && pad_active == 1) { prompts_activity(0, 0); pad_lost = 1; }
 }
 int prompts_pad_lost(void) { return pad_lost; }
 // The game's own pointer (texture 0x6B6A294F) is drawn by FUN_0056FDB0 (cdecl, FE x, y), called from FEManager::Render

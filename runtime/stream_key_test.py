@@ -5,6 +5,8 @@ Before-wait Forget erasure: late-wipe control 3 failures, fixed 0 (666 checks).
 Hardening original/fixed: editor 7/0 failures, unclosed Stop 2/0, erasing Stop 3/0, quit 5/0.
 Remembered key on relaunch: original save 0 present/1 failure, fixed 1 present/0 failures.
 Rebuilt process: 1 present/0 failures. Both fixed launches: 0 Go and 0 sessions.
+Installed update: retained key 1 present/0 failures; lost-key control 0 present/1 failure.
+The production apply/ack path replaces a scratch app; only signature admission is stubbed.
 Contention: bypassing the directory lock replaces the saved key (1 failure); the fixed write preserves it.
 Measured good: 666 assertions/0 failures, 0 sentinel/output matches, 0 clipboard and preference writes.
 Legacy faults: stale release/OSK/plain field 1 failure each, AX 2, menu buffer 11, preferences/clipboard 1/3, cid 34;
@@ -18,6 +20,8 @@ from pathlib import Path
 import fcntl
 import os
 import re
+import runpy
+import shutil
 import hashlib
 import secrets
 import stat
@@ -25,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from urllib.parse import quote
+from unittest import mock
 
 # Pinned original input routing and collapsed status, exercised without an Edit menu.
 ORIGINAL_KEY = {'route': "int stream_key_route_event(NSEvent *event) {\n    BOOL down=event.type==NSEventTypeKeyDown, up=event.type==NSEventTypeKeyUp;\n    unsigned code=(down || up)?event.keyCode:0;\n    if(up && code<sizeof consumed && consumed[code]) { consumed[code]=0; return 1; }\n    if(!panel) {\n        if(down && code<sizeof consumed && consumed[code]) {\n            if(event.isARepeat) return 1;\n            consumed[code]=0; // a fresh press retires a release lost during focus change\n        }\n        return 0;\n    }\n    if(down && code<sizeof consumed) consumed[code]=1;\n    // No keyboard, mouse or modifier input escapes to guest/menu shortcuts while editing.\n    if(down) {\n        if(code==53) { stream_key_close(); return 1; }\n        if(code==36 || code==76) { if(!event.isARepeat) [controller save:nil]; return 1; }\n        if((event.modifierFlags & NSEventModifierFlagCommand) && (code==8 || code==7)) return 1;\n    }\n    // Block drag/copy and contextual/services export. Paste reads the user's clipboard.\n    if(event.type==NSEventTypeLeftMouseDragged || event.type==NSEventTypeRightMouseDown ||\n       event.type==NSEventTypeRightMouseUp) return 1;\n    [NSApp sendEvent:event];\n    return 1;\n}", 'status': 'void stream_key_status(char *buf,int size) {\n    int state=cliprec_live_state();\n    const char *text=state==1?"Starting":state==2?"Live":state==3?"Stopping":\n        state==4?"Error: live stopped":notice?notice:keySize?"Ready (Off)":"No key";\n    if(state==1 || state==2) {\n        int transport=livestream_status();\n        if(transport!=1) text="Error: transport";\n    }\n    snprintf(buf,size,"%s",text);\n}'}
@@ -81,6 +86,47 @@ def private_output(output,key):
     return safe,matches
 
 
+def installed_update_proof(exe, rebuilt, base, sentinel):
+    helpers=runpy.run_path(str(ROOT/'tests/setup/test_apply.py'))
+    base.mkdir()
+    fixture=helpers['Fixture'](base)
+    install,apply=helpers['ins'],helpers['a']
+    executable=fixture.product['exec']
+    installed=fixture.dest/'Contents/MacOS'/executable
+    staged=fixture.job/fixture.bundle/'Contents/MacOS'/executable
+    shutil.copy2(exe,installed)
+    shutil.copy2(rebuilt,staged)
+    before=hashlib.sha256(installed.read_bytes()).digest()
+    after=hashlib.sha256(staged.read_bytes()).digest()
+    assert before!=after, 'update must replace executable bytes'
+    fixture.descriptor['hashes']['app']=install.digest_tree(fixture.job/fixture.bundle)
+    fixture.descriptor['destination'].update(identity=install.ident(fixture.dest),sha256=install.digest_tree(fixture.dest))
+    fixture.write_ready()
+
+    def launch(mode, failed=False):
+        result=subprocess.run([str(installed),str(fixture.dest),str(fixture.profile),mode],
+                              input=sentinel+'\n',capture_output=True,text=True,timeout=15)
+        safe,matches=private_output(result.stdout+result.stderr,sentinel)
+        assert not matches and result.returncode==int(failed), 'installed '+mode
+        assert 'go=0 sessions=0' in safe
+        return safe
+
+    launch('remember')
+    key=fixture.profile/'.stream-key/stream-key'
+    record=key.read_bytes()
+    with mock.patch.object(install,'codesign_ok',return_value=True):
+        token=fixture.apply()
+        fixture.receipt(token)
+        apply.acknowledge(fixture.profile,token)
+    assert hashlib.sha256(installed.read_bytes()).digest()==after
+    assert key.read_bytes()==record
+    assert 'key_present=1' in launch('relaunch')
+    print('installed update: executable replaced, key_present=1 go=0 sessions=0 failures=0',flush=True)
+    key.unlink()
+    assert 'key_present=0' in launch('relaunch',failed=True)
+    print('lost-key control: key_present=0 go=0 sessions=0 failures=1',flush=True)
+
+
 def storage_proof(exe, command, profile, sentinel, variant):
     profile.mkdir()
     bundle=profile.parent/'unused-bundle'
@@ -118,6 +164,8 @@ def storage_proof(exe, command, profile, sentinel, variant):
     built=subprocess.run([*command[:-1],str(rebuilt),'-O0'],capture_output=True,text=True,timeout=90)
     assert built.returncode==0,built.stderr[-4000:]
     assert 'key_present=1 go=0 sessions=0' in run(rebuilt,'relaunch')
+    if variant=='good':
+        installed_update_proof(exe,rebuilt,profile.parent/'installed-update',sentinel)
 
     key.chmod(0o644)
     assert 'key_present=0 go=0 sessions=0 status=Saved key unavailable' in run(rebuilt,'unavailable')

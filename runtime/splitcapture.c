@@ -45,6 +45,15 @@ typedef struct {
 } CaptureDiag;
 static CaptureDiag capture_diag[2];
 
+unsigned split_capture_resources(void) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        for (unsigned j = 0; j < 5; ++j) n += capture_banks[i].reflection[j] != 0;
+        for (unsigned j = 0; j < 13; ++j) n += capture_banks[i].cube[j] != 0;
+    }
+    return n;
+}
+
 void split_capture_receiver_texture(unsigned stage, uint32_t texture) {
     if (!diag_on || !capture_source || !texture || M32(CAP_RT) != M32(capture_source + 0x60)) return;
     CaptureDiag *d = &capture_diag[capture_source == CAP_P2];

@@ -52,14 +52,8 @@ static NSString *Redact(NSString *text, NSDictionary *identity) {
     NSString *home = identity[@"home"];
     if (home.length) text = [text stringByReplacingOccurrencesOfString:home withString:@"~"];
     text = ReplacePattern(text, @"\\b[\\p{L}\\p{N}._%+!'-]+@[\\p{L}\\p{N}.-]+\\.[\\p{L}]{2,}\\b", @"[email]");
-    for (NSString *key in @[@"user", @"computer", @"serial", @"wifi"]) {
-        for (NSString *value in identity[key]) {
-            if (!value.length) continue;
-            NSString *pattern = [NSString stringWithFormat:@"(?<![\\p{L}\\p{N}_])%@(?![\\p{L}\\p{N}_])",
-                [NSRegularExpression escapedPatternForString:value]];
-            text = ReplacePattern(text, pattern, @"[redacted]"); // known identities
-        }
-    }
+    text = ReportPrivacyKnownIdentity(text, identity);
+    if (!text) return nil;
     text = ReplacePattern(text, @"\\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\\b", @"[UUID]");
     text = ReplacePattern(text, @"\\b(?:serial(?:[ _-]?(?:number|no))?|s/n|uuid)\\s*[:=]\\s*[^\\s,;]+", @"serial: [redacted]");
     text = ReplacePattern(text, @"\\b(?:SSID|Wi[ -]?Fi(?:[ -]?name)?|wireless network)\\s*[:=]\\s*(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^\\r\\n,;]+)", @"Wi-Fi: [redacted]");

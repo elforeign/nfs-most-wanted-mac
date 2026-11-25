@@ -106,6 +106,7 @@ void diag_event(const char *fmt, ...) { (void)fmt; }
 #include "padlink_test.c"
 void diag_event_ring(const char *fmt, ...) { (void)fmt; }
 #ifndef TRIGOPT_TEST
+void rumble_stop_slot(unsigned slot) { (void)slot; rumble_stop(); }
 void rumble_stop(void) { CHECK(!strcmp(getenv("NFS_RUMBLE"),"off")); ++motor_calls; }
 void rumble_suppress(int on) { (void)on; rumble_stop(); }
 void rumble_signals(void) {}
@@ -142,7 +143,7 @@ static GCController *controller(int index) {
     c.extendedGamepad.rightTrigger=[GCDualSenseAdaptiveTrigger new]; c.extendedGamepad.rightTrigger.fake=YES;
     return c;
 }
-static void frame(void) { Cpu c={0}; c.ecx=0x8000; effects_valid=1; padfx_game_tick(&c,c.ecx); }
+static void frame(void) { Cpu c={0}; c.ecx=0x8000; feedback_states[0].effects_valid=1; padfx_game_tick(&c,c.ecx); }
 static void update(GCController *a,GCController *b) {
     padfx_update((__bridge void *)a,1,.8f,0);
     padfx_player_update(0,(__bridge void *)a); padfx_player_update(1,(__bridge void *)b);

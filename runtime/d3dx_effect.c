@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #include "host.h"
+#include "d3d9_constant_state.h"
 #include "blackbox_render.h"
 #include "game_select.h"
 
@@ -731,18 +732,28 @@ static void upload_ctab(Cpu *c, Effect *fx, State *st, int ps, uint64_t since) {
 #if NFS_GAME == NFS_GAME_PRIVATE
 #include "game_effect_evidence.h"
 #endif
-        uint32_t buf = scratch(16 * nreg);
-        if (rs == 2) {
-            memcpy(G + buf, regs, 16 * nreg);
-            uint32_t a[3] = {ri, buf, nreg};
-            dev_call(c, fx, ps ? DEV_SetPixelShaderConstantF : DEV_SetVertexShaderConstantF, 3, a);
-        } else {
-            for (uint32_t r = 0; r < nreg; ++r) for (int cc = 0; cc < 4; ++cc) M32(buf + 16 * r + 4 * cc) = (uint32_t)(int32_t)regs[r][cc];
-            if (rs == 0) { for (uint32_t r = 0; r < nreg; ++r) M32(buf + 4 * r) = regs[r][0] != 0; }
-            uint32_t a[3] = {ri, buf, nreg};
-            dev_call(c, fx, rs == 1 ? (ps ? DEV_SetPixelShaderConstantI : DEV_SetVertexShaderConstantI)
-                                    : (ps ? DEV_SetPixelShaderConstantB : DEV_SetVertexShaderConstantB), 3, a);
+        uint32_t packed[256 * 4];
+        const void *data = regs;
+        size_t bytes = 16 * (size_t)nreg;
+        if (rs != 2) {
+            if (rs == 0) {
+                for (uint32_t r = 0; r < nreg; ++r) packed[r] = regs[r][0] != 0;
+                bytes = 4 * (size_t)nreg;
+            } else {
+                for (uint32_t r = 0; r < nreg; ++r) for (int cc = 0; cc < 4; ++cc) packed[4 * r + cc] = (uint32_t)(int32_t)regs[r][cc];
+            }
+            data = packed;
         }
+        // Compare the final bytes with live device state, never a parameter's upload history:
+        // another pass or a direct device call may have overwritten these registers.
+        if (d3d9_constants_equal(fx->device, ps, rs, ri, nreg, data)) continue;
+        uint32_t buf = scratch((uint32_t)bytes);
+        memcpy(G + buf, data, bytes);
+        uint32_t a[3] = {ri, buf, nreg};
+        int slot = rs == 2 ? (ps ? DEV_SetPixelShaderConstantF : DEV_SetVertexShaderConstantF)
+                 : rs == 1 ? (ps ? DEV_SetPixelShaderConstantI : DEV_SetVertexShaderConstantI)
+                           : (ps ? DEV_SetPixelShaderConstantB : DEV_SetVertexShaderConstantB);
+        dev_call(c, fx, slot, 3, a);
     }
 }
 

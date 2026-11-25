@@ -10,11 +10,16 @@
 #include <unistd.h>
 #include "pub_update_core.h"
 #include "game_select.h"
+#include "pub_update_manifest.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
+#define PU_PRODUCT "carbon"
+#define PU_REPOSITORY "elforeign/nfs-carbon-mac"
 #define PU_SETUP_NAME @"NFS Carbon Native Setup.app"
 #define PU_STAGE_GAME "'--game', 'carbon', "
 #define PU_UPDATES @"Library/Application Support/NFSMW-Setup/Carbon/updates"
 #else
+#define PU_PRODUCT "mw"
+#define PU_REPOSITORY "elforeign/nfs-most-wanted-mac"
 #define PU_SETUP_NAME @"NFS Most Wanted Native Setup.app"
 #define PU_STAGE_GAME ""
 #define PU_UPDATES @"Library/Application Support/NFSMW-Setup/updates"
@@ -49,6 +54,39 @@ static NSString *PUCanonical(NSString *path) {
 }
 
 #ifdef PUB_UPDATE_WORKER
+static NSData *PUProofBytes(NSString *path, NSUInteger cap) {
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return nil;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (uint64_t)st.st_size > cap) {
+        close(fd); return nil;
+    }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
+    size_t offset = 0;
+    while (offset < data.length) {
+        ssize_t n = read(fd, (char *)data.mutableBytes + offset, data.length - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); return nil; }
+        offset += (size_t)n;
+    }
+    close(fd);
+    return data;
+}
+static BOOL PUAdmit(NSString *directory, NSString *tag, NSString *asset, NSString *checksum) {
+    NSString *path = [directory stringByAppendingPathComponent:[asset stringByAppendingString:@".manifest"]];
+    NSData *raw = PUProofBytes(path, PUM_MANIFEST_MAX);
+    NSData *signature = PUProofBytes([path stringByAppendingString:@".sig"], PUM_SIGNATURE_MAX);
+    PUMManifest proof;
+    if (!pum_verify(raw.bytes, raw.length, signature.bytes, signature.length,
+                    PU_REPOSITORY, PU_PRODUCT, tag.UTF8String, &proof) ||
+        strcmp(proof.dmg.name, asset.UTF8String) || strcmp(proof.checksum.name, checksum.UTF8String)) return NO;
+    for (NSString *name in @[asset, checksum]) {
+        struct stat st;
+        if (lstat([directory stringByAppendingPathComponent:name].fileSystemRepresentation, &st) || !S_ISREG(st.st_mode)) return NO;
+    }
+    return pum_verify_file(&proof.dmg, [directory stringByAppendingPathComponent:asset].fileSystemRepresentation) &&
+        pum_verify_file(&proof.checksum, [directory stringByAppendingPathComponent:checksum].fileSystemRepresentation);
+}
 static NSString *const PrepareScript =
 @"\n"
 @"import contextlib, json, os, shutil, signal, subprocess, sys, tarfile, time\n"
@@ -218,9 +256,11 @@ int main(int argc, const char **argv) {
         prepareScript = PURPrepareScript(prepareScript);
 #endif
         if (ok && [receipt[@"state"] isEqual:@"verified"] && [receipt[@"setup_path"] isEqual:setup]) {
+            // A progress receipt cannot authorize execution of release-supplied Python.
+            ok = PUAdmit(job, delivery[1], delivery[2], delivery[3]);
             // Delivery verifies that the signed Setup's version matches this release tag.
             NSString *tag = delivery[1];
-            ok = [tag hasPrefix:@"v"] && tag.length > 1 &&
+            ok = ok && [tag hasPrefix:@"v"] && tag.length > 1 &&
                 PUWrite([job stringByAppendingPathComponent:@"target-version.json"], @{@"version":[tag substringFromIndex:1]});
             NSString *script = [job stringByAppendingPathComponent:@"prepare.py"];
             if (ok) ok = PUReplaceFile(script, [prepareScript dataUsingEncoding:NSUTF8StringEncoding], 0600);

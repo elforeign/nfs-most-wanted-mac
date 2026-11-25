@@ -91,11 +91,10 @@ static void log_once(const char *what) {   // any thread (the overlapped thread 
 
 // Default to direct player traffic, even without BOOT_ONLINE. Never resolve the peer with DNS.
 static pthread_once_t policy_once = PTHREAD_ONCE_INIT;
-static int policy_open, policy_has_peer;
+static int policy_has_peer;
 static struct in_addr policy_peer;
 static void policy_init(void) {
-    const char *open = getenv("NFS_ONLINE_OPEN"), *peer = getenv("BOOT_ONLINE_PEER");
-    policy_open = open && !strcmp(open, "1");
+    const char *peer = getenv("BOOT_ONLINE_PEER");
     if (!peer) return;
     char ip[INET_ADDRSTRLEN];
     const char *colon = strchr(peer, ':');
@@ -114,10 +113,6 @@ static void policy_init(void) {
         if (!port) return;
     }
     policy_has_peer = inet_pton(AF_INET, ip, &policy_peer) == 1;
-}
-static int outbound_open(void) {
-    pthread_once(&policy_once, policy_init);
-    return policy_open;
 }
 // Separate from the bounded diagnostic cache: blocked destinations/names stay deduplicated even after
 // 128 ordinary socket messages, and long hostnames cannot collide through truncation. Guest calls hold the GIL.
@@ -141,7 +136,7 @@ static int outbound_allowed(const struct sockaddr_in *a) {
     uint32_t ip = ntohl(a->sin_addr.s_addr);
     if (lan_loopback() && (ip >> 24) != 127 &&
         !(ip == 0xFFFFFFFFu && ntohs(a->sin_port) == 9999)) { wsa_err = 10051; return 0; }
-    if (outbound_open()) return 1;
+    pthread_once(&policy_once, policy_init);
     // 255.255.255.255 is the limited broadcast (LAN discovery): routers never forward it off the local network.
     if (ip == 0xFFFFFFFFu || (ip >> 24) == 127 || (ip >> 24) == 10 || (ip >> 20) == 0xAC1 ||
         (ip >> 16) == 0xC0A8 || (ip >> 16) == 0xA9FE || (ip >> 22) == 0x191 ||
@@ -779,19 +774,9 @@ int win32_ws2(Cpu *c, const char *fn) {
             }
             else if (!strcasecmp(name, "localhost")) ip = htonl(INADDR_LOOPBACK);
             else if (inet_pton(AF_INET, name, &numeric) == 1) ip = numeric.s_addr;
-            else if (!outbound_open()) {
+            else {
                 policy_log_once("blocked hostname ", name);
                 wsa_err = 11001; RET(0, 1);            // WSAHOST_NOT_FOUND: no DNS/mDNS call
-            }
-            else {
-                struct addrinfo hints = {0}, *res = NULL;
-                hints.ai_family = AF_INET;
-                gil_release();
-                int r = getaddrinfo(name, NULL, &hints, &res);
-                gil_acquire();
-                if (r || !res) { wsa_err = 11001; RET(0, 1); }   // WSAHOST_NOT_FOUND
-                ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
-                freeaddrinfo(res);
             }
             RET(hostent_for(ip, name && *name ? name : our_hostname), 1);
         }
@@ -899,6 +884,19 @@ void f_00797450(Cpu *c) {             // client: R_BI_DRIVERFINISH received
 void f_0079FF50(Cpu *c) {             // Server::SendMessageToAllClients(type, bits, reliable)
     if ((ws2_online || lan_diag_on()) && arg(c, 0) == 7) { printf("online: server sends DRIVERFINISH\n"); fflush(stdout); }
     f_0079FF50_orig(c);
+}
+#endif
+// GlobalConnStatusCB (00793510): the lobby API synthesizes disc/down on a
+// lost connection. Observe callback completion, without changing its outcome.
+#if NFS_GAME == NFS_GAME_MW
+void f_00793510(Cpu *c) {
+    int down = 0;
+    if (lan_diag_on()) {
+        uint32_t msg = arg(c, 1);
+        down = msg && M32(msg+8)==0x64697363u && M32(msg+12)==0x646F776Eu;
+    }
+    f_00793510_orig(c);
+    if (down) { fprintf(stderr,"lan-connection: down callback-complete\n"); }
 }
 #endif
 // GRaceStatus::SetRoaming (from the GRaceStatus constructor) tells ICopMgr about each AI vehicle without a pursuit,

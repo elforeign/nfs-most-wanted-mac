@@ -63,7 +63,7 @@ int main(void) {
     }
     close(probe);
     G = calloc(1, 0x01000000); if (!G) return 2;
-    unsetenv("NFS_LAN_COPY"); unsetenv("NFS_ONLINE_OPEN"); unsetenv("BOOT_ONLINE_PEER");
+    unsetenv("NFS_LAN_COPY"); unsetenv("BOOT_ONLINE_PEER");
     uint32_t ip = lan_address();
     check(ip && (lan_real() ? (ip >> 24) != 127 : ip == INADDR_LOOPBACK), "selected transport route exists");
     uint32_t a = udp(); address("0.0.0.0", 9999);

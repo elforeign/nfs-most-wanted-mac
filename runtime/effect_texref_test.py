@@ -89,6 +89,9 @@ uint32_t galloc(uint32_t n) { static uint32_t top = 0x40000; uint32_t a = top; t
 uint32_t gstr(const char *s) { (void)s; return 0; }
 uint32_t host_fn(HostFn f, const char *n) { (void)f; (void)n; return 0; }
 uint32_t call_guest(Cpu *c, uint32_t f, int n, const uint32_t *a) { (void)c; (void)f; (void)n; (void)a; return 0; }
+int d3d9_constants_equal(uint32_t d, int ps, uint32_t set, uint32_t start, uint32_t count, const void *data) {
+    (void)d; (void)ps; (void)set; (void)start; (void)count; (void)data; return 0;
+}
 void widescreen_drop_offset(Cpu *c, uint32_t a) { (void)c; (void)a; }
 float lighting_inv_shadow_strength(float f) { return f; }
 static int refs[16], freed[16];                     // stand-in for d3d9.m: texture k lives at 0x1000 * k

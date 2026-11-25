@@ -250,7 +250,8 @@ void portmenu_toggle(void) { set_open(!is_open); }
 
 // ---------------- pause (pacing.c, every main-loop pass) ----------------
 #if NFS_GAME == NFS_GAME_MW
-int portmenu_hold(void) { return is_open && M32(GAMEFLOW_STATE) == 6; }
+static int portmenu_racing(void) { return M32(GAMEFLOW_STATE) == 6; }
+int portmenu_hold(void) { return is_open && portmenu_racing(); }
 void portmenu_pass(Cpu *c) {
     osk_pass(c);
     feedback_poll_pause();                // even with no pad reads / DoFFB ticks while the game is paused
@@ -267,8 +268,31 @@ void portmenu_pass(Cpu *c) {
 }
 
 #else
+uint32_t private_report_flow(void);       // the game-flow state (carbon_report_flow.c): 6 in a race
+static int portmenu_racing(void) { return private_report_flow() == 6; }
 #include "game_menu_hold.h"
 #endif
+// user32.m pad_freeze, from a pad read (the game thread, as portmenu_pad): the controller in use went away or the Mac
+// is going to sleep or woke. In a race the menu opens, which freezes the race (portmenu_hold) until the player closes
+// it; anywhere else nothing happens. 1: opened.
+int portmenu_open_if_racing(const char *why) {
+    if (is_open || !portmenu_racing()) return 0;
+    set_open(1);
+    report_note("menu opened: %s", why);
+    return 1;
+}
+int user32_pad_battery(void);
+// ---- padbattery: one note on entering a race, one live header line (plain C) ----
+static char battery_line[64];
+static void padbattery_update(int racing, int percent) {
+    static int was_racing;
+    battery_line[0] = 0;
+    if (percent >= 0 && percent <= 10)
+        snprintf(battery_line, sizeof battery_line, "DualSense battery low: %d %% - connect USB", percent);
+    if (racing && !was_racing && battery_line[0]) overlay_notice(battery_line);
+    was_racing = racing;
+}
+// ---- end padbattery ----
 // ---------------- keyboard ----------------
 // user32.m key_event, every key (scripted ones too): 1 = the menu took it.
 // Match the game's driving/menu decision in user32's pad mapping. Any input
@@ -680,6 +704,9 @@ static int render(void) {
 #include "game_menu_title.h"
 #endif
     text(ctx, b, PW - 28, 27, fnt(0, 12), c_faint, 1);
+    // ---- padbattery header ----
+    if (battery_line[0]) text(ctx, battery_line, 28, 44, fnt(0, 12), c_amber, 0);
+    // ---- end padbattery header ----
     // tabs
     double x = 28;
     const char *prev = device == 2 ? (user32_pad_layout_xbox() ? "LB" : "L1") : "Q", *next = device == 2 ? (user32_pad_layout_xbox() ? "RB" : "R1") : "E";
@@ -759,9 +786,7 @@ static int render(void) {
             break;
         case SET_INFO:
             readout(s, i, vb, sizeof vb);
-            if (!strcmp(s->id, "online.status")) {
-                wrapped(ctx, vb, vx, ty, PW - vx - 36, ROW - 3, fnt(0, 11), c_text); w = 0;
-            } else w = text(ctx, vb, vx, ty, fnt(0, 15), c_text, 0);
+            w = text(ctx, vb, vx, ty, fnt(0, 15), c_text, 0);
             break;
         default: break;
         }
@@ -789,9 +814,6 @@ static int render(void) {
     else if (s && !strcmp(s->id, "graphics.look_preset") && settings_look_state() == PRESET_X360 && settings_look_partial()) {
         wrapped(ctx, "partial: your Xbox 360 files are not installed. Applies the available picture settings, closest to retail.",
                 32, PH - 96, PW - 64, 44, fnt(0, 13), c_amber);
-    } else if (s && !strcmp(s->id, "online.status") && s->value_text) {
-        char detail[512]; s->value_text(detail, sizeof detail);
-        wrapped(ctx, detail, 32, PH - 96, PW - 64, 44, fnt(0, 11), c_text);
     } else if (s && s->help) {
         wrapped(ctx, s->help, 32, PH - 96, PW - 64, 44, fnt(0, 13), c_dim);
     }
@@ -987,6 +1009,10 @@ void portmenu_update(void) {
     if (editing && !osk_note_active()) { editing = 0; dirty = 1; }
     if (osk_note_active() && (!is_open || !editing)) osk_note_end(0);
     @autoreleasepool { keyboard_update(); }
+    char previous_battery[sizeof battery_line];
+    memcpy(previous_battery, battery_line, sizeof battery_line);
+    padbattery_update(portmenu_racing(), user32_pad_battery());
+    if (strcmp(previous_battery, battery_line)) dirty = 1;
     if (!is_open) { if (panel_layer && !panel_layer.hidden) layers(0); return; }
     // Keep the redraw pending until the window can hold a bitmap.
     if (!layer || layer.bounds.size.width <= 0 || layer.bounds.size.height <= 0) return;

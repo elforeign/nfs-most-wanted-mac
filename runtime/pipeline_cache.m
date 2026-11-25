@@ -1,6 +1,7 @@
 #include "game_select.h"
 // A descriptor catalogue for known scene passes and a history of those met on demand, replayed after shader readiness.
 #include "pipeline_cache.h"
+#include "blackbox_errors.h"
 #include "d3d9_internal.h"
 #include <pthread.h>
 #include <unistd.h>
@@ -271,6 +272,7 @@ id<MTLLibrary> pipeline_library_source(NSString *source, const char *pass, NSErr
     if (cold) source=[source stringByAppendingFormat:@"\n// cold %d %llu\n",getpid(),(unsigned long long)host_ticks()];
     uint64_t start=diag_on ? host_ticks() : 0;
     id<MTLLibrary> library=[mtl newLibraryWithSource:source options:nil error:error];
+    if (!library) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, error && *error ? (*error).code : 0, 0, 0, 0);
     if (diag_on) diag_event("pipeline_library_ms: pass=%s ms=%.3f frame=%d",pass,(host_ticks()-start)/1e6,on_frame_path());
     return library;
 }
@@ -347,6 +349,7 @@ id<MTLRenderPipelineState> pipeline_build_device(id<MTLDevice> device, MTLRender
     }
     uint64_t start=measure ? host_ticks() : 0;
     id<MTLRenderPipelineState> p=[device newRenderPipelineStateWithDescriptor:d error:error];
+    if (!p) blackbox_error(BB_ERR_METAL, BB_OP_PIPELINE, error && *error ? (*error).code : 0, 0, 0, 0);
     if(measure) {
         uint64_t spent=host_ticks()-start;
         __atomic_add_fetch(&frame_ns,spent,__ATOMIC_RELAXED);

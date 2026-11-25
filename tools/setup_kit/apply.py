@@ -32,9 +32,11 @@ from xml.parsers.expat import ExpatError
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from setup_kit import install as ins
+    from setup_kit import update_manifest as updates
     from setup_kit.export import refuse_update
 else:
     from . import install as ins
+    from . import update_manifest as updates
     from .export import refuse_update
 
 KIND = "launch-update-v1"
@@ -116,10 +118,7 @@ def verify_app(app, bundle_id=ins.PUBLIC_BUNDLE_ID):
 
 
 def _version_parts(version):
-    if not isinstance(version, str) or len(version) > 63 or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version):
-        raise ValueError("invalid app version")
-    parts = tuple(map(int, version.split(".")))
-    return parts + (0,) * (4 - len(parts))
+    return updates.version_parts(version)
 
 
 def _app_version(app):
@@ -127,23 +126,145 @@ def _app_version(app):
         return plistlib.load(info)["CFBundleShortVersionString"]
 
 
+def _small_file(path, limit):
+    """Bound retained metadata reads and refuse links/special files before reading."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            raise ValueError("invalid update metadata file")
+        body = source.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError("oversized update metadata")
+        return body
+
+
+def _product_name(destination):
+    ins.product(destination)
+    return "mw" if Path(destination).name == ins.APP_BUNDLE else "carbon"
+
+
+def highest_healthy(profile, product):
+    """Missing state is a first install; malformed existing state never resets trust."""
+    path = Path(profile) / (".update-healthy-" + product + ".json")
+    try:
+        body = _small_file(path, 1024)
+        record = json.loads(body)
+        if (record.get("format_version") != 1 or record.get("product") != product
+                or set(record) != {"format_version", "product", "version"}):
+            raise ValueError("invalid healthy-version record")
+        _version_parts(record["version"])
+        return record["version"]
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise ValueError(f"Invalid healthy-version record {path}. Delete this file to reset update history.") from error
+
+
+def _proof_files(job):
+    return set(job.glob("*.manifest")) | set(job.glob("*.manifest.sig"))
+
+
+def verify_update(job, profile, destination, target):
+    """Reauthenticate the retained release at both preparation and apply boundaries.
+
+    The only unsigned migration is a destination at/below the last pre-F4
+    version with BOTH sidecars absent. A supplied proof always has to verify.
+    Caller serializes healthy state with the existing destination lock.
+    """
+    job, profile, destination = map(Path, (job, profile, destination))
+    try:
+        product = _product_name(destination)
+        installed = _app_version(destination)
+        target_parts, installed_parts = _version_parts(target), _version_parts(installed)
+        healthy = highest_healthy(profile, product)
+        if target_parts <= installed_parts or (healthy is not None and target_parts <= _version_parts(healthy)):
+            raise ValueError("target version must be newer than installed and highest healthy versions")
+        binding = job / "target-version.json"
+        if os.path.lexists(binding):
+            if json.loads(_small_file(binding, 16384))["version"] != target:
+                raise ValueError("target version binding differs from the release")
+        repo, prefix = updates.PRODUCTS[product]
+        name = f"{prefix}-v{target}.dmg"
+        manifest, signature = job / (name + ".manifest"), job / (name + ".manifest.sig")
+        supplied = _proof_files(job)
+        if not supplied:
+            cutoff = "4.10.0" if product == "mw" else "1.3.0"
+            if installed_parts <= _version_parts(cutoff):
+                return None
+            raise ValueError("publisher proof is required after the bootstrap version")
+        if supplied != {manifest, signature}:
+            raise ValueError("missing or unexpected update proof files")
+        release = updates.verify(_small_file(manifest, updates.MANIFEST_MAX),
+                                 _small_file(signature, updates.SIGNATURE_MAX),
+                                 repo=repo, product=product, tag="v" + target)
+        # The retained Setup source independently carries its own product version.
+        from setup_kit import backend
+        setup_version = backend.PUBLIC_VERSION if product == "mw" else backend.CARBON_VERSION
+        if release.version != target or setup_version != target or not os.path.lexists(binding):
+            raise ValueError("signed version, Setup version and target binding must match")
+        for asset in (release.dmg, release.checksum):
+            path = job / asset.name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("unsafe retained update asset")
+            updates.verify_asset(path, asset)
+        checksum = _small_file(job / release.checksum.name, 4096)
+        match = re.fullmatch(rb"([0-9a-fA-F]{64})  " + re.escape(name.encode("ascii")) + rb"\n?", checksum)
+        if match is None or match[1].decode("ascii").lower() != release.dmg.sha256:
+            raise ValueError("invalid release checksum entry")
+        return release
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ExpatError) as error:
+        raise ins.InstallError("Update proof/version verification failed: " + str(error),
+                               "Discard this update and prepare it again.") from error
+
+
+def _advance_healthy(profile, record):
+    """Only acknowledged journals may advance state; recovery repeats this atomically."""
+    if record["state"] != "acknowledged":
+        raise ins.InstallError("An update cannot become healthy before acknowledgment.")
+    app = Path(record["dest"]) / record.get("bundle", ins.APP_BUNDLE)
+    try:
+        product = _product_name(app)
+        version = _app_version(app)
+        _version_parts(version)
+        if version != record.get("version", version):
+            raise ValueError("acknowledged app version changed")
+        try:
+            healthy = highest_healthy(profile, product)
+        except ValueError as error:
+            # The acknowledged app is authoritative even if the previous floor
+            # was damaged. Finish cleanup and replace it with this healthy version.
+            print(str(error))
+            healthy = None
+        if healthy is not None and _version_parts(version) <= _version_parts(healthy):
+            return
+        path = Path(profile) / (".update-healthy-" + product + ".json")
+        temporary = path.with_name(path.name + ".tmp-" + record["token"])
+        ins.remove(temporary)
+        body = json.dumps(dict(format_version=1, product=product, version=version), sort_keys=True).encode()
+        ins.write_synced(temporary, body, 0o600)
+        os.replace(temporary, path)
+        ins.sync_dir(profile)
+        _step("healthy-version-written")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ExpatError) as error:
+        raise ins.InstallError("Cannot record the healthy update version: " + str(error)) from error
+
+
 def _check_versions(ready, descriptor, app, destination):
     target = descriptor["version"]
-    # In-app preparation pins the signed Setup version independently of the staged output.
-    # Direct Setup transaction callers supply their target in the ready descriptor.
     job = ready.parent.parent if ready.parent.name == "staged" else ready.parent
-    binding = job / "target-version.json"
-    try:
-        metadata = binding.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384:
-            raise ValueError("invalid verified version binding")
-        if json.loads(binding.read_bytes())["version"] != target:
-            raise ins.InstallError("The prepared update does not match the verified release version.",
-                                   "Prepare the update again.")
-    if _app_version(app) != target or _version_parts(target) <= _version_parts(_app_version(destination)):
+    # A custom --stage name also keeps retained assets in its parent. Flat
+    # jobs keep proof beside ready.json; conflicting supplied proof refuses.
+    if ready.parent.name != "staged" and _proof_files(job.parent):
+        if _proof_files(job):
+            raise ValueError("ambiguous update proof location")
+        binding = job / "target-version.json"
+        if os.path.lexists(binding) and json.loads(_small_file(binding, 16384))["version"] != target:
+            raise ValueError("target version binding differs from the release")
+        job = job.parent
+    verify_update(job, Path(descriptor["profile"]), destination, target)
+    if _app_version(app) != target:
         raise ins.InstallError("The staged app must match the target version and be newer than the installed app.",
                                "Prepare the update again.")
 
@@ -350,6 +471,11 @@ def _rollback(profile, record):
 
 def _finish(profile, record):
     names, generation, temporary = _names(profile, record)
+    # Recovery must validate the acknowledged identities before advancing trust.
+    for path, candidate, unused in names:
+        if path.name != "app.txt" and ins.ident(path) != record["ids"][str(path)][1]:
+            raise ins.InstallError("An acknowledged update changed; its remaining backups were kept.")
+    _advance_healthy(profile, record)
     ins.sync_volumes(profile, Path(record["dest"]))
     # Once acknowledged, rollback is forbidden: cleanup may have removed backups.
     for path, candidate, unused in names:
@@ -417,7 +543,7 @@ def apply_ready(ready, profile, destination, verify=None, running=None, held=Non
         descriptor, app, data = read_ready(ready, profile, destination)
         verify(app)
         record = dict(kind=KIND, token=uuid.uuid4().hex, dest=str(destination.parent), state="preparing", ids={},
-                      ready=str(ready), ready_id=ins.ident(ready), job=str(ready.parent))
+                      ready=str(ready), ready_id=ins.ident(ready), job=str(ready.parent), version=descriptor["version"])
         if destination.name != ins.APP_BUNDLE:  # another product's journal names its app (install._plan, recovery)
             record.update(bundle=destination.name, bundle_id=product["bundle_id"])
         if ready.parent.name == "staged":

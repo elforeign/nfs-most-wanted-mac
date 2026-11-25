@@ -42,8 +42,8 @@ Per-volume checks preserve unknown sizes and refuse either full volume.
 Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
 two real child commands sharing one log entry independent of the caller TMPDIR.
 
-Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.10.0;
-changing it to 4.9.0 fails 1/1 against the independent 4.10.0 expectations.
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.11.0;
+changing it to 4.10.0 fails 1/1 against the independent 4.11.0 expectations.
 
 Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
 broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
@@ -212,6 +212,16 @@ class Fixture(unittest.TestCase):
         self.package_path = list(setup_kit.__path__)
         self.toolchain_version = "fixture-v1"
         self.dependency_pin = "fixture-v1"
+
+    def signed_carbon_job(self, name, version):
+        """A job folder (the stage's parent) holding a throwaway-signed Carbon release proof for `version`."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_apply import UpdateProof
+        job = self.home / name
+        job.mkdir()
+        signer = UpdateProof(job)
+        signer.write(job, "carbon", version)
+        return signer, job / "staged"
 
     def tearDown(self):
         setup_kit.__path__ = self.package_path
@@ -1084,7 +1094,7 @@ def game_save(body=b"career progress", alias=b"ALIAS"):
     return head + (~u & 0xFFFFFFFF).to_bytes(4, "little") + body
 
 
-MIGRATED = "Your 3.x career was copied into 4.0; the 3.x copy is untouched."
+MIGRATED = "Your 3.x career was copied into this version; the 3.x copy is untouched."
 
 
 class SaveMigrationTests(Fixture):
@@ -1183,7 +1193,7 @@ class SaveMigrationTests(Fixture):
                 self.assertEqual(self.legacy_state(), before)
                 warns = [e["msg"] for e in self.events_seen() if e["ev"] == "warn"]
                 self.assertEqual(len(warns), 1)
-                self.assertIn("were not copied into 4.0", warns[0])
+                self.assertIn("were not copied into this version", warns[0])
                 self.assertIn(str(self.old_saves), warns[0])
         # Broken control: a check of the magic alone accepts the truncated save (the game itself would reject it).
         shutil.rmtree(self.old_saves)
@@ -1325,7 +1335,7 @@ class X360ArchiveTests(Fixture):
     def test_space_and_size_limits(self):
         for suffix in (".zip", ".7z"):
             archive = self.archive(suffix)
-            with mock.patch.object(b.shutil, "disk_usage", return_value=types.SimpleNamespace(free=1)):
+            with mock.patch.object(b, "free_bytes", return_value=1):
                 with self.assertRaisesRegex(b.SetupError, "Not enough space on"):
                     b.extract_x360_archive(archive, self.paths.work, self.events)
             with mock.patch.object(b, "X360_ARCHIVE_BYTES", 1):
@@ -1691,8 +1701,19 @@ class PCDiscTests(Fixture):
             self.extract(update=False, exe=False)
         self.assertEqual(str(error.exception).splitlines(), [
             "Missing: official 1.3 update. Choose it above.",
-            "Missing: speed.exe from that update. Choose it above."])
+            "Missing: a speed.exe that has the version 1.3 code (the one on the discs and in the update is copy-protected). Choose it above."])
         self.assertFalse((self.paths.work / "pc_src").exists())
+
+    def test_missing_exe_names_the_file_setup_accepts(self):
+        """With the update chosen but no speed.exe, the message must not send the player to the update's own
+        speed.exe: that one is copy-protected and refused (v4.10.0 said "speed.exe from that update")."""
+        with self.assertRaises(b.SetupError) as error:
+            self.extract(exe=False)
+        message = str(error.exception)
+        self.assertEqual(message, f"Missing: {b.MW_DISC_EXE}. Choose it above.")
+        self.assertNotIn("from that update", message)
+        self.assertIn("version 1.3 code", message)
+        self.assertIn("copy-protected", message)
 
     def extract(self, disc=None, update=True, exe=True):
         return b.extract_pc_disc(disc or self.disc1, self.update if update else None, self.exe if exe else None,
@@ -1780,7 +1801,7 @@ class PCDiscTests(Fixture):
     def test_versions_missing_disc_and_inputs_refused_before_unpacking(self):
         cases = [
             ("Missing: official 1.3 update", dict(update=False, exe=False)),
-            ("Missing: speed.exe", dict(exe=False)),
+            ("Missing: a speed.exe that has the version 1.3 code", dict(exe=False)),
         ]
         for message, kwargs in cases:
             with self.subTest(message), self.assertRaisesRegex(b.SetupError, message):
@@ -2172,8 +2193,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], "4.10.0")
-        self.assertEqual(public["CFBundleVersion"], "4.10.0")
+        self.assertEqual(public["CFBundleShortVersionString"], "4.11.0")
+        self.assertEqual(public["CFBundleVersion"], "4.11.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -2197,7 +2218,7 @@ printf icon > "$1"
             self.assertRegex(event["msg"], r"^Not enough space on .+: [0-9.]+ GB more needed\. Free up space there, then press Retry\.$")
             self.assertNotIn("writable", event["fix"])
         with self.subTest(boundary="same volume totals"):
-            with mock.patch.object(b.shutil, "disk_usage", return_value=types.SimpleNamespace(free=6 * 1024**3)):
+            with mock.patch.object(b, "free_bytes", return_value=6 * 1024**3):
                 with self.assertRaises(b.SetupError):
                     b.check_space(self.paths, self.pc, self.dest)
         # Different storage devices must stay separate; each one can block.
@@ -2211,8 +2232,8 @@ printf icon > "$1"
             requirements = b.space_requirements(self.paths, self.pc, self.dest)
             self.assertEqual(len(requirements), 4)
             for full_device in range(4):
-                with self.subTest(full_device=full_device), mock.patch.object(b.shutil, "disk_usage", side_effect=lambda p:
-                        types.SimpleNamespace(free=0 if p.stat().st_dev == full_device else 100 * 1024**3)):
+                with self.subTest(full_device=full_device), mock.patch.object(b, "free_bytes", side_effect=lambda p:
+                        0 if p.stat().st_dev == full_device else 100 * 1024**3):
                     with self.assertRaisesRegex(b.SetupError, f"Not enough space on Disk {full_device}:"):
                         b.check_space(self.paths, self.pc, self.dest)
         for target in (self.paths.work, self.paths.cache, self.paths.data, self.dest):
@@ -2240,9 +2261,9 @@ printf icon > "$1"
 
     def test_disk_space_preflight_broken_control(self):
         free = types.SimpleNamespace(free=100 * 1024**3)
-        with mock.patch.object(b.shutil, "disk_usage", return_value=free):
+        with mock.patch.object(b, "free_bytes", return_value=free.free):
             b.check_space(self.paths, self.pc, self.dest)
-        with mock.patch.object(b.shutil, "disk_usage", return_value=types.SimpleNamespace(free=1)):
+        with mock.patch.object(b, "free_bytes", return_value=1):
             with self.assertRaises(b.SetupError):
                 b.check_space(self.paths, self.pc, self.dest)
             with self.assertRaises(AssertionError):
@@ -3321,7 +3342,11 @@ class X360ExtrasTests(Fixture):
                 record.update(features=True, missing=[n for n in x360_extras.ALL if n not in selection])
             return dict(x360_root=out / "files", assets_root=out / "assets")
         with self.pipeline_stubs(), mock.patch.object(b, "prepare_x360", side_effect=prepare):
-            return b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
+            # Update fixtures build a later release than the preceding repair/install.
+            verify = functools.partial(b.verify_app, version="4.10.1" if stage else "4.10.0")
+            with mock.patch.object(b, "PUBLIC_VERSION", "4.10.1" if stage else "4.10.0"), \
+                    mock.patch.object(b, "verify_app", verify):
+                return b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
 
     def installed_extras(self):
         roots = dict(line.split("=", 1) for line in (self.paths.data / "roots.txt").read_text().splitlines())
@@ -3378,7 +3403,7 @@ class X360ExtrasTests(Fixture):
     def test_x360_omitted_space_is_not_reserved(self):
         from setup_kit import x360_extras
         base = 2 * sum(p.stat().st_size for p in self.pc.rglob("*") if p.is_file()) + 8 * 1024**3 + 768 * 1024**2
-        with mock.patch.object(b.shutil, "disk_usage", return_value=types.SimpleNamespace(free=base)):
+        with mock.patch.object(b, "free_bytes", return_value=base):
             b.check_space(self.paths, self.pc, self.dest, x360_bytes=x360_extras.required_bytes([]))
             for feature in x360_extras.ALL:
                 with self.subTest(feature=feature), self.assertRaises(b.SetupError):
@@ -3585,7 +3610,8 @@ class CarbonRepackTests(Fixture):
 
 class CarbonBuildTests(Fixture):
     def test_moved_carbon_source_update_and_original_control(self):
-        installed, _ = self.carbon_build()
+        with mock.patch.object(b, 'CARBON_VERSION', '1.2.0'):
+            installed, _ = self.carbon_build()
         self.carbon.rename(self.home / 'Moved Carbon')
         setup_kit.__path__ = self.package_path
         real = b.build
@@ -3797,32 +3823,33 @@ class CarbonBuildTests(Fixture):
         self.assertTrue(bundle[bundle.index("--boot") + 1].endswith("recomp/out/carbon/boot_carbon"))
 
     def test_carbon_update_from_its_own_version_and_remembered_folder(self):
-        """Carbon's updater inputs: its own version 1.3.0 (Most Wanted's stays), its sources remembered at install in
-        its own Setup state, and a 1.3.1 update staged from those alone, bound to its app and profile <data>/Carbon.
+        """Carbon's updater inputs: its own version 1.4.0 (Most Wanted's stays), its sources remembered at install in
+        its own Setup state, and a 1.4.1 update staged from those alone, bound to its app and profile <data>/Carbon.
         Proof: with main 583933e9's tools/setup_kit this fails at its first check (bundle --version 4.6.0); fixed: passes."""
         from setup_kit import apply   # the checked-in launch transaction (the builds below load the build copy's)
         installed, runner = self.carbon_build()
         bundle = next(c for c in runner.commands if "runtime/bundle.sh" in " ".join(c))
-        self.assertEqual(bundle[bundle.index("--version") + 1], "1.3.0")
+        self.assertEqual(bundle[bundle.index("--version") + 1], "1.4.0")
         self.assertNotEqual(b.PUBLIC_VERSION.split(".")[0], "1")   # Most Wanted keeps its 4.x numbers
         with (Path(installed) / "Contents/Info.plist").open("rb") as f:
-            self.assertEqual(plistlib.load(f)["CFBundleShortVersionString"], "1.3.0")
+            self.assertEqual(plistlib.load(f)["CFBundleShortVersionString"], "1.4.0")
         choices = b.staging.load_choices(self.paths.state / "Carbon", required=True)
         self.assertEqual((Path(choices["pc"]), Path(choices["destination"])), (self.carbon.resolve(), Path(installed)))
         self.assertFalse((self.paths.state / "source-choices.json").exists())   # Most Wanted's choices untouched
         setup_kit.__path__ = self.package_path   # a new process (the update's preparer) imports the full package again
-        stage = self.home / "carbon-update"
+        signer, stage = self.signed_carbon_job("carbon-update", "1.4.1")   # past the unsigned bootstrap (1.3.0)
         real = b.build
         with mock.patch.object(b, "build", lambda args, paths, events, runner, source_root=None:
                                real(args, paths, events, CarbonRunner(self.log, self.child_env, paths.work), self.source)), \
-             mock.patch.object(b, "CARBON_VERSION", "1.3.1"), \
+             mock.patch.object(b, "CARBON_VERSION", "1.4.1"), signer.trust(b.updating.updates), \
              self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"), redirect_stdout(self.stream):
             rc = b.main(["--stage-only", "--game", "carbon", "--stage", str(stage), "--work", str(self.paths.work), "--events"])
         self.assertEqual(rc, 0, self.stream.getvalue()[-2000:])
         ready = json.loads((stage / "ready.json").read_text())
         self.assertEqual((ready["version"], ready["app"], ready["profile"], ready["destination"]["path"]),
-                         ("1.3.1", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
-        record, app, data = apply.read_ready(stage / "ready.json", self.paths.data / "Carbon", Path(installed))
+                         ("1.4.1", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
+        with signer.trust(apply.updates), mock.patch.object(b, "CARBON_VERSION", "1.4.1"):   # apply reauthenticates the proof
+            record, app, data = apply.read_ready(stage / "ready.json", self.paths.data / "Carbon", Path(installed))
         self.assertTrue((Path(app) / "Contents/MacOS/NFSCarbon").is_file())
         self.assertTrue((stage / record["roots"]["pc_root"] / "NFSC.exe").is_file())
         self.assertFalse((self.paths.data / "roots.txt").exists())   # Most Wanted's profile untouched
@@ -4019,7 +4046,7 @@ class CarbonSetupDiscTests(Fixture):
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0]["msg"].splitlines(), [
             "Missing: official 1.4 update. Choose it above.",
-            "Missing: NFSC.exe from that update. Choose it above."])
+            "Missing: your compatible 1.4 NFSC.exe (the one on the disc is copy-protected). Choose it above."])
 
     def test_P5_7_second_disc_folder(self):
         """P5 item 7: old 0/1 accepted second folders; shared disc path 1/1."""
@@ -4046,8 +4073,9 @@ class CarbonSetupDiscTests(Fixture):
         saved = b.staging.load_choices(b.carbon_state(self.paths), required=True)
         self.assertEqual([saved[k] for k in ("pc", "pc_update", "pc_exe")],
                          [str(p) for p in (self.disc, self.update, self.exe)])
-        stage = self.home / "update"
-        self.cli("--stage-only", "--stage", str(stage))
+        signer, stage = self.signed_carbon_job("update", "1.4.1")   # past the unsigned bootstrap (1.3.0)
+        with mock.patch.object(b, "CARBON_VERSION", "1.4.1"), signer.trust(b.updating.updates):
+            self.cli("--stage-only", "--stage", str(stage))
         record = json.loads((stage / "ready.json").read_text())
         self.assertEqual([record["provenance"][k] for k in ("carbon", "pc_update", "pc_exe")],
                          [str(p) for p in (self.disc, self.update, self.exe)])
@@ -4084,7 +4112,7 @@ class CarbonSetupDiscTests(Fixture):
 
     def test_disc_cli_missing_inputs(self):
         for flag, message in (("--pc-update", "Missing: official 1.4 update"),
-                              ("--pc-exe", "Missing: NFSC.exe")):
+                              ("--pc-exe", "Missing: your compatible 1.4 NFSC.exe")):
             args = self.selection()
             index = args.index(flag)
             del args[index:index + 2]
@@ -4140,7 +4168,7 @@ class CarbonSetupDiscTests(Fixture):
 
     def test_disc_missing_inputs_and_wrong_exe(self):
         for update, exe, message in ((False, True, "Missing: official 1.4 update"),
-                                      (True, False, "Missing: NFSC.exe")):
+                                      (True, False, "Missing: your compatible 1.4 NFSC.exe")):
             with self.subTest(message=message), self.assertRaisesRegex(b.SetupError, message):
                 self.prepare(update, exe)
         for data in (b"wrong executable", self.patch_fixture.EXE[0]):
@@ -4239,6 +4267,112 @@ class PrivateCarbonSetupTests(unittest.TestCase):
                 logs = sorted(paths.logs.glob("*.log"), key=lambda p: p.stat().st_mtime)
                 tail = "\n".join(logs[-1].read_text(errors="replace").splitlines()[-30:])[-6000:] if logs else "No build log."
                 self.assertEqual(rc, 0, tail)
+
+
+class F4BackendTests(Fixture):
+    """Preparation admission: original 0/3 tests pass; fixed 3/3; both products use real proof verification."""
+    def update_case(self, product, suffix):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_apply import UpdateProof
+        setup_kit.__path__ = self.package_path
+        carbon = product == 'carbon'
+        version, installed = ('1.4.0', '1.3.0') if carbon else ('4.11.0', '4.10.0')
+        bundle = 'NFS Carbon Native.app' if carbon else 'NFS Most Wanted Native.app'
+        app = self.dest / bundle
+        self.plant_app(app, installed, b.CARBON_PRODUCT['bundle_id'] if carbon else b.PUBLIC_ID,
+                       b.CARBON_PRODUCT['exec'] if carbon else b.PUBLIC_EXEC)
+        job = self.home / (product + '-' + suffix)
+        job.mkdir()
+        signer = UpdateProof(job)
+        dmg, checksum = signer.write(job, product, version)
+        args = self.args()
+        args.build, args.stage_only, args.game = False, True, product
+        args.dest, args.stage = str(app), str(job / 'staged')
+        profile = self.paths.data / 'Carbon' if carbon else self.paths.data
+        if carbon:
+            args.pc = None
+            carbon_pc = self.home / 'Carbon PC'
+            write(carbon_pc / 'NFSC.exe', b'MZ Carbon fixture executable')
+            write(carbon_pc / 'TRACKS/fixture.bin', b'Carbon track')
+            args.carbon = str(carbon_pc)
+            patch = mock.patch.object(b, 'CARBON_EXE_SHA256', b.sha_file(carbon_pc / 'NFSC.exe'))
+            patch.start()
+            self.addCleanup(patch.stop)
+        patch = mock.patch.object(b, 'CARBON_VERSION' if carbon else 'PUBLIC_VERSION', version)
+        patch.start()
+        self.addCleanup(patch.stop)
+        runner = (CarbonRunner if carbon else FakeRunner)(self.log, self.child_env, self.paths.work)
+        return args, profile, signer, dmg, checksum, runner
+
+    def prepare(self, args, signer, runner):
+        verify = functools.partial(b.verify_app, version=b.PUBLIC_VERSION)
+        setup_kit.__path__ = self.package_path
+        with self.pipeline_stubs(), signer.trust(b.updating.updates), mock.patch.object(b, 'verify_app', verify):
+            return b.build(args, self.paths, self.events, runner, self.source)
+
+    def test_f4_tampering_stops_before_compilers(self):
+        # Original builds 12/12 hostile releases; fixed refuses 12/12; gate bypass builds 12/12.
+        for product in ('mw', 'carbon'):
+            for change in ('dmg', 'repair', 'signature', 'missing-proof', 'binding', 'setup-version'):
+                with self.subTest(product=product, change=change):
+                    args, profile, signer, dmg, checksum, runner = self.update_case(product, change)
+                    if change in ('dmg', 'repair'):
+                        write(dmg, b'substituted executable image')
+                    if change == 'repair':
+                        write(checksum, b.sha_file(dmg) + '  ' + dmg.name + '\n')
+                    if change == 'signature':
+                        write(signer.signature, b'broken signature')
+                    if change == 'missing-proof':
+                        signer.signature.unlink()
+                    if change == 'binding':
+                        write(Path(args.stage).parent / 'target-version.json', '{"version":"9.0"}')
+                    if change == 'setup-version':
+                        # Valid proof for another version must not be treated as absent/legacy.
+                        replacement = signer.manifest.with_name(signer.manifest.name.replace('v1.4.0', 'v1.5.0')
+                                                                .replace('v4.11.0', 'v4.12.0'))
+                        signer.manifest.rename(replacement)
+                    with self.assertRaises(ins.InstallError):
+                        self.prepare(args, signer, runner)
+                    self.assertEqual(runner.commands, [])
+                    self.assertFalse((Path(args.stage) / 'ready.json').exists())
+                    with mock.patch.object(b.updating, 'verify_update', return_value=None):
+                        ready = self.prepare(args, signer, runner)
+                    self.assertTrue(ready.is_file())
+
+    def test_f4_signed_stage_reverified_before_apply(self):
+        # Original accepts 2/2 late DMG swaps; fixed refuses 2/2 after 2/2 valid signed builds.
+        for product in ('mw', 'carbon'):
+            with self.subTest(product=product):
+                args, profile, signer, dmg, checksum, runner = self.update_case(product, 'valid')
+                ready = self.prepare(args, signer, runner)
+                self.assertFalse((profile / ('.update-healthy-' + product + '.json')).exists())
+                with signer.trust(b.updating.updates):
+                    b.updating.read_ready(ready, profile, Path(args.dest))
+                    write(dmg, b'late swap after successful build')
+                    with self.assertRaises(ins.InstallError):
+                        b.updating.read_ready(ready, profile, Path(args.dest))
+
+    def test_f4_preparation_replay_and_failure_do_not_advance(self):
+        # Original builds 2/2 replayed targets; fixed refuses 2/2; unhealthy builds preserve 2/2 records.
+        for product in ('mw', 'carbon'):
+            with self.subTest(product=product):
+                args, profile, signer, dmg, checksum, runner = self.update_case(product, 'replay')
+                healthy = profile / ('.update-healthy-' + product + '.json')
+                target = '1.4.0' if product == 'carbon' else '4.11.0'
+                write(healthy, json.dumps(dict(format_version=1, product=product, version=target)))
+                before = healthy.read_bytes()
+                with self.assertRaises(ins.InstallError):
+                    self.prepare(args, signer, runner)
+                self.assertEqual(runner.commands, [])
+                self.assertEqual(healthy.read_bytes(), before)
+                write(healthy, json.dumps(dict(format_version=1, product=product,
+                                              version='1.3.0' if product == 'carbon' else '4.10.0')))
+                before = healthy.read_bytes()
+                with mock.patch.object(runner, 'run', side_effect=b.SetupError('injected build failure')), \
+                        self.assertRaises(b.SetupError):
+                    self.prepare(args, signer, runner)
+                self.assertEqual(healthy.read_bytes(), before)
+                self.assertFalse((Path(args.stage) / 'ready.json').exists())
 
 
 if __name__ == "__main__":

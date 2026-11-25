@@ -132,6 +132,7 @@ clang \
     pre_treatment.m \
     post_cuts.c \
     render_thread.m \
+    rt_scene.m \
     soft_smoke_half.m \
     gpupass.m \
     dsound.c \
@@ -206,14 +207,14 @@ clang \
     -x objective-c daynight_sky.c -x none \
     settings.c \
     text_fit.c \
-    roam_auth.c \
-    roam_moderation.c \
     settings_port.c \
     portmenu.m \
     guide.m \
     report.m \
     blackbox.c \
+    blackbox_errors.c \
     blackbox_render.m \
+    blackbox_input.c \
     blackbox_mw.c \
     blackbox_mw_fe.c \
     blackbox_mw_cinematics.c \
@@ -234,17 +235,6 @@ clang \
     x360copspeech.c \
     x360nisaudio.c \
     x360_shadow_fit.cpp \
-    roam_game.c \
-    roam_hud.c \
-    roam_core.c \
-    roam_relay.c \
-    roam_server.c \
-    roam_online.c \
-    roam_code.c \
-    natmap.c \
-    natpmp.c \
-    pcp.c \
-    upnp.c \
     ../recomp/out/speed.a \
     $SERVER_LIB \
     ../host/audio/build/libhostaudio.a \

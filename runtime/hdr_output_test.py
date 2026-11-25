@@ -349,6 +349,7 @@ def main():
         exe = scratch / 'test'
         build = ['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                  '-Wno-unused-variable', '-fobjc-arc', '-I', scratch, '-I', ROOT, scratch / 'test.m', ROOT / 'post_cuts.c',
+                 ROOT / 'blackbox.c', ROOT / 'blackbox_errors.c',
                  '-framework', 'Cocoa', '-framework', 'QuartzCore', '-framework', 'Metal', '-o', exe]
         checked(build)
         checked([exe, '--cpu'], env=env)

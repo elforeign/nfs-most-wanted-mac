@@ -125,7 +125,7 @@ unsigned trigopt_rumble_sample(uint8_t *bytes);
 unsigned trigopt_rumble_nonzero(void);
 unsigned trigopt_rumble_opens(void);
 static void output(GCController *a) {
-    Cpu c = cpu(); gs.tick_ns = clock_ns; effects_valid = 1;
+    Cpu c = cpu(); gs.tick_ns = clock_ns; feedback_states[0].effects_valid = 1;
     padfx_update((__bridge void *)a, 1, .8f, 0); drain();
     (void)c;
 }
@@ -182,7 +182,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     bind(A_SHIFTDOWN, T_AXIS_HI, 2); bind(A_SHIFTUP, T_ROT_HI, 2);
     M32(0x9885e0) = 0x1000; M32(0x102c) = 3;
     trigopt_rumble_init();
-    S.active = 1; S.out_l = .8f; S.out_r = .4f; last_tick = clock_ns;
+    feedback_states[0].model.active = 1; feedback_states[0].model.out_l = .8f; feedback_states[0].model.out_r = .4f; feedback_states[0].last_tick = clock_ns;
     output(a);
     unsigned on_writes = fake_writes;
     CHECK((a.extendedGamepad.leftTrigger.mode != T_OFF) == adaptive.value);
@@ -197,7 +197,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         CHECK(adaptive.value == !initial && pref_writes == writes);
 
     }
-    CHECK(S.out_l == .8f && S.out_r == .4f && effects_valid);
+    CHECK(feedback_states[0].model.out_l == .8f && feedback_states[0].model.out_r == .4f && feedback_states[0].effects_valid);
     unsigned clears = fake_writes - on_writes;
     fake_writes = 0; output(a);
     unsigned toggled_reports = fake_writes;

@@ -40,6 +40,16 @@ Carbon's begin seam bypasses shared HDR composition; its scene radiance and
 highlight treatment require their own implementation and proof. Display
 PQ/HLG transport and measured panel white remain unverified.
 
+In Carbon, the clock's daylight reads Most Wanted's own time-of-day records:
+Carbon ships all eight Most Wanted PC lighting layouts byte for byte, and the
+X360 overlay replaces the visual-treatment quartet's colours unless
+`NFS_LIGHT_DATA=pc`. With `NFS_DAYNIGHT=on`, the default applies Most Wanted's
+Neutral transform to that record. `NFS_WORLD_LIGHTING=original` (Retail Most
+Wanted, read at startup) keeps the authored colours, as Most Wanted's Original
+world setters do, for the world, glass, Rockport roads, facades and trees in
+both cities. The night record, car rig, sky and fog are the same in both profiles.
+The optional colour grade below applies only to Retail Most Wanted in Rockport. With the clock off, Carbon stays retail.
+
 The clock lives for the process, seeded once from the game's phase. Free roam
 advances by `dt/150` hours (60 real minutes per day), holds while paused and
 wraps at 24. Every race holds its first frame's hour. Returning to free roam
@@ -105,6 +115,64 @@ every hour, independent of the overlay, camera row and dome; its bypass omits
 saturation to retain code values above 1. `0`/`off` restores the native LUTs
 in this profile too. BOOT_DIAG logs
 `carbon_daynight_grade: weight=... draws day=... zero=...` every 2 s.
+
+`NFS_DAYNIGHT_MW_GRADE=on` (later image, **Off by default**, `1` also enables;
+restart required) opts into Most Wanted PC's colour grade only with
+`NFS_DAYNIGHT=on`, `NFS_WORLD_LIGHTING=original` (also `pc`/`0`) and
+`NFS_DAYNIGHT_GRADE` enabled. Unset, `0` or `off` keeps the existing program
+bytes and output. The new look uses the existing Rockport camera-row/native-dome
+daylight weight; night and Palmont retain Carbon's native grade. The switch
+has no effect in either Neutral profile, including the existing global D65
+bypass. It does not change any existing option's default.
+
+The initial look is zero-based record **3**, the fourth 0xE0-byte visuallook
+at attributes offset 0x435F0, key EEC2271A (tint .88/.80/.44). The decoded MW
+constructor 0074B8B0 binds it to the base instance +184. Normal-race UpdateHeat
+0074BC20 at heat 1 with no triggered pursuit/heat transition has inactive
++1C8 effect (timestamp zero), hence effect weight 0 and base weight 1;
+0073E090 reads the base from +184. This chooses the normal base record, without
+inventing a heat mapping for Carbon or following transient MW effects.
+
+`carbon_mw_grade.h` uses generated `gen/look_pc.inc`, builds the consumed R/G
+channels of MW's 256x1 SPLINE (float-step cubic, clamp, x255, truncation), and
+binds it POINT/CLAMP on s7. Detail B is unused by this grade and remains zero.
+Pixel c26..28 carry the source luminance vector (.6125/.5154/.0721),
+desaturation, black term, tint and colour intensity. Plain preserves the raw
+scene before native bloom; enhanced preserves its native DOF scene and replaces
+its additional desaturation. Bloom, vignette, exposure and fades remain Carbon's;
+plain adds its bloom after the replacement grade rather than grading it twice.
+
+**Luminance adaptation:** Carbon's final pass has no MW filter-alpha contract.
+Carbon's decoded `screeneffect/DownScaleForBloom` averages incoming alpha,
+rather than writing luminance as MW's `filter/p4` does. The new grade computes
+dot(Carbon filtered bloom RGB, MW luminance vector),
+independently of scene RGB; it does not reinterpret Carbon bloom alpha as MW
+luminance. This is an adaptation of the auxiliary input, not exact MW blur or
+whole-frame parity. Where matching MW filtered luminance is supplied, the
+source grade arithmetic and quantized curve sampling match the original MW PS.
+The offline original-bytecode check covers all five looks and both retail
+Carbon programs with independent scene/luminance fixtures, max RGB error
+<= 1/255 (measured 2.38418579e-7 across 300 pairs; 3328 assertions), and a
+deliberately broken identity bypass (2060 failed assertions, maximum 2.17443228).
+The grey/luminance-.8 broken fixture is .269565523 with quantized POINT curves;
+the design's unquantized analytical control is .271808649. Off shader bytes
+(10/10) and zero-weight output (300/300, also non-neutral tails) match the pinned
+previous variant fragment. The selector passes 100 combinations; the resource
+fixture checks retry/release, cached creation, sampler states and uploaded bytes.
+
+For matched Rockport daylight stills, use the same combined-world overlay,
+camera, car and graphics settings in both runs, with
+`NFS_CARBON_SKIPFE=1 NFS_CARBON_SKIPFE_TRACK=5000 NFS_CARBON_SKIPFE_CAR=viper
+NFS_CARBON_WORLD_PROBE=0 NFS_DAYNIGHT=on NFS_WORLD_LIGHTING=original
+NFS_DAYNIGHT_GRADE=on NFS_TEST_DAYNIGHT_HOUR=12 NFS_LIGHT_DATA=pc
+BOOT_AUTODRIVE=1 BOOT_DIAG=1 BOOT_DIAG_SHOT_EVERY=600`.
+Set `NFS_CARBON_TRACK_OVERLAY` to the current combined-world overlay and compare
+`NFS_DAYNIGHT_MW_GRADE=off` against `NFS_DAYNIGHT_MW_GRADE=on` after reaching
+Rockport (camera row contains section 2100); track 5000 alone starts in Palmont.
+Use `BOOT_BIN` pointing at the new Carbon binary and `NFS_GAME` at its PC data.
+For the maximum-detail stills, use the same resolution in both runs and:
+`BOOT_REG=FirstTime=0,g_PerformanceLevel=5,g_FSAALevel=1,g_CarEnvironmentMapEnable=3,g_RoadReflectionEnable=2,g_MotionBlurEnable=1,g_ParticleSystemEnable=1,g_WorldLodLevel=3,g_CarLodLevel=1,g_RainEnable=1,g_TextureFiltering=2,g_VisualTreatment=1,g_ShadowDetail=2,g_ShaderDetailLevel=3`.
+No new overlay or other `BOOT_` change is needed for this grade.
 
 The chosen daylight interval is 06:00–18:00. The original phase maps linearly
 from 0.05 to 0.95 over that interval and holds an endpoint outside it. Direction

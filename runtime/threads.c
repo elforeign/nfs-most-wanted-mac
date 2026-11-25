@@ -174,6 +174,12 @@ static KObj kobj[MAX_KOBJ];
 // Guest handle slot -> object (NULL once closed). Each handle, duplicates included,
 // owns one handle_refs reference and closes independently, as on Windows.
 static KObj *handle_obj[MAX_KOBJ];
+// Called on the guest main thread under the GIL, including acceptance snapshots.
+unsigned threads_handle_count(void) {
+    unsigned n = 0;
+    for (unsigned i = 1; i < MAX_KOBJ; ++i) n += handle_obj[i] != NULL;
+    return n;
+}
                                                                     
 static pthread_mutex_t cpu_snapshot_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t next_generation;

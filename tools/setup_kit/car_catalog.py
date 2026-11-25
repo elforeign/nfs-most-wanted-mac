@@ -28,7 +28,7 @@ MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = '1fefd1be8ac6840d46b75981812cb4df1be622d81861c74e52b1f1198863ef64'
+PACKAGED_POLICY_SHA256 = 'f679645d63b3c426eb1c72286589a781e9dbceaec52e154401cf9c7ffed813c8'
 LEGACY_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
 LEGACY_POLICY_REVISION = 2
 # Last policy before Carbon PC audio. Its original contracts remain reviewable.
@@ -49,6 +49,10 @@ PRE_UC_PERFORMANCE_POLICY_SHA256 = 'e5800b882bf2fc7a01d23974ec1f1e7316b0b3977137
 PRE_SIBLING_PERFORMANCE_POLICY_SHA256 = '93a8b9666cdffe4108ae9234fa08e718e47538609110feca05dbfd317b76295b'
 PRE_CACHE_PUBLISH_POLICY_SHA256 = '582212d17b6c590bd8ddcdff84eb4b296e78ee1846a5457bb72942e28d6aa830'
 PRE_PROSTREET_AUDIO_POLICY_SHA256 = '12f70e44254f539a2adb100a6c876d3ad7e562c52b5ae619f316115a343d45cd'
+PRE_TORQUE_SPLINE_POLICY_SHA256 = '3481940c810528f6ffe74e4ca34ca956f16b205461199b811d4e1b02d19247c7'
+PRE_CACHE_RENAME_POLICY_SHA256 = '1933a5cb7999c9248030687d4bafc440bdf92d5e9f9010d9dfb35f477f52f3db'
+PRE_UC_TORQUE_POLICY_SHA256 = 'd2a7671118660bf0c48c67bf91499a698619134480587f7b18800c68a8072aa7'
+PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256 = '5c52fc73694c442707aef4b023a2170d5402f609fcd0276afc1e9bfb6496ec6e'
 POLICY_PATH = Path(__file__).with_name('car_approvals.json')
 _HEX = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Z0-9_]{1,31}\Z')
@@ -278,8 +282,43 @@ class _Stage:
         current = _entry_stat(self.base, self.name)
         _require(current is not None and _identity(current) == _identity(os.fstat(self.fd)),
                  'stage directory changed: ' + repr(self.name))
-        os.rename(self.name, name, src_dir_fd=self.base, dst_dir_fd=self.base)
+        with _renamable(self.fd):
+            os.rename(self.name, name, src_dir_fd=self.base, dst_dir_fd=self.base)
         self.published = True
+
+
+@contextmanager
+def _renamable(fd):
+    """macOS before 26.4 refuses to rename any directory its owner cannot
+    write (EACCES), so a sealed directory is writable only for the rename."""
+    mode = stat.S_IMODE(os.fstat(fd).st_mode)
+    if mode & stat.S_IWUSR:
+        yield
+        return
+    os.fchmod(fd, mode | stat.S_IWUSR)
+    try:
+        yield
+    finally:
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+
+
+def _set_aside(base, name, prefix):
+    """Rename a retained entry aside, keeping its bytes and modes."""
+    try:
+        fd = os.open(name, _DIR_FLAGS, dir_fd=base)
+    except OSError:
+        fd = None  # not a directory: renaming it needs no write access to it
+    try:
+        if fd is None:
+            os.rename(name, prefix + uuid.uuid4().hex, src_dir_fd=base, dst_dir_fd=base)
+        else:
+            with _renamable(fd):
+                os.rename(name, prefix + uuid.uuid4().hex, src_dir_fd=base, dst_dir_fd=base)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    os.fsync(base)
 
 
 @contextmanager
@@ -427,7 +466,7 @@ def _policy(policy):
         for variant in row['variants']:
             if type(variant) is dict and 'legacy' in variant:
                 _keys(variant, ('contract', 'compatibility', 'legacy'))
-                _integer(variant['legacy'], 1, 12)
+                _integer(variant['legacy'], 1, 16)
             else:
                 _keys(variant, ('contract', 'compatibility'))
             _hex(variant['contract'])
@@ -525,7 +564,7 @@ def _row(row, expected, policy):
     _require(REQUIRED_OUTPUTS <= row['outputs'].keys() and
              all(_OUTPUT.fullmatch(name) for name in row['outputs']), 'missing required output or invalid filename')
     _require('AUDIO.BIN' not in row['outputs'] or origin['game'] == 'carbon' or
-             (origin['game'], origin['platform'], origin['folder']) == ('prostreet', 'pc', 'VEYRON'),
+             (origin['game'], origin['platform']) == ('prostreet', 'pc'),
              'audio sidecar requires an audited source')
     contract, compatibility = contract_hash(row), slot_compatibility(row)
     _require(any(v['contract'] == contract and v['compatibility'] == compatibility for v in policy['variants']),
@@ -559,7 +598,9 @@ def _catalog(doc, policy):
                                      PRE_RETAIL_ATTRIBUTES_POLICY_SHA256, RETAIL_ATTRIBUTES_POLICY_SHA256,
                                      PS_PERFORMANCE_POLICY_SHA256, PRE_UC_PERFORMANCE_POLICY_SHA256,
                                      PRE_SIBLING_PERFORMANCE_POLICY_SHA256, PRE_CACHE_PUBLISH_POLICY_SHA256,
-                                     PRE_PROSTREET_AUDIO_POLICY_SHA256),
+                                     PRE_PROSTREET_AUDIO_POLICY_SHA256, PRE_TORQUE_SPLINE_POLICY_SHA256,
+                                     PRE_CACHE_RENAME_POLICY_SHA256, PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256,
+                                     PRE_UC_TORQUE_POLICY_SHA256),
              'catalog policy or compatibility mismatch')
     _require(dict(doc, policy_sha256=policy.sha256) == make_catalog(doc['cars'], policy),
              'catalog policy or compatibility mismatch')

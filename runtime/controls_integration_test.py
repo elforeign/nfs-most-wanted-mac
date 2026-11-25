@@ -251,6 +251,7 @@ static const char *scratch;
 const char *diag_dir="";
 const char *userdata_dir(void) { return scratch; }
 int portmenu_is_open(void) { return 0; }
+int portmenu_open_if_racing(const char *why) { (void)why; return 0; }
 int pad_count(void) { return 2; }
 int user32_pad_layout_xbox(void) { return script_layout; }
 int pad_identity_n(int p,char *name,size_t n) {

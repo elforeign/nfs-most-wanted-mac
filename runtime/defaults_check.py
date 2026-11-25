@@ -6,6 +6,15 @@
 # ignored off FAIL 1/21; removed fit guard FAIL 6/21; registry On PASS, Off FAIL 1.
 import glob, re, sys
 from pathlib import Path
+def switch_registry(root):
+    """runtime/switches.tsv, or None in a public copy. The registry is dev-only (tools/publish/denylist.txt keeps it out
+    of the public repos), so only a tree without tools/publish may lack it; in the dev repo a missing file still fails."""
+    path = root / 'runtime/switches.tsv'
+    if path.is_file() or (root / 'tools/publish').is_dir():
+        return path.read_text()
+    print('skip: switch registry checks (runtime/switches.tsv is not exported to the public repo)', flush=True)
+    return None
+
 import subprocess
 import tempfile
 
@@ -52,7 +61,9 @@ int main(void) {
     def registry_failure(text):
         row = next(line.split('\t') for line in text.splitlines() if line.startswith('NFS_SHADOW_X360_FADE\t'))
         return int(row[2] != 'on')
-    registry = Path('runtime/switches.tsv').read_text()
+    registry = switch_registry(Path('.'))
+    if registry is None:
+        return 0
     broken = registry.replace('NFS_SHADOW_X360_FADE\topt\ton\t', 'NFS_SHADOW_X360_FADE\topt\toff\t')
     assert registry_failure(broken) == 1
     failure = registry_failure(registry)
@@ -92,7 +103,9 @@ int main(void) {
     def registry_failure(text):
         row = next(line.split('\t') for line in text.splitlines() if line.startswith('NFS_PSO_PREWARM\t'))
         return int(row[2] != '1')
-    registry = Path('runtime/switches.tsv').read_text()
+    registry = switch_registry(Path('.'))
+    if registry is None:
+        return 0
     broken_registry = registry.replace('NFS_PSO_PREWARM\tinternal\t1\t', 'NFS_PSO_PREWARM\tinternal\t0\t')
     assert registry_failure(broken_registry) == 1
     failure = registry_failure(registry)

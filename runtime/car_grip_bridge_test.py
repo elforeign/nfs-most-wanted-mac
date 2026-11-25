@@ -27,6 +27,15 @@ import subprocess
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[1]
+def switch_registry(root):
+    """runtime/switches.tsv, or None in a public copy. The registry is dev-only (tools/publish/denylist.txt keeps it out
+    of the public repos), so only a tree without tools/publish may lack it; in the dev repo a missing file still fails."""
+    path = root / 'runtime/switches.tsv'
+    if path.is_file() or (root / 'tools/publish').is_dir():
+        return path.read_text()
+    print('skip: switch registry checks (runtime/switches.tsv is not exported to the public repo)', flush=True)
+    return None
+
 HARNESS=r'''
 #include "host.h"
 #include "car_grip.h"
@@ -591,7 +600,7 @@ def main():
         print('bridge integration: 12/12 cases PASS; 15/15 integration mutants FAIL; singular scales refused 12/12')
     hooks=(ROOT/'recomp/hooks.txt').read_text()
     build=(ROOT/'runtime/build.sh').read_text()
-    table=(ROOT/'runtime/switches.tsv').read_text()
+    table=switch_registry(ROOT)
     for address in ('006AA020','0069DA90','006A9760'):
         needle=address+'    car_grip_bridge.c:'
         check=lambda value: bool(re.search(r'^'+address+r'\s+car_grip_bridge.c:',value,re.M))
@@ -599,7 +608,8 @@ def main():
     for source in ('car_grip_bridge.c','car_grip_wheel.c','car_grip_force.c','car_grip_assist.c'):
         assert source in build and source not in build.replace(source,'',1)
     check=lambda value: bool(re.search(r'^NFS_ADDCAR_GRIP\topt\toff\t',value,re.M))
-    assert check(table) and not check(table.replace('NFS_ADDCAR_GRIP\topt\toff','NFS_ADDCAR_GRIP\topt\ton'))
+    if table is not None:
+        assert check(table) and not check(table.replace('NFS_ADDCAR_GRIP\topt\toff','NFS_ADDCAR_GRIP\topt\ton'))
     assert not any(re.search(r'^'+a+r'\s',hooks,re.M) for a in ('0069EBF0','0068EF10'))
     print('hook/link/default registry: 8/8 PASS, omitted-line/default controls FAIL 8/8; native yaw routines unhooked')
     return 0 if native_proven else 3

@@ -8,7 +8,7 @@
 |---|---|
 | **Mac** | Apple Silicon (M1 or later) with **macOS 14.5 or later** (provisional). |
 | **Xcode Command Line Tools** | Apple's free developer tools. Setup offers to install them; in Terminal, `xcode-select --install`. |
-| **Disk space** | About 12 GB free while Setup builds; the installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy). |
+| **Disk space** | About 16 GB free while Setup builds from a PC game folder (twice the game's size plus about 9.4 GB), and more with an Xbox 360 copy. Setup's Review page shows the amount for your choices. The installed game then uses about 9 GB (3.5 GB without the Xbox 360 copy). |
 
 ## What you can use
 
@@ -44,8 +44,9 @@ containing one of those.
 
 1. In Most Wanted Setup, go to **Extras from your other games**, just after the Xbox 360 step.
    If Most Wanted is already installed, open **Manage installed extras…** on Setup’s welcome screen.
-2. Under **Later-game source**, click **Choose…**. Tick the cars you want, click **Retry check**,
-   then **Import selected extras**. Repeat for each source you want to use.
+2. Under **Later-game source**, click **Choose…**. Setup checks the source and ticks every car it can import.
+   Untick any you don't want, then click **Import selected cars**. If the check fails, fix what it says and click
+   **Retry check**. Repeat for each source you want to use.
 3. In Most Wanted, open **F10 > Cars & cutscenes** (Fn+F10 on some Mac keyboards), turn on
    **Cars from later games**, then quit and reopen the game.
 
@@ -89,7 +90,6 @@ With your own Xbox 360 copy, Setup can add its world, music, police radio, cutsc
 - Rows marked with a restart symbol take effect after **Restart game** (Display & performance).
 - **Help > Guide** explains the settings, look presets and controls.
 - **PlayStation pedals:** bind Accelerate to R2 and Brake to L2 in the game's Options > Controls.
-- **Online free roam:** not available in 4.5; it moves to a shared server with room codes in a later update.
 - **Display & performance > Online:** *Check for updates* asks GitHub when you press it. *Update now* prepares an available update for the next launch. *Discord status* is off by default.
 
 ## Where things are
@@ -103,7 +103,7 @@ With your own Xbox 360 copy, Setup can add its world, music, police radio, cutsc
 
 ## Updating
 
-In 4.3, use **F10 > Display & performance > Online > Check for updates**, then **Update now** when offered. Follow the status, quit and reopen when ready. Cancel update stops it before the next launch; Retry update starts again after a failure or cancellation.
+From 4.3 on, use **F10 > Display & performance > Online > Check for updates**, then **Update now** when offered. Follow the status, quit and reopen when ready. Cancel update stops it before the next launch; Retry update starts again after a failure or cancellation.
 
 Keep Setup’s saved source choices and the sources they point to. If they moved or were deleted, run the latest Setup and select them again. Careers and settings are kept.
 Updates automatically refresh selected extra cars when their conversion tools or approvals change.
@@ -121,7 +121,7 @@ if that name is taken) and still runs. A 4.0.0 app already there is simply repla
 
 **Your career comes with you.** When Setup installs 4.0.0 and 4.0.0 has no saves yet, it copies your 3.x careers
 (`~/Library/Application Support/NFS Most Wanted Native/Documents/NFS Most Wanted/`) into
-`~/Library/Application Support/NFSMW-port/NFS Most Wanted/` and tells you: "Your 3.x career was copied into 4.0; the
+`~/Library/Application Support/NFSMW-port/NFS Most Wanted/` and tells you: "Your 3.x career was copied into this version; the
 3.x copy is untouched." They are the game's own save files, so 4.0.0 loads them as they are.
 
 - The 3.x files are only read, never moved or changed, so 3.x keeps working with them.

@@ -27,6 +27,7 @@
 
 #include "funcs.h"
 #include "host.h"
+#include "blackbox_errors.h"
 #include "private_cars.h"
 #if defined(NFS_PUBLIC) && NFS_PUBLIC
 #include "carsave_public.h"
@@ -79,6 +80,7 @@ static void die(const char *fmt, ...) {
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
     fprintf(stderr, "boot: %s\n", msg);
+    blackbox_error(BB_ERR_FATAL, BB_OP_FATAL, 0, 0, 0, 0);
     diag_report("crash.txt", msg);
     app_fatal(msg);
     exit(1);
@@ -134,6 +136,7 @@ void guest_divide_error(Cpu *c, uint32_t at) {
 }
 // int3 (a failed assert, __break 0045CD20, SpeedScript errors): continued like under a debugger (see recomp.py int3).
 void guest_breakpoint(Cpu *c, uint32_t at) {
+    blackbox_error(BB_ERR_ASSERT, BB_OP_BREAKPOINT, 0, 0, at, 0);
     static uint32_t seen[256];
     if (diag_on && first_at_site(seen, at)) diag_event("int3 at=%08X esp0=%08X", at, M32(c->esp));   // nothing when diag is off
 }
@@ -271,6 +274,7 @@ void dispatch(Cpu *c, uint32_t t) {
         if (gr) { gr->ra = ra; gr->imp_t0 = host_ticks(); gr->imp = hn; }
         if (!fn(c)) die("not implemented yet: %s (called from %08X, this %08X)", hn, ra, a[0]);
         if (gr) { gr->imp = NULL; gr->imp_t0 = host_ticks(); }
+        if (c->eax & 0x80000000u) blackbox_error_hresult(hn, c->eax, ra);
         if (diag_on) {
             // COM calls run at millions per second: ring only, unless BOOT_DIAG_EVENTS=all
             static int all = -1;
@@ -1352,9 +1356,13 @@ static int win32(Cpu *c, const char *fn) {
             carbon_speech_open(host, &music)))
             RET(new_music_handle(&music), 7);
         int private_overlay = private_track_overlay_path(host, sizeof host, acc, disp);
-        if (private_overlay < 0) RET(0xFFFFFFFFu, 7);
+        if (private_overlay < 0) {
+            blackbox_error(BB_ERR_ASSET, BB_OP_OPEN, errno, 0, M32(c->esp), 0);
+            RET(0xFFFFFFFFu, 7);
+        }
 #endif
         uint32_t h = file_open((char *)G + arg(c, 0), host, acc, arg(c, 2), disp, arg(c, 5));
+        if (h == 0xFFFFFFFFu) blackbox_error(BB_ERR_ASSET, BB_OP_OPEN, errno, 0, M32(c->esp), 0);
 #if NFS_GAME == NFS_GAME_PRIVATE
         if (diag_on && private_overlay > 0 && h != 0xFFFFFFFFu)
             diag_event("PRIVATE TRACK OPEN %s status=ok -> %s", private_track_names[private_overlay-1], host);
@@ -1366,6 +1374,7 @@ static int win32(Cpu *c, const char *fn) {
     if (!strcmp(fn, "ReadFile")) {                // (h, buf, n, read*, overlapped)
         X360MusicHandle *music = handle_music(arg(c, 0));
         ssize_t r = music ? (ssize_t)x360music_read(music, G + arg(c, 1), arg(c, 2)) : file_read(arg(c,0), G + arg(c, 1), arg(c, 2));
+        if (r < 0) blackbox_error(BB_ERR_ASSET, BB_OP_READ, errno, 0, M32(c->esp), 0);
         if (r < 0) file_error();                 // includes EBADF for invalid guest handles
         if (arg(c, 3)) M32(arg(c, 3)) = r < 0 ? 0 : (uint32_t)r;
         void threads_note_io(void);
@@ -1724,7 +1733,12 @@ static void race_setup(void) {
     memset(G + 0x00926068, 0, 0x18);                                            // SkipFERaceID (char[0x18])
     strncpy((char *)G + 0x00926068, race, 0x17);
     memset(G + 0x009B4128, 0, 0x40);                                            // onlinePlayerCar buffer
-    strncpy((char *)G + 0x009B4128, car, 0x3F);
+    /* Normalize the developer car key before its case-sensitive game lookup. */
+    for (size_t i = 0; i < 0x3F && car[i]; ++i) {
+        unsigned char ch = (unsigned char)car[i];
+        G[0x009B4128 + i] = ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch;
+    }
+    car = (const char *)G + 0x009B4128;
     M32(0x008F86A8) = strcmp(car, "race") ? 0x009B4128 : 0;                    // SkipFEPlayerCar ("race": the race's own
                                                                                 // preset car, e.g. 16.2.1's M3GTRCAREERSTART)
     M32(0x008F86BC) = getenv("BOOT_RACE_LAPS") ? (uint32_t)atoi(getenv("BOOT_RACE_LAPS")) : 10;   // SkipFENumLaps

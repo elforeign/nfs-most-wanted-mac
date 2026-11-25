@@ -34,6 +34,15 @@ OLD_DISPATCH = 'char *mat_clearcoat_shader_old(const uint32_t *tokens, uint32_t 
 assert hashlib.sha256(OLD_DISPATCH.encode()).hexdigest() == '9c879e24e8835bfda71ab4e73f6602e047d9cf72f751fcd5aa4c7c74ab519b0c'
 
 RT = Path(__file__).resolve().parent
+def switch_registry(root):
+    """runtime/switches.tsv, or None in a public copy. The registry is dev-only (tools/publish/denylist.txt keeps it out
+    of the public repos), so only a tree without tools/publish may lack it; in the dev repo a missing file still fails."""
+    path = root / 'runtime/switches.tsv'
+    if path.is_file() or (root / 'tools/publish').is_dir():
+        return path.read_text()
+    print('skip: switch registry checks (runtime/switches.tsv is not exported to the public repo)', flush=True)
+    return None
+
 
 
 def run(args, expected=0, **kwargs):
@@ -59,7 +68,8 @@ def main():
     assert 'o->k[10][3] = (float)coat_material;' in src
     assert 'clearcoat.c \\' in (RT / 'build.sh').read_text()
     assert 'clearcoat_test.py + clearcoat_test.m' in (RT / 'offline_tests.sh').read_text()
-    assert 'NFS_CLEARCOAT\tuser\ton\truntime/clearcoat.c' in (RT / 'switches.tsv').read_text()
+    registry = switch_registry(RT.parent)
+    assert registry is None or 'NFS_CLEARCOAT\tuser\ton\truntime/clearcoat.c' in registry
     tables = [RT / 'gen' / n for n in ('car_shadow_off.inc', 'pc_shader_lits.inc', 'x360_shader_lits.inc')]
     if any(not p.is_file() for p in tables) or '#define X360_SHADER_LITS 1' not in tables[-1].read_text():
         print('clearcoat_test: SKIP private shader literals missing')

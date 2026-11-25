@@ -23,6 +23,15 @@ _source_sys.path.insert(0, str(Path(__file__).resolve().parent))
 from save_file_fixture import mw_source
 
 RT = Path(__file__).resolve().parent
+def switch_registry(root):
+    """runtime/switches.tsv, or None in a public copy. The registry is dev-only (tools/publish/denylist.txt keeps it out
+    of the public repos), so only a tree without tools/publish may lack it; in the dev repo a missing file still fails."""
+    path = root / 'runtime/switches.tsv'
+    if path.is_file() or (root / 'tools/publish').is_dir():
+        return path.read_text()
+    print('skip: switch registry checks (runtime/switches.tsv is not exported to the public repo)', flush=True)
+    return None
+
 # switch, file holding the Setting row, row anchor, selector source, extraction, harness prelude, default, other
 FEATURES = [
     ('NFS_PARTICLES', 'physical', 'retail', 'settings_port.c', 'graphics.particles', 'particles_physical.c',
@@ -94,7 +103,8 @@ def sign_layers(tmp):
     source = (RT / 'decal_depth.m').read_text()
     source = re.sub(r'^#include .*\n', '', source, flags=re.M)
     assert 'NFS_DECAL_DEPTH' not in source
-    assert 'NFS_DECAL_DEPTH' not in (RT / 'switches.tsv').read_text()
+    registry = switch_registry(RT.parent)
+    assert registry is None or 'NFS_DECAL_DEPTH' not in registry
     render = mw_source(RT / 'render.m')
     assert 'eb.decal_back = decal_depth_tagged(dev.tex[0]);' in render
     assert 'decal_depth_ground(dev.tex[0])' in render
@@ -141,7 +151,7 @@ static int diag_on;
 
 
 def main():
-    tsv = (RT / 'switches.tsv').read_text()
+    tsv = switch_registry(RT.parent)
     old_mode = '--old' in sys.argv
     sel_fail = sel_n = tab_fail = tab_n = 0
     with tempfile.TemporaryDirectory(prefix='look-defaults-') as td:
@@ -152,11 +162,12 @@ def main():
             label = name.lower()
             f, n = run_selector(tmp, label, body, prelude, call, name, default, other, old_mode)
             sel_fail += f; sel_n += n
-            tsv_got = tsv_default(name, tsv)
+            tsv_got = tsv_default(name, tsv) if tsv is not None else None
             if old_mode:
                 tsv_got = other      # control: switches.tsv column 3 as it was before the decision
-            for what, got in (('switches.tsv', tsv_got),
-                              ('F10 row .def', row_default((RT / row_file).read_text(), ident, old_mode))):
+            tables = [('switches.tsv', tsv_got)] if tsv is not None else []
+            tables.append(('F10 row .def', row_default((RT / row_file).read_text(), ident, old_mode)))
+            for what, got in tables:
                 tab_n += 1
                 bad = got is None or got.lower() != default
                 tab_fail += bad

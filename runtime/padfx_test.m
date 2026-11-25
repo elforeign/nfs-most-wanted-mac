@@ -99,12 +99,12 @@ int main(int argc,char **argv) { @autoreleasepool {
     CHECK(speed==30 && fabsf(surface-.55f)<.001f && attr_calls==4);
     active(a,b); CHECK(a.extendedGamepad.rightTrigger.strengths.values[0]==.2f);
     road_sw=0; padfx_stop(); active(a,b); CHECK(a.extendedGamepad.rightTrigger.strengths.values[0]==.1f);
-    road_sw=1; road_speed_pub=6000; road_surface_pub=10; padfx_stop();
+    road_sw=1; feedback_states[0].road_speed_pub=6000; feedback_states[0].road_surface_pub=10; padfx_stop();
     if (broken==3) road_sw=0;
     active(a,b); CHECK(a.extendedGamepad.rightTrigger.strengths.values[0]==.3f);
     CHECK(a.extendedGamepad.leftTrigger.strengths.values[0]==.25f && a.extendedGamepad.leftTrigger.strengths.values[9]==.9f);
     trig_sw=0; padfx_stop(); active(a,b); CHECK(a.extendedGamepad.rightTrigger.mode==T_OFF); trig_sw=1;
-    road_speed_pub=-100; road_surface_pub=-1; padfx_stop(); active(a,b); CHECK(a.extendedGamepad.rightTrigger.strengths.values[0]==.1f);
+    feedback_states[0].road_speed_pub=-100; feedback_states[0].road_surface_pub=-1; padfx_stop(); active(a,b); CHECK(a.extendedGamepad.rightTrigger.strengths.values[0]==.1f);
     fb_begin_frame(&cpu); M32(cpu.esp+8)=0; MF32(cpu.esp+12)=NAN; fb_speed(&cpu); fb_end(&cpu);
     feedback_road_state(&speed,&surface); CHECK(speed==0 && surface==0);
     // Every hold stops at once, stays stopped across ticks, and requires a new frame after resume.

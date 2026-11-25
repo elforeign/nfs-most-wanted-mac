@@ -405,8 +405,13 @@ static void rt_init(void) {
     pthread_attr_init(&at);
     pthread_attr_set_qos_class_np(&at, QOS_CLASS_USER_INTERACTIVE, 0);
     pthread_t t;
-    pthread_create(&t, &at, render_thread, NULL);
+    int err = pthread_create(&t, &at, render_thread, NULL);
     pthread_attr_destroy(&at);
+    if (err) {            // no consumer: encode directly instead of waiting on buffers nothing will replay
+        rt_on = 0;
+        fprintf(stderr, "boot: render: render thread failed to start (%d), encoding on the calling thread\n", err);
+        return;
+    }
     fprintf(stderr, "boot: render: Metal encoding on a render thread (NFS_RENDER_THREAD=0 turns it off)\n");
 }
 

@@ -1,11 +1,15 @@
 #!/bin/sh
-# offline_tests.sh [name ...] - every offline test of the port in one command (~2 min on an idle machine): no game launch, no
+# offline_tests.sh [name ...] - every offline test of the port in one command: no game launch, no
 # game slot, no real audio (null/manual sinks only), no rumble device, nothing written outside a scratch dir. Prints one line
 # per test and ends with "OFFLINE PASS (N tests ...)" or "OFFLINE FAIL: <names>". gate.sh runs it as its first step
 # after the recompiler build, so a test that rots (a stub missing after a runtime change, a default the user changed) fails the
 # gate instead of failing silently until someone runs it. With names: only those (e.g. `offline_tests.sh x360music_test aa_setting`).
+# Cost: nightly.sh prints NIGHTLY COST with measured offline/publication/live seconds;
+# gates.tsv retains those parts. Full-suite runs take tens of minutes; named runs depend on their selection.
 #
 # What runs (autodiscovered, so a new test joins by existing):
+#   runtime/movies_lifecycle_test.py: production Play/Update/Stop/destruction and both boot-flow hooks, broken controls
+#   runtime/particles_fragment_test.py: production smoke fragments and renderer bindings into RGBA pixels, lamp/depth controls
 #   runtime/lens_drops_test.py + lens_drops_test.m: generated upload and production drop shader, suppressed-generation control
 #   runtime/diag_capture_test.py: slow PNG capture vs original watchdog and post-capture stall control
 #   runtime/daynight_test.py: live block endpoints, full orbit, hook ABI/Off and broken ambient/swing controls
@@ -18,7 +22,11 @@
 #   runtime/paint_flake_test.py: generated resource/upload/paint pixels and missing-volume control
 #   runtime/glass_port_test.py: port glass V = UV0.y on the GPU (two broken controls) and, with console files, V error vs console
 #   runtime/car_normals_port_test.py: port TREAD/TREADR/DOORLINE/DAMAGE0 binding + content, recipe deletion, GPU vs flat normal
-#   runtime/*_test.py (including roam_online_test.py codecs/loopback relay and roam_session_test.py lifecycle)
+#   runtime/padheld_test.py: driving-to-menu release guard (1,234 checks; original guard 385 failures; autodiscovered)
+#   runtime/padpick_test.py, runtime/padfreeze_test.py: active-pad selection, drop/sleep freeze and broken controls (autodiscovered)
+#   runtime/padslot_test.py: NFS_PADS=2 slot refill (a waiting third pad, a late gamepad profile) and its broken control (autodiscovered)
+#   runtime/padbattery_test.py: injected DualSense battery, race-start note and F10 header; threshold/header controls (autodiscovered)
+#   runtime/*_test.py
 #   temporal_state_test.py drives temporal_state_test.c: view/cut/lifetime state and disabled-invalidation control
 #   temporal_render_test.py + temporal_render_test.m: depth reprojection, 1x object motion replay and broken controls
 #   shared_depth_test.py: shared_depth_test.m Metal normals/min-max/reset/AO equality and three broken controls
@@ -44,6 +52,8 @@
 #   water_port_test.py: authored water generation, production shader patch on a checker reflection, suppressed-wave control
 #   materials_stub_test.py: every X360 material source with --stub includes, Metal compile and three-source broken control
 #   clearcoat_test.py + clearcoat_test.m: production paint variants, exact Off source, Metal layer and broken controls
+#   gameplay_opts_test.py: F10 Gameplay hooks (markers, catch-up, heat, Open Map, Black Edition, bonus, movies), 12 broken controls
+#   rumble_switches_test.py: Rumble on cobbles and Prop hits by impact in feedback.c, motor levels, 6 broken controls
 # Private layout coverage: private_pad_layout_test (auto-discovered) and private_padbind_test.
 # Report location readers and empty-reader controls: private_report_position_test (auto-discovered).
 # Xbox fallback: recomp/private_carbon_xboxart_test.py is auto-discovered (24 on / 0 off).
@@ -93,13 +103,13 @@
 #   private tool tests listed in runtime/offline_serial.txt (1-3 s stub, polling and shutdown deadlines; load caused a false timeout)
 #   replay_capture_test (bounded two-second encoder watermarks)
 #   pub_update_flow_test (120 s disk-image prepare: 30-75 s in the parallel batch, 130 s timeout in one gate, 10 s alone)
-#   roam_admission_test: synthetic cookie times also depend on the real five-second key clock
 #   test_backend 3s ready-file polling deadline
 # Offline-tested by itself: break any test (e.g. flip an assertion in runtime/framecap_test.c) -> OFFLINE FAIL: framecap.
 # Discovery proof: 140 registered names (7 Setup), 0 collisions, exit 0; injecting a duplicate test_app exits 1.
 # test_release_artifact is autodiscovered: builds packaged Setup with bundled Python
 # and scratch HOME/CLT (no game launch); exit 3 without the Setup artifact or PC input.
 #   tests/setup/test_setup_carflow.py: compiled car source/actions, N+4 activations -> 1 picker + 1 press, 2 -> 1 import buttons, 6 -> 0 screen hashes
+#   runtime/splitflow_check_test.py: passive splitflow_check.py evidence, both finish orders and missing-stage controls; auto-discovered
 #   tests/setup/test_release_artifact_checks.py also exercises exported Carbon
 #   table-free controllers/settings (PC-only and optional-Xbox roots); 6 broken exports fail.
 #   tests/setup/test_export_cars.py: two verified cars survive relocation;
@@ -134,8 +144,8 @@ LIMIT=${OFFLINE_TEST_LIMIT:-420}      # seconds per test
 CF="-std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined"
 FF=$here/third_party/ffmpeg
 
-# Named release-critical tests: strict mode rejects their missing inputs/devices.
-release_critical="maxperf_career_test maxperf_checkout_test padprompts_shop_test cliprec clip_present_test fsauto_test nativefs_test contact_mass_test test_car_physics soft_smoke_test particles_review_test particles_physical_test junkman_test roam_budget_test realworld_materials_test traffic_detail_test traffic_role_test pedals_test controltype_test padlayout_test"
+# Named release-critical tests fail on missing inputs/devices by default.
+release_critical="maxperf_career_test maxperf_checkout_test padprompts_shop_test cliprec clip_present_test fsauto_test nativefs_test contact_mass_test test_car_physics soft_smoke_test particles_review_test particles_physical_test particles_fragment_test movies_lifecycle_test junkman_test realworld_materials_test traffic_detail_test traffic_role_test pedals_test controltype_test padlayout_test"
 
 # ---- one test: run_one <name> <dir for its scratch files>; exit 0 pass, 3 skip, else fail
 run_one() {
@@ -250,7 +260,12 @@ void padfx_set_triggers(int on) { trig_sw = on != 0; padfx_stop(); }' runtime/pa
                  "$d/t" || return 1
                  "$d/t" --broken-padfx >"$d/broken.log" 2>&1; rc=$?
                  tail -1 "$d/broken.log"
-                 [ "$rc" = 1 ] ;;
+                 [ "$rc" = 1 ] || return 1
+                 sed 's/        return f;/        return \&feedback_states[0];/' runtime/feedback.c >"$d/singleton.c"
+                 clang $CF -I recomp -I runtime -DFEEDBACK_SOURCE="\"$d/singleton.c\"" runtime/feedback_test.c -o "$d/singleton" || return 1
+                 "$d/singleton" >"$d/singleton.log" 2>&1; rc=$?
+                 tail -3 "$d/singleton.log"
+                 [ "$rc" = 1 ] && grep -q 'P2-only collision: P1 0.984, P2 0.000' "$d/singleton.log" ;;
     heap)        clang -O2 -DHEAP_TEST -o "$d/t" runtime/heap_test.c runtime/heap.c || return 1
                  "$d/t" || return 1
                  # Restore the pinned unchecked-rounding path without consulting repository history.
@@ -262,7 +277,14 @@ void padfx_set_triggers(int on) { trig_sw = on != 0; padfx_stop(); }' runtime/pa
                  [ "$rc" = 1 ] && grep -q '^heap_test: 12 FAILURES$' "$d/broken.log" &&
                      grep -q '^realloc bounds: 48 cases, 36 rejected, 36 preserved, 12 oversized writes, largest 4294917295 bytes$' "$d/broken.log" ;;
     rumble)      clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp runtime/rumble_test.m \
-                     -framework Foundation -framework IOKit -lz -o "$d/t" && exec "$d/t" ;;
+                     -framework Foundation -framework IOKit -lz -o "$d/t" || return 1
+                 "$d/t" || return 1
+                 sed '/^void rumble_update_slot(/,/^}/s/RumblePad \*r = \&rumble_pads\[slot\];/RumblePad *r = \&rumble_pads[0];/' runtime/rumble.m >"$d/singleton.m"
+                 clang -Wall -Wextra -Werror -g -fsanitize=address,undefined -fobjc-arc -I recomp -I runtime \
+                     -DRUMBLE_SOURCE="\"$d/singleton.m\"" runtime/rumble_test.m -framework Foundation -framework IOKit -lz -o "$d/singleton" || return 1
+                 "$d/singleton" >"$d/singleton.log" 2>&1; rc=$?
+                 tail -3 "$d/singleton.log"
+                 [ "$rc" = 1 ] && grep -q 'P2-only HID output: P1 204, P2 0' "$d/singleton.log" ;;
     framecap)    clang -std=c11 -Wall -Wextra -Werror runtime/framecap_test.c -o "$d/t" || return 1
                  "$d/t" || return 1
                  if "$d/t" --broken >/dev/null 2>&1; then echo "framecap --broken unexpectedly passed (the check no longer fails when the limit is off)"; return 1; fi ;;
@@ -352,8 +374,8 @@ if [ "$1" = "--one" ]; then      # internal: run one test with a watchdog, log +
     wd=$!
     wait "$pid"; rc=$?
     kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
-    # Release hosts opt in; missing development inputs remain skips by default.
-    if [ "$rc" = 3 ] && [ "${NFS_TESTS_NOSKIP:-0}" = 1 ]; then
+    # Required coverage must run in ordinary gates; development hosts can opt out.
+    if [ "$rc" = 3 ] && [ "${NFS_TESTS_NOSKIP:-1}" = 1 ]; then
         case " $release_critical " in *" $n "*)
             echo "FAIL: release-critical test $n skipped (NFS_TESTS_NOSKIP=1)" >>"$log"
             rc=1 ;;
@@ -368,12 +390,17 @@ if [ "$1" = "--one" ]; then      # internal: run one test with a watchdog, log +
     exit 0
 fi
 
+#   runtime/blackbox_input_test.py: physical source history and connection-only broken control
+#   runtime/report_staging_test.py: interrupted crash-report publication and stale staging cleanup
+#   runtime/report_privacy_identity_test.py: account variants and UTF-16 attachments
 #   runtime/blackbox_test.py: shared recorder, production report hooks, wrap/pause/loss and removed-hook control
 #   runtime/blackbox_mw_fe_test.py: MW loading, controlling package and fade script in F10, bounded cyclic reads
 #   runtime/blackbox_mw_cinematics_test.py: MW movie and NIS edges in F10 and hang, with the NIS feed removed as a control
 #   runtime/diag_profile_test.py: slow-frame and whole-session game-thread profiles, both images; old-profiler controls
 # run_guarded_parked_test.py: fixture race logs and a fake process (auto-discovered; impact_tests.py maps run_guarded.sh through its reader).
 # ---- the list
+# tests/setup/test_setup_robust.py is discovered by pyfiles: purgeable capacity,
+# developer-tool failures and leftover folder names, with shortage/good-tool/player-file controls.
 # live_picture_sweep_test is discovered below: production table inventory, batching,
 # diagnostic driver and refs-tolerance undo comparison, including a skipped-undo seed.
 pyfiles() { for f in runtime/*_test.py recomp/*_test.py tools_snapshot/test_*.py tools_snapshot/worldmerge/test_*.py tools/publish/test_*.py tests/setup/test_*.py runtime/defaults_check.py; do [ -f "$f" ] && echo "$f"; done; }
@@ -382,7 +409,7 @@ standalone="cliprec note_len aa_setting settings_live feedback padfx padlink ws2
 # Timing-sensitive tests: audio requires zero wall-clock underruns; short-deadline public tests are here,
 # private tool tests in runtime/offline_serial.txt (absent in public trees).
 # Live encoder mutation builds exceeded the suite watchdog under parallel load.
-deadline_tests="run_guarded_parked_test diag_capture_test live_encode_test host_audio pub_update_flow_test pacewait test_backend report_lock_test roam_loopback_fixture_test roam_admission_test windows_sync_test replay_capture_test livestream_test stream_live_test $(cat runtime/offline_serial.txt 2>/dev/null | tr '\n' ' ')"
+deadline_tests="run_guarded_parked_test diag_capture_test live_encode_test host_audio pub_update_flow_test pacewait test_backend report_lock_test windows_sync_test replay_capture_test livestream_test stream_live_test $(cat runtime/offline_serial.txt 2>/dev/null | tr '\n' ' ')"
 serial=${OFFLINE_SERIAL_TESTS:-$deadline_tests}
 duplicates=$({ pylist; printf '%s\n' $standalone host_shaders; } | sort | uniq -d)
 [ -z "$duplicates" ] || { echo "OFFLINE FAIL: duplicate test names: $duplicates"; exit 1; }

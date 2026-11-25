@@ -192,7 +192,7 @@ def build(source, td, name):
     src, exe = td / (name + '.m'), td / name
     src.write_text(PRELUDE + IO_INJECTION + source + MAIN.replace('    NSError *error=nil;', INSPECT + '    NSError *error=nil;', 1))
     p = subprocess.run(['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-unused-function',
-                        '-fobjc-arc', '-I', str(ROOT), str(src), '-framework', 'Foundation', '-framework', 'Metal',
+                        '-fobjc-arc', '-I', str(ROOT), str(src), str(ROOT / 'blackbox.c'), str(ROOT / 'blackbox_errors.c'), '-framework', 'Foundation', '-framework', 'Metal',
                         '-o', str(exe)], capture_output=True, text=True)
     assert p.returncode == 0, p.stderr[-4000:]
     return exe

@@ -202,6 +202,16 @@ def remember_plate_mount(model, markers):
     c.remember_rear_plate(model, mounts)
 
 
+LAMP_MARKERS = {c.name_hash(source): c.name_hash(target) for source, target in (
+    ('HEADLIGHT_LEFT', 'LEFT_HEADLIGHT'), ('HEADLIGHT_RIGHT', 'RIGHT_HEADLIGHT'),
+    ('BRAKELIGHT_LEFT', 'LEFT_BRAKELIGHT'), ('BRAKELIGHT_RIGHT', 'RIGHT_BRAKELIGHT'))}
+
+
+def lamp_marker(raw):
+    """Adapt only decoded flare IDs; retain the complete authored transform."""
+    return struct.pack('<I', LAMP_MARKERS.get(c.u32(raw), c.u32(raw))) + raw[4:]
+
+
 def car_local_source(src):
     """Keep authored car-local geometry; the header basis is authoring metadata."""
     stock_matrix(src)
@@ -209,7 +219,7 @@ def car_local_source(src):
     # header's mirror again folds right panels onto left panels. Wheel/driver
     # authoring rotations likewise must not rotate their stored vertices twice.
     result = dict(src, draws=[dict(d, light=LIGHT_ALIASES.get(d['light'], d['light'])) for d in src['draws']],
-                  markers=list(src['markers']))
+                  markers=[lamp_marker(raw) for raw in src['markers']])
     # The imported builder checks the LOD authoring offset, then emits identity.
     expected = np.eye(4, dtype='<f4'); expected[3, 1] = 'ABCDE'.index(src['name'][-1]) * 2.2
     header = bytearray(src['header']); header[64:128] = expected.tobytes(); result['header'] = bytes(header)
@@ -292,6 +302,7 @@ def validate_output(geo, tex, selected, manifest, reference, source_tex, referen
     local_hashes = {h for h, _ in c.texture_blobs(source_tex)}
     source_hashes = local_hashes | (extras or {}).keys()
     allowed = local | {h for m in refs.values() for h in m['textures']}
+    allowed.update(c.name_hash('BRAKELIGHT_' + side) for side in ('LEFT', 'RIGHT', 'CENTRE'))
     for name, names in manifest.items():
         m = actual[name]
         # The role follows the car name, which can itself hold underscores.
@@ -317,6 +328,14 @@ def validate_output(geo, tex, selected, manifest, reference, source_tex, referen
             if diffuse in source_hashes and (diffuse != METAL_SWATCH or diffuse in local_hashes
                                              or draw['light'] in METAL_ROLES):
                 defaults = [diffuse] * 5
+            if draw['light'] == c.name_hash('BRAKELIGHT'):
+                car, part = srcname.rsplit('_KIT', 1)
+                kit, role = part.split('_', 1)
+                base = f'{car}_KIT{kit}_BRAKELIGHT'
+                pair = {c.name_hash(base + '_OFF'), c.name_hash(base + '_ON')}
+                if diffuse in pair and pair <= source_hashes:
+                    side = role.rsplit('_', 1)[0].rsplit('_', 1)[-1]
+                    defaults = [c.name_hash('BRAKELIGHT_' + (side if side in ('LEFT', 'RIGHT') else 'CENTRE'))] * 5
             normal = v25.normal_for_mw(draw, material_name)
             slots = c.car_texture_slots(defaults, normal=normal)
             wanted = [(aliases or {}).get(h, (h, None))[0] for h in slots]
@@ -332,7 +351,7 @@ def validate_output(geo, tex, selected, manifest, reference, source_tex, referen
                 c.require(np.array_equal(actual_v, v), f'source vertex bytes/transform changed: {name}')
                 cursor += len(v)
             for raw in src['markers']:
-                row = bytearray(raw)
+                row = bytearray(lamp_marker(raw))
                 role = srcname.rsplit('_KIT00_', 1)[1][:-2]
                 if role in BRAKE_SOCKET_ROLES and c.u32(row) in (c.name_hash('BRAKE_FRONT'), c.name_hash('BRAKE_REAR')):
                     struct.pack_into('<I', row, 0, c.name_hash(BRAKE_SOCKET_ROLES[role]))

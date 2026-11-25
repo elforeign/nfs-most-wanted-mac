@@ -38,6 +38,7 @@ PRE = r'''
 #include <stdarg.h>
 #include "threads.c"
 #include "x360audio.h"
+#include "blackbox_errors.h"
 uint8_t *G;
 int diag_on, boot_trace;
 uint64_t diag_idle_ns[IDLE_N];
@@ -211,7 +212,7 @@ def main():
             p = subprocess.run(['clang', '-std=c11', '-O2', '-g', '-w', '-pthread',
                                 '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                                 '-I'+str(tmp), '-I'+str(ROOT/'runtime'), '-I'+str(ROOT/'recomp'),
-                                '-I'+str(ROOT/'recomp/out'), str(tmp/'fixture.c'), '-o', str(exe)],
+                                '-I'+str(ROOT/'recomp/out'), str(tmp/'fixture.c'), str(ROOT/'runtime/blackbox.c'), str(ROOT/'runtime/blackbox_errors.c'), '-o', str(exe)],
                                capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-4500:]
             env = {k: v for k, v in os.environ.items() if k not in ('BOOT_TEST_GILYIELD', 'BOOT_WATCH', 'BOOT_DIAG_WATCH')}

@@ -1465,7 +1465,7 @@ SOURCES = {'report_github.m': '// Local-only issue preparation. Only the explici
                      '#import <Foundation/Foundation.h>\n'
                      '#include <string.h>\n'
                      'static BOOL ReportCodeChecksum(NSString *code) {\n'
-                     '    // Same GF(32) recurrence as roam_code_decode (x^5 + x^2 + 1).\n'
+                     '    // Legacy room-code GF(32) recurrence (x^5 + x^2 + 1).\n'
                      '    const char *alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";\n'
                      '    unsigned check = 0;\n'
                      '    for (NSUInteger i = 0; i < code.length; ++i) {\n'
@@ -1788,5 +1788,5 @@ SOURCES = {'report_github.m': '// Local-only issue preparation. Only the explici
 SHA256 = {'report_github.m': '996f159c8bb5f4b1285a01a00b634479a702a5840292a1b7ba8d439bdff34e3d',
  'report_github.h': 'b626743dc5cc8551b105495f46fd792e6b7045b3c9ef4a5c601480f536692791',
  'portmenu.m': '66a72c0321f98b7ab09c22c6c7852d02a8650e3d7737dad58312abac8377fce6',
- 'report_privacy.h': 'f9e5aa04488deb00cf978ecefee137b5ed3e8d5ad394a69818164ec09cd904ba',
+ 'report_privacy.h': 'cf0ff5272f7eef413c1bee15edb352a38139ec0ac13f9fa535842ed3cdac6494',
  'report_submit.m': '867896e4e64ec70875c32872e40917c297cd0136ab87b6fa64b351409d85b659'}

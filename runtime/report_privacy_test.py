@@ -33,7 +33,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'runtime'
 SCRATCH = ROOT / '.metal-cache' / 'report-privacy-proof'
-ORIGINAL = 'f9e5aa04488deb00cf978ecefee137b5ed3e8d5ad394a69818164ec09cd904ba'
+ORIGINAL = 'cf0ff5272f7eef413c1bee15edb352a38139ec0ac13f9fa535842ed3cdac6494'
 PREDECESSOR = '1f942d8a'
 # Pinned predecessor code keeps ordinary offline runs independent of Git history.
 PREDECESSOR_RULES = {
@@ -76,7 +76,7 @@ PIN_13984AB7_REPORT_PRIVACY_H = r'''// Shared endpoint privacy for issue preview
 #import <Foundation/Foundation.h>
 #include <string.h>
 static BOOL ReportCodeChecksum(NSString *code) {
-    // Same GF(32) recurrence as roam_code_decode (x^5 + x^2 + 1).
+    // Legacy room-code GF(32) recurrence (x^5 + x^2 + 1).
     const char *alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
     unsigned check = 0;
     for (NSUInteger i = 0; i < code.length; ++i) {
@@ -131,7 +131,7 @@ static void ReportRedactBundle(NSString *folder) {
     }
 }
 '''
-assert hashlib.sha256(PIN_13984AB7_REPORT_PRIVACY_H.encode()).hexdigest() == 'f9e5aa04488deb00cf978ecefee137b5ed3e8d5ad394a69818164ec09cd904ba', 'pinned baseline changed'
+assert hashlib.sha256(PIN_13984AB7_REPORT_PRIVACY_H.encode()).hexdigest() == 'cf0ff5272f7eef413c1bee15edb352a38139ec0ac13f9fa535842ed3cdac6494', 'pinned baseline changed'
 
 
 # Reviewed baseline fragment; its digest prevents accidental control drift.
@@ -166,7 +166,7 @@ PIN_1F942D8A_REPORT_PRIVACY_H = r'''// Shared payload privacy for issue previews
 #include <string.h>
 static NSString *ReportPrivateText(NSString *text);
 static BOOL ReportCodeChecksum(NSString *code) {
-    // Same GF(32) recurrence as roam_code_decode (x^5 + x^2 + 1).
+    // Legacy room-code GF(32) recurrence (x^5 + x^2 + 1).
     const char *alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
     unsigned check = 0;
     for (NSUInteger i = 0; i < code.length; ++i) {
@@ -367,7 +367,7 @@ static void ReportRedactBundle(NSString *folder) {
     ReportPrivacyRedactBundle(folder, ReportPrivacyLocalIdentity());
 }
 '''
-assert hashlib.sha256(PIN_1F942D8A_REPORT_PRIVACY_H.encode()).hexdigest() == 'bf54464b36ad3caf8120986f4994b6c20d5395839bab6848d0a29b4d4d8d4846', 'pinned baseline changed'
+assert hashlib.sha256(PIN_1F942D8A_REPORT_PRIVACY_H.encode()).hexdigest() == '56ed3961e413fb6810fd2bd496a5e949c98e043a58c216a59118609c7a285287', 'pinned baseline changed'
 
 
 # Reviewed baseline fragment; its digest prevents accidental control drift.
@@ -417,6 +417,14 @@ def run(name, header, *, baseline=False, expected_failure=False, fixture=None, r
         old_path_rule = r'    text = ReplacePattern(text, @"/(?:Users|home)/[^/\\s]+", @"~"); // home paths'
         assert source.count(home) == 1
         path.write_text(source.replace(home, home + '\n' + old_path_rule))
+    if 'static NSString *ReportPrivacyKnownIdentity(' not in header:
+        # The pinned original predates the shared matcher. Restore its preview's whole-value rules.
+        path = work / 'report_github.m'
+        source = path.read_text()
+        call = '    text = ReportPrivacyKnownIdentity(text, identity);\n    if (!text) return nil;'
+        assert source.count(call) == 1
+        whole = whole_identity_loop(pinned_source(PREDECESSOR, 'report_privacy.h'))
+        path.write_text(source.replace(call, whole.replace('ReportPrivacyReplace', 'ReplacePattern').rstrip()))
     (work / 'report_privacy.h').write_text(header)
     # Compile the actual log-copy function, including its truncation order, not a fixture substitute.
     report = report if report is not None else (RUNTIME / 'report.m').read_text()
@@ -468,6 +476,24 @@ def run(name, header, *, baseline=False, expected_failure=False, fixture=None, r
     return failures
 
 
+def whole_identity_loop(header):
+    start = header.index('    for (NSString *key in @[@"user"')
+    return header[start:header.index('    text = ', header.index('\n    }', start))].rstrip() + '\n'
+
+
+def name_parts_proof(header):
+    fixture = (RUNTIME / 'report_privacy_test.m').read_text()
+    start = fixture.index('    NSArray *rows = PrivacyCases();')
+    end = fixture.index('    printf("privacy:')
+    fixture = fixture[:start] + '    NamePartTests(root);\n' + fixture[end:]
+    start = header.index('    // Underscores delimit account names')
+    end = header.index('    return text;', start)
+    whole = whole_identity_loop(pinned_source(PREDECESSOR, 'report_privacy.h'))
+    run('name_parts_baseline', header[:start] + whole + header[end:], fixture=fixture,
+        expected_failure=True, expected_counts=(22, 15))
+    run('name_parts', header, fixture=fixture, expected_counts=(22, 0))
+
+
 def room_code_proof(header, premise=False):
     fixture=(RUNTIME/'report_privacy_test.m').read_text()
     start=fixture.index('    NSArray *rows = PrivacyCases();')
@@ -488,6 +514,7 @@ def main():
     run('public_carbon', header, game='carbon', expected_counts=(12, 0))
     run('public_mw', header, game='mw', expected_counts=(10, 0))
     room_code_proof(header)
+    name_parts_proof(header)
     original = pinned_source('13984ab7', 'report_privacy.h').encode()
     assert hashlib.sha256(original).hexdigest() == ORIGINAL
     print('original SHA256 ' + ORIGINAL, flush=True)
@@ -524,7 +551,10 @@ def main():
         old = '@[@"user", @"computer", @"serial", @"wifi"]'
         new = '@[' + ', '.join('@"' + other + '"' for other in ('user', 'computer', 'serial', 'wifi') if other != key) + ']'
         assert header.count(old) == 1
-        mutants['known_' + key] = header.replace(old, new)
+        mutant = header.replace(old, new)
+        if key == 'user':
+            mutant = mutant.replace('NSString *full = [identity[@"user"] lastObject];', 'NSString *full = nil;')
+        mutants['known_' + key] = mutant
     for symbol in 'pousr':
         mutants['github_' + symbol] = header.replace('gh[pousr]_', 'gh[' + 'pousr'.replace(symbol, '') + ']_')
     mutants['github_pat'] = header.replace('|github_pat_', '|absent_pat_')
@@ -537,9 +567,9 @@ def main():
     mutants['overlapping_fields'] = header.replace('@"(?=(%@))"', '@"(%@)"')
     mutants['decode_order'] = header.replace('text = ReportPrivateRules(decoded);', 'text = decoded;')
     mutants['text_extension'] = header.replace('name.pathExtension.lowercaseString', 'name.pathExtension')
-    mutants['nesting_fail_closed'] = header.replace('return nil;\n}\n\n// Bundle', 'return text;\n}\n\n// Bundle')
+    mutants['nesting_fail_closed'] = header.replace('return nil;\n}\n\n// Match the same', 'return text;\n}\n\n// Match the same')
     mutants['decode_fail_closed'] = header.replace('if (!bytes) return nil;', 'if (!bytes) return text;')
-    mutants['write_fail_closed'] = header.replace('[fm removeItemAtPath:path error:NULL];', '(void)path;')
+    mutants['write_fail_closed'] = header.replace('if (![fm removeItemAtPath:path error:NULL]) return NO;', '(void)path;')
     # The broken controls are independent (own scratch dir and binary each); compile them four at a time.
     jobs = []
     for name, broken in mutants.items():

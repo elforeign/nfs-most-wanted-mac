@@ -1,7 +1,9 @@
-"""Translated contact fixtures: 93 checks, 0 failures; 8 pair + 2 single-body solver entries.
-Disabled controls fail: Moment 26, tensor 3, inverse mass 17, penetration 6,
-collision modifier 2, damage 3, production ghost gate 3, native delegation 1
+"""Translated contact fixtures with paired and single-body solver entries.
+Disabled controls fail: Moment 28, tensor 3, inverse mass 18, penetration 6,
+collision modifier 2, damage 3, native delegation 1
 (each exits 1).
+Production admission reaches the solver in seven live/stale/missing/off states;
+removed readiness and generation guards each fail 2 checks (exit 1).
 Heavy/light, reversed and off-centre pairs; native world/OBB/ground callers;
 GameBreaker/reset/invulnerability; both damage sides and unchanged shared Info.
 Private executable supplies translated math/constants; surface/event bookkeeping
@@ -31,16 +33,20 @@ void f_006B7720_orig(Cpu *c) { c->esp+=4; }
 void f_006978F0_orig(Cpu *c) { c->esp+=8; }
 int diag_on;
 void diag_event(const char *s,...) { (void)s; }
-static int enabled=1,invulnerable,ghost;
+static int enabled=1,invulnerable;
 static unsigned checks,failures,damage_calls,solver_calls;
 static float damage_value,world_mass;
 static unsigned world_calls,single_solves,pair_solves;
 static float single_mass,pair_mass;
-GHOST_GATE
-static CarPhysics heavy={1,1888,{1,2,1,0}},light={1,995,{1,1,1,0}};
+
 int car_physics_enabled(void) { return enabled; }
 uint32_t car_physics_key(const char *s) { return !strcmp(s,"300c")?1:3; }
-const CarPhysics *car85_contact_physics(uint32_t key) { return key==1?&heavy:key==2?&light:NULL; }
+typedef struct { uint32_t key; CarPhysics physics; uint32_t contact_vault; uint64_t contact_generation; } Addition;
+static Addition additions[2]={{1,{1,1888,{1,2,1,0}},0x90000,1},{2,{1,995,{1,1,1,0}},0x91000,2}};
+static unsigned nadditions=2;
+ADMISSION
+#define heavy additions[0].physics
+#define light additions[1].physics
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; fprintf(stderr,"line %d: %s\n",__LINE__,#x); } } while (0)
 #define NEAR(a,b,t) CHECK(isfinite(a) && fabs((a)-(b))<(t))
 static Cpu cpu(void) { Cpu c={0}; c.esp=0x800000; c.cw=0x37f; return c; }
@@ -132,6 +138,28 @@ static void pair(float mass,int reverse,float offset) {
 int main(int argc,char **argv) {
     assert(argc==2); setvbuf(stdout,NULL,_IONBF,0); G=calloc(1,0x1000000); FILE *f=fopen(argv[1],"rb"); assert(f);
     assert(fread(G,1,0x1000000,f)==0x1000000); fclose(f);
+    vaults[0]=(VaultLife){0x90000,1,1}; vaults[1]=(VaultLife){0x91000,2,1};
+    // Production admission must reach the translated solver only while the
+    // source collection is present, ready and in the same live generation.
+    for (int state=0;state<7;++state) {
+        additions[0].key=1; heavy.present=1; additions[0].contact_vault=0x90000;
+        additions[0].contact_generation=1; vaults[0].ready=1; enabled=1;
+        if(state==1)vaults[0].ready=0;
+        if(state==2)additions[0].contact_generation=3;
+        if(state==3)additions[0].contact_vault=0x92000;
+        if(state==4)heavy.present=0;
+        if(state==5)additions[0].key=3;
+        if(state==6)enabled=0;
+        body(0x10000,1,1595); body(0x12000,0,1595);
+        uint32_t ma=moment(0x10000,0x20000),mb=moment(0x12000,0x21000);
+        float mass=state?1595:1888;
+        NEAR(MF32(ma+0xd0),mass,.001);
+        MF32(ma+0x98)=-10; solve(ma,mb,0);
+        double resolved=1.0-5040.0/2097152.0;
+        NEAR(MF32(mb+0x98),-10*mass/(mass+1595)*resolved,.00002);
+    }
+    enabled=1; additions[0].key=1; heavy.present=1;
+    additions[0].contact_vault=0x90000; additions[0].contact_generation=1; vaults[0].ready=1;
     body(0x10000,1,1595); body(0x12000,0,1595);
     uint32_t a=moment(0x10000,0x20000);
     NEAR(MF32(a+0xd0),1888,.001); NEAR(MF32(a+0xd4),1.0/1888,1e-8);
@@ -169,14 +197,6 @@ int main(int argc,char **argv) {
     // No collision can alter the driving mass/inertia, including after reset.
     CHECK(MF32(0x1042c)==1595 && MF32(0x1043c)==1.0f/1595 && MF32(0x10440)==1000);
     enabled=0; a=moment(0x10000,0x20000); CHECK(MF32(a+0xd0)==1595 && MF32(a+0x80)==1000); enabled=1;
-    // Execute the production roam ghost veto in both pair orders.
-    roam_ghosts=1; roam_car[0].used=roam_car[0].ghost=1; roam_car[0].sim=0x10800;
-    c=cpu(); c.ecx=0x10000; M32(c.esp+4)=0x12000; f_0069B740(&c);
-    CHECK(!(c.eax&255) && roam_ghost_skips==1 && native_collision_calls==0);
-    c=cpu(); c.ecx=0x12000; M32(c.esp+4)=0x10000; f_0069B740(&c);
-    CHECK(!(c.eax&255) && roam_ghost_skips==2 && native_collision_calls==0);
-    roam_ghosts=0; c=cpu(); c.ecx=0x10000; M32(c.esp+4)=0x12000; f_0069B740(&c);
-    CHECK((c.eax&255)==1 && native_collision_calls==1);
     // Run the translated world caller through Moment construction and its
     // native single-body solver. Surface/default bookkeeping is synthetic.
     body(0x10000,1,1595); MF32(0x10420)=-10;
@@ -265,20 +285,18 @@ def main():
         for addr in stubs:
             translated.append(f'void f_{addr:08X}(Cpu *c) {{ stub(c,0x{addr:X}); }}')
         dispatch='\n'.join(f'case 0x{a:X}: f_{a:08X}(c); return;' for a in generated)
-        roam=(ROOT/'runtime/roam_game.c').read_text()
-        start=roam.index('void f_0069B740(Cpu *c) {')
-        gate=roam[start:roam.index('\n}',start)+2]
-        gate_prefix="""#define ROAM_CARS 1
-        typedef struct { int used,ghost; uint32_t sim; } RoamCar;
-        static RoamCar roam_car[1]; static unsigned roam_ghost_skips,native_collision_calls;
-        static int roam_ghosts;
-        void f_0069B740_orig(Cpu *c) { ++native_collision_calls; c->eax=1; c->esp+=8; }
-        """
-        source=HARNESS.replace('TRANSLATED','\n'.join(translated)).replace('DISPATCH',dispatch).replace('GHOST_GATE',gate_prefix+gate)
+        admission=(ROOT/'runtime/car85.c').read_text()
+        def fragment(start):
+            a=admission.index(start)
+            return admission[a:admission.index('\n}',a)+2]
+        vault=re.search(r'typedef struct \{[^\n]+\} VaultLife;',admission)[0]
+        admitted=vault+'\nstatic VaultLife vaults[256];\n'+fragment('static VaultLife *life(')+'\n'+fragment('const CarPhysics *car85_contact_physics(')
+        source=HARNESS.replace('ADMISSION',admitted).replace('TRANSLATED','\n'.join(translated)).replace('DISPATCH',dispatch)
         unit=tmp/'fixture.c'; unit.write_text(source)
         original=(ROOT/'runtime/contact_mass.c').read_text()
         variants={'actual':original,
-                  'ghost':original,
+                  'admission-ready':original,
+                  'admission-generation':original,
                   'integration':original.replace('    f_006978F0_orig(c);','    /* omitted native delegation */'),
                   'tensor':original.replace('memcpy(G+moment+0x80,G+scratch+48,12);','/* omitted tensor */'),
                   'inverse-mass':original.replace('MF32(moment+0xd4)=1.0f/p->mass;','/* omitted inverse mass */'),
@@ -287,8 +305,12 @@ def main():
                   'modifier':original.replace('if (p && MF32(body+0x16c)','if (0 && p && MF32(body+0x16c)'),
                   'damage':original.replace('float ratio=p->mass/body_mass(body);','float ratio=1.0f;')}
         for name,module in variants.items():
-            assert name in ('actual','ghost') or module!=original,name
-            unit.write_text(source.replace('if (roam_ghosts) {','if (0) {') if name=='ghost' else source)
+            assert name in ('actual','admission-ready','admission-generation') or module!=original,name
+            fixture=source
+            if name=='admission-ready': fixture=fixture.replace('v && v->ready && v->generation==a->contact_generation','v && v->generation==a->contact_generation')
+            if name=='admission-generation': fixture=fixture.replace('v && v->ready && v->generation==a->contact_generation','v && v->ready')
+            assert name not in ('admission-ready','admission-generation') or fixture!=source
+            unit.write_text(fixture)
             feature=tmp/'contact.c'; feature.write_text(module); exe=tmp/'fixture'
             build=subprocess.run(['clang','-O1','-w','-I'+str(ROOT/'runtime'),'-I'+str(ROOT/'recomp'),
                 '-I'+str(ROOT/'recomp/out'),str(unit),str(feature),'-o',str(exe)],capture_output=True,text=True)

@@ -1,4 +1,5 @@
 #include "blackbox.h"
+#include "blackbox_errors.h"
 #include "blackbox_render.h"
 #include "blackbox_mw_fe.h"
 #include <stdatomic.h>
@@ -28,7 +29,7 @@ typedef struct {
 } Frame;
 typedef struct { Header h; uint32_t stage, valid; uint64_t values[3]; } Present;
 typedef struct { Header h; uint32_t kind, valid; uint64_t values[11]; } Event;
-enum { FE_LOAD = 3, FE_PACKAGE, FE_MW, MW_MOVIE, MW_NIS, CARBON_MOVIE, CARBON_NIS, STATE_CONTEXTS };
+enum { FE_LOAD = 3, FE_PACKAGE, FE_MW, MW_MOVIE, MW_NIS, CARBON_MOVIE, CARBON_NIS, INPUT_STATE, STATE_CONTEXTS };
 #define EVENT_WORDS (sizeof(Event) / sizeof(uint64_t))
 _Static_assert(sizeof(Frame) == 376, "frame budget");
 _Static_assert(sizeof(Present) == 56, "presentation budget");
@@ -115,6 +116,44 @@ static int publish(unsigned which, void *record) {
     else atomic_fetch_add_explicit(&r->lost, 1, memory_order_relaxed);
     release(gate);
     return ok;
+}
+/* Only failures visit this ring. Bounded, nonblocking aggregation retains the
+ * first observation and counts repeats; snapshots use the same slot gates. */
+void blackbox_record_error(const BlackboxError *error, uint64_t serial) {
+    if (!error || !blackbox_enabled()) return;
+    static atomic_flag producer = ATOMIC_FLAG_INIT;
+    Ring *r = &rings[3];
+    if (atomic_flag_test_and_set_explicit(&producer, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&r->lost, 1, memory_order_relaxed);
+        return;
+    }
+    uint64_t now = blackbox_now_ns();
+    if (!serial) serial = atomic_load_explicit(&last_frame, memory_order_relaxed);
+    uint64_t head = atomic_load_explicit(&r->head, memory_order_relaxed);
+    for (uint64_t n = 0; n < head && n < ERRORS; ++n) {
+        unsigned i = (head - 1 - n) % ERRORS;
+        if (!acquire(&errors[i].gate)) continue;
+        Event *e = &errors[i].value;
+        int same = e->h.seq && e->kind == BB_ERROR &&
+            e->values[0] == error->subsystem && e->values[1] == error->operation &&
+            e->values[2] == (uint64_t)error->code && e->values[3] == error->identifier &&
+            e->values[4] == error->caller;
+        if (same) {
+            if (now > e->h.ns) e->h.ns = now;
+            e->h.frame = serial;
+            ++e->values[6];
+        }
+        release(&errors[i].gate);
+        if (same) {
+            atomic_flag_clear_explicit(&producer, memory_order_release);
+            return;
+        }
+    }
+    Event e = {.h = {0, now, serial}, .kind = BB_ERROR, .valid = 1,
+        .values = {error->subsystem, error->operation, (uint64_t)error->code,
+                   error->identifier, error->caller, now, 1, serial}};
+    publish(3, &e);
+    atomic_flag_clear_explicit(&producer, memory_order_release);
 }
 static void event(uint32_t kind, uint64_t now, uint64_t frame, uint64_t a, uint64_t b) {
     Event e = {.h = {0, now, frame}, .kind = kind, .valid = 1, .values = {a, b}};
@@ -291,6 +330,16 @@ static void state_event(unsigned key, uint32_t kind, const void *state, size_t s
         atomic_store_explicit(&state_context[key].words[i], words[i], memory_order_relaxed);
     atomic_store_explicit(&state_context[key].version, e.h.seq * 2, memory_order_release);
 }
+void blackbox_record_input(const BlackboxInput *state, uint64_t frame, uint64_t now) {
+    state_event(INPUT_STATE, BB_INPUT, state, sizeof *state, 1, frame, now);
+}
+static void dump_input_event(FILE *f, const Event *v, uint64_t anchor) {
+    BlackboxInput s; memcpy(&s, v->values, sizeof s);
+    const char *layout = s.layout == 1 ? "playstation" : s.layout == 2 ? "xbox" : s.layout == 3 ? "pc" : "unobserved";
+    fprintf(f, "INPUT source=%s source_changed=%u connected=%u layout=%s changes=%u unchanged_for=%.3fs\n",
+            s.source ? "controller" : "keyboard/mouse", !!(s.changes & 1), s.connected,
+            layout, s.changes, (double)(anchor - s.source_since) / 1000000000.0);
+}
 void blackbox_record_fe(const BlackboxFE *state, uint32_t valid, uint64_t frame, uint64_t now) {
     if (state->index < FE_LOAD) state_event(state->index, BB_FE, state, sizeof *state, valid, frame, now);
 }
@@ -386,6 +435,7 @@ static unsigned context_key(const Event *v) {
     case BB_LOAD: return FE_LOAD;
     case BB_PACKAGE: return FE_PACKAGE;
     case BB_MW_FE: return FE_MW;
+    case BB_INPUT: return INPUT_STATE;
     case BB_MOVIE: if (index == BB_CIN_STATE) return MW_MOVIE; break;
     case BB_NIS: if (index == BB_CIN_STATE) return MW_NIS; break;
     case BB_CARBON_MOVIE: if (index == BB_CIN_STATE) return CARBON_MOVIE; break;
@@ -442,6 +492,13 @@ __attribute__((weak)) void blackbox_render_definitions(FILE *f) { fputs("UNAVAIL
 void blackbox_record_present(uint64_t serial, uint32_t stage, uint32_t status,
                              uint64_t a, uint64_t b, uint64_t c) {
     if (!blackbox_enabled()) return;
+    /* Both frame and final completion paths retain their original serial here.
+     * MTLCommandBufferStatusError=5 also covers a missing NSError payload. */
+    if ((stage == BB_RENDER_GPU || stage == BB_PRESENT_GPU) && (status == 5 || c)) {
+        BlackboxError error = {BB_ERR_METAL, stage == BB_RENDER_GPU ? BB_OP_FRAME_COMMAND : BB_OP_FINAL_COMMAND,
+                               (int64_t)c, status, 0};
+        blackbox_record_error(&error, serial);
+    }
     Present p = {.h = {0, blackbox_now_ns(), serial}, .stage = stage,
                  .valid = status, .values = {a, b, c}};
     publish(1, &p);
@@ -565,8 +622,8 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
             seconds(s->anchor, s->flow_since));
     const char *fe = s->game == BLACKBOX_MW ? " fe package load fade movie nis" :
                      s->game == BLACKBOX_CARBON ? " fe package load movie nis" : "";
-    fprintf(f, "AVAILABLE flow frame_timing attempted_draws ticks menu%s; UNAVAILABLE%s input errors\n",
-            fe, s->game == BLACKBOX_MW || s->game == BLACKBOX_CARBON ? "" : " movie nis");
+    fprintf(f, "AVAILABLE flow frame_timing attempted_draws ticks menu input errors%s%s\n",
+            fe, s->game == BLACKBOX_MW || s->game == BLACKBOX_CARBON ? "" : "; UNAVAILABLE movie nis");
     blackbox_render_definitions(f);
     /* Summarize only copied observations for the latest encoded serial. An
      * absent callback is missing-or-pending, never evidence of a blank image. */
@@ -605,8 +662,9 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
         const Event *v = &s->state_context[i];
         if (v->h.seq <= latest_state[i] || v->h.ns > s->anchor) continue;
         fprintf(f, "% .6f f%llu %s ", seconds(v->h.ns, s->anchor), (unsigned long long)v->h.frame,
-                cinematic(v) ? "CINEMATIC_CONTEXT" : "FE_CONTEXT");
+                cinematic(v) ? "CINEMATIC_CONTEXT" : v->kind == BB_INPUT ? "INPUT_CONTEXT" : "FE_CONTEXT");
         if (cinematic(v)) dump_cinematic_event(f, v, s->anchor);
+        else if (v->kind == BB_INPUT) dump_input_event(f, v, s->anchor);
         else dump_fe_event(f, v);
         latest_state[i] = 0;
     }
@@ -624,7 +682,11 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
             /* Completion/presentation may arrive after the last guest sample.
              * Freeze at capture time for F10, otherwise at export time. */
             int present = k == 1 && h->ns <= (saved ? s->captured_at : now);
-            int after_frame = edge || present || (e && e->kind == BB_MENU);
+            /* A repeat can update last_ns after the trigger but before this
+             * snapshot copies its slot. Retain the known pre-trigger first
+             * observation; mark the interval count unavailable below. */
+            int failure = k == 3 && ((Event *)h)->values[5] <= (saved ? s->captured_at : now);
+            int after_frame = edge || present || failure || (e && e->kind == BB_MENU);
             int context = 0;
             if (e) for (unsigned j = 0; j < STATE_CONTEXTS; ++j)
                 if (h->seq && h->seq == latest_state[j]) context = 1;
@@ -665,8 +727,23 @@ static void dump(FILE *f, Snapshot *s, BlackboxTrigger trigger, uint64_t now, in
                 else if (v->kind == BB_FE || v->kind == BB_LOAD || v->kind == BB_PACKAGE || v->kind == BB_MW_FE)
                     dump_fe_event(f, v);
                 else if (cinematic(v)) dump_cinematic_event(f, v, context ? s->anchor : h->ns);
+                else if (v->kind == BB_INPUT) dump_input_event(f, v, s->anchor);
                 else fprintf(f, "EVENT kind=%u valid=%u\n", v->kind, v->valid);
-            } else fprintf(f, "RESERVED\n");
+            } else {
+                Event *v = (void *)h;
+                static const char *const classes[] = {"unknown", "shader", "d3d", "metal", "asset", "assert", "fatal", "com"};
+                static const char *const operations[] = {"unknown", "translate", "library", "pipeline", "hresult", "open", "read", "breakpoint", "fatal", "frame_command", "final_command", "function"};
+                unsigned c = v->values[0], op = v->values[1];
+                fprintf(f, "ERROR class=%s operation=%s code=%lld id=%016llX caller=%08X first_ns=%llu last_ns=%llu ",
+                    c < sizeof classes / sizeof *classes ? classes[c] : "unknown",
+                    op < sizeof operations / sizeof *operations ? operations[op] : "unknown",
+                    (long long)v->values[2], (unsigned long long)v->values[3], (unsigned)v->values[4],
+                    (unsigned long long)v->values[5], (unsigned long long)h->ns);
+                if (h->ns > (saved ? s->captured_at : now))
+                    fprintf(f, "repeats=unavailable observed_repeats=%llu capture_overlap=1 ", (unsigned long long)v->values[6]);
+                else fprintf(f, "repeats=%llu ", (unsigned long long)v->values[6]);
+                fprintf(f, "first_frame=%llu\n", (unsigned long long)v->values[7]);
+            }
         }
         fprintf(f, "COVERAGE %s records=%llu retained=%.3fs overwritten=%llu lost=%llu unavailable=%llu capacity_short=%u\n",
                 names[k], (unsigned long long)kept, oldest ? seconds(s->anchor, oldest) : 0,

@@ -75,7 +75,7 @@ def test_prepared_modes_pass_launch_walk():
         executable = driver.with_suffix('')
         compiled = subprocess.run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations',
                                    '-Wno-incompatible-pointer-types', '-I', str(ROOT),
-                                   str(driver), '-framework', 'Cocoa', '-o', str(executable)],
+                                   str(driver), '-framework', 'Cocoa', '-framework', 'Security', '-o', str(executable)],
                                   capture_output=True, text=True, timeout=90)
         assert compiled.returncode == 0, compiled.stderr[-4000:]
 

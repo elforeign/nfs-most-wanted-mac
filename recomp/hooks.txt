@@ -153,7 +153,6 @@
 007A77F0    gameplay_opts.c: FEMarkerSelection::Redraw (Markers per Rival: Selections Remaining counts from N)
 00443BA0    gameplay_opts.c: AIPursuit::OnTask (Heat Level: the pursuit's heat range)
 005992E0    gameplay_opts.c: cFrontendDatabase::cFrontendDatabase (Black Edition content after the INGAMEC.BUN check)
-0057A110    roam_hud.c: Minimap::UpdateAiRacerElements (online names and spare racer icons)
 005DD090    gameplay_opts.c: GRaceBin::EnableBarriers (Open Map: the career's region barriers)
 005FF990    gameplay_opts.c: GRaceStatus::ComputeCatchUpSkill (No Catch-up, default on: no rubber banding)
 00518B40    gameplay_opts.c: MemoryCard::ListOldSaveFilesPC (Starting Bonus: the NFSU2-save $10,000)
@@ -283,6 +282,7 @@
 00792230    ws2_32.c: client SetState (BOOT_ONLINE: logs the client state machine)
 00797450    ws2_32.c: client R_BI_DRIVERFINISH handler (BOOT_ONLINE: logs it)
 0079FF50    ws2_32.c: Server::SendMessageToAllClients (BOOT_ONLINE: logs R_BI_DRIVERFINISH sent by the host)
+00793510    ws2_32.c: GlobalConnStatusCB (passive LAN diag: lost connection callback completed)
 00761140    ws2_32.c: OnlineManager::Disconnect (BOOT_ONLINE: logs who disconnects)
 006F2850    ws2_32.c: OnlineGame::CreatePlayersAndCars (BOOT_ONLINE: logs it)
 007356A0    ws2_32.c: OnlineManager::UpdateOutgoing (BOOT_ONLINE: logs the first call)
@@ -302,6 +302,7 @@
 00752940    car85.c: LoadedWheel (RideInfo model namespace)
 00752B60    car85.c: LoadedCar model hashes (RideInfo model namespace)
 00678CE0    car_performance_attrib_impl.h: keep estimated top speed within the imported ECU cutoff
+00672FE0    car_performance_attrib_impl.h: source torque spline for owned engine layouts
 006794E0    car_performance_attrib_impl.h: original all-car bounds preserve source rating order
 00683EB0    car_performance_attrib_impl.h: diagnostics for normalized added-car ratings
 00755800    car85.c: CarRenderInfo parts (RideInfo model namespace)
@@ -323,11 +324,6 @@
 00516520    onscreen_keyboard.c: initiating FE joy mask for text ownership
 006A8870    pedals.c: diagnostic human input identity after FetchInput
 0069D4D0    pedals.c: diagnostic physics pedal values after ComputeState
-0075AAD0    roam_game.c: World_Service (online free roam: local car out, friends' poses in; NFS_ROAM)
-00663D30    roam_game.c: MainLoop (online session cleanup also runs without a simulation)
-0069B740    roam_game.c: RBVehicle::CanCollideWith (online free roam: ghosted friend cars collide with nothing)
-00687710    roam_game.c: PVehicle resource admission (online spawn failure reason)
-006ED260    roam_game.c: Sim::CanSpawnRigidBody (online spawn failure reason)
 
 00576E30    gameplay_opts.c: Junkman UtilizeMarker preserves stock after the career
 0058A680    gameplay_opts.c: Junkman performance availability after the career

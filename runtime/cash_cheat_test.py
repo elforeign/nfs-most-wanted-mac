@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Synthetic career cash fixture; no game, assets, preferences or profile files.
-Pre-review controls: online 10 failures / 547 checks; input 28 / 549;
-cap 7 / 545; headers 4 / 535; all four 49 / 553. Production: 0 / 541.
-Pre-feature (rows absent / no frame hook): 106 / 340;
-missing award: 45 / 501; missing refresh: 6 / 518.
-Registry integration: 167 retained / 0 dropped; old capacity: 160 / 7.
+Controls reject missing cash rows, frame hook, award and refresh calls, unsafe
+input handling, excess cash headroom and incomplete cash-label updates.
+Registry integration checks retained rows against the old registry capacity.
 Translated AwardCash/GetCash/marker add, all four F10 actions, reward headroom,
-raw paste / Unicode typing / grouped ASCII parsing, online entry at queue and
-frame, profile replacement, one-shot dispatch, CPU restoration and cash labels.
+raw paste / Unicode typing / grouped ASCII parsing, profile replacement,
+one-shot dispatch, CPU restoration and cash labels.
 """
 from pathlib import Path
 import hashlib
@@ -32,13 +30,11 @@ PRE = r'''
 #include "host.h"
 #include "settings.h"
 #include "cash_cheat.h"
-#include "roam_online.h"
 #import <Foundation/Foundation.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 uint8_t *G;
-atomic_int roam_online_active;
 static Setting *registry[8];
 static unsigned nrows,checks,failures,awards,refreshes,prints,sheet_prints,localizations;
 static uint32_t last_award,last_cash;
@@ -90,7 +86,7 @@ POST = r'''
 static Cpu cpu(void){Cpu c={.ecx=0x1234,.esp=sp,.eax=4,.ebx=5,.edx=6,.esi=7,.edi=8,.ebp=9,.cw=0x37f};return c;}
 static void tick(void){Cpu c=cpu(),saved=c;cash_cheat_frame(&c);CHECK(!memcmp(&c,&saved,sizeof c));}
 static void setup(void){
- atomic_store(&roam_online_active,0);memset(G,0,0x700000);M32(0x91CF90)=db;M32(db+0x10)=profile;M8(profile+0x20)=1;
+ memset(G,0,0x700000);M32(0x91CF90)=db;M32(db+0x10)=profile;M8(profile+0x20)=1;
  M32(profile+0xac)=1;M32(db+0x12c)=1;M32(0x925e90)=6;M32(0x91e000)=race;M32(race+0x1964)=2;
  M32(profile+0xb4)=123;awards=refreshes=prints=sheet_prints=localizations=last_award=last_cash=0;message[0]=0;
  tick();
@@ -157,13 +153,7 @@ int main(void){ @autoreleasepool {
  }
  setup();memset(current()->text,'0',94);current()->text[94]='1';current()->text[95]=0;
  portmenu_char(0x2212);click(ids[3]);tick();balance(123);CHECK(!awards);
- // Online entry, stale callbacks, and a session starting between queue and frame.
- setup();atomic_store(&roam_online_active,1);tick();
- for(unsigned i=0;i<4;i++){CHECK(settings_find(ids[i])->type==SET_INFO);click(ids[i]);}
- cash_cheat_20000(0);cash_cheat_50000(0);cash_cheat_100000(0);
- strcpy(current()->text,"20");cash_cheat_typed(0);tick();balance(123);CHECK(!awards);
- setup();click(ids[0]);atomic_store(&roam_online_active,1);tick();balance(123);CHECK(!awards);
- setup();atomic_store(&roam_online_active,1);cash_cheat_20000(0);atomic_store(&roam_online_active,0);tick();balance(123);CHECK(!awards);
+
  }
  // Every reason a career is unavailable, including retained FE career bit in
  // Quick Race / Challenge and loading. Disabled rows keep the hint and no action.
@@ -228,20 +218,6 @@ int main(void){
 
 # Frozen pre-review function fragments; each digest pins the failing control.
 BEFORE = {
-    'career': (r'''static uint32_t career_profile(void) {
-    uint32_t db = M32(FE_DATABASE), profile = db ? M32(db + 0x10) : 0;
-    // IsProfileNamed (0056DB10), HasCareerStarted (0050E310), FE career bit.
-    if (!profile || !M8(profile + 0x20) || !(M32(profile + 0xAC) & 1) || !(M32(db + 0x12C) & 1)) return 0;
-    // Quick races can retain a career profile: Game_IsCareerMode (00605610)
-    // uses GRaceStatus::mRaceMode == 2, rather than the front-end mode bit.
-    if (M32(GAME_FLOW) == 6) {
-        uint32_t race = M32(RACE_STATUS);
-        if (!race || M32(race + 0x1964) != 2) return 0;
-    } else if (M32(GAME_FLOW) != 3) return 0; // no awards during loading
-    return profile;
-}
-''',
-        'd37af13caff1cd2b659464ab074b6505f4a96e5a42bbbe0f0f78bfd916b40108'),
     'typed': (r'''void cash_cheat_typed(int value) {
     (void)value;
     Setting *row = settings_find("gameplay.cash_amount");
@@ -349,11 +325,10 @@ def main():
     marker += marker_source[marker_source.index('    /* 007B3DDA:'):marker_source.index('    /* 007B3DF6:')] + '}\n'
     for body, digest in BEFORE.values():
         assert hashlib.sha256(body.encode()).hexdigest() == digest
-    before_online = feature.replace(fragment(feature, 'static uint32_t career_profile('), BEFORE['career'][0])
     before_input = feature.replace(fragment(feature, 'void cash_cheat_typed('), BEFORE['typed'][0])
     before_cap = feature.replace('#define CASH_MAX ((uint32_t)INT32_MAX - 10000000u)', BEFORE['cap'][0])
     before_headers = feature.replace(fragment(feature, 'static void refresh_cash('), BEFORE['refresh'][0])
-    before_all = before_online.replace(fragment(before_online, 'void cash_cheat_typed('), BEFORE['typed'][0])
+    before_all = feature.replace(fragment(feature, 'void cash_cheat_typed('), BEFORE['typed'][0])
     before_all = before_all.replace('#define CASH_MAX ((uint32_t)INT32_MAX - 10000000u)', BEFORE['cap'][0])
     before_all = before_all.replace(fragment(before_all, 'static void refresh_cash('), BEFORE['refresh'][0])
     # Before this feature there are no cash rows and no frame callback. This
@@ -368,7 +343,6 @@ void cash_cheat_100000(int v){(void)v;}
                 ('pre-feature', baseline + 'void cash_cheat_20000(int v){}\nvoid cash_cheat_50000(int v){}\nvoid cash_cheat_typed(int v){}\n', menu_input, 1),
                 ('missing-award', feature.replace('call_guest(c, 0x00566010u, 1, &award);', '(void)award;'), menu_input, 1),
                 ('missing-refresh', feature.replace('refresh_cash(c, M32(profile + 0xB4));', ''), menu_input, 1),
-                ('online-before', before_online, menu_input, 1),
                 ('input-before', before_input, BEFORE['paste'][0] + BEFORE['char'][0], 1),
                 ('cap-before', before_cap, menu_input, 1),
                 ('headers-before', before_headers, menu_input, 1),

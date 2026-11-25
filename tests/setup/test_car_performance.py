@@ -29,7 +29,10 @@ from setup_kit.x360 import Source
 
 
 class Record(ct.Structure):
-    _fields_ = [('version', ct.c_uint32), ('words', ct.c_uint32 * 82), ('source', ct.c_uint)]
+    _fields_ = [('version', ct.c_uint32), ('words', ct.c_uint32 * 82), ('source', ct.c_uint),
+                ('torque_count', ct.c_uint32), ('torque_bounds', ct.c_float * 4),
+                ('torque_x', ct.c_float * 64), ('torque_y', ct.c_float * 64),
+                ('torque_second', ct.c_float * 64)]
 
 
 # MW guest offsets from the engine/transmission constructors, Fetch PerfStats

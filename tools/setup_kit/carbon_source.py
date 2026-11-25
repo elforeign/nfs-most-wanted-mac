@@ -38,15 +38,25 @@ def prepare(source, work, events, update=None, exe=None, extra=()):
         raise b.SetupError("This is an Xbox 360 disc image.",
                            "Add it under Xbox 360 files (optional). Choose your PC game first.")
     if update or exe or extra:
+        if looks_like_disc(source):  # a disc the player chose as one, but not the supported Carbon disc
+            raise disc_refusal(source)
         raise b.SetupError("The Carbon update and a separate NFSC.exe are only used with original Carbon PC discs.", FIX)
     if source.is_file() and source.suffix.lower() == ".iso":
+        # An ISO 9660 disc is not the private UDF input handled below.
+        try:
+            disc = b.pc_disc.Disc(source)
+        except b.pc_disc.DiscError:
+            pass
+        else:
+            disc.close()
+            raise disc_refusal(source)
         try:
             from . import carbon_repack
         except ImportError:  # the public Setup does not carry the disc-image reader
-            raise b.SetupError("A disc image (.iso) is not supported here.", FIX)
+            raise disc_refusal(source) from None
         return carbon_repack.prepare(source, work, events)
-    if b.pc_disc.is_disc(source):
-        raise b.SetupError("Carbon PC disc installation is not supported yet.", FIX)
+    if looks_like_disc(source):
+        raise disc_refusal(source)
     if source.suffix.lower() not in (".zip", ".7z") or not source.is_file():
         b.validate_carbon(source)
         return source
@@ -74,7 +84,7 @@ def prepare(source, work, events, update=None, exe=None, extra=()):
         except b.Cancelled:
             raise
         except b.SetupError as error:
-            raise b.SetupError(str(error), FIX) from None
+            raise b.SetupError(str(error), error.fix or FIX) from None
 
     def space(total):
         if total > b.ZIP_MAX_BYTES:
@@ -85,6 +95,44 @@ def prepare(source, work, events, update=None, exe=None, extra=()):
                       "the Carbon archive", unpack, name="carbon_src")
     b.validate_carbon(root)
     return root
+
+
+UNREADABLE_FIX = ("Make an .iso from your original Carbon disc (2048-byte sectors; raw .mdf/.bin images can't be read), "
+                  "or choose your installed and updated Carbon folder instead.")
+EDITION_FIX = ("Choose your installed Carbon folder, updated to 1.4, instead. If you report this on GitHub, include the "
+               "disc id shown here.")
+
+
+def looks_like_disc(source):
+    """A chosen disc image (.iso/.mdf file) or a disc-shaped folder (autorun.inf and game archives, no game folders)."""
+    if source.is_file():
+        return source.suffix.lower() in (".iso", ".mdf")
+    from . import backend as b
+    return b.pc_disc.is_disc(source)
+
+
+def disc_refusal(source):
+    """Name why a chosen disc is not the supported Carbon PC disc. Messages that send a disc owner to "the game folder
+    was not found" or "the update is only used with discs" leave them nowhere to go."""
+    from . import backend as b
+    try:
+        disc = b.pc_disc.Disc(source)
+    except b.pc_disc.DiscError:
+        kind = ".mdf" if source.suffix.lower() == ".mdf" else "disc image"
+        return b.SetupError(f"Setup can't read this {kind}: it has no readable ISO 9660 file system.", UNREADABLE_FIX)
+    try:
+        if "speed.exe" in disc.files:
+            return b.SetupError("This is a Need for Speed: Most Wanted disc, not Carbon.",
+                                "Choose your Carbon PC disc, or use this disc with Most Wanted Setup.")
+        if not disc.archives:
+            return b.SetupError("This disc has no Carbon game archives (0compressed.zip).",
+                                "Choose disc 1 of your Carbon PC game, or your installed Carbon folder.")
+        if disc.product != carbon_disc.PRODUCT:
+            return b.SetupError(f"This disc isn't a supported Carbon PC disc edition (disc id {disc.product or 'missing'}).",
+                                EDITION_FIX)
+        return b.SetupError("This Carbon disc could not be used.", FIX)
+    finally:
+        disc.close()
 
 
 def find_root(top):
@@ -106,12 +154,19 @@ def prepare_disc(source, work, events, update, exe, extra=()):
     """Patch a temporary disc tree, discard its executables, then validate the player's copy."""
     from . import backend as b
 
-    b.require_disc_inputs(update, exe, "1.4", "NFSC.exe", DISC_FIX)
+    # The work lock is held. Clear a killed run's raw tree even when the updated copy is cached.
+    temporary = Path(work) / "tmp"
+    temporary.mkdir(exist_ok=True)
+    for stale in temporary.glob("carbon-disc-*"):
+        if stale.is_dir() and not stale.is_symlink():
+            shutil.rmtree(stale)
+
+    b.require_disc_inputs(update, exe, "1.4", b.CARBON_DISC_EXE, DISC_FIX)
     update, exe = Path(update), Path(exe)
     if not update.is_file():
         raise b.SetupError("The chosen Carbon update is missing or not a file.", DISC_FIX)
     if not exe.is_file() or b.sha_file(exe) != b.CARBON_EXE_SHA256:
-        raise b.SetupError("NFSC.exe is not the supported PC release of Need for Speed Carbon.", DISC_FIX)
+        raise b.carbon_exe_refusal(exe)
 
     def inputs():
         discs = {}
@@ -131,10 +186,9 @@ def prepare_disc(source, work, events, update, exe, extra=()):
         def unpack(out):
             # The disc executable is needed only for the update's edition check.
             # Never retain the raw extraction in Setup's resumable cache.
-            temporary = Path(work) / "tmp"
-            temporary.mkdir(exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="carbon-disc-", dir=temporary) as td:
-                raw = carbon_disc.prepare(source, Path(td), events, extra)
+                # The raw tree and the updated copy below exist together until this block ends.
+                raw = carbon_disc.prepare(source, Path(td), events, extra, reserve=1)
                 patch.apply(raw, out, progress=events.progress)
                 shutil.copyfile(exe, out / "NFSC.exe")
                 b.validate_carbon(out)

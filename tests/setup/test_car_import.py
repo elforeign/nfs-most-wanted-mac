@@ -3,6 +3,9 @@
 Issue #24 first list with no catalog: 0/1 silent before, 1/1 after.
 Issue #24 cache entry present at publish: old engine 0/2 (EACCES on the
 sealed-stage rename, the reported message), fixed engine 2/2 (reuse or quarantine).
+Issue #24 on macOS 15 (OlderKernelLifecycle, the older kernel's directory rename
+rule): 4.10.0 engine 51 of 54 fail, 50 with the reported EACCES '.txn-' -> 'c-';
+the engine that unseals only for the rename passes 54/54.
 Original baseline: the public engine API test fails (1 failure, 0 errors)
 because no standalone transaction engine exists. No test reads repository history.
 Good: 45 lifecycle/API tests; real PC/X360 selected-range dry runs write seven
@@ -37,6 +40,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -438,7 +442,8 @@ class Lifecycle(unittest.TestCase):
                                (9, 'RETAIL_ATTRIBUTES_POLICY_SHA256'), (9, 'PS_PERFORMANCE_POLICY_SHA256'),
                                (11, 'PRE_UC_PERFORMANCE_POLICY_SHA256'),
                                (12, 'PRE_SIBLING_PERFORMANCE_POLICY_SHA256'),
-                               (13, 'PRE_CACHE_PUBLISH_POLICY_SHA256')):
+                               (13, 'PRE_CACHE_PUBLISH_POLICY_SHA256'),
+                               (18, 'PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256')):
             with self.subTest(revision=revision):
                 self.policy_doc['revision'] = revision
                 self.save_policy()
@@ -1046,6 +1051,33 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(self.engine.list_cars()['generations']), 2)
         self.engine.restore(first['pointer']['generation'])
         self.assertEqual([r['id'] for r in self.ready().selected], [95])
+
+
+class _OlderKernelRename:
+    """The rename rule of macOS kernels before xnu-12377.101 (macOS 26.4):
+    vn_authorize_renamex_with_paths authorizes DELETE|ADD_SUBDIRECTORY on
+    every directory being renamed, so a directory its owner cannot write is
+    refused with EACCES even for a new name in the same parent. A callable
+    object, not a function, so class attributes holding it stay unbound."""
+
+    def __init__(self):
+        self.real = os.rename
+
+    def __call__(self, src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+        st = os.stat(src, dir_fd=src_dir_fd, follow_symlinks=False)
+        if os.getuid() != 0 and stat.S_ISDIR(st.st_mode) and not st.st_mode & stat.S_IWUSR:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), src, None, dst)
+        return self.real(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+
+class OlderKernelLifecycle(Lifecycle):
+    """Issue #24 (macOS 15): the whole lifecycle under the older rename rule."""
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch('os.rename', _OlderKernelRename())
+        patch.start()
+        self.addCleanup(patch.stop)
 
 
 def asset_main():

@@ -42,6 +42,9 @@ with tempfile.TemporaryDirectory(prefix='ssao-review-') as td:
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "rt_scene.h"
+static void rt_scene_capture_fixture(const RTSceneDraw *draw){(void)draw;}
+#define rt_scene_capture rt_scene_capture_fixture
 static int headlight_receiver_encoding;
 static int headlights_casting(void){return 0;}
 static void headlights_drawn(int receiver){(void)receiver;}
@@ -109,7 +112,7 @@ int main(void){@autoreleasepool{
  CHECK(prepares==1);mat_trees_draw.alpha_ref=95;
  eb.pa=(SmPSAux){7,95.f/255};__block int mask=255;
  GrassDraw grass={0};WaterDraw water={0};AuxDraw aux={0};
- material_emit(&grass,&water,&aux,^{float alpha=.2f;if(eb.pa.alpha_func==0||(eb.pa.alpha_func==2&&alpha<eb.pa.alpha_ref)||(eb.pa.alpha_func==7&&alpha>=eb.pa.alpha_ref))mask=0;});
+ material_emit(&grass,&water,&aux,NULL,^{float alpha=.2f;if(eb.pa.alpha_func==0||(eb.pa.alpha_func==2&&alpha<eb.pa.alpha_ref)||(eb.pa.alpha_func==7&&alpha>=eb.pa.alpha_ref))mask=0;});
  CHECK(mask==0);CHECK(emits==0);free(G);printf("renderer failures: %d\n",failures);return 0;
 }}
 '''

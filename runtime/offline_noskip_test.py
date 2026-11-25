@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the production suite scheduler on scratch pass/skip/fail fixtures.
-Proof: strict skip policy 0 failures / 6 scenarios; disabled strict guard 1 / 6.
+Proof: default strict policy 0 failures / 6 scenarios; permissive default 1 / 6.
+Disabled strict guard 2 / 6.
 Hidden skip reasons: 2 / 6 failures; production prints both real reasons.
 No real feature tests, assets, game, GPU or sockets are invoked by this fixture.
 """
@@ -23,7 +24,7 @@ def exercise(script):
         (rt/'maxperf_career_test.py').write_text('print("fixture passed")\n')
         (rt/'optional_test.py').write_text('print("SKIP: optional fixture"); raise SystemExit(3)\n')
         (rt/'broken_test.py').write_text('print("fixture failure"); raise SystemExit(1)\n')
-        cases=[('default skip',None,['fsauto_test'],0,'SKIPPED: fsauto_test'),
+        cases=[('default skip',None,['fsauto_test'],1,'OFFLINE FAIL: fsauto_test'),
                ('strict skip','1',['fsauto_test'],1,'OFFLINE FAIL: fsauto_test'),
                ('zero skip','0',['fsauto_test'],0,'OFFLINE PASS'),
                ('strict optional','1',['optional_test'],0,'SKIPPED: optional_test'),
@@ -37,11 +38,9 @@ def exercise(script):
             if strict is not None:env['NFS_TESTS_NOSKIP']=strict
             p=subprocess.run(['sh',str(rt/'offline_tests.sh'),*names],cwd=root,env=env,capture_output=True,text=True,timeout=30)
             ok=p.returncode==rc and line in p.stdout
-            if label=='default skip' and ok:
-                ok='SKIP: fixture input missing' in p.stdout
             if label=='strict optional' and ok:
                 ok='SKIP: optional fixture' in p.stdout
-            if label=='strict skip' and ok:
+            if label in ('default skip','strict skip') and ok:
                 logs=list((root/'fail-logs').glob('fsauto_test.*.log'))
                 ok=bool(logs) and 'release-critical test fsauto_test skipped' in logs[0].read_text()
             if not ok:print(label+': '+p.stdout[-1500:]+p.stderr[-500:])
@@ -50,12 +49,14 @@ def exercise(script):
 
 def main():
     script=(RT/'offline_tests.sh').read_text()
-    line='[ "${NFS_TESTS_NOSKIP:-0}" = 1 ]'
+    line='[ "${NFS_TESTS_NOSKIP:-1}" = 1 ]'
     assert script.count(line)==1
     reason='echo "${reason:-SKIP: exit 3 without a reported reason}"'
     assert script.count(reason)==1
-    for label,body,want in [('production',script,0),('strict-disabled',script.replace(line,'[ 0 = 1 ]'),1),
-                            ('reason-hidden',script.replace(reason,'echo "reason hidden"'),2)]:
+    for label,body,want in [('production',script,0),
+                            ('permissive-default',script.replace(line,'[ "${NFS_TESTS_NOSKIP:-0}" = 1 ]'),1),
+                            ('strict-disabled',script.replace(line,'[ 0 = 1 ]'),2),
+                            ('reason-hidden',script.replace(reason,'echo "reason hidden"'),1)]:
         failures=exercise(body)
         print('%s: %d failures / 6 scenarios'%(label,failures))
         assert failures==want,(label,failures)

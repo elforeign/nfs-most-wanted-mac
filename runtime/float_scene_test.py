@@ -31,6 +31,9 @@ pre=r'''
 #include <stdlib.h>
 #include <string.h>
 #include "post_cuts.h"
+#include "blackbox_errors.h"
+#include "blackbox_render.h"
+void blackbox_render_host(uint64_t serial, uint32_t id) { (void)serial; (void)id; }
 static int diag_on=1,gpt_on;
 static char *diag_dir="/tmp";
 static uint64_t frame_serial=1;
@@ -73,7 +76,7 @@ int main(int argc,const char **argv){@autoreleasepool{
 with tempfile.TemporaryDirectory(prefix='float-scene-test-') as td:
     td=Path(td);m=td/'test.m';exe=td/'test'
     m.write_text(pre+map_code+'\nstatic Map blit_pipelines;\n'+blit+quad+main)
-    build=subprocess.run(['clang','-O1','-fobjc-arc','-Wno-unused-function','-I',str(root),str(m),str(root/'post_cuts.c'),'-framework','Foundation','-framework','Metal','-o',str(exe)],capture_output=True,text=True)
+    build=subprocess.run(['clang','-O1','-fobjc-arc','-Wno-unused-function','-I',str(root),str(m),str(root/'post_cuts.c'),str(root/'blackbox.c'),str(root/'blackbox_errors.c'),'-framework','Foundation','-framework','Metal','-o',str(exe)],capture_output=True,text=True)
     if build.returncode:
         print('\n'.join(build.stderr.splitlines()[-20:]));sys.exit(1)
     good=subprocess.run([str(exe)],capture_output=True,text=True)

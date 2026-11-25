@@ -584,7 +584,7 @@ static int on(void) {
 #endif
             a->grip=car->grip;
             a->performance=car->performance;
-            if (a->performance.version==1) {
+            if (a->performance.version==1 || a->performance.version==4) {
                 if (!strcmp(car->source,"prostreet") || !strncmp(car->source,"P/",2))
                     a->performance.source=CAR_PERFORMANCE_PROSTREET;
                 if (!strcmp(car->source,"undercover") || !strncmp(car->source,"U/",2))
@@ -1490,6 +1490,7 @@ static void apply_render_fit(uint32_t lay, Addition *a, unsigned kind) {
 void f_006794E0_orig(Cpu *c);
 void f_00683EB0_orig(Cpu *c);
 void f_00678CE0_orig(Cpu *c);
+void f_00672FE0_orig(Cpu *c);
 #include "car_performance_attrib_impl.h"
 
 static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int vehicle, Addition *a,
@@ -1506,6 +1507,8 @@ static void append_collection_as(Cpu *c, Source *s, uint32_t layout_size, int ve
     uint32_t lay=performance_layout ? performance_alloc(vault,layout_size) : gmalloc(layout_size);
     memcpy(G + ld, G + src, bytes);
     memcpy(G + lay, performance_layout ? performance_layout : G + M32(src + 0x1C), layout_size);
+    if (performance_layout && cls==car_performance_links[CAR_PERFORMANCE_ENGINE_LINK].key)
+        performance_bind_torque(vault,lay,&a->performance);
     M32(ld) = key; M32(ld + 0x1C) = lay;
 #if !defined(NFS_PUBLIC) || !NFS_PUBLIC
     if (vehicle && cls == PVEHICLE) {

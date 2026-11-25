@@ -41,7 +41,7 @@ def native_hash(work, tree, legacy=False):
     executable = driver.with_suffix('')
     result = subprocess.run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations',
                              '-Wno-incompatible-pointer-types', '-I', str(ROOT),
-                             str(driver), '-framework', 'Cocoa', '-o', str(executable)],
+                             str(driver), '-framework', 'Cocoa', '-framework', 'Security', '-o', str(executable)],
                             capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stderr[-4000:]
     return subprocess.run([str(executable), str(tree)], capture_output=True,

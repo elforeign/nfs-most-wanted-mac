@@ -3,7 +3,8 @@
 Part of the runtime documentation; the index and switch lookup hint are in `runtime/README.md`.
 
 Always-on numeric history for both games includes MW movie state and NIS
-Load, Play and Unload calls in F10 and hang/stall output. [Black box](blackbox.md)
+Load, Play and Unload calls, and typed shader/D3D/Metal/asset/assert/fatal errors
+in F10 and hang/stall output. [Black box](blackbox.md)
 
 ## Car render rejection trace
 
@@ -50,7 +51,7 @@ helper calls or guest queries. `BOOT_DIAG_DRAWS` remains independent.
 With the installed XK enabled, collect one guarded run:
 
 ```sh
-runtime/run_guarded.sh 60 /tmp/xkdiag NFS_TEST_PRIVATE_CARS_ROOT="$HOME/Library/Application Support/NFSMW-port/private-cars" BOOT_RACE=15.1.1 BOOT_RACE_CAR=JAGUARXK BOOT_RACE_AI=0 BOOT_AUTODRIVE=1 BOOT_DIAG_CAR_EVERY=120
+runtime/run_guarded.sh 60 /tmp/xkdiag NFS_TEST_PRIVATE_CARS_ROOT="$HOME/Library/Application Support/NFSMW-port/private-cars" BOOT_RACE=15.1.1 BOOT_RACE_CAR=jaguarxk BOOT_RACE_AI=0 BOOT_AUTODRIVE=1 BOOT_DIAG_CAR_EVERY=120
 ```
 
 The launcher sets `BOOT_DIAG=/tmp/xkdiag`; inspect `/tmp/xkdiag/events.log` for

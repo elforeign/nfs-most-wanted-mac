@@ -28,12 +28,17 @@
 
 
 
+
+
+
 """
 import hashlib
+import functools
 import json
 import os
 from pathlib import Path
 import plistlib
+import runpy
 from contextlib import nullcontext
 import shutil
 import signal
@@ -748,7 +753,7 @@ int main(int argc, char **argv) { @autoreleasepool {
 ''')
         executable = self.root / "trust"
         build = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", str(source),
-            "-framework", "Cocoa", "-o", str(executable)], capture_output=True)
+            "-framework", "Cocoa", "-framework", "Security", "-o", str(executable)], capture_output=True)
         self.assertEqual(build.returncode, 0, build.stderr.decode()[-3000:])
         def run(job, hashes, broken=False):
             return subprocess.run([str(executable), str(job), str(hashes)],
@@ -793,7 +798,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     def test_retained_imports_do_not_change_pinned_hashes(self):
         source = self.root / "retained-source/tools/setup_kit"
         source.mkdir(parents=True)
-        for name in ("apply.py", "install.py", "export.py"):
+        for name in ("apply.py", "install.py", "export.py", "update_manifest.py"):
             shutil.copy2(ROOT / "tools/setup_kit" / name, source / name)
         before = ins.digest_tree(source)
         command = [sys.executable, "-I", "-B", str(source / "apply.py"), "--help"]
@@ -862,7 +867,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             put(path, source)
             exe = self.root / name
             result = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "runtime"), str(path),
-                "-framework", "Cocoa", "-o", str(exe)], capture_output=True)
+                "-framework", "Cocoa", "-framework", "Security", "-o", str(exe)], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr.decode()[-2000:])
             return exe
         def run(exe):
@@ -1057,6 +1062,11 @@ int main(int argc, char **argv) { @autoreleasepool {
 
     def test_native_transfer_and_health_receipt(self):
         # This executable is only a Foundation harness; it contains no game code.
+        proof = runpy.run_path(str(ROOT / 'runtime/pub_update_helper_test.py'))
+        headers = proof['fixture_headers'](self.root)
+        launch = self.root / 'signed-launch.m'
+        put(launch, (ROOT / 'runtime/pub_update_launch.m').read_text().replace(
+            '"pub_update_manifest.h"', '"fixture-headers/pub_update_manifest.h"'))
         harness = self.root / "harness.m"
         put(harness, '''#import <Cocoa/Cocoa.h>
 #include <stdio.h>
@@ -1078,7 +1088,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         carbon = self.root / "carbon-harness"
         for output, flags in ((executable, []), (carbon, ["-DNFS_GAME=2"])):
             build = subprocess.run(["clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", *flags, str(harness),
-                str(ROOT / "runtime/pub_update_launch.m"), "-framework", "Cocoa", "-o", str(output)], capture_output=True)
+                "-I", str(ROOT / "runtime"), str(launch), "-framework", "Cocoa", "-framework", "Security", "-o", str(output)], capture_output=True)
             self.assertEqual(build.returncode, 0, build.stderr.decode()[-2000:])
         home = self.root / "home"
         home.mkdir()
@@ -1122,9 +1132,16 @@ int main(int argc, char **argv) { @autoreleasepool {
                 python = job / "python/bin/python3"
                 put(python, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PWD/transfer.txt"\nprintf "%s" "$BOOT_USERDATA" > "$PWD/profile.txt"\n')
                 python.chmod(0o755)
-                if layout != "unbound":
-                    put(job / "target-version.json", json.dumps(dict(version=f.version)))
-                entry = a.publish_ready(stage / "ready.json", f.profile, f.dest)
+                put(job / "target-version.json", json.dumps(dict(version=f.version)))
+                proof['retain_proof'](job, headers, product='carbon' if is_carbon else 'mw', version=f.version)
+                pin = subprocess.check_output(['/usr/bin/openssl', 'pkey', '-in', str(headers / 'key.pem'),
+                                               '-pubout', '-outform', 'DER'])[-65:]
+                from setup_kit import backend
+                with mock.patch.object(a.updates, 'verify', functools.partial(a.updates.verify, pins=(pin,))), \
+                        mock.patch.object(backend, 'CARBON_VERSION' if is_carbon else 'PUBLIC_VERSION', f.version):
+                    entry = a.publish_ready(stage / "ready.json", f.profile, f.dest)
+                if layout == "unbound":
+                    (job / "target-version.json").unlink()
                 if layout == "stale":
                     # An older retained apply.py would accept this staged app
                     # with matching hashes and a newer declared version.
@@ -1201,6 +1218,298 @@ class CarbonApplyTests(unittest.TestCase):
         self.assertEqual((f.dest / "Contents/marker").read_text(), "new")
         self.assertEqual(ins.digest_tree(most_wanted), before)
         self.assertEqual((f.profile / "Saves/career").read_bytes(), f.saves)
+
+
+class UpdateProof:
+    """Throwaway signer; production pins are never replaced on disk."""
+    def __init__(self, root):
+        from setup_kit import update_manifest
+        self.module = update_manifest
+        self.key = Path(root) / "publisher.pem"
+        self.command(["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                      "-pkeyopt", "ec_param_enc:named_curve",
+                      "-out", self.key])
+        self.key.chmod(0o600)
+        der = self.command(["pkey", "-in", self.key, "-pubout", "-outform", "DER"])
+        self.pin = der[-65:]
+        assert len(der) == 91 and self.pin[0] == 4
+
+    @staticmethod
+    def command(arguments):
+        return subprocess.run(["/usr/bin/openssl", *map(str, arguments)], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+
+    def write(self, job, product, version, *, resign=True):
+        m = self.module
+        repo, prefix = m.PRODUCTS[product]
+        name = f"{prefix}-v{version}.dmg"
+        dmg, checksum = job / name, job / (name + ".sha256")
+        put(dmg, b"synthetic signed disk image")
+        put(checksum, hashlib.sha256(dmg.read_bytes()).hexdigest() + "  " + name + "\n")
+        def asset(path):
+            return m.Asset(path.name, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.manifest = job / (name + ".manifest")
+        self.signature = job / (name + ".manifest.sig")
+        put(self.manifest, m.serialize(m.Manifest(repo, product, version, "v" + version,
+                                                asset(dmg), asset(checksum))))
+        if resign:
+            put(self.signature, self.command(["dgst", "-sha256", "-sign", self.key, self.manifest]))
+        put(job / "target-version.json", json.dumps(dict(version=version)))
+        return dmg, checksum
+
+    def trust(self, module):
+        return mock.patch.object(module, "verify", functools.partial(module.verify, pins=(self.pin,)))
+
+
+class F4ApplyTests(unittest.TestCase):
+    """F4 admission/state: failing-first 2/10 tests pass; fixed 10/10 (see individual controls)."""
+    setUp = ApplyTests.setUp
+    tearDown = ApplyTests.tearDown
+    fixture = ApplyTests.fixture
+
+    def cases(self):
+        return ((ins.APP_BUNDLE, "mw", "4.10.0", "4.11.0"),
+                ("NFS Carbon Native.app", "carbon", "1.3.0", "1.4.0"))
+
+    def signed(self, name, bundle, product, installed, target):
+        from setup_kit import backend
+        f = self.fixture(name, bundle=bundle, version=target)
+        f.make_app(f.dest, "old", version=installed)
+        f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
+        f.write_ready()
+        signer = UpdateProof(f.base)
+        paths = signer.write(f.job, product, target)
+        patch = mock.patch.object(backend, "PUBLIC_VERSION" if product == "mw" else "CARBON_VERSION", target)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return f, signer, paths
+
+    def healthy(self, f, product, version):
+        path = f.profile / (".update-healthy-" + product + ".json")
+        put(path, json.dumps(dict(format_version=1, product=product, version=version)))
+        return path
+
+    def test_f4_invalid_retained_proof_and_assets(self):
+        # Original rejected 2/26 (binding only); fixed rejects 26/26 before journaling. Gate bypass applies 26/26.
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            for change in ("dmg", "checksum", "repair", "manifest", "signature", "missing-manifest",
+                           "missing-signature", "oversized-manifest", "oversized-signature", "symlink", "binding", "rewrite", "setup-version"):
+                with self.subTest(product=product, change=change):
+                    f, signer, (dmg, checksum) = self.signed(product + change, bundle, product, installed, target)
+                    if change in ("dmg", "repair", "rewrite"):
+                        put(dmg, b"substituted executable image")
+                    if change == "checksum":
+                        put(checksum, b"changed checksum")
+                    if change in ("repair", "rewrite"):
+                        put(checksum, hashlib.sha256(dmg.read_bytes()).hexdigest() + "  " + dmg.name + "\n")
+                    if change == "rewrite":
+                        wire = signer.manifest.read_bytes().decode().splitlines()
+                        for index, path in ((5, dmg), (6, checksum)):
+                            wire[index] = wire[index].split("=", 1)[0] + f"={path.name}|{path.stat().st_size}|{hashlib.sha256(path.read_bytes()).hexdigest()}"
+                        put(signer.manifest, "\n".join(wire) + "\n")
+                    if change == "manifest":
+                        put(signer.manifest, signer.manifest.read_bytes().replace(b"repo=", b"Repo="))
+                    if change == "signature":
+                        put(signer.signature, b"invalid signature")
+                    if change.startswith("missing-"):
+                        (signer.manifest if change.endswith("manifest") else signer.signature).unlink()
+                    if change.startswith("oversized-"):
+                        put(signer.manifest if change.endswith("manifest") else signer.signature, b"x" * 4097)
+                    if change == "symlink":
+                        saved = f.base / "proof"
+                        signer.manifest.rename(saved)
+                        signer.manifest.symlink_to(saved)
+                    if change == "binding":
+                        put(f.job / "target-version.json", '{"version":"9.0"}')
+                    if change == "setup-version":
+                        from setup_kit import backend
+                        patch = mock.patch.object(backend, "PUBLIC_VERSION" if product == "mw" else "CARBON_VERSION", target + ".1")
+                        patch.start()
+                        self.addCleanup(patch.stop)
+                    with signer.trust(m):
+                        with self.assertRaises(ins.InstallError):
+                            f.apply()
+                    self.assertFalse(ins.journal_path(f.profile).exists())
+                    self.assertEqual((f.dest / "Contents/marker").read_text(), "old")
+                    if hasattr(a, "verify_update"):
+                        with mock.patch.object(a, "verify_update", return_value=None):
+                            f.apply()
+                        f.recover()
+
+    def test_f4_bootstrap_then_mandatory_signed_update(self):
+        # Original accepts 2/2 forbidden unsigned second hops; fixed rejects 2/2; legacy/next-signed hops pass 2/2 each.
+        for bundle, product, installed, target in self.cases():
+            with self.subTest(product=product):
+                f = self.fixture(product, bundle=bundle, version=target)
+                f.make_app(f.dest, "old", version=installed)
+                f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
+                f.write_ready()
+                token = f.apply()
+                f.receipt(token)
+                a.acknowledge(f.profile, token)
+                next_target = "4.12.0" if product == "mw" else "1.5.0"
+                f.make_app(f.job / bundle, "new", version=next_target)
+                f.descriptor.update(version=next_target, destination=dict(path=str(f.dest), identity=ins.ident(f.dest), sha256=ins.digest_tree(f.dest)))
+                f.descriptor["hashes"]["app"] = ins.digest_tree(f.job / bundle)
+                f.write_ready()
+                with self.assertRaises(ins.InstallError):
+                    f.apply()
+                from setup_kit import backend
+                signer = UpdateProof(f.base)
+                signer.write(f.job, product, next_target)
+                with mock.patch.object(backend, "PUBLIC_VERSION" if product == "mw" else "CARBON_VERSION", next_target), \
+                        signer.trust(a.updates):
+                    token = f.apply()
+                    f.receipt(token)
+                    a.acknowledge(f.profile, token)
+                path = f.profile / (".update-healthy-" + product + ".json")
+                self.assertEqual(json.loads(path.read_bytes())["version"], next_target)
+
+    def test_f4_healthy_replay_blocks_newer_than_current(self):
+        # Original rejects 0/4 replays after an older reinstall; fixed rejects 4/4. State bypass applies 4/4.
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            for healthy in (target, "9.0.0"):
+                with self.subTest(product=product, healthy=healthy):
+                    f, signer, _ = self.signed(product + healthy, bundle, product, installed, target)
+                    path = self.healthy(f, product, healthy)
+                    before = path.read_bytes()
+                    with signer.trust(m):
+                        with self.assertRaises(ins.InstallError):
+                            f.apply()
+                        if hasattr(a, "highest_healthy"):
+                            with mock.patch.object(a, "highest_healthy", return_value=None):
+                                f.apply()
+                            f.recover()
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_f4_healthy_advances_only_after_ack(self):
+        # Original writes 0/2 healthy records; fixed writes 2/2 only after matching ACK.
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            with self.subTest(product=product):
+                f, signer, _ = self.signed(product, bundle, product, installed, target)
+                path = self.healthy(f, product, installed)
+                with signer.trust(m):
+                    token = f.apply()
+                    self.assertEqual(json.loads(path.read_bytes())["version"], installed)
+                    with self.assertRaises(OSError):
+                        a.acknowledge(f.profile, token)
+                    self.assertEqual(json.loads(path.read_bytes())["version"], installed)
+                    f.receipt(token)
+                    a.acknowledge(f.profile, token)
+                self.assertEqual(json.loads(path.read_bytes()), dict(format_version=1, product=product, version=target))
+
+    def test_f4_failed_health_keeps_record_and_rolls_back(self):
+        # Healthy/failure controls: original and fixed preserve 2/2 records and restore 2/2 apps.
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            f, signer, _ = self.signed(product, bundle, product, installed, target)
+            path = self.healthy(f, product, installed)
+            before = path.read_bytes()
+            with signer.trust(m):
+                f.apply()
+            self.assertEqual(f.recover(), "restored")
+            f.consistent("old")
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_f4_malformed_healthy_record_refuses(self):
+        # Damaged state still refuses new updates; recovery advice names the actual file.
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            for index, body in enumerate(('invalid json', '[]',
+                    '{"format_version":1,"product":"wrong","version":"9.0"}',
+                    json.dumps(dict(format_version=1, product=product, version="09.0")))):
+                f, signer, _ = self.signed(product + str(index), bundle, product, installed, target)
+                path = self.healthy(f, product, installed); put(path, body)
+                with signer.trust(m), self.assertRaises(ins.InstallError) as caught:
+                    f.apply()
+                self.assertIn(str(path), str(caught.exception))
+                self.assertIn('Delete this file to reset', str(caught.exception))
+                self.assertEqual(path.read_text(), body)
+
+    def test_f4_malformed_healthy_record_does_not_block_acknowledged_finish(self):
+        from setup_kit import update_manifest as m
+        for bundle, product, installed, target in self.cases():
+            for recovery in (False, True):
+                with self.subTest(product=product, recovery=recovery):
+                    f, signer, _ = self.signed(product + str(recovery), bundle, product, installed, target)
+                    path = self.healthy(f, product, installed)
+                    with signer.trust(m):
+                        token = f.apply()
+                    f.receipt(token)
+                    put(path, 'damaged after admission')
+                    if recovery:
+                        record = json.loads(ins.journal_path(f.profile).read_bytes())
+                        a._journal(f.profile, record, 'acknowledged')
+                        self.assertEqual(f.recover(), 'finished')
+                    else:
+                        self.assertEqual(a.acknowledge(f.profile, token), 'finished')
+                    self.assertEqual(json.loads(path.read_bytes()), dict(format_version=1, product=product, version=target))
+                    self.assertFalse(ins.journal_path(f.profile).exists())
+                    self.assertFalse(a.ack_path(f.profile, token).exists())
+                    f.consistent('new')
+
+    def test_f4_canonical_bounded_versions(self):
+        # Original rejects 0/3 noncanonical/overflow targets; fixed rejects 3/3.
+        for version in ("04.11.0", "4.4294967296", "4.000000000000000000000000000000001"):
+            with self.subTest(version=version):
+                f = self.fixture(version, version=version)
+                with self.assertRaises(ins.InstallError):
+                    f.apply()
+
+    def test_f4_ack_crash_recovers_healthy_record(self):
+        # Original persists 0/4 healthy recovery controls; fixed persists 4/4 after durable ACK/state boundaries.
+        class Crash(BaseException):
+            pass
+        for bundle, product, installed, target in self.cases():
+            for boundary in ("journal-acknowledged", "healthy-version-written"):
+                with self.subTest(product=product, boundary=boundary):
+                    f, signer, _ = self.signed(product + boundary, bundle, product, installed, target)
+                    path = self.healthy(f, product, installed)
+                    with signer.trust(a.updates):
+                        token = f.apply()
+                    f.receipt(token)
+                    def crash(step):
+                        if step == boundary:
+                            raise Crash()
+                    with mock.patch.object(a, "_step", side_effect=crash), self.assertRaises(Crash):
+                        a.acknowledge(f.profile, token)
+                    self.assertEqual(f.recover(), "finished")
+                    self.assertEqual(json.loads(path.read_bytes())["version"], target)
+                    self.assertEqual((f.dest / "Contents/marker").read_text(), "new")
+
+    def test_f4_post_bootstrap_older_and_equal(self):
+        # Original/fixed reject 4/4 equal/older versions; numeric zero padding stays enforced.
+        for bundle, product, installed, target in self.cases():
+            for version in (installed, installed + ".0"):
+                f = self.fixture(product + version, bundle=bundle, version=version)
+                f.make_app(f.dest, "old", version=installed)
+                f.descriptor["destination"]["sha256"] = ins.digest_tree(f.dest)
+                f.write_ready()
+                with self.assertRaises(ins.InstallError):
+                    f.apply()
+
+    def test_f4_named_stage_rechecks_outer_proof(self):
+        # Before named-stage lookup: rejects 0/2 tampered outer proofs; fixed rejects 2/2 and applies 2/2 valid controls.
+        for bundle, product, installed, target in self.cases():
+            with self.subTest(product=product):
+                f, signer, assets = self.signed(product, bundle, product, installed, target)
+                # --stage accepts another directory name as well as the native job/staged layout.
+                for path in (*assets, signer.manifest, signer.signature, f.job / 'target-version.json'):
+                    path.rename(f.base / path.name)
+                signature = f.base / signer.signature.name
+                original = signature.read_bytes()
+                put(signature, b'changed outer proof')
+                with signer.trust(a.updates):
+                    with self.assertRaises(ins.InstallError):
+                        f.apply()
+                    put(signature, original)
+                    token = f.apply()
+                    f.receipt(token)
+                    a.acknowledge(f.profile, token)
+                self.assertEqual((f.dest / 'Contents/marker').read_text(), 'new')
 
 
 if __name__ == "__main__":

@@ -237,11 +237,13 @@ def translated(name, chunk, original=False):
 def main():
     # Execute the physical-device tracker itself, including connection-only changes.
     prompts = (R / 'padprompts.c').read_text()
-    tracker = '\n'.join(re.search(r'void ' + name + r'\([^\n]*\) \{.*?\n\}', prompts, re.S).group()
-                        for name in ('prompts_pointer_visible', 'prompts_input', 'prompts_mouse_moved', 'prompts_pad_seen'))
+    tracker = '\n'.join(re.search(r'(?:static )?void ' + name + r'\([^\n]*\) \{.*?\n\}', prompts, re.S).group()
+                        for name in ('prompts_pointer_visible', 'prompts_activity', 'prompts_input', 'prompts_mouse_moved', 'prompts_pad_seen'))
     tracker_pre = r'''
     #include <stdio.h>
-    static int physical_input, pointer_hidden, pad_active=-1, pad_lost, failures, hide_calls;
+    #include <stdatomic.h>
+    static _Atomic int physical_input, pad_connected;
+    static int pointer_hidden, pad_active=-1, pad_lost, failures, hide_calls;
     static int diag_on;
     static int mode(void) { return 2; }
     static void user32_hide_pointer(void) { ++hide_calls; }
@@ -262,7 +264,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='osk-physical-') as d:
         for broken in (False, True):
             src = Path(d) / 'physical.c'; exe = Path(d) / 'physical'
-            src.write_text(tracker_pre + (tracker.replace('physical_input = physical;', '(void)physical;') if broken else tracker) + tracker_main)
+            src.write_text(tracker_pre + (tracker.replace('prompts_activity(1, 0)', 'prompts_activity(1, 1)').replace('prompts_activity(0, 0)', 'prompts_activity(0, 1)') if broken else tracker) + tracker_main)
             subprocess.run(['clang', '-std=c11', str(src), '-o', str(exe)], check=True, capture_output=True)
             p = subprocess.run([str(exe)], capture_output=True, text=True)
             print(('broken tracker: ' if broken else '') + p.stdout.strip())

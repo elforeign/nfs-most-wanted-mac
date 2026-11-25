@@ -64,6 +64,7 @@ PRELUDE = r'''
 #include <time.h>
 #include <unistd.h>
 #include "host/shaders/sm_translate.h"
+#include "runtime/blackbox_errors.h"
 enum { HL_RECEIVER=0x10000, HL_CASTER=0x20000, HL_VARIANTS=0x30000 };
 enum { MAT_VARIANT_WATER=0x100, MAT_VARIANT_GLASS, MAT_VARIANT_TREES,
        MAT_VARIANT_BONE, MAT_VARIANT_SOFT_SMOKE, MAT_VARIANT_SOFT_SMOKE_RESOLVED,
@@ -228,7 +229,7 @@ int main(int argc, char **argv) { @autoreleasepool {
  for (int i=0;i<4;i++) {
    id __strong *slot=&results[i];
    dispatch_group_async(group,shader_workers[i],^{ @autoreleasepool {
-     NSError *error=nil; *slot=shader_library(@"same exact source",nil,&error);
+     NSError *error=nil; *slot=shader_library(@"same exact source",nil,&error,0);
    }});
  }
  dispatch_group_wait(group,DISPATCH_TIME_FOREVER);
@@ -237,7 +238,7 @@ int main(int argc, char **argv) { @autoreleasepool {
  for(int i=1;i<4;i++)if(check(results[i]==results[0],"shared library identity"))return 1;
  dispatch_sync(shader_workers[0],^{ @autoreleasepool {
    NSError *a=nil,*b=nil;
-   id one=shader_library(@"invalid",nil,&a),two=shader_library(@"invalid",nil,&b);
+   id one=shader_library(@"invalid",nil,&a,0),two=shader_library(@"invalid",nil,&b,0);
    if(one||two||a.code!=7||b.code!=7)abort();
  }});
  if(check(library_requests==2,"failed compile publishes error and wakes followers"))return 1;
@@ -453,7 +454,7 @@ def offline():
         def build(name, contents):
             path = tmp / (name + ".m"); path.write_text(contents)
             exe = tmp / name
-            run(["clang", "-O1", "-fobjc-arc", "-I", str(ROOT), str(path), *objects,
+            run(["clang", "-O1", "-fobjc-arc", "-I", str(ROOT), str(path), str(ROOT / "runtime/blackbox.c"), str(ROOT / "runtime/blackbox_errors.c"), *objects,
                  "-framework", "Foundation", "-lc++", "-o", str(exe)])
             profile = tmp / (name + "-profile"); profile.mkdir()
             return [str(exe), str(profile), str(synthetic)]

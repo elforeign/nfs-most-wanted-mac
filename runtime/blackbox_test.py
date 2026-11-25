@@ -46,6 +46,7 @@ PRELUDE = r'''
 #include "blackbox.h"
 #include "game_select.h"
 #include "present_image_diag.h"
+void blackbox_input(uint64_t frame, uint64_t now) { (void)frame; (void)now; }
 void carbon_blackbox_fe(uint64_t frame, uint32_t flow, uint64_t now) { (void)frame; (void)flow; (void)now; }
 void carbon_blackbox_cinematics(uint64_t frame, uint64_t now) { (void)frame; (void)now; }
 void present_image_diag_tick(uint32_t ticks, uint32_t flow) { (void)ticks; (void)flow; }
@@ -179,7 +180,7 @@ def main():
     # The ordinary native fixture separately exercises report_store and its sanitizer.
     source = (R / 'report.m').read_text()
     assert '"report", "blackbox"' in function(source, 'static int report_store(')
-    assert source.index('ReportRedactBundle([NSString stringWithUTF8String:dir])') > source.index('"report", "blackbox"')
+    assert source.index('ReportRedactBundle([NSString stringWithUTF8String:stage])') > source.index('"report", "blackbox"')
     assert 'blackbox.txt' in (R / 'report_privacy_test.m').read_text()
     missing = [0, 0]
     for game in ('mw', 'carbon'):

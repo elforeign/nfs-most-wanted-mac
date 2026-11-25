@@ -339,8 +339,7 @@ def _repair_car_generation(base, generation, sha, policy):
     try:
         car_catalog._verify_generation(base, generation, sha, policy)
     except (OSError, ValueError):
-        os.rename(generation, '.damaged-' + uuid.uuid4().hex, src_dir_fd=base, dst_dir_fd=base)
-        os.fsync(base)
+        car_catalog._set_aside(base, generation, '.damaged-')
 
 
 def _car_repair_snapshot(engine, policy, preparations):

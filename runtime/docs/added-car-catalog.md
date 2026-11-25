@@ -222,12 +222,13 @@ audio files under `SOUND/ENGINE`. The Xbox 360 route reads those logical ranges
 from the selected disc's numbered archives. Reimport a retained Carbon pack to
 get its source sidecar. Retained catalogs still open under their original
 approval contracts. The earlier private Jaguar XK stock sidecar is also
-readable. Missing or refused sidecars, Undercover additions, ProStreet
-additions other than the Veyron, and explicit `off` or `0` use donor audio.
-The ProStreet PC Veyron imports its own stock layers (version 4 below): engine
-`car_068-engine.tmx` and exhaust `car_062-exhaust.tmx` under `SOUND/ENGINE`,
-plus their `swtn_car_068.abk` / `swtn_car_062.abk` transient banks. Only the
-audited attributes revision is admitted; any other revision uses donor audio.
+readable. Missing or refused sidecars, Undercover additions, and explicit `off`
+or `0` use donor audio. All 31 reviewed ProStreet PC additions import their
+stock player engine/exhaust layers (version 5 below). The typed NG references
+at vehicle index zero select filenames; Veyron selects `car_106-engine.tmx`
+and `car_126-exhaust.tmx`. Only the audited attributes revision is admitted.
+Sweet-bank, blower and gear selectors remain decoded inventory, without
+requiring their banks for continuous playback.
 
 The converter preserves `pvehicle.Audio[]` order. Each `caraudio` resolves to
 engine and exhaust `engineaudio`, in that order. Each layer contains its
@@ -264,15 +265,20 @@ image followed by the same pointer-free execution manifest. Sample rows
 store declared frames, rate and loop start with a zero PCM byte count. The
 runtime checks those values against the source before decoding to float PCM.
 
-Version 4 identifies ProStreet PC. It keeps the 68-byte header with one tier.
-The payload starts with the engine and exhaust TMX resource indices (two
-words) and each layer's source RPM range (four floats), then the attributes
-SHA-256. Each resource row stores kind (3 TMX, 2 SWTN bank), source byte
-count, zero and the count of resident sounds, then its SHA-256 and the original
-bytes. A TMX row is followed by each resident sound's frames, rate, loop word
-and little-endian mono PCM. The runtime maps normalized RPM into each layer's
-source range and plays both layers continuously. SWTN transient programs are
-validated and retained but not executed.
+Versions 4 and 5 identify ProStreet PC and keep the 68-byte header with one
+tier. The payload starts with engine and exhaust TMX resource indices (two
+words), each layer's RPM range (four floats), then the attributes SHA-256.
+Each resource row stores kind (3 TMX, 2 bank), source byte count, zero and the
+resident sound count, then its SHA-256 and original bytes. TMX rows append each
+resident sound's frames, original rate, loop word and little-endian mono PCM.
+Version 5 carries exactly two TMXs and obtains the RPM bounds from those files.
+The runtime intersects their bounds, adds one RPM at the lower edge and removes
+two RPM at the upper edge, then maps the live normalized RPM into that shared
+range. It preserves three to six tracks, empty bins, reviewed curves 0/1/4/8/9,
+original GIN rates and up to six Ginsu voices. Resident XAS rates are 32, 44 and
+48 kHz. Released version-4 Veyron packages retain their four-resource contract.
+SWTN, blower, shift and skid programs are not executed. The nine source vehicle
+variants are not mapped to MW upgrades.
 
 For race objects the port obtains the live MW engine upgrade level via
 `Physics::Upgrades::GetLevel` (00672D30, engine type 4). Carbon PC's 0053B570

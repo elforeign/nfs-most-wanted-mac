@@ -39,6 +39,38 @@ s = b.staging
 
 
 class StageTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        # Update admission needs a real older destination, even with no profile yet.
+        self.plant_app(self.dest / (b.PUBLIC_NAME + '.app'), '4.0.0')
+
+    def build(self, runner=None):
+        installed = super().build(runner)
+        self.plant_app(Path(installed), '4.9.0')
+        return installed
+
+    def test_f4_cli_refuses_tampered_release_before_build(self):
+        # Original gate bypass builds 1/1 tampered releases; signed admission builds 0/1.
+        from test_apply import UpdateProof
+        signer = UpdateProof(self.home)
+        signer.write(self.home, 'mw', b.PUBLIC_VERSION)
+        write(signer.signature, b'changed signature')
+        target = self.home / 'bad-proof'
+        with signer.trust(b.updating.updates):
+            result = self.run_stage(target)
+        self.assert_failed(target, result)
+        self.assertIn('proof/version', result[1][-1]['msg'])
+        self.assertFalse((self.paths.work / 'src').exists())
+        with mock.patch.object(b.updating, 'verify_update', return_value=None):
+            self.assert_ready(self.home / 'bypass', self.run_stage(self.home / 'bypass'))
+
+    def test_f4_missing_destination_refused_before_build(self):
+        # Original builds 1/1 unusable stages for absent destinations; fixed builds 0/1.
+        import shutil
+        shutil.rmtree(self.dest)
+        self.assert_failed(self.home / 'update', self.run_stage())
+        self.assertFalse(self.paths.data.exists())
+
     def test_moved_source_update_and_path_only_control(self):
         self.build()
         self.pc.rename(self.home / 'Moved PC')
@@ -202,7 +234,8 @@ class StageTests(Fixture):
         args = self.args()
         args.x360 = str(self.xbox)
         with self.pipeline_stubs(), mock.patch.object(b, "prepare_x360", side_effect=self.xbox_prepare):
-            b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
+            installed = b.build(args, self.paths, self.events, FakeRunner(self.log, self.child_env, self.paths.work), self.source)
+        self.plant_app(Path(installed), '4.9.0')
         saved = s.load_choices(self.paths.state, required=True)
         self.assertEqual(saved, dict(format_version=1, pc=str(self.pc), x360=str(self.xbox),
                                     destination=str(self.dest / (b.PUBLIC_NAME + ".app"))))
@@ -399,10 +432,11 @@ class StageTests(Fixture):
                 self.assert_ready(target, result)
                 self.assertEqual(sum(event["ev"] == "ready" for event in result[1]), 1)
 
-    def test_no_work_argument_and_no_active_install(self):
+    def test_no_work_argument_and_no_active_profile(self):
+        # Before admission: staged an absent app (1/1); now stages an older app (1/1), never creates a profile.
         record = self.assert_ready(self.home / "update", self.run_stage(default_work=True))
-        self.assertIsNone(record["destination"]["identity"])
-        self.assertFalse(self.dest.exists())
+        self.assertEqual(record["destination"]["identity"], ins.ident(self.dest / (b.PUBLIC_NAME + '.app')))
+        self.assertTrue(self.dest.exists())
         self.assertFalse(self.paths.data.exists())
 
     def test_protected_stage_locations_rejected_before_writes(self):

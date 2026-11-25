@@ -204,6 +204,8 @@ static void test_shadow_switch(void) {
 }
 
 void x360_frame(void) {
+    void qrsplit_diag_frame(void);
+    if (diag_on) qrsplit_diag_frame();
     mat_water_frame();
     shadow_options();
     test_sun();

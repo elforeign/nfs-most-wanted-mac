@@ -9,6 +9,21 @@ typedef struct PerformanceAllocation {
 } PerformanceAllocation;
 static PerformanceAllocation *performance_allocations;
 
+typedef struct PerformanceTorque {
+    struct PerformanceTorque *next;
+    uint32_t vault, layout;
+    const CarPerformance *record;
+} PerformanceTorque;
+static PerformanceTorque *performance_torques;
+
+static void performance_bind_torque(uint32_t vault,uint32_t layout,const CarPerformance *record) {
+    if (record->version!=4) return;
+    PerformanceTorque *p=malloc(sizeof *p);
+    if (!p) fail("performance torque bookkeeping");
+    *p=(PerformanceTorque){performance_torques,vault,layout,record};
+    performance_torques=p;
+}
+
 static uint32_t performance_alloc(uint32_t vault, uint32_t size) {
     PerformanceAllocation *p=malloc(sizeof *p);
     if (!p) fail("performance allocation bookkeeping");
@@ -18,6 +33,12 @@ static uint32_t performance_alloc(uint32_t vault, uint32_t size) {
 }
 
 static void performance_release(uint32_t vault) {
+    for (PerformanceTorque **next=&performance_torques; *next;) {
+        PerformanceTorque *p=*next;
+        if (p->vault!=vault) { next=&p->next; continue; }
+        *next=p->next;
+        free(p);
+    }
     for (PerformanceAllocation **next=&performance_allocations; *next;) {
         PerformanceAllocation *p=*next;
         if (p->vault!=vault) { next=&p->next; continue; }
@@ -25,6 +46,29 @@ static void performance_release(uint32_t vault) {
         gfree(p->address);
         free(p);
     }
+}
+
+/* Physics::Info::Torque receives an engine instance and RPM, returning ST(0).
+ * Only layouts owned by a spline record enter the new evaluator. */
+void f_00672FE0(Cpu *c) {
+    if (!performance_torques) { f_00672FE0_orig(c); return; }
+    uint32_t engine=M32(c->esp+4), layout=M32(engine+8);
+    uint32_t original=layout, collection=M32(engine+4);
+    if (collection && (M8(engine+0x10)&1)) {
+        uint32_t parent=M32(collection+0x10);
+        if (parent) original=M32(parent+0x18);
+    }
+    for (PerformanceTorque *p=performance_torques;p;p=p->next) {
+        if (p->layout!=layout && p->layout!=original) continue;
+        float torque;
+        if (car_performance_torque(p->record,G+layout,MF32(c->esp+8),&torque)) {
+            x87_push(c,torque);
+            c->esp+=4;
+            return;
+        }
+        break;
+    }
+    f_00672FE0_orig(c);
 }
 
 static void performance_link(Cpu *c, Source *owner, uint32_t ld, Addition *a,

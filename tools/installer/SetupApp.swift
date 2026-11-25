@@ -644,7 +644,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "2b2b38cc6189a2638c95213d98f6d910a4ac61320f777888fba68873cc6b572e"
+let carSelectionsSHA256 = "0fa2f898a91629531c7c9a992a3a2709b83f8b2d69e47c6620b434386137a355"
 let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
 
 func carSourceName(_ game: String, _ platform: String) -> String {
@@ -1082,8 +1082,8 @@ final class Setup: ObservableObject {
 
     var discInstructions: String {
         let version = carbonProduct ? "1.4" : "1.3"
-        let exe = carbonProduct ? "NFSC.exe" : "speed.exe"
-        return "A disc install needs three things: the disc (or a copy of its files), the official \(version) update, and the \(exe) from that update. Choose all three, then press Check."
+        let exe = carbonProduct ? "your compatible 1.4 NFSC.exe (the one on the disc is copy-protected)" : "a speed.exe that has the version 1.3 code (the one on the discs and in the update is copy-protected)"
+        return "A disc install needs three things: the disc (or a copy of its files), the official \(version) update, and \(exe). Choose all three, then press Check."
     }
 
     var otherDiscRows: [Int] { Array(Set(missingDiscs).union(pcDiscs.keys)).sorted() }
@@ -1837,7 +1837,7 @@ struct ContentView: View {
                     }
                     if FileManager.default.fileExists(atPath: s.installedApp.path) {
                         Text(s.carbonProduct ? "NFS Carbon Native is already there. It is replaced only after the new one is complete."
-                             : "NFS Most Wanted Native is already there. A 3.x copy is kept as \"NFS Most Wanted Native 3.x\"; a 4.0 copy is replaced only after the new one is complete.")
+                             : "NFS Most Wanted Native is already there. A 3.x copy is kept as \"NFS Most Wanted Native 3.x\"; a 4.x copy is replaced only after the new one is complete.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Text("Keep the Mac plugged in; it stays awake while this runs.").font(.caption).foregroundStyle(.secondary)

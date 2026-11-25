@@ -3,7 +3,8 @@
 // Modes: the retail game has six 4:3 modes (__getResolutionByIndex 006C27D0, a copy at 006C28B0, and the width and
 // height tables at 008F9414 / 008F942C that start-up matches against the adapter's modes to mark the usable ones).
 // The six slots follow the display: heights 720, 1080, 1440, 1800 and 2160 at the main display's aspect, then its
-// native size, capped at 4K (3840 wide or 2160 high); sizes above the display's are left empty (the game marks them
+// native size, capped at 4K (3840 wide or 2160 high; notch fill admits the exact panel within that pixel budget).
+// Sizes above the display's are left empty (the game marks them
 // unavailable and the options menu skips them). Slot 1, 1080p, is what the game's first-run detection picks. The
 // options menu prints the size (Draw__18VOScreenResolution 0051B7A0 otherwise shows a localized 4:3 label per slot).
 // NFS_WIDESCREEN=off keeps the retail table.
@@ -53,14 +54,18 @@
 #define VIEW_REFLECTION 0x9197A0u       // eViews[4] (eViews 009195E0, 0x70 each): the road reflection view
 
 static uint32_t modes[6][2] = {{640, 480}, {800, 600}, {1024, 768}, {1280, 960}, {1280, 1024}, {1600, 1200}};
-static int wide, native_slot;      // native_slot: the largest mode, the display's native size (at most 4K)
+static int wide, native_slot;      // native_slot: the largest mode, within the 4K pixel budget
 
-static void build_modes(void) {        // the resolution list for this display (at most 4K)
+static void build_modes(void) {        // the resolution list for this display
     int dw, dh;
     user32_display_pixels(&dw, &dh);
     double aspect = dh > 0 ? (double)dw / dh : 16.0 / 9.0;
-    double cap = fmin(1.0, fmin(3840.0 / dw, 2160.0 / dh));            // native, at most 4K
-    uint32_t nw = (uint32_t)(dw * cap) & ~7u, nh = (uint32_t)(dh * cap) & ~7u;
+    // The camera strip can make a native panel taller than 2160 while still
+    // using fewer pixels than 4K. Keep its exact size when filling that strip.
+    int notch_native = user32_notch_fill() && dw <= 3840 && (uint64_t)dw * dh <= 3840u * 2160u;
+    double cap = notch_native ? 1.0 : fmin(1.0, fmin(3840.0 / dw, 2160.0 / dh));
+    uint32_t nw = (uint32_t)(dw * cap) & ~7u;
+    uint32_t nh = notch_native ? (uint32_t)dh : (uint32_t)(dh * cap) & ~7u;
     static const uint32_t heights[5] = {720, 1080, 1440, 1800, 2160};
     memset(modes, 0, sizeof modes);
     int n = 0;

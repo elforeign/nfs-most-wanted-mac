@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/sysctl.h>
@@ -919,21 +920,43 @@ fail:
     return NULL;
 }
 
+#define REPORT_STAGE_PREFIX ".report-"
+
+// Leave recent directories alone while a writer may still be opening its staging lock.
+static void report_remove_stale_staging(const char *root) {
+    NSString *folder = [NSString stringWithUTF8String:root];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    time_t cutoff = time(NULL) - 600;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:folder error:NULL]) {
+        if (![name hasPrefix:@REPORT_STAGE_PREFIX] || name.length != sizeof REPORT_STAGE_PREFIX - 1 + 6) continue;
+        NSString *stage = [folder stringByAppendingPathComponent:name];
+        int fd = open(stage.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (fd < 0) continue;
+        struct stat st;
+        if (!flock(fd, LOCK_EX | LOCK_NB) && !fstat(fd, &st) && st.st_mtime <= cutoff)
+            [fm removeItemAtPath:stage error:NULL];
+        close(fd);
+    }
+}
+
 // No guest lock needed. The potentially slow file, image and privacy work runs on the report queue for F10.
 static int report_store(ReportSnapshot *r, char *dir, size_t n) {
+    dir[0] = 0;
     if (!r->attach && !r->shot) r->shot = report_wait_shot(r->shot_generation);
-    char stamp[32], path[1500];
-    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &r->tm);
+    char stage[1400], path[1500];
     mkdir(r->root, 0755);
-    for (unsigned k = 1;; ++k) {
-        if (k == 1) snprintf(dir, n, "%s/%s", r->root, stamp);
-        else snprintf(dir, n, "%s/%s-%u", r->root, stamp, k);
-        if (mkdir(dir, 0755) == 0) break;
-        if (errno != EEXIST || k >= 1000) { dir[0] = 0; return 0; }
+    int length = snprintf(stage, sizeof stage, "%s/" REPORT_STAGE_PREFIX "XXXXXX", r->root);
+    if (length < 0 || (size_t)length >= sizeof stage || !mkdtemp(stage)) return 0;
+    NSString *staging = [NSString stringWithUTF8String:stage];
+    int fd = open(stage, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB)) {
+        if (fd >= 0) close(fd);
+        rmdir(stage);
+        return 0;
     }
     int have_shot = 0;
     if (r->shot) {
-        snprintf(path, sizeof path, "%s/screenshot.png", dir);
+        snprintf(path, sizeof path, "%s/screenshot.png", stage);
         FILE *image = fopen(path, "wb");
         if (image) {
             size_t bytes = (size_t)CFDataGetLength(r->shot);
@@ -944,11 +967,11 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
     int have_log = r->log[0] && !report_private_attachment(r->log);
     int have_attach = r->attach != NULL && !report_private_attachment(r->attach);
     if (have_log) {
-        snprintf(path, sizeof path, "%s/log.txt", dir);
+        snprintf(path, sizeof path, "%s/log.txt", stage);
         copy_tail(r->log, path, 256 * 1024);
     }
     if (have_attach) {
-        snprintf(path, sizeof path, "%s/crash.txt", dir);
+        snprintf(path, sizeof path, "%s/crash.txt", stage);
         copy_tail(r->attach, path, 0);
     }
     int have_profile = 0;                  // BOOT_DIAG: the session's CPU profile so far (diag_profile.h)
@@ -957,13 +980,13 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
         diag_profile_session_write();
         char from[1200];
         snprintf(from, sizeof from, "%s/profile_session.txt", diag_dir);
-        snprintf(path, sizeof path, "%s/profile.txt", dir);
+        snprintf(path, sizeof path, "%s/profile.txt", stage);
         if (!access(from, R_OK)) { copy_tail(from, path, 0); have_profile = !access(path, R_OK); }
     }
     const char *names[] = {"settings", "stats", "events", "report", "blackbox"};
     int ok = 1;
     for (int i = 0; i < 5; ++i) {
-        snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
+        snprintf(path, sizeof path, "%s/%s.txt", stage, names[i]);
         FILE *f = fopen(path, "w");
         if (!f) { ok = 0; continue; }
         if (fwrite(r->text[i], 1, r->size[i], f) != r->size[i]) ok = 0;
@@ -975,12 +998,30 @@ static int report_store(ReportSnapshot *r, char *dir, size_t n) {
         }
         if (fclose(f)) ok = 0;
     }
-    ReportRedactBundle([NSString stringWithUTF8String:dir]);
+    if (ok) ok = ReportRedactBundle([NSString stringWithUTF8String:stage]);
     for (int i = 0; i < 5; ++i) {
-        snprintf(path, sizeof path, "%s/%s.txt", dir, names[i]);
+        snprintf(path, sizeof path, "%s/%s.txt", stage, names[i]);
         if (access(path, R_OK)) ok = 0;
     }
-    return ok;
+    if (ok) {
+        char stamp[32];
+        strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &r->tm);
+        for (unsigned k = 1; k <= 1000; ++k) {
+            length = k == 1 ? snprintf(dir, n, "%s/%s", r->root, stamp) :
+                snprintf(dir, n, "%s/%s-%u", r->root, stamp, k);
+            if (length < 0 || (size_t)length >= n) break;
+            // A concurrent writer may have used this timestamp while we were redacting.
+            if (!renamex_np(stage, dir, RENAME_EXCL)) {
+                close(fd);
+                return 1;
+            }
+            if (errno != EEXIST) break;
+        }
+    }
+    [NSFileManager.defaultManager removeItemAtPath:staging error:NULL];
+    close(fd);
+    dir[0] = 0;
+    return 0;
 }
 
 static void report_complete(const char *dir, const char *category) {
@@ -1091,6 +1132,7 @@ void report_init(void) {
         fprintf(stderr, "boot: full diagnostic logging (Diagnostics menu): %s\n", dir);
     }
     session_open();
+    @autoreleasepool { report_remove_stale_staging(reports_dir()); }
 #if NFS_GAME == NFS_GAME_MW
     slowlog_start();
 #endif

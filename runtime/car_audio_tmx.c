@@ -11,10 +11,11 @@ static uint32_t be32(const uint8_t *p) {
 static float f32(const uint8_t *p) { uint32_t u=u32(p); float f; memcpy(&f,&u,4); return f; }
 static int inside(size_t n,size_t at,size_t size) { return at<=n && size<=n-at; }
 static int zero(const uint8_t *p,size_t n) { for(size_t i=0;i<n;i++) if(p[i]) return 0; return 1; }
+static int valid_curve(unsigned id) { return id==0 || id==1 || id==4 || id==8 || id==9; }
 int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
     if(!out || !p || n<96 || n>16*1024*1024 || memcmp(p+12,"1000",4) ||
        u32(p+16)!=4 || u32(p+20)!=4 || u32(p+24) ||
-       (u32(p+40)!=4 && u32(p+40)!=6) || u32(p+48)!=2) return -1;
+       (u32(p+40)<3 || u32(p+40)>6) || u32(p+48)!=2) return -1;
     uint32_t offsets[10];
     for(unsigned i=0;i<10;i++) {
         offsets[i]=u32(p+56+i*4);
@@ -30,7 +31,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
         c->curve=u32(p+at+4); c->input=u32(p+at+12);
         c->low=f32(p+at+24); c->range=f32(p+at+28);
         c->minimum=f32(p+at+32); c->maximum=f32(p+at+36);
-        if(u32(p+at)!=i || c->curve>1 || c->input>=5 || u32(p+at+8) ||
+        if(u32(p+at)!=i || !valid_curve(c->curve) || c->input>=5 || u32(p+at+8) ||
            u32(p+at+16) || u32(p+at+20) || u32(p+at+40) ||
            !isfinite(c->low) || !isfinite(c->range) || !isfinite(c->minimum) || !isfinite(c->maximum) ||
            c->range<=0 || c->minimum<0 || c->maximum>1 || c->minimum>c->maximum) return -1;
@@ -42,7 +43,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
         if(!inside(n,at,28)) return -1;
         CarAudioTmxBin *b=t.bins+i;
         b->count=u32(p+at+12); b->input=u32(p+at+16); b->pairs=u32(p+at+4);
-        if(u32(p+at)!=i || !b->pairs || b->pairs>3 || b->count>4 ||
+        if(u32(p+at)!=i || b->pairs>3 || b->count>4 ||
            u32(p+at+8)!=28+b->count*4 || b->input>=5 || u32(p+at+20) || u32(p+at+24) ||
            !inside(n,at,28+b->count*4+64*b->pairs)) return -1;
         for(unsigned j=0;j<b->count;j++) {
@@ -54,7 +55,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
             CarAudioTmxEnd *e=b->ends+j;
             e->track=u32(p+at+4); e->curve=u32(p+at+12);
             e->start=f32(p+at+16); e->width=f32(p+at+20); e->gain=f32(p+at+24);
-            if(u32(p+at)!=j || e->track>=t.track_count || e->curve>1 || u32(p+at+8) || u32(p+at+28) ||
+            if(u32(p+at)!=j || e->track>=t.track_count || !valid_curve(e->curve) || u32(p+at+8) || u32(p+at+28) ||
                !isfinite(e->start) || !isfinite(e->width) || !isfinite(e->gain) ||
                e->start<0 || e->width<0 || e->gain<0 || e->gain>1) return -1;
         }
@@ -83,15 +84,15 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
             if(s->size<40 || memcmp(raw,"Gnsu20",6)) return -1;
             uint32_t f=u32(raw+16),c=u32(raw+20); s->frames=u32(raw+24); s->rate=u32(raw+28);
             uint64_t bytes=40+4ull*(f+c)+((s->frames+31ull)/32)*19;
-            if(!f || f>65536 || !c || c>1048576 || !s->frames || (s->rate!=44100 && s->rate!=48000) ||
+            if(!f || f>65536 || !c || c>1048576 || !s->frames || (s->rate!=24000 && s->rate!=32000 && s->rate!=36000 && s->rate!=44000 && s->rate!=44100 && s->rate!=48000) ||
                !isfinite(f32(raw+8)) || !isfinite(f32(raw+12)) || f32(raw+8)<=0 || f32(raw+8)>=f32(raw+12) ||
                bytes>s->size || s->size-bytes>3 || !zero(raw+bytes,s->size-(size_t)bytes)) return -1;
             s->size=(uint32_t)bytes;
         } else {
             t.snr_count++;
-            if(s->size<20 || be32(raw)!=0x0400bb80 || be32(raw+4)>>30 || !(be32(raw+4)&0x20000000)) return -1;
-            s->frames=be32(raw+4)&0x1fffffff; s->loop=be32(raw+8)+1; s->rate=48000;
-            if(!s->frames || !s->loop || s->loop>s->frames) return -1;
+            if(s->size<20 || (be32(raw)>>18)!=0x100 || be32(raw+4)>>30 || !(be32(raw+4)&0x20000000)) return -1;
+            s->frames=be32(raw+4)&0x1fffffff; s->loop=be32(raw+8)+1; s->rate=be32(raw)&0x3ffff;
+            if((s->rate!=32000 && s->rate!=44000 && s->rate!=48000) || !s->frames || !s->loop || s->loop>s->frames) return -1;
         }
     }
     *out=t; return 0;
@@ -99,11 +100,15 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
 /* 00508210: a 512-point cosine table, reversed for the rising curve.
  * Quantize the argument as the original player does; table values round to
  * six decimals. The analytic reconstruction avoids embedding a source table. */
-static float curve(float x,unsigned rising) {
+static float curve(float x,unsigned id) {
+    if(id==8) return 1-fminf(1,fmaxf(0,x));
+    if(id==9) return fminf(1,fmaxf(0,x));
+    if(id==4) x=1-x;
     unsigned i=x<=0?0:x>=1?511:(unsigned)(x*511);
-    if(rising) i=511-i;
-    if(i==511) return 0;
-    return roundf(cosf((float)i*(1.5707963267948966f/512))*1000000)*0.000001f;
+    if(id==1) i=511-i;
+    if(i==511) return id==4?1:0;
+    float value=roundf(cosf((float)i*(1.5707963267948966f/512))*1000000)*0.000001f;
+    return id==4?1-value:value;
 }
 int car_audio_tmx_gains(const CarAudioTmx *t,const float input[5],float out[6]) {
     if(!t || !input || !out) return -1;
@@ -112,7 +117,7 @@ int car_audio_tmx_gains(const CarAudioTmx *t,const float input[5],float out[6]) 
     for(unsigned i=0;i<4;i++) {
         const CarAudioTmxControl *c=t->controls+i;
         float v=(input[c->input]-c->low)/c->range;
-        xf[i]=curve(fminf(c->maximum,fmaxf(c->minimum,v)),c->curve);
+        xf[i]=curve(fminf((c->maximum-c->low)/c->range,fmaxf((c->minimum-c->low)/c->range,v)),c->curve);
     }
     /* 00510620: multiply dependency crossfades, then the selected RPM ramp
      * and authored track gain. Outside an interval the cleared track is silent. */

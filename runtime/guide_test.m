@@ -41,6 +41,8 @@ void user32_menu_cursor(void) {}
 void feedback_poll_pause(void) {}
 void feedback_suppress(unsigned why,int on) { (void)why; feedback_hold=on; }
 int user32_pad_layout_xbox(void) { return xbox; }
+int user32_pad_battery(void) { return -1; }
+void overlay_notice(const char *s) { (void)s; }
 uint32_t gstr(const char *s) { (void)s; return 0x1234; }
 uint32_t call_guest(Cpu *c,uint32_t fn,int n,const uint32_t *args) {
     (void)c; CHECK(fn==0x004B9080u && n==3 && args[1]==1);

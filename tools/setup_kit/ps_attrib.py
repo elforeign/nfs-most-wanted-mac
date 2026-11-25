@@ -72,7 +72,7 @@ def wheel_fit(source, donor_data, car, donor):
 
 
 def torque_samples(attrib, vehicle, idle, maximum):
-    """Evaluate the source cubic spline at the nine MW engine RPM samples."""
+    """Return the nine MW samples and the relocated source spline vectors."""
     vault, dep, pos, size, _, flags = attrib.field_site('vehicle', vehicle, 'TORQUE')
     require(size == 44 and flags == 6, 'ProStreet torque field schema')
     raw = span(vault.buffers[dep], pos, size, 'ProStreet torque record')
@@ -107,7 +107,8 @@ def torque_samples(attrib, vehicle, idle, maximum):
         # The source ramps torque from zero when RPM is below a positive first knot.
         return result * rpm / x_min if rpm < x_min and x_min > 0 else result
 
-    return tuple(torque(idle + (maximum - idle) * i / 8) for i in range(9))
+    return (tuple(torque(idle + (maximum - idle) * i / 8) for i in range(9)),
+            ((x_min, x_max, y_min, y_max), xs, ys, second))
 
 
 def performance(attrib, native, car, donor, *, wheels=None):
@@ -133,9 +134,10 @@ def source_performance(attrib, native, car, donor):
     steering = source('STEERING')
     require(len(steering) == 10 and all(scale == steering[0] for scale in steering),
             'ProStreet steering multiplier is not constant')
+    samples, spline = torque_samples(attrib, vehicle, *source('IDLE'), *source('MAX_RPM'))
     overrides = {
         'HandlingRating': floats(attrib, 'pvehicle', own, 'HandlingRating'),
-        'TORQUE': torque_samples(attrib, vehicle, *source('IDLE'), *source('MAX_RPM')),
+        'TORQUE': samples,
         'BRAKES': tuple(torque / 4 for torque in source('BRAKES')),
         'STEERING': steering[:1],
     }
@@ -160,7 +162,7 @@ def source_performance(attrib, native, car, donor):
                     f'ProStreet performance field: {cls}.{name}')
             record.append(value)
         records.append(record)
-    return car_performance.serialize(records, car, donor)
+    return car_performance.serialize(records, car, donor, torque_spline=spline)
 
 
 def sidecars(attributes, donor_data, car, donor):

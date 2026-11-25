@@ -13,7 +13,8 @@ Watch it running live on a Mac: [YouTube live stream](https://www.youtube.com/wa
 ## What you need
 
 - An Apple Silicon Mac (M1 or later) with macOS 14.5 or later.
-- About 12 GB free while Setup builds (the game then uses about 9 GB, or 3.5 GB without the Xbox 360 copy).
+- About 16 GB free while Setup builds from a PC game folder, and more with an Xbox 360 copy. Setup's Review page shows
+  the amount for your choices. The game then uses about 9 GB, or 3.5 GB without the Xbox 360 copy.
 
 ## What you can use
 
@@ -24,8 +25,8 @@ Watch it running live on a Mac: [YouTube live stream](https://www.youtube.com/wa
 
 ## Install
 
-1. Download the **Setup app** from the [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest)
-   and open it. The first time, macOS asks you to allow it once (System Settings > Privacy & Security > Open Anyway).
+1. Download the **Setup** disk image from the [latest release](https://github.com/elforeign/nfs-most-wanted-mac/releases/latest)
+   and open the Setup app inside it. The first time, macOS asks you to allow it once (System Settings > Privacy & Security > Open Anyway).
 2. Choose your PC game using one of the options above, optionally add your Xbox 360 files, and click **Build**.
    Setup offers to install Apple's free Command Line Tools if you need them.
 3. Play **NFS Most Wanted Native** from Applications. Updating later keeps your career and settings.
@@ -72,7 +73,7 @@ Press **F10** (Fn+F10 on a Mac keyboard, or click the touchpad on a DualSense or
 - Updates from inside the game, problem reports ready for a GitHub issue, and Discord status (off until you turn it
   on).
 
-Not available yet: online free roam. What changed in each version: [changelog](CHANGELOG.md).
+What changed in each version: [changelog](CHANGELOG.md).
 
 ## Help and news
 

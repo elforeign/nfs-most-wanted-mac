@@ -85,7 +85,12 @@ def source_model(s):
         images = {labels[ids[j]]: u32(r, 180 + j * 4) for j in range(nb)}
         require(len(images) == nb and 'DIFFUSE' in images and images['DIFFUSE'] in textures, 'UC PC one diffuse binding')
         if 'NORMAL' in images: normals.add(images['NORMAL'])
-        draws.append(dict(vertices=v, indices=q, texture=images['DIFFUSE'], normal=images.get('NORMAL'),
+        # MW's car effect has one colour sampler. Feed the authored emitting
+        # atlas into its brake state path instead of discarding that binding.
+        diffuse = (images.get('SELFILLUMINATION', images['DIFFUSE'])
+                   if lights[li] == name_hash('BRAKELIGHT') else images['DIFFUSE'])
+        require(diffuse in textures, 'UC PC brake emission texture reference')
+        draws.append(dict(vertices=v, indices=q, texture=diffuse, normal=images.get('NORMAL'),
                           light=lights[li], source_record=r))
         cursor += count; nverts += nv
     require(len(ib) == (cursor * 2 + 3) // 4 * 4 and not any(ib[cursor * 2:]), 'UC PC index buffer rounding')

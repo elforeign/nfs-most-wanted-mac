@@ -27,9 +27,9 @@ Carbon hang reports also create the ordinary problem-report folder. Its frame ti
 when diagnostics are off. The recorder does not change watchdog thresholds.
 
 Storage is bounded: 16,384 frame slots (384 bytes), 65,536 presentation
-slots (64 bytes), 4,096 state slots and 512 reserved error slots (128 bytes each).
+slots (64 bytes), 4,096 state slots and 512 typed error slots (128 bytes each).
 Publication gates and sequence numbers are inside these sizes: 10.5625 MiB plus
-ring bookkeeping, ten latest state context slots, and bounded label and adapter
+ring bookkeeping, eleven latest state context slots, and bounded label and adapter
 state, below 11 MiB. A menu snapshot adds about 9.9 MiB until closing;
 export may temporarily add another snapshot and formatted text. No allocation,
 formatting, file I/O, guest calls or waiting occurs in frame/event publication.
@@ -44,9 +44,10 @@ At 546 fps the frame ring covers approximately 30 s; higher rates can shorten it
 
 MW and Carbon provide FE, package and load observations. MW also provides the
 active script on the fade object and movie/NIS observations. Both games provide
-pass draws and asynchronous presentation. Carbon includes movie requests/state and the
-witnessed NIS class/clock below. Physical input and error feeds are unavailable for
-both games. Standalone sections contain only fixed labels and numbers.
+pass draws, asynchronous presentation, typed errors, and physical input-source,
+connection and layout observations. Carbon includes movie requests/state and the
+witnessed NIS class/clock below. Standalone sections contain only fixed labels
+and numbers.
 
 `blackbox_test.py` runs without assets through `offline_tests.sh`. It compiles the
 production adapters and export hooks: 0 missing sentinel records across 12 exports
@@ -218,3 +219,72 @@ The ordinary final completion uses one shared block and 32 fixed numeric tickets
 so serial capture allocates no new block per frame. Ticket exhaustion emits an
 explicit loss record. Added renderer state is bounded below 16 KiB; the original
 frame/presentation slot sizes and permanent recorder storage cap remain unchanged.
+
+Input sampling reads cached host values once per frame. `INPUT` records carry
+`source=keyboard/mouse|controller`, `source_changed`, primary-pad `connected`,
+`layout=unobserved|playstation|xbox|pc`, and source `unchanged_for` age at the
+snapshot anchor. Layout is the last value resolved by ordinary controller/prompt
+paths; it stays unobserved until those paths run. Carbon caches its three-choice
+resolver separately from MW's two-choice layout. No preference lookup occurs in
+sampling. `changes` bits are 1 source, 2 connection, 4 layout. The initial keyboard
+value is the existing reader default, not evidence of a key press.
+
+Connection-driven prompt defaults never change the physical source; disconnects
+retain the last physical source even when prompts switch to keyboard. Mouse
+movement retains the existing 16-point threshold. Only changes observed at frame
+samples are journaled; multiple changes between samples may be missed. The latest
+input record and source timestamp survive event-ring wrap as `INPUT_CONTEXT`.
+No key values, text, device names or controller identifiers enter this feed.
+
+`blackbox_input_test.py` compiles both production prompt providers, adapters,
+layout caches and recorder. The pad → keyboard → pad sequence exports exactly
+3 source transitions for each game with diagnostics off/on, including connection
+and layout changes. On unchanged providers, MW observed 3 source transitions
+and 0 connection-only transitions; Carbon observed 6 and 3 respectively. The
+pinned Carbon prompt-state-only control exports 6 and fails the same check.
+Frozen F10 history survives later keyboard activity and an 80-second pause;
+unchanged source age survives 40 seconds and 4,097 events wrapping the journal.
+The fixture also checks the mouse threshold and disabled collection. Its paired
+microbench compares adapters with/without the input tap; live timing remains a
+separate measurement.
+
+Typed errors use the same `NFS_BLACKBOX` switch in both games, independently of
+`BOOT_DIAG`. Failure-only taps cover shader translation and library compilation,
+pipeline construction, failed COM HRESULTs, asset open/read failures, guest
+breakpoints and runtime fatal exits. Frame and final GPU completion failures
+enter the error ring through the existing presentation callback primitive;
+their original render serial survives late or reordered completion. Command
+status Error is recorded even without an NSError code. No extra callback or
+GPU wait is added.
+
+Each ERROR row contains class, operation, numeric code, numeric shader/method ID,
+guest caller, first and last monotonic timestamps, first frame and occurrence
+count (`repeats`, including the first occurrence). Identical retained keys are
+counted together, with a bounded scan of the 512 slots only on failure. Counts
+cover the retained key's lifetime, rather than just the 30-second window. A busy
+producer drops once and increments the lifetime loss counter. Snapshots and
+producers use the same slot protection; neither waits for the other. Export
+coverage reports overwritten keys and lost or unavailable records. An error
+after the last frame remains eligible through snapshot capture or live export.
+If a repeat updates a key while capture is copying the ring, its known
+pre-trigger first observation remains visible. `capture_overlap=1` marks that
+the copied last time is later than the trigger. The exact pre-trigger count is
+`repeats=unavailable`; `observed_repeats` gives the copied lifetime count instead.
+
+COM filtering excludes handle getters, reference counts, scalar values and void
+returns. In particular, high-bit D3DX effect handles are not HRESULT failures.
+Unrecognized host interfaces remain unclassified. File paths, player names,
+assertion text, compiler source and NSError descriptions never enter numeric
+storage. Asset IDs are omitted; caller and error code identify the observation.
+Legacy error messages in report/log attachments still pass through the existing
+bundle privacy sanitizer before sharing.
+
+The asset-free `blackbox_errors_test.py` fixture injects shader, D3D, Metal,
+asset and assert failures: starting code misses all five classes, fixed exports
+miss zero, and removing any feed misses one in each of F10/hang/stall/crash.
+Seeded path/name/secret occurrences across the exported bundle are zero;
+bypassing sanitization leaves 15. Concurrent error producers account for all
+40,000 attempts as occurrences or explicit losses. Overflow retains 512 keys
+and reports the loss of coverage. An alternating offline microbench includes
+100 COM returns and three presentation records per frame; this is separate
+from the complete solo game A/B required after integration.

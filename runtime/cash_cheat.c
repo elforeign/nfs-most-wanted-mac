@@ -5,7 +5,6 @@
 #include <strings.h>
 #include "cash_cheat.h"
 #include "settings.h"
-#include "roam_online.h"
 
 #define FE_DATABASE 0x0091CF90u
 #define GAME_FLOW 0x00925E90u
@@ -24,12 +23,10 @@ static const char unavailable[] = "Load a profile and enter Career to add cash."
 void portmenu_status(const char *fmt, ...);
 
 static const char *unavailable_reason(void) {
-    return atomic_load_explicit(&roam_online_active, memory_order_relaxed) ?
-        "Leave online free roam to add cash." : unavailable;
+    return unavailable;
 }
 
 static uint32_t career_profile(void) {
-    if (atomic_load_explicit(&roam_online_active, memory_order_relaxed)) return 0;
     uint32_t db = M32(FE_DATABASE), profile = db ? M32(db + 0x10) : 0;
     // IsProfileNamed (0056DB10), HasCareerStarted (0050E310), FE career bit.
     if (!profile || !M8(profile + 0x20) || !(M32(profile + 0xAC) & 1) || !(M32(db + 0x12C) & 1)) return 0;

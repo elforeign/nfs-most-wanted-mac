@@ -1,7 +1,10 @@
 # Switch registry
 
 Every NFS_* / BOOT_* name the code reads is a row in `runtime/switches.tsv` (kind, default, where read, docs, retire);
-`runtime/switches_test.py` fails on a name missing from the table. The lines below document names that had no doc.
+`runtime/switches_test.py` checks names (including header reads), metadata paths and static F10 defaults.
+For a switch with a static F10 row, the default column begins with the switch spelling derived from that row's
+default, value strings and slider unit; conditions and asset fallbacks follow a semicolon. Runtime-populated language
+choices and non-F10 fallback behavior are covered by their feature tests. The lines below document names that had no doc.
 
 
 - `BOOT_DIAG_GILWAIT`: reports guest lock wait diagnostics when diagnostic capture is enabled.
@@ -24,7 +27,9 @@ Every NFS_* / BOOT_* name the code reads is a row in `runtime/switches.tsv` (kin
 - `NFS_FRAME_MEMORY_KB`: sets the frame-memory budget in kilobytes.
 - `NFS_HDR_OUTPUT=auto|off|edr`: HDR output mode (default Auto, based on display potential EDR headroom; restart required).
 - `NFS_MUSIC_TEST_PREF`: selects the music preference test case.
-- `NFS_NO_CATCHUP`: disables simulation catch-up steps.
+- `NFS_NO_CATCHUP`: disables rival rubber banding by default; Off restores the game's catch-up behavior.
+- `NFS_ROOTS`: chooses an alternate roots manifest; unset uses the profile's manifest.
+- `NFS_LAN_REAL`: `1` enables real LAN addresses and fanout; unset keeps tests on loopback.
 - `NFS_TEST_ADDCARS_SEED_META`: injects added-car seed metadata for tests.
 - `NFS_TEST_AUDIOSET`: selects a test audio set.
 - `NFS_TEST_CARDRAW_MISS`: injects a car draw miss for tests.

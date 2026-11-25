@@ -48,7 +48,7 @@ int main(void){
   M8(0x400000)=i%3;M8(0x40012C)=i%2?4:0;
   free_stacks[0].lo=0x600000;free_stacks[0].size=0x100000;nfree_stacks=1;
   uint32_t tid=0,h=thread_create(0x100000,0x820BD7,0,0,&tid);
-  CHECK(h==original);CHECK(objects()==1);CHECK(tid==i+2);
+  CHECK(h==original);CHECK(objects()==1);CHECK(threads_handle_count()==1);CHECK(tid==i+2);
   KObj *t=kget(h);CHECK(t&&t->cpu&&t->start==0x820BD7);CHECK(nfree_stacks==0);
   t->signaled=1;t->running=0;M32(0x9C22E8)=h;
  }
@@ -58,7 +58,7 @@ int main(void){
  int n=threads_list(ths,cpus,tids,64);CHECK(n==2);
  Cpu *held=cpus[1];CHECK(held!=retiring->cpu);CHECK(held->eax==0x12345678);
  retiring->running=0;retiring->signaled=1;split_sound_worker_reap(0x820BD7);
- CHECK(objects()==0);CHECK(held->eax==0x12345678);
+ CHECK(objects()==0);CHECK(threads_handle_count()==0);CHECK(held->eax==0x12345678);
  KObj *again;CHECK(knew(K_THREAD,&again)==original);again->cpu=calloc(1,sizeof(Cpu));
  // Every excluded state preserves ALL guest bytes and the complete object table.
  for(unsigned mode=6;mode<12;++mode){

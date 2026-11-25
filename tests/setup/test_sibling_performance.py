@@ -136,13 +136,15 @@ void stock_stats(const char *body,const char *handling,const char *engine,
 def native_library(work, exe):
     functions = ('00401AE0', '0066BC60', '0066BCC0', '0066BF20', '0066C3A0',
                  '0066C8A0', '00672FE0', '00673400', '00678CE0_orig')
-    pattern = re.compile(r'^void f_(' + '|'.join(functions) + r')\(Cpu.*?^}', re.M | re.S)
+    pattern = re.compile(r'^void f_(' + '|'.join(functions) + r')(?:_orig)?\(Cpu.*?^}', re.M | re.S)
     source = {}
     for shard in (0, 33, 34, 35, 36):
         path = ROOT / f'recomp/out/speed_{shard:02d}.c'
         if path.is_file():
             for function in pattern.finditer(path.read_text()):
-                source[function[1]] = function[0]
+                # Retail siblings use the untouched original torque consumer.
+                source[function[1]] = function[0].replace(
+                    f'void f_{function[1]}_orig(', f'void f_{function[1]}(', 1)
     assert source.keys() == set(functions), set(functions) - source.keys()
     declarations = '\n'.join('void f_' + name + '(Cpu *);' for name in functions)
     harness = work / 'stock_stats.c'

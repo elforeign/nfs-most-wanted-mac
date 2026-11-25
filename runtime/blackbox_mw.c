@@ -6,5 +6,6 @@ void blackbox_game_frame(uint64_t frame, uint32_t flow, const BlackboxTiming *ti
     uint64_t now = blackbox_now_ns();
     blackbox_mw_fe(frame, flow, now);
     blackbox_mw_cinematics(frame, now);
+    blackbox_input(frame, now);
     blackbox_record_frame(BLACKBOX_MW, frame, flow, timing, now);
 }

@@ -139,6 +139,29 @@ def templates(refs):
     return result
 
 
+def texture_slots(srcname, draw, material_name, defaults, source_textures):
+    """Use the native replacement role for an authored brake OFF/ON pair.
+
+    MW UpdateLightStateTextures replaces BRAKELIGHT_LEFT/RIGHT/CENTRE;
+    a concrete atlas hash bypasses that per-side state selection.
+    """
+    diffuse = draw['texture']
+    if draw['light'] == name_hash('BRAKELIGHT'):
+        car, part = srcname.rsplit('_KIT', 1)
+        kit, role = part.split('_', 1)
+        base = f'{car}_KIT{kit}_BRAKELIGHT'
+        pair = {name_hash(base + '_OFF'), name_hash(base + '_ON')}
+        if diffuse in pair and all(h in source_textures for h in pair):
+            side = role.rsplit('_', 1)[0].rsplit('_', 1)[-1]
+            side = side if side in ('LEFT', 'RIGHT') else 'CENTRE'
+            defaults = [name_hash('BRAKELIGHT_' + side)] * 5
+        elif diffuse in source_textures:
+            defaults = [diffuse] * 5
+    elif diffuse in source_textures:
+        defaults = [diffuse] * 5
+    return mw.car_texture_slots(defaults, normal=normal_for_mw(draw, material_name))
+
+
 def target_model(src, name, selected, table, source_textures):
     draws = [src['draws'][i] for i in selected]
     require(draws, 'empty MW model')
@@ -148,8 +171,7 @@ def target_model(src, name, selected, table, source_textures):
         lh = LIGHT_FALLBACK.get(draw['light'], draw['light'])
         require(lh in table, f'PS light {draw["light"]:08X} lacks explicit MW mapping in {src["name"]}')
         raw, nm, defaults = table[lh]
-        defaults = [draw['texture']] * 5 if draw['texture'] in source_textures else defaults
-        bindings = mw.car_texture_slots(defaults, normal=normal_for_mw(draw, nm))
+        bindings = texture_slots(src['name'], draw, nm, defaults, source_textures)
         for val in bindings:
             if val not in textures: textures.append(val)
         if lh not in lights: lights.append(lh)

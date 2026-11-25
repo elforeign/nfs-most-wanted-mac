@@ -19,6 +19,7 @@ typedef struct Obj {
     uint32_t surfaces[16 * 6];   // cached surface objects per level/face
     int dirty;
     uint64_t buffer_generation;  // vertex/index contents: bumped on writable Lock and Unlock
+    uint64_t resource_id;        // never reused, including after COM/host-slot reuse
     uint8_t buffer_lock_write, pane_cached;
     uint8_t hd_swap, hd_tinted;  // an X360 HD texture (x360_textures.m); uploaded with the probe's signature (probe.m)
                                  // (hd_swap 2: an X360 arrest-scene character texture, its draws counted)
@@ -53,7 +54,7 @@ typedef struct {
     float vsc[256][4], psc[224][4];
     int32_t vsi[16][4], psi[16][4];
     uint32_t vsb[16], psb[16];
-    uint32_t ver_vsc, ver_psc, ver_vsi, ver_psi, ver_vsb, ver_psb;   // bumped by every Set*ShaderConstant* (render.m uploads on change)
+    uint32_t ver_vsc, ver_psc, ver_vsi, ver_psi, ver_vsb, ver_psb;   // nonzero; bumped when register bytes change (render.m uploads on change)
     float transform[512][16];
     uint32_t viewport[6], scissor[4];
     uint32_t rt[4], ds;

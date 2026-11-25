@@ -1,3 +1,4 @@
+// Device name parts: main 22 checks/15 failures; fixed 22/0.
 // Synthetic payloads only; paired driver records original, fixed and independent broken controls.
 // Compact mistyped room codes: pinned rule 25 checks/12 failures; fixed 25/0; ordinary words preserved.
 // Proof: pinned original 1003 checks/941 failures; review predecessor 1009/20; fixed 1009/0.
@@ -94,6 +95,32 @@ static void RoomCodeTests(NSString *root) {
                              @"R-ABC R-ABCD R-ABCDEFGH R-ABCDEFGHJK"]) {
         CHECK([ReportEndpointRedact(input) isEqual:input]);
     }
+}
+
+// macOS names Bluetooth and Continuity devices after the first name alone, and the short name differs here.
+// The audio and display rows reach the public issue body and report.txt.
+static void NamePartTests(NSString *root) {
+    int beforeChecks = checks, beforeFailures = failures;
+    NSDictionary *idn = @{@"home":@"/Volumes/TestHomes/synthuser", @"user":@[@"synthuser", @"Synthia Fixtureson"],
+        @"computer":@[], @"serial":@[], @"wifi":@[]};
+    for (NSString *device in @[@"Synthia\u2019s AirPods Pro", @"Synthia's iPhone", @"iPhone de Synthia", @"Synthias iPad",
+                               @"Fixtureson\u2019s Speaker"]) {
+        NSString *summary = [Summary() stringByReplacingOccurrencesOfString:@"Built-in speakers" withString:device];
+        summary = [summary stringByReplacingOccurrencesOfString:@"3840x2160, 120 Hz"
+                                                      withString:[device stringByAppendingString:@", 3840x2160"]];
+        for (NSNumber *discord in @[@NO, @YES]) {
+            NSString *body = BuildSnapshot(summary, nil, nil, idn, discord.boolValue)[@"body"];
+            CHECK(body && ![body containsString:@"Synthia"] && ![body containsString:@"Fixtureson"] && [body containsString:@"Example pad"] && [body containsString:@"3840x2160"] && [body containsString:@"audio: PCM,"]);
+        }
+        NSString *path = [root stringByAppendingPathComponent:@"report.txt"];
+        CHECK([summary writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        ReportPrivacyRedactBundle(root, idn);
+        NSString *out = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
+        CHECK(out && ![out containsString:@"Synthia"] && ![out containsString:@"Fixtureson"] && [out containsString:@"controller: Example pad"]);
+    }
+    // Initials are not redacted on their own.
+    CHECK([ReportPrivacyIdentityRedact(@"S mode, 5 s", @{@"user":@[@"synthuser", @"S. Fixtureson"]}) isEqual:@"S mode, 5 s"]);
+    printf("review name_parts: %d checks, %d failures\n", checks - beforeChecks, failures - beforeFailures);
 }
 
 #endif
@@ -212,7 +239,7 @@ static NSArray *BundleIdentityCases(void) {
         @[@"serial", @"serial=SERIALSYNTHETIC", @"SERIALSYNTHETIC"],
         @[@"wifi", @"SSID=\"Synthetic Other Network\"", @"Synthetic Other Network"],
         @[@"known_home", @"/Volumes/TestHomes/playerone/file", @"playerone"],
-        @[@"known_user", @"Example Player", @"Example Player"],
+        @[@"known_user", @"Synthia Fixtureson", @"Synthia Fixtureson"],
         @[@"known_computer", @"My Test Mac", @"My Test Mac"],
         @[@"known_serial", @"C02TEST12345", @"C02TEST12345"],
         @[@"known_wifi", @"Secret Network", @"Secret Network"]];

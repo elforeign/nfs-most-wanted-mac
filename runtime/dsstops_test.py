@@ -57,16 +57,16 @@ def transport_controls(tmp):
     (tmp / 'padfx_roles.inc').write_text(re.search(
         r'^int padbind_trigger_role\(.*?^}', roles, re.M | re.S)[0] + '\n')
     controls = [
-        ('rumble', 'detach', 'if (departing == pad) {\n            invalidate_motors();', 'if (departing == pad) {'),
-        ('rumble', 'attach', 'flush();                                           // neutral before the next feedback publication', '(void)0;'),
-        ('rumble', 'cache', 'if (send(heavy, light))', 'if ((send(heavy, light), 1))'),
-        ('rumble', 'retry', 'neutral_pending = 1; retry_clear();', 'neutral_pending = 1; if (0) retry_clear();'),
+        ('rumble', 'detach', 'if (departing == r->pad) {\n                invalidate_motors(r);', 'if (departing == r->pad) {'),
+        ('rumble', 'attach', 'flush(r);                                           // neutral before the next feedback publication', '(void)0;'),
+        ('rumble', 'cache', 'if (send(r, heavy, light))', 'if ((send(r, heavy, light), 1))'),
+        ('rumble', 'retry', 'r->neutral_pending = 1; retry_clear(r);', 'r->neutral_pending = 1; if (0) retry_clear(r);'),
         ('rumble', 'deadline', 'now + 250000000ull', 'now + 2500000000ull'),
-        ('rumble', 'epoch', '(request >> 32) != motor_generation', '0'),
-        ('rumble', 'selection', 'applied_selection != selection_generation ||', ''),
+        ('rumble', 'epoch', '(request >> 32) != r->motor_generation', '0'),
+        ('rumble', 'selection', 'r->applied_selection != r->selection_generation ||', ''),
         ('padfx', 'debt', 'if (gone && (trig_taken || light_taken))', 'if (0)'),
         ('padfx', 'deferred', 'if (is_detached(ctl)) {\n            if (owner == ctl)', 'if (0) {\n            if (owner == ctl)'),
-        ('feedback', 'model', 'reset_invalid_model();', 'if (0) reset_invalid_model();'),
+        ('feedback', 'model', 'reset_invalid_model(f);', 'if (0) reset_invalid_model(f);'),
     ]
     for module, label, old, new in controls:
         suffix = 'c' if module == 'feedback' else 'm'

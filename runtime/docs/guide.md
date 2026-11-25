@@ -104,28 +104,6 @@ These are looks, not exact console reproductions. Keep your preferred screen res
 - **Video clip** starts recording the game picture and its sound; select it again to stop and wait for **Clip saved**. Clips go to Movies/NFSMW (**Show clips in Finder** opens it); **Clip resolution** picks 1080p, 1440p or 4K. Recording always starts Off and works with HDR on; the F10 panel is not recorded.
 - **Live streaming** lets you enter a YouTube stream key. **Remember on this Mac** is checked by default and keeps the key in this game's save folder across quits and updates. Uncheck it before saving to keep the key until quit and clear any remembered key. Choose **Go live** to start streaming. **Stop live** ends the broadcast, and **Forget stream key** also removes the key.
 
-## Online (beta)
-
-Online free roam is unavailable in this build. **Create room** and **Join** require a configured shared relay.
-
-**Walkthrough for the early beta (unavailable in this build).** These steps apply once a shared relay is configured. Access is free. Use the same game version on both Macs. Online races are not included. Begin with two players on different internet connections.
-
-Create: enter career free roam, then open **F10 > Online (beta) > Create room**. Both Create and Join connect to the release's shared relay. Send the displayed room code privately to your friend. Codes look like **R-XXXX-XXXXX** and identify rooms rather than passwords; they contain no player's internet address. Anyone with a room code can try joining it.
-
-Join: enter career free roam, open **F10 > Online (beta) > Join code**, paste the complete prefixed code and choose **Join**. Old endpoint codes are unsupported. Close F10 and check that both players see each other's cars moving. **Leave** disconnects your installation; other players can stay in the room. A room is an ephemeral identifier, with no reserved owner or lasting registration.
-
-No home router setup, port forwarding or public-IP entry is needed for this flow. Keep the firewall enabled. Your network must permit outgoing UDP to the shared relay. The direct numeric-address transport remains a diagnostic tool.
-
-If Status says **no shared relay configured**, online free roam is not available in this release yet; it arrives in a later update, and entering a different room code cannot configure a server. **Relay unavailable** means no response or a local connection/credential failure. Check your connection, then try again later. A full relay requires waiting for capacity; a different game version requires the matching release. If an installation is banned, contact the service operator through the existing private project contact. **Reconnecting** retries automatically after a lost connection or relay restart.
-
-The relay authenticates a random installation credential stored in your selected profile's online-identity directory. Rooms are not passwords or accounts. UDP is unencrypted: the relay and network/provider observers can see addresses, names, room identifiers and car states. The service retains verified installation identifiers and expiry for bans; see the moderation/privacy documentation for limits. A new identity can evade an installation ban.
-
-**Ghost mode** lets your car and friends' cars pass through each other. Toggle it in **F10 > Online (beta) > Ghost mode**, or press **D-pad Down / G** while driving.
-
-Online sessions cap the frame rate at **60 fps** and render at most **six nearby remote cars**. Actual frame rates depend on your Mac, settings and the scene.
-
-Report successes and failures from both Macs: game/macOS versions, Mac models, creator/joiner roles, separate networks, last Status and whether cars appeared. Preview reports and inspect every attachment. Remove join codes, addresses and personal details from logs and screenshots before posting. Real two-network delivery and packaged visual checks remain required before beta release.
-
 ## Audio
 
 - **Output > Automatic** chooses a supported format. You can also request Dolby TrueHD 5.1, Dolby Digital Plus 5.1, Dolby Digital 5.1, PCM 5.1 or Stereo.

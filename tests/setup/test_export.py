@@ -203,7 +203,7 @@ int main(int argc, char **argv) { @autoreleasepool {
 ''')
         cls.updater = cls.build_path / "updater"
         run(["clang", "-fobjc-arc", "-Wno-deprecated-declarations", "-I", ROOT / "runtime", ui,
-             "-framework", "Cocoa", "-o", cls.updater])
+             "-framework", "Cocoa", "-framework", "Security", "-o", cls.updater])
         broken = cls.build_path / "broken"
         broken.mkdir()
         for name in ("pub_update.m", "pub_update_launch.m"):
@@ -212,7 +212,7 @@ int main(int argc, char **argv) { @autoreleasepool {
             (broken / name).write_text(source.replace("if (roots_exported())", "if (0)"))
         cls.broken_updater = cls.build_path / "broken-updater"
         run(["clang", "-fobjc-arc", "-Wno-deprecated-declarations", "-I", broken, "-I", ROOT / "runtime", ui,
-             "-framework", "Cocoa", "-o", cls.broken_updater])
+             "-framework", "Cocoa", "-framework", "Security", "-o", cls.broken_updater])
 
     @classmethod
     def tearDownClass(cls):

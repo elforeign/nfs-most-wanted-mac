@@ -6,7 +6,6 @@ Setup routing is deliberately left to the caller.
 """
 from contextlib import ExitStack
 from pathlib import Path
-import shutil
 import zipfile
 
 from . import pc_disc
@@ -31,11 +30,13 @@ def is_disc(path):
         return False
 
 
-def prepare(source, work, events, extra=()):
+def prepare(source, work, events, extra=(), reserve=0):
     """Return <work>/carbon_src with all archives and listed loose files.
 
     Uses Setup's transactional extraction/cache and archive path/type/size/CRC
     checks. No executable compatibility or installed-version claim is made.
+    reserve is further free space the caller needs beside the extracted tree, as
+    a multiple of its size (the updated copy made from it needs about one more).
     """
     from . import backend as b
 
@@ -69,7 +70,7 @@ def prepare(source, work, events, extra=()):
         key = dict(layout=1, discs=[stamp(disc) for disc in discs.values()])
 
         def unpack(out):
-            _extract(discs, out, work, events)
+            _extract(discs, out, work, events, reserve)
             if key["discs"] != [stamp(disc) for disc in discs.values()]:
                 raise b.SetupError("A Carbon disc changed while being extracted.", FIX)
             return out
@@ -82,7 +83,7 @@ def prepare(source, work, events, extra=()):
             disc.close()
 
 
-def _extract(discs, out, work, events):
+def _extract(discs, out, work, events, reserve=0):
     from . import backend as b
 
     first = discs[1]
@@ -105,8 +106,9 @@ def _extract(discs, out, work, events):
         count = sum(len(members) for _, _, members, _ in archives) + len(loose)
         if total > b.ZIP_MAX_BYTES or count > b.ZIP_MAX_FILES:
             raise b.SetupError("The Carbon discs are larger than 8 GB or 20,000 files.", FIX)
-        if shutil.disk_usage(work).free < total + 512 * 1024**2:
-            raise b.SetupError("There is not enough free disk space to unpack the Carbon discs.", FIX)
+        # Checked before the first byte is written: the extracted tree and, with reserve, the caller's updated copy
+        # of it coexist. The shared message names the volume and how much more is needed.
+        b.require_space(work, total * (1 + reserve) + 512 * 1024**2)
         out.mkdir(parents=True)
         done = 0
         events.progress(done, total)

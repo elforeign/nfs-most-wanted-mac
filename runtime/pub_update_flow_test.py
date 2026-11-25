@@ -1,22 +1,27 @@
-"""Player update flow, driven by the real local progress reader and F10 actions.
-Core proof: 27 good checks (12 UI, 15 preparation/launch); 17 broken controls rejected
-(9 UI, 8 preparation/launch), including automatic fetch and false-success controls.
-Launch fixture: inherited BOOT_BACKGROUND=1 skipped the normal-launch guard
-(broken rc=0); clear launch-mode flags in this stub child (good rc=0, broken rc=99).
-Interrupted Setup journal: Open Setup beside Quit passes 1/1 and sends --recover.
-The original Quit-only alert passes 0/1. A fixture records the action with no window.
-Uses only loopback networking. No game or desktop app is started.
-Release feed: original followed the redirect (1 destination hit) and accepted the chunked cap+1 body.
-Fixed: zero destination hits, cap+1 rejected, at-cap accepted.
-Transport compilation: production UI good=2 has the fixed release URL and no
-fixture environment; the fixture-enabled build fails that same release oracle (2/2).
-Detach proof: first-phase order good=2 (fresh/existing marker), original-order
-broken=2 rejected; retained detach good=6, broken retry policy=2 rejected.
-Mounted interpreter proof: good=1 detached before build (rc=0) / original-order
-broken=1 rejected with Resource busy (rc=1). Direct restricted run: image refused
-with "Device not configured" (rc=3); --mounted-prepare skips only image refusal.
-Cleanup regression requires original detach/rmtree EBUSY (16), then successful
-retry/force unmount with the same file still open (1 broken / 1 good control).
+"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 import io
 import http.server
@@ -35,6 +40,7 @@ import time
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
+PROOF = runpy.run_path(str(ROOT / 'pub_update_helper_test.py'))
 
 
 def run(args, **kwargs):
@@ -132,7 +138,7 @@ def native_flow(root, patch=None):
     path.write_text(source + DRIVER)
     (root / 'pub_update_core.h').write_text(header)
     run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, '-I', root,
-         path, '-framework', 'Cocoa', '-o', root / 'flow'])
+         path, '-framework', 'Cocoa', '-framework', 'Security', '-o', root / 'flow'])
     work = root / 'profile'; work.mkdir()
     result = run([root / 'flow', work])
     return dict(line.split('=', 1) for line in result.stdout.splitlines())
@@ -422,13 +428,15 @@ def bridge_cases(root):
     # A helper failure must prevent executing any released Python, even when
     # it leaves a misleading verified receipt. The broken supervisor executes it.
     source = (ROOT/'pub_update.m').read_text()
+    headers = PROOF['fixture_headers'](root)
+    source = source.replace('"pub_update_manifest.h"', '"fixture-headers/pub_update_manifest.h"')
     before = 'if (ok && [receipt[@"state"] isEqual:@"verified"] && [receipt[@"setup_path"] isEqual:setup])'
     assert before in source
     for broken in (False, True):
         native = root/('broken.m' if broken else 'good.m')
-        native.write_text(source.replace(before, 'if (YES)', 1) if broken else source)
+        native.write_text(source.replace(before, 'if (YES)', 1).replace('ok = PUAdmit(job, delivery[1], delivery[2], delivery[3]);', 'ok = YES;', 1) if broken else source)
         preparer = root/('broken-preparer' if broken else 'preparer')
-        run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, '-DPUB_UPDATE_WORKER=1', native, '-framework', 'Cocoa', '-o', preparer])
+        run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, '-DPUB_UPDATE_WORKER=1', native, '-framework', 'Cocoa', '-framework', 'Security', '-o', preparer])
         for reason in ('helper failed', 'SHA256 checksum mismatch') + (() if broken else ('verified',)):
             job = root/(('broken-' if broken else 'good-')+reason.replace(' ', '-')); job.mkdir(mode=0o700)
             setup=job/'mount/NFS Most Wanted Native Setup.app'
@@ -437,9 +445,11 @@ def bridge_cases(root):
             python.chmod(0o700)
             helper=job/'pub_update_helper'
             verified = reason == 'verified'
+            asset = 'NFS-Most-Wanted-Native-Setup-v4.2.0.dmg'
+            if verified: PROOF['retain_proof'](job, headers)
             helper.write_text('#!/bin/sh\nprintf %s '+shlex.quote(json.dumps(dict(state='verified', message=reason, setup_path=str(setup))))+f' > "$1/progress.json"\nexit {0 if verified else 1}\n')
             helper.chmod(0o700)
-            result=subprocess.run([str(preparer), str(job), 'v4.2.0', 'fixture.dmg', 'fixture.sha256', '10', str(root/'good/profile'), str(root/'app')], capture_output=True, text=True)
+            result=subprocess.run([str(preparer), str(job), 'v4.2.0', asset, asset+'.sha256', '10', str(root/'good/profile'), str(root/'app')], capture_output=True, text=True)
             value=json.loads((job/'progress.json').read_text())
             assert (value['state']=='ready') == (broken or verified), (result.stderr, value)
             assert (job/'executed').exists() == (broken or verified)
@@ -449,6 +459,142 @@ def bridge_cases(root):
             elif not broken:
                 assert not binding.exists()
     print('Native failed-helper/checksum controls good=2 rejected broken=2 false successes detected')
+
+
+def signed_worker_cases(root):
+    root.mkdir()
+    headers = PROOF['fixture_headers'](root)
+    source = (ROOT/'pub_update.m').read_text().replace('"pub_update_manifest.h"', '"fixture-headers/pub_update_manifest.h"')
+    gate = 'ok = PUAdmit(job, delivery[1], delivery[2], delivery[3]);'
+    assert source.count(gate) == 1
+    for product in ('mw', 'carbon'):
+        setup_name = 'NFS Carbon Native Setup.app' if product == 'carbon' else 'NFS Most Wanted Native Setup.app'
+        for broken in (True, False):
+            path=root/'preparer.m'; path.write_text(source.replace(gate, 'ok = YES;', 1) if broken else source)
+            exe=root/'preparer'
+            run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-Wno-unused-function', '-I', ROOT,
+                 *(['-DNFS_GAME=2'] if product == 'carbon' else []), '-DPUB_UPDATE_WORKER=1', path,
+                 '-framework', 'Cocoa', '-framework', 'Security', '-o', exe])
+            for case in ('unsigned', 'partial', 'dmg', 'checksum', 'signature', 'binding', 'good'):
+                job=root/f'{product}-{broken}-{case}'; job.mkdir(mode=0o700)
+                asset=PROOF['retain_proof'](job, headers, product=product)
+                proof=job/(asset+'.manifest'); sig=job/(asset+'.manifest.sig')
+                if case == 'unsigned': proof.unlink(); sig.unlink()
+                if case == 'partial': sig.unlink()
+                if case == 'dmg': (job/asset).write_bytes(b'changed image')
+                if case == 'checksum': (job/(asset+'.sha256')).write_bytes(b'changed checksum')
+                if case == 'signature': sig.write_bytes(b'invalid')
+                if case == 'binding': proof.write_bytes(proof.read_bytes().replace(b'tag=v4.2.0', b'tag=v4.3.0'))
+                setup=job/'mount'/setup_name
+                python=setup/'Contents/Resources/python/bin/python3'; python.parent.mkdir(parents=True)
+                python.write_text('#!/bin/sh\ntouch "$PWD/executed"\nprintf \'{"state":"ready"}\' > "$PWD/progress.json"\n')
+                python.chmod(0o700)
+                helper=job/'pub_update_helper'
+                receipt=json.dumps(dict(state='verified', setup_path=str(setup)))
+                helper.write_text('#!/bin/sh\nprintf %s '+shlex.quote(receipt)+' > "$1/progress.json"\n')
+                helper.chmod(0o700)
+                result=subprocess.run([exe, job, 'v4.2.0', asset, asset+'.sha256', '1', root/'profile', root/'App.app'],
+                                      capture_output=True, text=True, timeout=20)
+                accepted=broken or case=='good'
+                assert (job/'executed').exists() == accepted, (product, broken, case, result.stderr)
+                assert (result.returncode == 0) == accepted, (product, broken, case, result.stderr)
+    print('Preparation signed admission: bypass EXECUTE=12 / intact REFUSE=12; signed EXECUTE=2 (both products)')
+
+
+def signed_launch_cases(root):
+    root.mkdir()
+    headers=PROOF['fixture_headers'](root)
+    digest_tree=runpy.run_path(str(ROOT.parent/'tools/setup_kit/install.py'))['digest_tree']
+    source=(ROOT/'pub_update_launch.m').read_text().replace('"pub_update_manifest.h"', '"fixture-headers/pub_update_manifest.h"')
+    source=source.replace('if (![NSBundle.mainBundle.bundleIdentifier isEqual:PublicBundleID]) return;', '')
+    source=source.replace('CanonicalPath(NSBundle.mainBundle.bundlePath)', 'CanonicalPath([NSString stringWithUTF8String:getenv("FIXTURE_DEST")])')
+    source=source.replace('NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]', '@"4.0.0"')
+    a=source.index('static void UpdateError('); b=source.index('static void InterruptedInstall(', a)
+    source=source[:a]+'static void UpdateError(NSString *reason) { fprintf(stderr, "%s\\n", reason.UTF8String); exit(99); }\n'+source[b:]
+    driver='''
+const char *game_dir;
+int main(int argc, char **argv) { @autoreleasepool {
+    const char *profile=argv[1]; argc=1;
+    pub_update_launch(&argc,&argv,profile); return 0;
+} }
+'''
+    env={k:v for k,v in os.environ.items() if k not in ('BOOT_BACKGROUND','BOOT_DEADLINE')}
+    healthy_cases = ('healthy-lower', 'healthy-equal', 'healthy-padded', 'healthy-higher',
+                     'healthy-json', 'healthy-shape', 'healthy-product', 'healthy-version',
+                     'healthy-large', 'healthy-link')
+    healthy_refused = set(healthy_cases) - {'healthy-lower'}
+    floor_bypass = floor_refused = floor_allowed = 0
+    for product in ('mw','carbon'):
+        for broken in ('healthy', 'signature', None):
+            gate='        !SignedJob(job, target) ||\n'
+            assert source.count(gate)==1
+            floor=' || !HealthyVersionAllows(target, profile)'
+            assert source.count(floor)==1
+            changed = source.replace(floor, '', 1) if broken == 'healthy' else source.replace(gate, '', 1) if broken == 'signature' else source
+            path=root/'launch.m'; path.write_text(changed+driver)
+            exe=root/'launch'
+            run(['clang','-fobjc-arc','-Wno-deprecated-declarations','-I',ROOT,
+                 *(['-DNFS_GAME=2'] if product=='carbon' else []),path,
+                 '-framework','Cocoa','-framework','Security','-o',exe])
+            for case in ('unsigned','partial','dmg','checksum','signature','binding','good','legacy-recovery', *healthy_cases):
+                work=root/f'{product}-{broken}-{case}'; work.mkdir()
+                profile=work/'profile'; profile.mkdir()
+                destination=work/'Game.app'; destination.mkdir()
+                job=work/'job'; job.mkdir(mode=0o700)
+                (job/'python/bin').mkdir(parents=True); (job/'source/tools/setup_kit').mkdir(parents=True)
+                python=job/'python/bin/python3'
+                python.write_text('#!/bin/sh\ntouch "$PWD/executed"\n'); python.chmod(0o700)
+                (job/'source/tools/setup_kit/apply.py').write_text('# retained fixture\n')
+                tools={name:digest_tree(job/name) for name in ('source','python')}
+                (job/'target-version.json').write_text('{"version":"4.2.0"}')
+                staged=job/'staged'; (staged/'Game.app/Contents').mkdir(parents=True)
+                import plistlib
+                (staged/'Game.app/Contents/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleShortVersionString='4.2.0')))
+                ready=staged/'ready.json'; ready.write_text('{"app":"Game.app","version":"4.2.0"}')
+                asset=PROOF['retain_proof'](job, headers, product=product)
+                proof=job/(asset+'.manifest'); sig=job/(asset+'.manifest.sig')
+                if case in ('unsigned','legacy-recovery'): proof.unlink(); sig.unlink()
+                if case=='partial': sig.unlink()
+                if case=='dmg': (job/asset).write_bytes(b'changed image')
+                if case=='checksum': (job/(asset+'.sha256')).write_bytes(b'changed checksum')
+                if case=='signature': sig.write_bytes(b'invalid')
+                if case=='binding':
+                    raw=proof.read_bytes().replace(b'version=4.2.0',b'version=4.3.0')
+                    proof.write_bytes(raw); sig.write_bytes(PROOF['sign_bytes'](raw, headers/'key.pem'))
+                if case in healthy_cases:
+                    healthy = profile / ('.update-healthy-' + product + '.json')
+                    version = {'healthy-lower':'4.1.0', 'healthy-padded':'4.2.0.0', 'healthy-higher':'4.3.0'}.get(case, '4.2.0')
+                    record = dict(format_version=1, product=product, version=version)
+                    if case == 'healthy-product': record['product'] = 'carbon' if product == 'mw' else 'mw'
+                    if case == 'healthy-version': record['version'] = '04.2.0'
+                    if case == 'healthy-shape': record['extra'] = True
+                    healthy.write_text('broken json' if case == 'healthy-json' else json.dumps(record))
+                    if case == 'healthy-large': healthy.write_text(healthy.read_text() + ' ' * 1024)
+                    if case == 'healthy-link':
+                        other = work / 'healthy.json'; healthy.rename(other); healthy.symlink_to(other)
+                index=dict(format_version=1,job=str(job),ready=str(ready),profile=str(profile),destination=str(destination),tools=tools)
+                (profile/'.update-ready.json').write_text(json.dumps(index)); (profile/'.update-ready.json').chmod(0o600)
+                if case=='legacy-recovery':
+                    pending=dict(kind='launch-update-v1',state='moving',job=str(job),tools=tools)
+                    (profile/'.install-journal.json').write_text(json.dumps(pending))
+                result=subprocess.run([exe,profile],env=dict(env,FIXTURE_DEST=str(destination)),capture_output=True,text=True,timeout=20)
+                assert result.returncode==0,(product,broken,case,result.stderr)
+                accepted = case == 'legacy-recovery' or (
+                    (broken == 'signature' or case == 'good' or case in healthy_cases) and
+                    (broken == 'healthy' or case not in healthy_refused))
+                marker=job/'executed'
+                if accepted:
+                    deadline=time.monotonic()+5
+                    while not marker.exists() and time.monotonic()<deadline: time.sleep(.01)
+                assert marker.exists()==accepted,(product,broken,case,result.stderr)
+                if not accepted:
+                    assert (staged/'.apply-failed.json').is_file(), (case,result.stderr)
+                if broken == 'healthy' and case in healthy_refused: floor_bypass += marker.exists()
+                if broken is None and case in healthy_refused: floor_refused += not marker.exists()
+                if broken is None and case in ('good', 'healthy-lower'): floor_allowed += marker.exists()
+    print('Launch signed admission: bypass EXECUTE=12 / intact REFUSE=12; signed EXECUTE=2; legacy recovery EXECUTE=2 (both products)')
+    assert (floor_bypass, floor_refused, floor_allowed) == (18, 18, 4)
+    print('Launch healthy floor: removed check EXECUTE=18/18; intact REFUSE=18/18; missing/lower EXECUTE=4/4 (both products)')
 
 
 def ready_while_playing(root):
@@ -496,7 +642,7 @@ def cancelled_launch(root):
     for broken in (False, True):
         path=root/'launch.m'; path.write_text((source.replace(guard, '', 1) if broken else source)+main)
         exe=root/'launch'
-        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-o', exe])
+        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-framework', 'Security', '-o', exe])
         result=subprocess.run([str(exe),str(root)], capture_output=True, env=env)
         assert result.returncode == (99 if broken else 0), (broken, result.returncode, result.stdout, result.stderr)
         assert (b'retained tools failed verification' in result.stderr) == broken, result.stderr
@@ -549,7 +695,7 @@ int main(int argc, char **argv) {
         path = root / 'launch.m'
         path.write_text(fixture)
         exe = root / 'launch'
-        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-o', exe])
+        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-I', ROOT, path, '-framework', 'Cocoa', '-framework', 'Security', '-o', exe])
         result = subprocess.run([exe, root], capture_output=True, text=True, env=env, timeout=20)
         assert result.returncode == 1, result
         offered_recovery = ('Open Setup\nQuit\n' in result.stderr
@@ -576,7 +722,7 @@ int main(void) { return 0; }
             if product == 'carbon':
                 flags += ['-DNFS_GAME=2', '-DNFS_PUBLIC=1']  # the public build (a private one registers no rows)
             run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags,
-                 path, '-framework', 'Cocoa', '-o', exe])
+                 path, '-framework', 'Cocoa', '-framework', 'Security', '-o', exe])
             data = run(['/usr/bin/strings', exe]).stdout
             release_ok.append('https://api.github.com/repos/' in data and
                               'PUB_UPDATE_REHEARSAL_BASE_URL' not in data)
@@ -593,7 +739,7 @@ int main(void) { return 0; }
         assert folder in client and (other is None or other not in client), (product, folder)
         preparer = root / (product + '-preparer')
         run(['clang', '-fobjc-arc', '-Wno-unused-function', '-I', ROOT, *flags, '-DPUB_UPDATE_WORKER=1',
-             ROOT / 'pub_update.m', '-framework', 'Cocoa', '-o', preparer])
+             ROOT / 'pub_update.m', '-framework', 'Cocoa', '-framework', 'Security', '-o', preparer])
         assert ("'--game', 'carbon'" in run(['/usr/bin/strings', preparer]).stdout) == game, product
     print('Update folders and rebuild product good=2 (Most Wanted, Carbon)')
 
@@ -622,7 +768,7 @@ int main(void) { @autoreleasepool {
 } }
 ''')
     executable = root / 'feed'
-    run(['clang', '-fobjc-arc', '-I', ROOT, path, '-framework', 'Cocoa', '-o', executable])
+    run(['clang', '-fobjc-arc', '-I', ROOT, path, '-framework', 'Cocoa', '-framework', 'Security', '-o', executable])
 
     cap = 1024 * 1024
     release = b'{"tag_name":"v4.2.0"}'
@@ -703,6 +849,8 @@ def main():
             print(name, 'broken FAIL')
         bridge = root/"bridge"; bridge.mkdir()
         bridge_cases(bridge)
+        signed_worker_cases(root/"signed-preparation")
+        signed_launch_cases(root/"signed-launch")
         ready_while_playing(root/"locked-profile")
         cancelled_launch(root/"cancelled-launch")
         interrupted_setup_launch(root/"interrupted-setup")

@@ -53,7 +53,7 @@ int main(int argc,char **argv) {
         char name[64]; CHECK(pad_identity_n(1,name,sizeof name)==PAD_KIND_DUALSHOCK4 && strstr(name,"DualShock 4"));
         int rb=rumble_calls, fx=fx_calls, pc=prompts_calls, mk=menu_calls, kc=key_calls, seen=prompts_seen;
         CHECK(pad_read_n(1,&p1));
-        CHECK(rb==rumble_calls && fx==fx_calls && pc==prompts_calls && mk==menu_calls && kc==key_calls && seen==prompts_seen);
+        CHECK(rb+1==rumble_calls && fx==fx_calls && pc==prompts_calls && mk==menu_calls && kc==key_calls && seen==prompts_seen);
         fake_time=start_ns+4000000000ull; CHECK(!pad_read_n(1,&p1) && !p1.connected && p1.pov==-1);
         fake_time=start_ns+6000000000ull; CHECK(pad_read_n(1,&p1));
         menu_hide=1; CHECK(pad_read_n(1,&p1) && p1.connected && !p1.buttons && !p1.lx && !p1.ly && !p1.lt && !p1.rt && p1.pov==-1);

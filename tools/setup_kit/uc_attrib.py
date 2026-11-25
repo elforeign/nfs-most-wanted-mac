@@ -139,4 +139,4 @@ def source_performance(attributes, donor_data, car, donor):
                     f'Undercover performance field: {cls}.{name}')
             values.append(value)
         records.append(values)
-    return car_performance.serialize(records, car, donor)
+    return car_performance.serialize(records, car, donor, torque_spline=torque)

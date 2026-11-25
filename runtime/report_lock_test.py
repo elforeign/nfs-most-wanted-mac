@@ -12,7 +12,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import secrets
 import subprocess
 import tempfile
 
@@ -180,11 +179,13 @@ assert hashlib.sha256(ORIGINAL_SAVE.encode()).hexdigest() == '04ed1585e4c8bcc36b
 def private_attachments(exe, profile, broken):
     store = profile / '.stream-key'
     store.mkdir(parents=True, mode=0o700)
-    sentinel = secrets.token_hex(60).encode()
+    # A stable key-shaped record keeps this control independent of the text decoder.
+    sentinel = hashlib.sha512(b'synthetic stream key fixture').hexdigest().encode()
+    record = hashlib.sha256(sentinel).digest() + sentinel
     for name in ('stream-key', 'stream-key.tmp'):
         path = store / name
         path.touch(mode=0o600)
-        path.write_bytes(hashlib.sha256(sentinel).digest() + sentinel)
+        path.write_bytes(record)
     result = subprocess.run([str(exe), str(profile), '--private-attachments'], capture_output=True,
                             timeout=10, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
     assert result.returncode == 0, 'private attachment report failed to build'
@@ -196,9 +197,9 @@ def private_attachments(exe, profile, broken):
     assert hits == (2 if broken else 0)
 
 
-def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, regex_error=False, private_fault=False):
+def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, regex_error=False, private_fault=False, staging_source=None):
     work.mkdir()
-    source = (RUNTIME / 'report.m').read_text()
+    source = staging_source if staging_source is not None else (RUNTIME / 'report.m').read_text()
     fixture = (RUNTIME / 'report_lock_test.m').read_text()
     (work / 'report_lock_test.m').write_text(fixture)
     privacy = (RUNTIME / 'report_privacy.h').read_text()
@@ -239,6 +240,8 @@ def run(work, baseline, *, budget=False, unbounded=False, unsafe_regex=False, re
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=90)
     (work / 'compile.log').write_text(compiled.stdout + compiled.stderr)
     assert compiled.returncode == 0, compiled.stderr[-5000:]
+    if staging_source is not None:
+        return work / 'check'
     if private_fault or not (baseline or budget or regex_error):
         private_attachments(work / 'check', work / 'private-profile', private_fault)
         if private_fault:

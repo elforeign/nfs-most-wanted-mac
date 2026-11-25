@@ -32,30 +32,80 @@
 #endif
 typedef struct { float phase, amp, freq, offset; } Osc;
 typedef struct { float time, dur, start, end; } Env;
-static struct {
+typedef struct {
     Osc osc[16];          // pairs (k, k+1) sum to the left motor, (k+2, k+3) to the right; 0-3 speed, 4-7 skid, 8-11 slip
     Env env[10];          // left/right: collision, shift kick, nitrous, engine damage, gear change
     float out_l, out_r;
     int active;
     int last_shift, nos, damage, gear;
-} S;
-static uint64_t last_tick;
+} Model;
+typedef struct {
+    Model model;
+    uint64_t last_tick;
+    uint32_t owner;
 // padfx.m's triggers: each axle's wheelspin / lock-up level from the surface's slip curve (the rumble model's own data,
 // as its slip oscillators get it, whether or not the game's Rumble option is on), this DoFFB frame and the last one.
-static float slip_now[2], hz_now[2], slip_pub[2], hz_pub[2];   // [0] rear, [1] front
-static int nos_on;
-static float road_speed_now, road_surface_now, road_speed_pub, road_surface_pub;
+    float slip_now[2], hz_now[2], slip_pub[2], hz_pub[2]; // [0] rear, [1] front
+    int nos_on;
+    float road_speed_now, road_surface_now, road_speed_pub, road_surface_pub;
+    _Atomic int effects_valid, reset_model;
+} Feedback;
+static Feedback feedback_states[2], unowned_feedback;
 static unsigned suppressed;
-static _Atomic int effects_valid;
-static _Atomic int reset_model;
-void feedback_invalidate_effects(void) { effects_valid = 0; reset_model = 1; }
+
+// The local-player vector contains IPlayer pointers. GetFFB reads +0x0C and
+// GetControllerPort reads +0x18; DoFFB's complete object starts 0x4C earlier.
+static uint32_t feedback_owner(unsigned slot, uint32_t object) {
+#if NFS_GAME == NFS_GAME_MW
+    uint32_t list = G ? M32(0x0092D87Cu) : 0, count = G ? M32(0x0092D884u) : 0;
+    for (uint32_t i = 0; list && i < count; ++i) {
+        uint32_t player = M32(list + i * 4);
+        if (player && M32(player + 0x18) == slot) {
+            uint32_t feedback = M32(player + 0x0C);
+            if (feedback && (!object || feedback == object)) return feedback;
+        }
+    }
+#else
+    (void)slot; (void)object;
+#endif
+    return 0;
+}
+static Feedback *feedback_for(Cpu *c) {
+#if NFS_GAME == NFS_GAME_MW
+    for (unsigned slot = 0; c->ecx && slot < 2; ++slot) {
+        uint32_t owner = feedback_owner(slot, c->ecx);
+        if (!owner) continue;
+        Feedback *f = &feedback_states[slot];
+        if (f->owner != owner) {
+            f->effects_valid = 0;
+            memset(&f->model, 0, sizeof f->model); f->last_tick = 0;
+            memset(f->slip_now, 0, sizeof f->slip_now); memset(f->hz_now, 0, sizeof f->hz_now);
+            memset(f->slip_pub, 0, sizeof f->slip_pub); memset(f->hz_pub, 0, sizeof f->hz_pub);
+            f->nos_on = 0;
+            f->road_speed_now = f->road_surface_now = f->road_speed_pub = f->road_surface_pub = 0;
+            f->owner = owner;
+        }
+        return f;
+    }
+    if (c->ecx) return &unowned_feedback;
+#else
+    (void)c;
+#endif
+    return &feedback_states[0];
+}
+void feedback_invalidate_slot(unsigned slot) {
+    if (slot >= 2) return;
+    feedback_states[slot].effects_valid = 0;
+    feedback_states[slot].reset_model = 1;
+}
+void feedback_invalidate_effects(void) { feedback_invalidate_slot(0); }
 // Disconnect can arrive on the HID queue. Reset the model only on its game thread,
 // before sampling old output or building the next frame; discard timed envelopes too.
-static void reset_invalid_model(void) {
-    if (!atomic_exchange(&reset_model, 0)) return;
-    int active = S.active;
-    memset(&S, 0, sizeof S); S.active = active;
-    last_tick = 0;
+static void reset_invalid_model(Feedback *f) {
+    if (!atomic_exchange(&f->reset_model, 0)) return;
+    int active = f->model.active;
+    memset(&f->model, 0, sizeof f->model); f->model.active = active;
+    f->last_tick = 0;
 }
 // These transitions run on the game/AppKit thread, like the IFeedback methods. The HID queue has its own atomic
 // gate (rumble.m), so a report already queued cannot restore a nonzero value after this stop.
@@ -63,11 +113,14 @@ void feedback_suppress(unsigned reason, int on) {
     unsigned next = on ? suppressed | reason : suppressed & ~reason;
     if (next == suppressed) return;
     suppressed = next;
-    memset(&S, 0, sizeof S);              // discard oscillators AND envelopes, including on the final resume
-    last_tick = 0;
-    memset(slip_now, 0, sizeof slip_now); memset(hz_now, 0, sizeof hz_now);
-    memset(slip_pub, 0, sizeof slip_pub); memset(hz_pub, 0, sizeof hz_pub); nos_on = 0;
-    road_speed_now = road_surface_now = road_speed_pub = road_surface_pub = 0;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        Feedback *f = &feedback_states[slot];
+        memset(&f->model, 0, sizeof f->model);              // discard oscillators AND envelopes, including on the final resume
+        f->last_tick = 0;
+        memset(f->slip_now, 0, sizeof f->slip_now); memset(f->hz_now, 0, sizeof f->hz_now);
+        memset(f->slip_pub, 0, sizeof f->slip_pub); memset(f->hz_pub, 0, sizeof f->hz_pub); f->nos_on = 0;
+        f->road_speed_now = f->road_surface_now = f->road_speed_pub = f->road_surface_pub = 0;
+    }
     padfx_suppress(reason, on);
     rumble_suppress(suppressed != 0);
     if (diag_on) diag_event("feedback: %s %s (holds %02X), motors 0",
@@ -75,7 +128,19 @@ void feedback_suppress(unsigned reason, int on) {
         reason == FEEDBACK_FOCUS ? "focus" : "app", suppressed);
 }
 #if NFS_GAME == NFS_GAME_MW
+// Main-loop passes must retire a departed player even when pad reads have stopped.
+static void feedback_poll_owners(void) {
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        Feedback *f = &feedback_states[slot];
+        if (f->owner && feedback_owner(slot, f->owner) != f->owner) {
+            memset(&f->model, 0, sizeof f->model);
+            f->owner = 0; f->effects_valid = 0; f->reset_model = 1;
+            rumble_stop_slot(slot); // mode exit or reassignment, even without another pad read
+        }
+    }
+}
 void feedback_poll_pause(void) {
+    feedback_poll_owners();
     uint32_t sim = G ? M32(0x009885E0u) : 0;  // Sim::_mSystem; Sim::GetState (006E8D20), 4 = paused
     feedback_suppress(FEEDBACK_PAUSE, sim && M32(sim + 0x2C) == 4);
     padfx_poll();
@@ -84,11 +149,13 @@ void feedback_poll_pause(void) {
 #include "carbon_feedback_pause.h"
 #endif
 void feedback_trigger_state(float slip[2], float hz[2], int *nos) {
-    if (!effects_valid) { memset(slip, 0, sizeof slip_pub); memset(hz, 0, sizeof hz_pub); *nos = 0; return; }
-    memcpy(slip, slip_pub, sizeof slip_pub); memcpy(hz, hz_pub, sizeof hz_pub); *nos = nos_on;
+    Feedback *f = &feedback_states[0];
+    if (!f->effects_valid) { memset(slip, 0, sizeof f->slip_pub); memset(hz, 0, sizeof f->hz_pub); *nos = 0; return; }
+    memcpy(slip, f->slip_pub, sizeof f->slip_pub); memcpy(hz, f->hz_pub, sizeof f->hz_pub); *nos = f->nos_on;
 }
 void feedback_road_state(float *speed, float *surface) {
-    *speed = effects_valid ? road_speed_pub : 0; *surface = effects_valid ? road_surface_pub : 0;
+    Feedback *f = &feedback_states[0];
+    *speed = f->effects_valid ? f->road_speed_pub : 0; *surface = f->effects_valid ? f->road_surface_pub : 0;
 }
 #if NFS_GAME == NFS_GAME_MW
 static unsigned ncalls[16];                    // diag: calls per slot (slot / 4) since the last summary
@@ -144,41 +211,44 @@ static float env_eval(Env *e, float dt_ms) {
 }
 // Called every pad read (rumble.m): advance by real time, as the X360 does each frame, and give the motor levels.
 void feedback_last_levels(float *heavy, float *light) {    // the overlay's rumble bars: the levels last computed
-    *heavy = !suppressed && S.active ? S.out_l : 0;
-    *light = !suppressed && S.active ? S.out_r : 0;
+    Feedback *f = &feedback_states[0];
+    *heavy = !suppressed && f->model.active ? f->model.out_l : 0;
+    *light = !suppressed && f->model.active ? f->model.out_r : 0;
 }
-void feedback_levels(float *heavy, float *light) {
+void feedback_levels_slot(unsigned slot, float *heavy, float *light) {
+    if (slot >= 2) { *heavy = *light = 0; return; }
+    Feedback *f = &feedback_states[slot];
     feedback_poll_pause();
-    reset_invalid_model();
+    reset_invalid_model(f);
     uint64_t now = host_ticks();
-    float dt = last_tick ? (float)(now - last_tick) / 1e6f : 0;
-    last_tick = now;
-    if (dt > 0 && S.active && !suppressed) {
+    float dt = f->last_tick ? (float)(now - f->last_tick) / 1e6f : 0;
+    f->last_tick = now;
+    if (dt > 0 && f->model.active && !suppressed) {
         float l = 0, r = 0;
         for (int k = 0; k < 16; k += 4) {
-            float a = osc_eval(&S.osc[k], dt) + osc_eval(&S.osc[k + 1], dt), b = osc_eval(&S.osc[k + 2], dt) + osc_eval(&S.osc[k + 3], dt);
+            float a = osc_eval(&f->model.osc[k], dt) + osc_eval(&f->model.osc[k + 1], dt), b = osc_eval(&f->model.osc[k + 2], dt) + osc_eval(&f->model.osc[k + 3], dt);
             if (k < 12) { peak_src[k / 4][0] = fmaxf(peak_src[k / 4][0], a); peak_src[k / 4][1] = fmaxf(peak_src[k / 4][1], b); }
             l = fmaxf(l, a); r = fmaxf(r, b);
         }
         for (int e = 0; e < 10; e += 2) {
-            float a = env_eval(&S.env[e], dt), b = env_eval(&S.env[e + 1], dt);
+            float a = env_eval(&f->model.env[e], dt), b = env_eval(&f->model.env[e + 1], dt);
             peak_src[3 + e / 2][0] = fmaxf(peak_src[3 + e / 2][0], a); peak_src[3 + e / 2][1] = fmaxf(peak_src[3 + e / 2][1], b);
             l = fmaxf(l, a); r = fmaxf(r, b);
         }
-        S.out_l = fminf(fmaxf(l, 0), 1); S.out_r = fminf(fmaxf(r, 0), 1);
+        f->model.out_l = fminf(fmaxf(l, 0), 1); f->model.out_r = fminf(fmaxf(r, 0), 1);
     }
-    *heavy = !suppressed && S.active ? S.out_l : 0;
-    *light = !suppressed && S.active ? S.out_r : 0;
-    if (diag_on && S.active && trace) {
+    *heavy = !suppressed && f->model.active ? f->model.out_l : 0;
+    *light = !suppressed && f->model.active ? f->model.out_r : 0;
+    if (slot == 0 && diag_on && f->model.active && trace) {
         static uint64_t last_line; static float lh = -1, ll = -1; static int lt[4];
         int changed = fabsf(*heavy - lh) > 0.005f || fabsf(*light - ll) > 0.005f || memcmp(lt, tyre_now, sizeof lt);
         if (changed || now - last_line >= 100000000ull) {
-            fprintf(trace, "%.1f\t%.3f\t%.3f\t%.3f\t%.1f\t%s %s %s %s\n", now / 1e6, *heavy, *light, S.env[0].time, speed_now,
+            fprintf(trace, "%.1f\t%.3f\t%.3f\t%.3f\t%.1f\t%s %s %s %s\n", now / 1e6, *heavy, *light, f->model.env[0].time, speed_now,
                     surf_name(tyre_now[0]), surf_name(tyre_now[1]), surf_name(tyre_now[2]), surf_name(tyre_now[3]));
             last_line = now; lh = *heavy; ll = *light; memcpy(lt, tyre_now, sizeof lt);
         }
     }
-    if (diag_on) {
+    if (slot == 0 && diag_on) {
         static uint64_t next;
         peak_l = fmaxf(peak_l, *heavy); peak_r = fmaxf(peak_r, *light);
         if (now >= next) {
@@ -195,8 +265,8 @@ void feedback_levels(float *heavy, float *light) {
 #else
 #include "carbon_feedback_summary.h"
 #endif
-            diag_event("feedback: second active %d peak heavy %.2f light %.2f calls%s", S.active, peak_l, peak_r, n ? b : " none");
-            if (S.active) {                 // two lines: one would pass the event ring's line length and lose the last sources
+            diag_event("feedback: second active %d peak heavy %.2f light %.2f calls%s", f->model.active, peak_l, peak_r, n ? b : " none");
+            if (f->model.active) {                 // two lines: one would pass the event ring's line length and lose the last sources
                 diag_event("feedback: collision %.2f x speed %.2f/%.2f skid %.2f/%.2f slip %.2f/%.2f (rear/front)",
                            peak_dv, peak_x[0][0], peak_x[0][1], peak_x[1][0], peak_x[1][1], peak_x[2][0], peak_x[2][1]);
                 diag_event("feedback: heavy/light: speed %.2f/%.2f skid %.2f/%.2f slip %.2f/%.2f collision %.2f/%.2f shift %.2f/%.2f "
@@ -205,7 +275,7 @@ void feedback_levels(float *heavy, float *light) {
                            peak_src[3][0], peak_src[3][1], peak_src[4][0], peak_src[4][1], peak_src[5][0], peak_src[5][1],
                            peak_src[6][0], peak_src[6][1], peak_src[7][0], peak_src[7][1]);
             }
-            if (S.active) {
+            if (f->model.active) {
                 char t[400]; int m = 0;
                 for (int i = 0; i <= 96; ++i)
                     if (tyre_ticks[i] && m < (int)sizeof t - 40) m += snprintf(t + m, sizeof t - m, " %s %u", surf_name(i), tyre_ticks[i]);
@@ -219,26 +289,28 @@ void feedback_levels(float *heavy, float *light) {
     }
 }
 
+void feedback_levels(float *heavy, float *light) { feedback_levels_slot(0, heavy, light); }
+
 // ---- the IFeedback methods (thiscall; RET pops the arguments like the stubs' ret N)
 // The guest calls Stop every feedback tick with native Rumble Off. Pad effects have their own lifecycle.
-static int fb_stop(Cpu *c) { COUNT(0x04); S.active = 0; rumble_stop(); RET(0, 0); }
-static int fb_resume(Cpu *c) { COUNT(0x08); feedback_poll_pause(); S.active = !suppressed; RET(0, 0); }
-static int fb_reset(Cpu *c) { COUNT(0x0C); S.active = 0; S.out_l = S.out_r = 0; memset(&S.env[0], 0, sizeof S.env[0]); RET(0, 0); }
+static int fb_stop(Cpu *c) { Feedback *f = feedback_for(c); (void)f; COUNT(0x04); f->model.active = 0; if (f != &unowned_feedback) rumble_stop_slot((unsigned)(f - feedback_states)); RET(0, 0); }
+static int fb_resume(Cpu *c) { Feedback *f = feedback_for(c); (void)f; COUNT(0x08); feedback_poll_pause(); f->model.active = !suppressed; RET(0, 0); }
+static int fb_reset(Cpu *c) { Feedback *f = feedback_for(c); (void)f; COUNT(0x0C); f->model.active = 0; f->model.out_l = f->model.out_r = 0; memset(&f->model.env[0], 0, sizeof f->model.env[0]); RET(0, 0); }
 static void dump_surfaces(Cpu *c);
-static int fb_begin_frame(Cpu *c) {
+static int fb_begin_frame(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x10);
-    reset_invalid_model();
+    reset_invalid_model(f);
     if (diag_on) { dump_surfaces(c); trace_open(); tyre_n = 0; }
-    for (int k = 0; k < 12; ++k) S.osc[k].amp = S.osc[k].freq = S.osc[k].offset = 0;   // phases kept
-    memset(slip_now, 0, sizeof slip_now); memset(hz_now, 0, sizeof hz_now);
-    road_speed_now = road_surface_now = 0;
+    for (int k = 0; k < 12; ++k) f->model.osc[k].amp = f->model.osc[k].freq = f->model.osc[k].offset = 0;   // phases kept
+    memset(f->slip_now, 0, sizeof f->slip_now); memset(f->hz_now, 0, sizeof f->hz_now);
+    f->road_speed_now = f->road_surface_now = 0;
     RET(0, 0);
 }
-static int fb_end(Cpu *c) {
+static int fb_end(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x14);
-    memcpy(slip_pub, slip_now, sizeof slip_now); memcpy(hz_pub, hz_now, sizeof hz_now);
-    road_speed_pub = suppressed ? 0 : road_speed_now; road_surface_pub = suppressed ? 0 : road_surface_now;
-    effects_valid = !suppressed;
+    memcpy(f->slip_pub, f->slip_now, sizeof f->slip_now); memcpy(f->hz_pub, f->hz_now, sizeof f->hz_now);
+    f->road_speed_pub = suppressed ? 0 : f->road_speed_now; f->road_surface_pub = suppressed ? 0 : f->road_surface_now;
+    f->effects_valid = !suppressed;
     RET(0, 0);
 }
 
@@ -316,7 +388,7 @@ static uint32_t test_surface(Cpu *c, uint32_t surf) {
 #include "carbon_feedback_surfaces.h"
 #endif
 // The surface's rumble curve j for `key`: {f0, a0, o0, x0, f1, a1, o1, x1}, interpolated at x.
-static void surface_curves(Cpu *c, uint32_t surf, uint32_t key, float x, int first) {
+static void surface_curves(Feedback *f, Cpu *c, uint32_t surf, uint32_t key, float x, int first) {
     if (!surf) return;
     for (uint32_t j = 0; j < 4; ++j) {
         uint32_t esp = c->esp, ecx = c->ecx;
@@ -327,7 +399,7 @@ static void surface_curves(Cpu *c, uint32_t surf, uint32_t key, float x, int fir
         if (!p) continue;
         float r[8];
         memcpy(r, G + p, sizeof r);
-        curve_into(r, x, &S.osc[first + (int)j]);
+        curve_into(r, x, &f->model.osc[first + (int)j]);
     }
 }
 // The level a curve gives at x (its peak, amp + offset, 0..1) and that curve's frequency: the strongest of the 4.
@@ -357,71 +429,71 @@ static void wheel_args(Cpu *c, int ch, float *x, int *front, uint32_t *surf) {  
     *front = (int)(arg(c, 0) & 0xFF); *surf = test_surface(c, arg(c, 1)); *x = argf(c, 2);
     peak_x[ch][*front != 0] = fmaxf(peak_x[ch][*front != 0], *x);
 }
-static int fb_speed(Cpu *c) {
+static int fb_speed(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x18);
     float x; int front; uint32_t surf;
     wheel_args(c, 0, &x, &front, &surf);
     if (!suppressed && padfx_road_wanted() && isfinite(x)) {
         float hz;
-        road_speed_now = fmaxf(road_speed_now, fmaxf(x, 0));
-        road_surface_now = fmaxf(road_surface_now, surface_level(c, surf, 0xBA1297DAu, x, &hz));
+        f->road_speed_now = fmaxf(f->road_speed_now, fmaxf(x, 0));
+        f->road_surface_now = fmaxf(f->road_surface_now, surface_level(c, surf, 0xBA1297DAu, x, &hz));
     }
     if (diag_on) { int i = surf_index(surf); tyre_ticks[i]++; if (tyre_n < 4) tyre_now[tyre_n++] = i; speed_now = x; }
-    if (S.active) surface_curves(c, surf, 0xBA1297DAu, x, 0);
-    if (S.active && rough_on() && is_rough(c, surf)) { curve_into(kRoughHeavy, x, &S.osc[1]); curve_into(kRoughLight, x, &S.osc[2]); }
+    if (f->model.active) surface_curves(f, c, surf, 0xBA1297DAu, x, 0);
+    if (f->model.active && rough_on() && is_rough(c, surf)) { curve_into(kRoughHeavy, x, &f->model.osc[1]); curve_into(kRoughLight, x, &f->model.osc[2]); }
     RET(0, 3);
 }
-static int fb_skid(Cpu *c) {
+static int fb_skid(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x1C);
     float x; int front; uint32_t surf;
     wheel_args(c, 1, &x, &front, &surf);
     if (front) x *= 0.25f;
-    if (S.active) surface_curves(c, surf, 0x0C149044u, x, 4);
+    if (f->model.active) surface_curves(f, c, surf, 0x0C149044u, x, 4);
     RET(0, 3);
 }
-static int fb_slip(Cpu *c) {
+static int fb_slip(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x20);
     float x; int front; uint32_t surf;
     wheel_args(c, 2, &x, &front, &surf);
-    if (S.active) surface_curves(c, surf, 0x8FD11D27u, x, 8);
+    if (f->model.active) surface_curves(f, c, surf, 0x8FD11D27u, x, 8);
     if (padfx_wanted()) {
         float hz, v = surface_level(c, surf, 0x8FD11D27u, x, &hz);
         int k = front != 0;
-        if (v > slip_now[k]) { slip_now[k] = v; hz_now[k] = hz; }
+        if (v > f->slip_now[k]) { f->slip_now[k] = v; f->hz_now[k] = hz; }
     }
     RET(0, 3);
 }
-static int fb_engine_rpm(Cpu *c) { COUNT(0x24); RET(0, 3); }          // no-op on X360
-static int fb_shift_kick(Cpu *c) {                        // shift status: 3 good, 4 perfect, 5 missed window
+static int fb_engine_rpm(Cpu *c) { Feedback *f = feedback_for(c); (void)f; COUNT(0x24); RET(0, 3); }          // no-op on X360
+static int fb_shift_kick(Cpu *c) { Feedback *f = feedback_for(c); (void)f;                        // shift status: 3 good, 4 perfect, 5 missed window
     COUNT(0x28);
-    int v = (int)arg(c, 0), last = S.last_shift;
+    int v = (int)arg(c, 0), last = f->model.last_shift;
     float k = v == 3 ? X360E_FB_SHIFT_GOOD : v == 4 ? X360E_FB_SHIFT_PERFECT : v == 5 ? 1.0f : 0.0f;
-    if (last) memset(&S.env[2], 0, 2 * sizeof S.env[0]);
-    S.last_shift = v;
-    if (S.active && k > 0 && last != v && last < v) S.env[2] = S.env[3] = (Env){X360E_FB_SHIFT_TIME, X360E_FB_SHIFT_TIME, fminf(k, 1.0f), k};
+    if (last) memset(&f->model.env[2], 0, 2 * sizeof f->model.env[0]);
+    f->model.last_shift = v;
+    if (f->model.active && k > 0 && last != v && last < v) f->model.env[2] = f->model.env[3] = (Env){X360E_FB_SHIFT_TIME, X360E_FB_SHIFT_TIME, fminf(k, 1.0f), k};
     RET(0, 1);
 }
-static int fb_nos(Cpu *c) {                               // (engaged, capacity)
+static int fb_nos(Cpu *c) { Feedback *f = feedback_for(c); (void)f;                               // (engaged, capacity)
     COUNT(0x2C);
     int on = (int)(arg(c, 0) & 0xFF);
-    nos_on = on;
-    if (S.active && on != S.nos) { S.env[4] = on ? (Env){X360E_FB_NOS_TIME, X360E_FB_NOS_TIME, 1.0f, X360E_FB_NOS_END} : (Env){0}; S.nos = on; }
+    f->nos_on = on;
+    if (f->model.active && on != f->model.nos) { f->model.env[4] = on ? (Env){X360E_FB_NOS_TIME, X360E_FB_NOS_TIME, 1.0f, X360E_FB_NOS_END} : (Env){0}; f->model.nos = on; }
     RET(0, 2);
 }
-static int fb_engine_damage(Cpu *c) {
+static int fb_engine_damage(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x30);
     int on = (int)(arg(c, 0) & 0xFF);
-    if (S.active && on != S.damage) {
-        if (on) { S.env[6] = (Env){1, 1, 1.0f, X360E_FB_DAMAGE_END}; S.env[7] = (Env){1, 1, fminf(S.env[7].start, 1.0f), X360E_FB_DAMAGE_END}; }
-        else S.env[6] = S.env[7] = (Env){0};
-        S.damage = on;
+    if (f->model.active && on != f->model.damage) {
+        if (on) { f->model.env[6] = (Env){1, 1, 1.0f, X360E_FB_DAMAGE_END}; f->model.env[7] = (Env){1, 1, fminf(f->model.env[7].start, 1.0f), X360E_FB_DAMAGE_END}; }
+        else f->model.env[6] = f->model.env[7] = (Env){0};
+        f->model.damage = on;
     }
     RET(0, 1);
 }
-static int fb_gear_change(Cpu *c) {
+static int fb_gear_change(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
     COUNT(0x34);
     int on = (int)(arg(c, 0) & 0xFF);
-    if (S.active && on != S.gear) { if (on) S.env[8] = S.env[9] = (Env){X360E_FB_GEAR_TIME, X360E_FB_GEAR_TIME, X360E_FB_GEAR_LEVEL, X360E_FB_GEAR_LEVEL}; S.gear = on; }
+    if (f->model.active && on != f->model.gear) { if (on) f->model.env[8] = f->model.env[9] = (Env){X360E_FB_GEAR_TIME, X360E_FB_GEAR_TIME, X360E_FB_GEAR_LEVEL, X360E_FB_GEAR_LEVEL}; f->model.gear = on; }
     RET(0, 1);
 }
 static void vec(uint32_t p, float v[3]) { memcpy(v, G + p, 12); }
@@ -453,7 +525,7 @@ static void velocity_now(Cpu *c, uint32_t sim, float v[3]) {
 // Collision (const Sim::Collision::Info &, bool me is object A), as the X360's GameDevice (823A4F30) does it. Info:
 // +0x1C type (x86 bitfield, low 3 bits: 1 car/object, 2 world, 3 ground), +0x3C / +0x4C the bodies' handles, +0x50 /
 // +0x60 their velocities before the contact. The strength is how much the contact changed my velocity.
-static int fb_collision(Cpu *c) {
+static int fb_collision(Cpu *c) { Feedback *f = feedback_for(c); (void)f;
 #if NFS_GAME == NFS_GAME_MW
     COUNT(0x38);
 #else
@@ -461,7 +533,7 @@ static int fb_collision(Cpu *c) {
 #endif
     uint32_t info = arg(c, 0);
     int me_a = (int)(arg(c, 1) & 0xFF);
-    if (!S.active || !info) RET(0, 2);
+    if (!f->model.active || !info) RET(0, 2);
     uint32_t me = simable(c, M32(info + (me_a ? 0x3C : 0x4C))), other = simable(c, M32(info + (me_a ? 0x4C : 0x3C)));
     if (!me) RET(0, 2);
     float now[3], before[3], other_now[3];
@@ -510,12 +582,12 @@ static int fb_collision(Cpu *c) {
     int short_vehicle = vehicle_hit && vehicles_on();
     if (short_vehicle) duration = v * kVehicleHitFullFadeSeconds;
     else if (!prop_hit) duration = v;
-    Env *e = &S.env[0];
+    Env *e = &f->model.env[0];
     float previous_time = e->time;
     int restart = e->time <= 0 || v > e->start;           // compare to the running hit's peak, not its decayed level
     if (trace) fprintf(trace, "# %.1f collision type %u other %s dv %.2f speed %.1f dv_other %.2f -> %.2f (envelope was %.3f s)\n",
                        host_ticks() / 1e6, M32(info + 0x1C) & 7, !other ? "none" : (thiscall1(c, other, FN_QUERY_VEHICLE, scratch()) & 0xFF) ? "vehicle" : "object",
-                       dv, speed, dv_other, v, S.env[0].time);
+                       dv, speed, dv_other, v, f->model.env[0].time);
     peak_dv = fmaxf(peak_dv, v);
     if (v > 0) {                                          // left motor: strength and decay time are independent
         if (short_vehicle) {
@@ -635,7 +707,7 @@ void f_006EE490(Cpu *c) {
     M32(self + 0x5C) = 0;
     f_006EE490_orig(c);
     M32(self + 0x5C) = wheel;
-    if (padfx_wanted()) padfx_game_tick(c, self);   // the lightbar's race state (padfx.m)
+    if (padfx_wanted() && M32(self + 0x64) == 0) padfx_game_tick(c, self);   // the lightbar's race state (padfx.m)
 }
 
 // LocalPlayer::CanDoFFB (006EE400): false while the AI drives the player's car (IHumanAI +0x0C), so BOOT_AUTODRIVE runs

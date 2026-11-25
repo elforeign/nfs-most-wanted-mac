@@ -64,7 +64,7 @@ static void x360_gate(Setting *s) {
     value_str(s, v, s->env_text, sizeof s->env_text);
     if (s->env && s->env_text[0]) setenv(s->env, s->env_text, 1);
 }
-const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Online (beta)", "Help"};
+const char *const settings_category_names[SET_NCATEGORIES] = {"Picture", "World", "Cars & cutscenes", "Mirror", "Display & performance", "Audio", "Controls", "Gameplay", "Help"};
 static const char *const kOffOn[] = {"Off", "On"};
 
 #define MAX_SETTINGS 256

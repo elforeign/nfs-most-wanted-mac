@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Actual menu tabs: sparse registry draws 4, full registry draws 10.
-
-Good: 195 checks / 0 failures. Forced-true helper: sparse draws 10 against
-expected 4, 195 checks / 28 failures, exit 1; good exit 0.
+"""Actual menu tabs: sparse registry draws 4, full registry draws 9.
+The forced-true helper draws 9 sparse tabs and must fail the fixture.
 The renderer, keyboard/pad navigation, opening and both mouse paths run without
 a game. Source dependencies: portmenu.m, settings.c, guide.m, guide_test.m.
 """
@@ -48,8 +46,8 @@ def main():
         broken = run(base, 'forced-true', source.replace(
             good_helper, '(void)cat; (void)r; return 1;'))
         assert broken.returncode == 1, broken.stderr[-4000:]
-        assert 'sparse shown=10 expected=4' in broken.stdout, broken.stdout
-    print('menu_tabs_test PASS: good=4 sparse/10 full; forced-true=10 sparse (rejected)')
+        assert 'sparse shown=9 expected=4' in broken.stdout, broken.stdout
+    print('menu_tabs_test PASS: good=4 sparse/9 full; forced-true=9 sparse (rejected)')
 
 
 if __name__ == '__main__':

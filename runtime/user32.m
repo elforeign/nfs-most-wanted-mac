@@ -62,8 +62,6 @@ static uint32_t focus_hwnd, capture_hwnd;
 void prompts_pointer_visible(void);       // padprompts.c: the next pad input must hide the pointer again
 static int cursor_count;
 static uint8_t key_down[256], key_toggled[256], key_scan[256];
-static int pad0_down;   // physical D-pad Down on pad 0 as of the last read (online free roam's ghost toggle; the game still sees it)
-int user32_ghost_buttons(void) { return (pad0_down ? 1 : 0) | (key_down['G'] ? 2 : 0); }   // bit 0 D-pad Down, bit 1 the G key
 static int window_occluded;     // the game window isn't on screen (windowDidChangeOcclusionState)
 static int mouse_x, mouse_y;   // screen coordinates
 
@@ -251,6 +249,13 @@ static void cocoa_init(void) {
         // user32_display_poll (every frame) acts once the burst of notifications is over.
         [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil
                                                          queue:nil usingBlock:^(NSNotification *n) { screen_changed_at = CFAbsoluteTimeGetCurrent(); screen_dirty = 1; }];
+        // The Mac going to sleep, or waking, mid-race: the next pad read freezes the race behind the F10 menu
+        // (pad_freeze), so it doesn't carry on the moment the Mac wakes while the controller is still reconnecting.
+        extern volatile int user32_sleep_freeze;
+        for (NSString *name in @[NSWorkspaceWillSleepNotification, NSWorkspaceDidWakeNotification])
+            [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:name object:nil queue:nil usingBlock:^(NSNotification *n) {
+                (void)n; __atomic_store_n(&user32_sleep_freeze, 1, __ATOMIC_RELEASE);
+            }];
         // GameController.framework finds controllers asynchronously (~100 ms of run loop for a DualSense): give discovery
         // a moment so a pad already connected names the game's gamepad from the start. One that connects later (asleep at
         // launch, plugged in, reconnecting) is picked up by pad_read whenever it arrives.
@@ -505,12 +510,12 @@ static const NSWindowStyleMask windowed_style = NSWindowStyleMaskTitled | NSWind
                                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
 static int ns_fullscreen(const Win *w) { return w->full; }
 // NFS_FULLSCREEN_NOTCH=1 (F10 Fill notch area): Borderless also covers the strip beside the camera housing.
-static int notch_fill(void) { const char *e = getenv("NFS_FULLSCREEN_NOTCH"); return e && (atoi(e) || !strcasecmp(e, "on")) && !app_native_fullscreen(); }
+int user32_notch_fill(void) { const char *e = getenv("NFS_FULLSCREEN_NOTCH"); return e && (atoi(e) || !strcasecmp(e, "on")) && !app_native_fullscreen(); }
 static NSRect ns_content_rect(const Win *w) {
     NSScreen *s = [NSScreen mainScreen];
     if (ns_fullscreen(w)) {
         NSRect f = s.frame;
-        if (!notch_fill()) if (@available(macOS 12.0, *)) f.size.height -= s.safeAreaInsets.top;
+        if (!user32_notch_fill()) if (@available(macOS 12.0, *)) f.size.height -= s.safeAreaInsets.top;
         return f;
     }
     CGFloat k = s.backingScaleFactor;
@@ -671,7 +676,7 @@ void user32_notch_fill_changed(void) {   // F10 Fill notch area: re-fit the bord
     void (^refit)(void) = ^{
         Win *w = game_window();
         if (w && w->ns && ns_fullscreen(w) && !app_native_fullscreen() && !w->native_transition) [w->ns setFrame:ns_content_rect(w) display:YES];
-        fprintf(stderr, "boot: full screen window re-fit (notch area %s)\n", notch_fill() ? "filled" : "below");
+        fprintf(stderr, "boot: full screen window re-fit (notch area %s)\n", user32_notch_fill() ? "filled" : "below");
     };
     if (NSThread.isMainThread) refit(); else dispatch_async(dispatch_get_main_queue(), refit);
 #if NFS_GAME == NFS_GAME_MW
@@ -702,12 +707,12 @@ int user32_request_close(void) {
 void user32_pump(void) { pump(0); }
 
 // BOOT_KEYS=frame:KEY[,frame:KEY...]: scripted key presses (down at `frame`, up 4 frames later) for runs without a
-// keyboard. KEY: RETURN ESCAPE SPACE BACK UP DOWN LEFT RIGHT F6 F7 F8 F10 TAB, or a letter/digit (also typed, as WM_CHAR, like a real
+// keyboard. KEY: RETURN ESCAPE SPACE BACK UP DOWN LEFT RIGHT F6 F7 F8 F10 F12 TAB, or a letter/digit (also typed, as WM_CHAR, like a real
 // keyboard: name entry reads characters).
 static void press(const char *name, int down, uint64_t frame) {
     static const struct { const char *n; uint8_t vk, scan; } keys[] = {
         {"RETURN", 0x0D, 0x1C}, {"ESCAPE", 0x1B, 0x01}, {"SPACE", 0x20, 0x39}, {"UP", 0x26, 0x48}, {"DOWN", 0x28, 0x50},
-        {"LEFT", 0x25, 0x4B}, {"RIGHT", 0x27, 0x4D}, {"BACK", 0x08, 0x0E}, {"F10", 0x79, 0x44}, {"TAB", 0x09, 0x0F}};
+        {"LEFT", 0x25, 0x4B}, {"RIGHT", 0x27, 0x4D}, {"BACK", 0x08, 0x0E}, {"F10", 0x79, 0x44}, {"F12", 0x7B, 0x58}, {"TAB", 0x09, 0x0F}};
     uint8_t vk = 0, scan = 0;
     for (unsigned k = 0; k < sizeof keys / sizeof *keys; ++k) if (!strcmp(keys[k].n, name)) { vk = keys[k].vk; scan = keys[k].scan; }
     if(!vk && name[0]=='F' && name[1]>='6' && name[1]<='8' && !name[2]) {
@@ -1035,6 +1040,19 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
         float diag_car_speed(void);
         if (diag_on) diag_event("scripted %s down (car %.1f m/s)", tok, diag_car_speed());
         ++step; step_start = 0;
+    } else if (!strncmp(tok, "pad2wait:", 9)) {
+        // BOOT_PAD2 acceptance waits observe retail state; they never finish a
+        // car or bypass FE. Later split/solo entries cannot use race:'s first-run clock.
+        int qrsplit_accept_ready(const char *);
+        if (qrsplit_accept_ready(tok + 9)) {
+            if (diag_on) diag_event("script: %s reached", tok);
+            ++step; step_start = 0;
+            if (!strcmp(tok + 9, "quit")) [NSApp performSelector:@selector(terminate:) withObject:nil];
+        } else if (frame - step_start >= (!strcmp(tok + 9, "finished") ? 12000u : 1800u)) {
+            sequence_failed = 1;
+            if (diag_on) diag_event("script: %s timeout; input stopped", tok);
+            [NSApp performSelector:@selector(terminate:) withObject:nil];
+        }
     } else if (!strncmp(tok, "pad:", 4) || !strncmp(tok, "padraw:", 7) || !strncmp(tok, "padaxis:", 8) ||
                !strncmp(tok, "pad2:", 5) || !strncmp(tok, "pad2raw:", 8) || !strncmp(tok, "pad2axis:", 9)) {
         int second = tok[3] == '2';
@@ -1229,7 +1247,8 @@ void user32_display_pixels(int *w, int *h) {
     const char *fake = getenv("NFS_DISPLAY_PIXELS");
     if (fake && sscanf(fake, "%dx%d", w, h) == 2 && *w > 0 && *h > 0) { *w &= ~7; *h &= ~7; return; }
     *w = (int)(screen_w * screen_scale) & ~7;
-    *h = (int)((screen_h - (notch_fill() ? 0 : screen_top_inset)) * screen_scale) & ~7;
+    *h = (int)((screen_h - (user32_notch_fill() ? 0 : screen_top_inset)) * screen_scale);
+    if (!user32_notch_fill()) *h &= ~7;
 }
 
 // ---------------- wsprintf ----------------
@@ -1578,13 +1597,27 @@ static int pad_kinds[2];                  // set by set_identity, below
 static int kind_native(int kind);
 // NFS_PAD_LAYOUT, else the player's pick (app.txt pad_layout), else the active pad's own console: PlayStation for a
 // PlayStation pad, Xbox for every other pad; live, so a hot-plug or a pad of another type changes it.
+/* Numeric layout observed by the normal pad/prompt path; no preference reads in telemetry. */
+static int observed_pad_layout;
+int user32_pad_observed_layout(void) {
+#if NFS_GAME == NFS_GAME_MW
+    return __atomic_load_n(&observed_pad_layout, __ATOMIC_RELAXED);
+#else
+    int carbon_pad_layout_observed(void);
+    return carbon_pad_layout_observed();
+#endif
+}
 static int pad_layout_xbox(void) {
-    if (script_layout >= 0) return script_layout;
+    if (script_layout >= 0) {
+        __atomic_store_n(&observed_pad_layout, script_layout ? 2 : 1, __ATOMIC_RELAXED);
+        return script_layout;
+    }
     static const char *env;
     static int env_read;
     if (!env_read) { env_read = 1; env = getenv("NFS_PAD_LAYOUT"); }
     const char *e = env && *env ? env : app_pref("pad_layout");
     int xbox = e && *e ? !strcasecmp(e, "xbox") : !kind_native(pad_kinds[0]);
+    __atomic_store_n(&observed_pad_layout, xbox ? 2 : 1, __ATOMIC_RELAXED);
     static int last = -1;
     if (diag_on && xbox != last) {
         last = xbox;
@@ -1600,7 +1633,6 @@ void user32_set_pad_layout_xbox(int xbox) {
     if (diag_on) diag_event("pad: layout %s", xbox ? "xbox" : "playstation");
 }
 static uint32_t bit(uint32_t phys, int b) { return (phys >> b) & 1; }
-static int pad0_down;   // (defined after bit(): the pad harnesses compile user32.m from there)
 static void pad_menu_keys(uint32_t keys) {  // menus: FE BUTTON4 / BUTTON0 / START as keys 2 / 3 / 4 (DIK 03 / 04 / 05)
     static uint32_t held;
     for (int k = 0; k < 3; ++k)
@@ -1682,6 +1714,11 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
         pad_diag_bindings();
     }
     if (remap) driving = 1;
+    // A button held from driving into a menu is no menu input until released.
+    static uint32_t held_drivings[2];
+    uint32_t *held_driving = &held_drivings[idx];
+    *held_driving = driving ? phys : *held_driving & phys;
+    if (!driving) phys &= ~*held_driving;
     // While re-mapping, the right stick is its own axis (Y Rotation) and isn't also sent as gas/brake buttons.
     int up = !remap && st->ry > 0.5f, down = !remap && st->ry < -0.5f;
     uint32_t gas, ebrake, brake, speedbreaker, lookback, nitrous, shift_up, shift_down, camera = 0;
@@ -1699,12 +1736,8 @@ static void pad_apply_layout(int idx, PadState *st, uint32_t phys) {
     int xb = pad_layout_xbox();
     uint32_t back = bit(phys, xb ? P_CIRCLE : P_TRIANGLE), fourth = bit(phys, xb ? P_TRIANGLE : P_CIRCLE);
     uint32_t v = fourth << 0 | bit(phys, P_CROSS) << 1 | back << 2 | (phys & 0x30) | bit(phys, P_OPTIONS) << 7;   // menus
-    // A button held from driving into a menu (Options pausing) is no key there.
-    static uint32_t held_drivings[2];
-    uint32_t *held_driving = &held_drivings[idx];
     uint32_t keys = bit(phys, P_SQUARE) | bit(phys, P_CREATE) << 1 | bit(phys, P_OPTIONS) << 2;
-    *held_driving = driving ? keys : *held_driving & keys;
-    if (idx == 0) pad_menu_keys(keys & ~*held_driving);
+    if (idx == 0) pad_menu_keys(driving ? 0 : keys);
     if (driving)
         v = gas << 0 | ebrake << 1 | brake << 2 | speedbreaker << 3 | lookback << 4 | bit(phys, P_CREATE) << 5 | nitrous << 6 |
             bit(phys, P_OPTIONS) << 7;
@@ -1789,7 +1822,8 @@ static int pad_presents[2] = {-1, -1};              // -1 before the first read
 static void pad_presence(int idx, int present, const char *what) {
     if (present == pad_presents[idx]) return;
     int first = pad_presents[idx] < 0;
-    pad_presents[idx] = present;
+    // Background link refresh reads this under the same lock before refilling a two-pad hole.
+    @synchronized (GCController.class) { pad_presents[idx] = present; }
     if (present) {
         fprintf(stderr, "boot: controller connected: %s\n", what);
         if (idx == 0 && !first) prompts_pad_seen(1);
@@ -1805,20 +1839,103 @@ static void pad_presence(int idx, int present, const char *what) {
 // Cache the restart-only opt-in once: default reads retain the original single-controller scan,
 // without slot locks, allocation or a second GCController.controllers fetch.
 // A disconnect observer in both modes releases any owned output immediately.
+// Never call it before main: the saved F10 choice reaches NFS_PADS only in settings_init (boot.c main), so an
+// earlier call (a constructor) would cache 1 for the whole run.
 int pad_count(void) {
     static int count;
     if (!count) { const char *e = getenv("NFS_PADS"); count = e && !strcmp(e, "2") ? 2 : 1; }
     return count;
 }
+// ---- padpick: which controller the game reads with NFS_PADS=1 (plain C; padpick_test.py compiles it alone) ----
+// The game has one gamepad; GameController.framework may list several (a DualSense and an Xbox pad, a second pad
+// left on). The pad in use stays in use while it is connected. Another listed pad takes over when it gets a
+// deliberate input (a button, or a stick or trigger past half way) while the pad in use has none, so picking up the
+// other pad and pressing a button switches to it. When the pad in use goes away, the first listed pad with input, else
+// the first listed, takes over, and the loss is reported once (PADPICK_LOST: pad_freeze). List order alone never
+// switches pads: a pad reconnecting after a Bluetooth drop is listed last, and must not stay behind an idle one.
+enum { PADPICK_LOST = 1, PADPICK_SWITCHED = 2 };
+typedef struct { const void *active; } PadPick;
+static int padpick_choose(PadPick *s, const void *const *ids, const int *input, int n, int *events) {
+    int cur = -1, other = -1;
+    *events = 0;
+    for (int i = 0; i < n; ++i) if (s->active && ids[i] == s->active) cur = i;
+    for (int i = 0; i < n; ++i) if (i != cur && input[i]) { other = i; break; }
+    if (s->active && cur < 0) *events |= PADPICK_LOST;
+    int pick = cur;
+    if (cur < 0) pick = other >= 0 ? other : n > 0 ? 0 : -1;
+    else if (!input[cur] && other >= 0) { pick = other; *events |= PADPICK_SWITCHED; }
+    s->active = pick >= 0 ? ids[pick] : NULL;
+    return pick;
+}
+static int padpick_input(uint32_t buttons, float lx, float ly, float rx, float ry, float lt, float rt) {
+    return buttons || fabsf(lx) > .5f || fabsf(ly) > .5f || fabsf(rx) > .5f || fabsf(ry) > .5f || lt > .5f || rt > .5f;
+}
+// ---- end padpick ----
+static PadPick pad_pick;                  // NFS_PADS=1, pad 0 reads only, under the GCController.class lock
+static GCController *pad_picked;          // strong: a new controller can't reuse the address pad_pick remembers
+static int pad_input_now(GCExtendedGamepad *g) {
+    GCControllerButtonInput *b[15] = {g.buttonA, g.buttonB, g.buttonX, g.buttonY, g.leftShoulder, g.rightShoulder,
+                                      g.buttonOptions, g.buttonMenu, g.leftThumbstickButton, g.rightThumbstickButton,
+                                      g.buttonHome, g.dpad.up, g.dpad.down, g.dpad.left, g.dpad.right};
+    uint32_t pressed = 0;
+    for (int i = 0; i < 15; ++i) if (b[i].pressed) pressed |= 1u << i;
+    return padpick_input(pressed, g.leftThumbstick.xAxis.value, g.leftThumbstick.yAxis.value, g.rightThumbstick.xAxis.value,
+                         g.rightThumbstick.yAxis.value, g.leftTrigger.value, g.rightTrigger.value);
+}
+// Each pad 0 read with NFS_PADS=1 (caller holds the GCController.class lock): still one controller-list fetch, and
+// the other pads' inputs are only looked at when more than one is listed. live 0 (app in the background): the
+// framework's values are stale, so only connects and disconnects move the choice.
+static GCController *pad_pick_update(int live, int *events) {
+    NSArray<GCController *> *all = GCController.controllers;
+    __unsafe_unretained GCController *pads[8];
+    const void *ids[8];
+    int input[8], n = 0;
+    for (GCController *ctl in all) if (ctl.extendedGamepad && n < 8) { pads[n] = ctl; ids[n] = (__bridge const void *)ctl; ++n; }
+    for (int i = 0; i < n; ++i) input[i] = live && n > 1 && pad_input_now(pads[i].extendedGamepad);
+    int k = padpick_choose(&pad_pick, ids, input, n, events);
+    pad_picked = k >= 0 ? pads[k] : nil;
+    return pad_picked;
+}
+// The controller in use went away (Bluetooth drop, flat battery, switched off), or the Mac is going to sleep or just
+// woke: in a race the F10 menu opens, which freezes the race (portmenu.m portmenu_hold) until the player closes it,
+// instead of the car driving on with nobody steering. Outside a race nothing changes. NFS_PAD_LOST_PAUSE=0 turns it
+// off. Simulated pads (BOOT_PAD=sim, every unattended run) only get here with NFS_PAD_LOST_PAUSE=1.
+int portmenu_open_if_racing(const char *why);
+volatile int user32_sleep_freeze;         // set by cocoa_init's NSWorkspace sleep / wake observers
+static void pad_freeze(const char *why) {
+    const char *e = getenv("NFS_PAD_LOST_PAUSE");
+    int opened = e && *e && !atoi(e) ? 0 : portmenu_open_if_racing(why);
+    fprintf(stderr, "boot: %s%s\n", why, opened ? ": race frozen behind the settings menu until it is closed" : "");
+    if (diag_on) diag_event("pad: %s (%s)", why, opened ? "race frozen" : "no race to freeze");
+}
 // Two-pad mode: notifications preserve connection order, and holes are reused without compacting
 // the surviving slot. Controllers already connected at initialization use the framework's order.
 // All access is serialized with notification delivery, which may arrive off the polling thread.
 static GCController *pad_slots[2];
+// ---- padbattery: percentage shared by physical and simulated pads (plain C) ----
+// Round up so a reading above 10 % never triggers the 10 % warning. Unknown is not empty.
+static int padbattery_percent(float level) {
+    return isfinite(level) && level >= 0 && level <= 1 ? (int)ceilf(level * 100 - .00001f) : -1;
+}
+// ---- end padbattery ----
+static int pad_sim_battery[2] = {-1, -1};
+// ---- padslot: refilling a two-pad slot (plain C; padslot_test.py compiles it alone) ----
+// A slot that has gone empty, after the read has reported the loss (so the race freeze still fires), takes the first
+// listed pad that is in neither slot. That moves a third pad left waiting into the free slot, and picks up a pad whose
+// gamepad profile wasn't ready when its connect notification came. The surviving slot never moves.
+static int padslot_fill(const void **slots, int hole, const void *const *ids, int n) {
+    if (slots[hole]) return -1;
+    for (int i = 0; i < n; ++i)
+        if (ids[i] && ids[i] != slots[0] && ids[i] != slots[1]) { slots[hole] = ids[i]; return i; }
+    return -1;
+}
+// ---- end padslot ----
 static void pad_slot_connect(GCController *ctl) {
     if (!ctl.extendedGamepad) return;
     @synchronized (GCController.class) {
         for (int i = 0; i < 2; ++i) if (pad_slots[i] == ctl) return;
-        for (int i = 0; i < 2; ++i) if (!pad_slots[i]) { pad_slots[i] = ctl; return; }
+        // A reconnect between polls must leave one absent read for the drop/pause path.
+        for (int i = 0; i < 2; ++i) if (!pad_slots[i] && pad_presents[i] != 1) { pad_slots[i] = ctl; return; }
     }
 }
 static void padlink_refresh(void);
@@ -1838,25 +1955,54 @@ static void pad_slots_init(void) {
         [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             padfx_connect((__bridge void *)n.object);
             @synchronized (GCController.class) {
-                if (pad_count() == 2) pad_slot_connect(n.object);
+                pad_slot_connect(n.object);   // slots are read only with two pads; this may run before main (pad_count)
                 padlink_refresh();
             }
         }];
         [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
             pad_slot_disconnect(n.object);
         }];
-        if (pad_count() == 2) @synchronized (GCController.class) {
-            for (GCController *ctl in GCController.controllers) pad_slot_connect(ctl);
-        }
     }
 }
 static GCController *pad_controller_n(int idx) {
     if (pad_count() == 1) {
         if (idx) return nil;
-        for (GCController *ctl in GCController.controllers) if (ctl.extendedGamepad) return ctl;
+        NSArray<GCController *> *all = GCController.controllers;
+        for (GCController *ctl in all) if (ctl == pad_picked && ctl.extendedGamepad) return ctl;   // the pad in use
+        for (GCController *ctl in all) if (ctl.extendedGamepad) return ctl;
         return nil;
     }
-    @synchronized (GCController.class) { return pad_slots[idx]; }
+    @synchronized (GCController.class) {
+        static int seeded;   // controllers connected before the first two-pad read keep the framework's order
+        if (!seeded) { seeded = 1; for (GCController *ctl in GCController.controllers) pad_slot_connect(ctl); }
+        // a hole the read has already reported (pad_presents 0): a listed pad in neither slot takes it. Only while a
+        // slot is empty does this fetch the controller list, as NFS_PADS=1 does on every read.
+        if (!pad_slots[idx] && pad_presents[idx] == 0) {
+            __unsafe_unretained GCController *pads[8];
+            const void *ids[8];
+            int n = 0;
+            for (GCController *ctl in GCController.controllers)
+                if (ctl.extendedGamepad && n < 8) { pads[n] = ctl; ids[n] = (__bridge const void *)ctl; ++n; }
+            const void *s[2] = {(__bridge const void *)pad_slots[0], (__bridge const void *)pad_slots[1]};
+            int k = padslot_fill(s, idx, ids, n);
+            if (k >= 0) pad_slots[idx] = pads[k];
+        }
+        return pad_slots[idx];
+    }
+}
+// The same selected controller as input; a waiting or disconnected pad cannot supply the warning.
+int user32_pad_battery(void) {
+    const char *sim = getenv("BOOT_PAD");
+    if (sim && (!strcmp(sim, "sim") || !strncmp(sim, "sim:", 4)))
+        return pad_presents[0] == 1 && (pad_kinds[0] == PAD_KIND_DUALSENSE || pad_kinds[0] == PAD_KIND_EDGE)
+            ? pad_sim_battery[0] : -1;
+    @synchronized (GCController.class) {
+        GCController *ctl = pad_controller_n(0);
+        if (![ctl.extendedGamepad isKindOfClass:GCDualSenseGamepad.class] && ![ctl.productCategory hasPrefix:@"DualSense"])
+            return -1;
+        GCDeviceBattery *b = ctl.battery;
+        return b && b.batteryState >= 0 && b.batteryState <= 2 ? padbattery_percent(b.batteryLevel) : -1;
+    }
 }
 // Logging uses the same selection as input, including preserved two-pad slots.
 static void padlink_observe(GCController *ctl) {
@@ -1909,12 +2055,12 @@ __attribute__((constructor)) static void pad_clock(void) { start_ns = host_ticks
 
 // The indexed GameController.framework extended gamepad, or BOOT_PAD=sim:name=value,...
 // (BOOT_PAD2 for slot 1 with NFS_PADS=2; same parser and independent script state) (constant values for tests:
-// lx ly rx ry in -1..1 with y up positive, lt rt 0..1, buttons=<physical P_* mask>, dpad=<hundredths of a degree>; a
+// lx ly rx ry in -1..1 with y up positive, lt rt 0..1, buttons=<physical P_* mask>, dpad=<hundredths of a degree>,
+// battery=<percent> (unknown when omitted); a
 // bare word is the pad's identity: dualsense, ds4, edge, or xbox, the default; a last @T1-T2-T3... connects it T1
 // seconds after start-up, disconnects it at T2, connects it again at T3, ...). @eT1-T2-T3... uses the first
 // gamepad enumeration instead; before that enumeration the timed pad is absent. 0: no controller (st centred).
 int pad_read_n(int idx, PadState *st) {
-    if (!idx) pad0_down = 0;
     memset(st, 0, sizeof *st);
     st->pov = -1;
     if (idx < 0 || idx >= pad_count()) return 0;
@@ -1938,9 +2084,13 @@ int pad_read_n(int idx, PadState *st) {
                 q = *e == '-' ? e + 1 : e + strlen(e);
             }
         }
+        // NFS_PAD_LOST_PAUSE=1 (scripted checks only) lets a timed simulated pad's disconnect freeze the race too.
+        if (!on && pad_presents[idx] == 1 && getenv("NFS_PAD_LOST_PAUSE") && !strcmp(getenv("NFS_PAD_LOST_PAUSE"), "1"))
+            pad_freeze("the simulated controller disconnected");
         if (!on) { void replay_controls_disconnect(void); if(!idx) replay_controls_disconnect(); pad_presence(idx, 0, NULL); if (!idx) prompts_pad_seen(0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
         st->connected = 1;
         int word_kind = -1;
+        pad_sim_battery[idx] = -1;
         for (const char *p = sim + 4; p < end;) {
             char name[16];
             size_t n = strcspn(p, "=,@");
@@ -1953,6 +2103,7 @@ int pad_read_n(int idx, PadState *st) {
             else if (!strcmp(name, "rx")) st->rx = (float)v; else if (!strcmp(name, "ry")) st->ry = (float)v;
             else if (!strcmp(name, "lt")) st->lt = (float)v; else if (!strcmp(name, "rt")) st->rt = (float)v;
             else if (!strcmp(name, "buttons")) st->buttons = (uint32_t)v; else if (!strcmp(name, "dpad")) st->pov = (int)v;
+            else if (!strcmp(name, "battery")) pad_sim_battery[idx] = padbattery_percent((float)(v / 100));
             while (p < end && *p != ',') ++p;
             if (p < end) ++p;
         }
@@ -1973,7 +2124,6 @@ int pad_read_n(int idx, PadState *st) {
         if (axis[0] && (!strncmp(axis, "lx", 2) || !strncmp(axis, "ly", 2)) && strchr(axis, '='))   // BOOT_KEYS padaxis: the menu sees a scripted left stick
             (axis[1] == 'x' ? &st->lx : &st->ly)[0] = (float)atof(strchr(axis, '=') + 1);
         pov_dirs(st->pov, &u, &d, &l, &r);
-        if (!idx) pad0_down = d;
         if (osk_pad(idx, pad_activity(st->buttons, st, 1), u, d, l, r, st->lx, st->ly, 1,
                     pad_layout_xbox() && !kind_native(kind))) { pad_neutral(idx, st); return 1; }
         uint32_t inject = 0, hide = idx ? (portmenu_is_open() ? ~0u : 0) : portmenu_pad(st->buttons & 0xFFF, u, d, l, r, st->lx, st->ly, (st->buttons >> 12) & 1, (st->buttons >> 13) & 1, 1, &inject);
@@ -2001,35 +2151,39 @@ int pad_read_n(int idx, PadState *st) {
                              "pad: sim buttons %03X ry %.2f, %s (package in control %s)",
                        st->buttons, st->ry, pad_mode, pad_ctl ? pad_ctl : "none");
         }
-        if (!idx) rumble_update();
+        rumble_update_slot((unsigned)idx);
         // the adaptive triggers and lightbar decide as for a real pad and only log it (padfx.m never touches a pad here)
         if (!idx) padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
         return 1;
     }
     @autoreleasepool {
         GCController *ctl;
+        int pick = 0;
         @synchronized (GCController.class) {
-            ctl = pad_controller_n(idx);
+            ctl = !idx && pad_count() == 1 ? pad_pick_update(headless || NSApp.isActive, &pick) : pad_controller_n(idx);
             if (!idx) padlink_observe(ctl);
         }
+        if (pick & PADPICK_SWITCHED) fprintf(stderr, "boot: controller in use: %s\n", ctl.vendorName.UTF8String ?: "controller");
+        if (pick & PADPICK_LOST) pad_freeze("the controller in use disconnected");
+        if (!idx && __atomic_exchange_n(&user32_sleep_freeze, 0, __ATOMIC_ACQ_REL)) pad_freeze("the Mac went to sleep or woke");
         if (!idx) {
             static GCController *menu_controller;
             if (ctl != menu_controller) {
                 pad_menu_keys(0);
                 menu_controller = ctl;
             }
-            rumble_select((__bridge void *)ctl);
         }
+        rumble_select_slot((unsigned)idx, (__bridge void *)ctl);
         if (!headless && !NSApp.isActive) { st->connected = 1; st->native = kind_native(pad_kinds[idx]); return 1; }
         GCExtendedGamepad *g = ctl.extendedGamepad;
+        if (pad_count() == 2 && !g && pad_presents[idx] == 1) pad_freeze(idx ? "controller 2 disconnected" : "controller 1 disconnected");
         if ((g != nil) != pad_presents[idx])
             pad_presence(idx, g != nil, g ? [NSString stringWithFormat:@"%@ (%@, %lu controllers)", ctl.vendorName ?: @"controller",
                                         ctl.productCategory ?: @"?", (unsigned long)GCController.controllers.count].UTF8String : NULL);
         if (idx == 0) prompts_pad_seen(g != nil);
         padfx_player_update(idx, (__bridge void *)ctl);
         if (!g) { void replay_controls_disconnect(void); if(!idx) replay_controls_disconnect(); if (!idx) padfx_update(NULL, 0, 0, 0); osk_pad(idx, 0, 0, 0, 0, 0, 0, 0, 0, 0); return 0; }
-        // Pad 1 feedback would hook here once the model and legacy single-output HID transport have player routing.
-        if (idx == 0) rumble_update();
+        rumble_update_slot((unsigned)idx);
         st->connected = 1;
         int kind = PAD_KIND_OTHER;
         NSString *cat = ctl.productCategory ?: @"";
@@ -2048,7 +2202,6 @@ int pad_read_n(int idx, PadState *st) {
         for (int i = 0; i < 12; ++i) if (b[i].pressed) phys |= 1u << i;
         GCControllerDirectionPad *d = g.dpad;
         int up = d.up.pressed, down = d.down.pressed, left = d.left.pressed, right = d.right.pressed;
-        if (idx == 0) pad0_down = down;
         // the F10 menu's shortcut: the touchpad click (DualSense, DualShock 4), the PS/Guide button, or holds (portmenu.m)
         GCControllerButtonInput *touch = nil;
         if ([g isKindOfClass:GCDualSenseGamepad.class]) touch = ((GCDualSenseGamepad *)g).touchpadButton;

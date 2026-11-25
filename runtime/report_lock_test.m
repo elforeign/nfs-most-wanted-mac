@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -87,12 +88,15 @@ void portmenu_status(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vsnprintf(status, sizeof status, fmt, ap); va_end(ap);
     if (!strncmp(status, "Report saved:", 13) || !strcmp(status, "Couldn't write the report")) ++completed;
 }
-static void SlowRedact(NSString *folder) {
+static BOOL interrupt_report, fail_redaction;
+static BOOL SlowRedact(NSString *folder) {
+    if (interrupt_report) _exit(73);
+    if (fail_redaction) return NO;
     // Model a slow disk/privacy pass; only the old path runs it while owning the guest lock.
     ++exports;
     export_held += guest_held;
     usleep(650000);
-    ReportRedactBundle(folder);
+    return ReportRedactBundle(folder);
 }
 static time_t FixtureTime(time_t *out) { time_t value = 1700000000; if (out) *out = value; return value; }
 static uint64_t t_start = 100000000000ull;
@@ -220,6 +224,27 @@ int main(int argc, char **argv) {
         mkdir(profile, 0755);
         G = calloc(1, 0x01000000);
         reset_guest_state();
+        if (argc > 2 && (!strcmp(argv[2], "--interrupt-report") ||
+                         !strcmp(argv[2], "--redaction-failure") || !strcmp(argv[2], "--save-test-report"))) {
+            interrupt_report = !strcmp(argv[2], "--interrupt-report");
+            fail_redaction = !strcmp(argv[2], "--redaction-failure");
+            char attachment[1400];
+            snprintf(attachment, sizeof attachment, "%s/source-crash.txt", profile);
+            if (![@"password=SyntheticStageSecret\n" writeToFile:[NSString stringWithUTF8String:attachment]
+                                                       atomically:YES encoding:NSUTF8StringEncoding error:NULL]) return 2;
+            guest_enter();
+            const char *bundle = report_write("Crash-freeze", "synthetic note", "synthetic hang", attachment);
+            guest_leave();
+            free(G);
+            return (!!*bundle != !fail_redaction) || failures;
+        }
+        if (argc > 2 && !strcmp(argv[2], "--reap-reports")) {
+#ifdef REPORT_STAGE_PREFIX
+            report_remove_stale_staging(reports_dir());
+#endif
+            free(G);
+            return 0;
+        }
         if (argc > 2 && !strcmp(argv[2], "--private-attachments")) {
             const char *names[] = {STREAM_KEY_FILE, STREAM_KEY_TEMP};
             for (size_t i = 0; i < sizeof names / sizeof *names; ++i) {

@@ -54,7 +54,7 @@ def main():
         for name in ['normal',*CHANGES]:
             for kind, exe in executables.items():
                 env=dict(os.environ)
-                for key in ['NFS_LAN_COPY','NFS_ONLINE_OPEN','BOOT_ONLINE_PEER']:
+                for key in ['NFS_LAN_COPY','BOOT_ONLINE_PEER']:
                     env.pop(key,None)
                 p=subprocess.run([str(exe),name],env=env,capture_output=True,text=True,timeout=25)
                 expected=0 if name=='normal' else 1

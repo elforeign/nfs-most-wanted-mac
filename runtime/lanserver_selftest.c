@@ -69,6 +69,49 @@ static void discovery_pass(Cpu *outer) {
     uint32_t rows = guest(&local, 0x0083ECF0u, 4, a);
     fprintf(stderr, "landiscovery: cache rows %u [%.*s]\n", rows, 2047, (char *)G + snapshot);
 }
+// Passive lifecycle snapshots. Offsets are retail data: GetRacerInfo 005DBED0,
+// GetRacerCount 005DBEF0, FinishRace 005E97B0, SetupResults 005964A0;
+// LobbyGames::Instance 0079CA30 and its 00845290 session decoder.
+static void original_lan_lifecycle_pass(const char *package) {
+    static char old_session[256], old_race[512], old_results[96];
+    static int old_loaded = -1;
+    if (!lan_diag_on()) return;
+    int loaded = M32(0x009B08E8u) != 0;
+    if (loaded != old_loaded) {
+        fprintf(stderr,"lan-host: loaded=%d\n",loaded);
+        old_loaded = loaded;
+    }
+    if (G[0x009B9D0Cu] & 1) {
+        uint32_t game = 0x009B9690u, count = M32(game + 0x214);
+        char line[256];
+        int used = snprintf(line,sizeof line,"id=%d count=%u",(int32_t)M32(game+8),count);
+        for (uint32_t i=0;i<count && i<4;++i)
+            used += snprintf(line+used,sizeof line-(size_t)used," name=\"%.15s\"",(char *)G+game+0x220+0x8C*i);
+        if (strcmp(line,old_session)) {
+            snprintf(old_session,sizeof old_session,"%s",line);
+            fprintf(stderr,"lan-session: %s\n",line);
+        }
+    }
+    uint32_t rs = M32(0x0091E000u);
+    if (rs && M32(rs+0x1964)==1) {
+        uint32_t count = M32(rs+0x1958);
+        char line[512];
+        int used = snprintf(line,sizeof line,"count=%u",count);
+        for (uint32_t i=0;i<count && i<4;++i) {
+            uint32_t ri = rs+0x18+0x194*i, name = M32(ri+8);
+            used += snprintf(line+used,sizeof line-(size_t)used,
+                " name=\"%.15s\" finished=%u dnf=%u rank=%u",name?(char *)G+name:"",
+                G[ri+0x21],G[ri+0x1D] || G[ri+0x1E],M32(ri+0x10));
+        }
+        // Repeat on entry to results: standings must come from that screen,
+        // rather than a provisional position observed earlier during racing.
+        if (strcmp(line,old_race) || strcmp(package,old_results)) {
+            snprintf(old_race,sizeof old_race,"%s",line);
+            fprintf(stderr,"lan-race: %s\n",line);
+        }
+    } else old_race[0]=0;
+    snprintf(old_results,sizeof old_results,"%s",package);
+}
 // Read-only UI/lobby observation; never drives the game state machine.
 static void original_lan_pass(Cpu *outer) {
     static uint64_t next;
@@ -85,6 +128,7 @@ static void original_lan_pass(Cpu *outer) {
         snprintf(old_package,sizeof old_package,"%s",package);
         fprintf(stderr,"lan-ui: package %s\n",old_package);
     }
+    original_lan_lifecycle_pass(package);
     uint32_t core=M32(0x009B41C4),api=core?M32(core+0x38):0;
     if(api) {
         char line[256];

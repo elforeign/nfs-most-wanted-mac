@@ -68,8 +68,6 @@ WINDOW = r'''
 #include <pthread.h>
 #include "gpuclients.h"
 #include "framecap.h"
-#include "roam_online.h"
-atomic_int roam_online_active;
 @interface FakeScreen : NSObject
 @property NSDictionary *deviceDescription;
 @property NSInteger maximumFramesPerSecond;

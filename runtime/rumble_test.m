@@ -1,3 +1,4 @@
+// Two owned pads: P2-only output fixed P1 0, P2 204; singleton transport control P1 204, P2 0.
 // Link proof: fixed PASS 47/47; retained transport / unkeyed old behavior each FAIL 1/47.
 // Selected B with A also connected, then unplug A: old reports (A, B before/after) 2, 0/0; fixed 0, 1/1.
 // Without the selection-generation guard an earlier queued flush sends one nonzero report to A.
@@ -32,7 +33,7 @@ void rumble_select(void *controller) { (void)controller; }
 #endif
 #ifdef RUMBLE_LEGACY
 // The original transport had no epoch argument; preserve its original publication path.
-static uint32_t motor_generation;
+static uint32_t rumble_pads[0].motor_generation;
 static void post_levels_at(uint8_t heavy, uint8_t light, uint32_t token) {
     (void)token; post_levels(heavy, light);
 }
@@ -41,7 +42,9 @@ static void post_levels_at(uint8_t heavy, uint8_t light, uint32_t token) {
 int diag_on;
 static int reports, nonzero, failures, checks;
 static uint8_t motor_h, motor_l;
-static float model_h = 0.8f, model_l = 0.4f;
+static float model_h = 0.8f, model_l = 0.4f, model2_h, model2_l;
+static uint8_t a_motor_h, b_motor_h, a_motor_l, b_motor_l;
+static int independent_transport;
 static uint64_t clock_ns = 1000000000;
 static int reject_zeros, rejected, detached, invalidations;
 static int real_opens, stale_link_test;
@@ -63,10 +66,16 @@ IOHIDManagerRef test_manager_create(CFAllocatorRef allocator, IOOptionBits optio
 }
 uint64_t host_ticks(void) { return clock_ns; }
 void feedback_levels(float *h, float *l) { *h = model_h; *l = model_l; }
+void feedback_levels_slot(unsigned slot, float *h, float *l) {
+    if (slot == 0) feedback_levels(h, l); else { *h = model2_h; *l = model2_l; }
+}
+void feedback_invalidate_slot(unsigned slot) {
+    if (slot == 0) feedback_invalidate_effects(); else { model2_h = model2_l = 0; ++invalidations; }
+}
 void feedback_invalidate_effects(void) { model_h = model_l = 0; ++invalidations; }
 CFTypeRef test_property(IOHIDDeviceRef d, CFStringRef key) {
     if (CFEqual(key, CFSTR(kIOHIDPhysicalDeviceUniqueIDKey))) return (CFStringRef)d;
-    if (CFEqual(key, CFSTR(kIOHIDTransportKey))) return bluetooth ? CFSTR("Bluetooth") : CFSTR("USB");
+    if (CFEqual(key, CFSTR(kIOHIDTransportKey))) return (independent_transport ? CFEqual(d, CFSTR("fake-B")) : rumble_pads[0].bluetooth) ? CFSTR("Bluetooth") : CFSTR("USB");
     return NULL;
 }
 io_service_t test_service(IOHIDDeviceRef d) { (void)d; return IO_OBJECT_NULL; }
@@ -83,13 +92,22 @@ IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType type, CFIndex id
     if (stale_link_test) {
         stale_link_test = 0;
         padlink_detach((void *)device);
-        padlink_hid((void *)device, bluetooth);
+        padlink_hid((void *)device, rumble_pads[0].bluetooth);
     }
     if (detached || ((!c[2] && !c[3]) && reject_zeros)) {
         if (reject_zeros > 0) --reject_zeros;
         ++rejected; return kIOReturnError;
     }
     motor_l = c[2]; motor_h = c[3];
+    if (CFEqual(device, CFSTR("fake-A"))) { a_motor_h = motor_h; a_motor_l = motor_l; }
+    if (CFEqual(device, CFSTR("fake-B"))) { b_motor_h = motor_h; b_motor_l = motor_l; }
+    if (independent_transport && CFEqual(device, CFSTR("fake-A")) && (id != 2 || n != 48)) abort();
+    if (independent_transport && CFEqual(device, CFSTR("fake-B"))) {
+        if (id != 0x31 || n != 78) abort();
+        uint8_t hdr = 0xA2;
+        uint32_t crc = (uint32_t)crc32(crc32(0, &hdr, 1), bytes, 74), actual;
+        memcpy(&actual, bytes + 74, 4); if (crc != actual) abort();
+    }
     if (motor_h || motor_l) {
         ++nonzero;
         if (CFEqual(device, CFSTR("fake-A"))) ++a_reports;
@@ -126,22 +144,22 @@ int main(void) {
     padlink_select((void *)3, "framework pad");
     FakeRumbleController *gc = controller(@"fake-pad");
     rumble_select((__bridge void *)gc);
-    bluetooth = 1;
+    rumble_pads[0].bluetooth = 1;
     found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
-    removed(NULL, 0, NULL, pad); drain();
+    removed(NULL, 0, NULL, rumble_pads[0].pad); drain();
     CHECK(links[1].transport == -1 && links[0].transport == -1);
-    bluetooth = 0;
+    rumble_pads[0].bluetooth = 0;
     found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
     CHECK(links[1].transport == 0 && links[0].transport == -1);
     dispatch_sync(hid_q, ^{
         unsigned count = links[1].total[0];
-        send(0, 0); CHECK(links[1].total[0] == count + 1);
-        stale_link_test = 1; send(0, 0);
+        send(&rumble_pads[0], 0, 0); CHECK(links[1].total[0] == count + 1);
+        stale_link_test = 1; send(&rumble_pads[0], 0, 0);
         CHECK(links[1].total[0] == 0); // completion belongs to the detached epoch
     });
     diag_on = 0; model_h = .8f; model_l = .4f;
     for (int transport = 0; transport < 2; ++transport) {
-        bluetooth = transport;
+        rumble_pads[0].bluetooth = transport;
         update(); CHECK(motor_h > 0 && motor_l > 0);
         dispatch_suspend(hid_q);
         rumble_update();                     // a nonzero report is pending when F10 opens
@@ -156,12 +174,12 @@ int main(void) {
         CHECK(motor_h == 0 && motor_l == 0 && nonzero == old_nonzero);
         update(); CHECK(motor_h > 0 && motor_l > 0); // only the next update takes over
         detached = 1;
-        removed(NULL, 0, NULL, pad); drain();
-        CHECK(!pad && want == 0 && model_h == 0 && model_l == 0);
+        removed(NULL, 0, NULL, rumble_pads[0].pad); drain();
+        CHECK(!rumble_pads[0].pad && rumble_pads[0].want == 0 && model_h == 0 && model_l == 0);
         detached = 0;
         found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
         CHECK(motor_h == 0 && motor_l == 0); // attach clears before any fresh pad read
-        dispatch_sync(hid_q, ^{ flush(); });
+        dispatch_sync(hid_q, ^{ flush(&rumble_pads[0]); });
         CHECK(motor_h == 0 && motor_l == 0);
         model_h = .8f; model_l = .4f; update();
         reject_zeros = 1; int before_reject = rejected;
@@ -170,24 +188,24 @@ int main(void) {
         CHECK(timers.count == 1); // only the scheduled retry can complete the clear, without a pad read
         retry();
         CHECK(rejected == before_reject + 1 && motor_h == 0 && motor_l == 0);
-        CHECK(sent_heavy == 0 && sent_light == 0);
+        CHECK(rumble_pads[0].sent_heavy == 0 && rumble_pads[0].sent_light == 0);
         model_h = .8f; model_l = .4f; update();
         reject_zeros = -1; int before_reports = reports;
         rumble_stop(); drain(); retry();
         CHECK(reports > before_reports && reports - before_reports <= 15);
-        CHECK(motor_h > 0 && sent_heavy > 0); // a rejected clear never enters the success cache
+        CHECK(motor_h > 0 && rumble_pads[0].sent_heavy > 0); // a rejected clear never enters the success cache
         reject_zeros = 0; rumble_stop(); drain(); retry();
         CHECK(motor_h == 0 && motor_l == 0);
         // Old publications cannot regain ownership after a detach/attach cycle.
         model_h = .8f; model_l = .4f; update();
-        uint32_t old_token = motor_generation;
-        removed(NULL, 0, NULL, pad); drain();
+        uint32_t old_token = rumble_pads[0].motor_generation;
+        removed(NULL, 0, NULL, rumble_pads[0].pad); drain();
         reject_zeros = 1;
         found(NULL, 0, NULL, (IOHIDDeviceRef)CFSTR("fake-pad")); drain();
-        CHECK(motor_h > 0 && timers.count == 1); // attachment neutral was rejected
+        CHECK(motor_h == 0 && timers.count == 1); // disconnect cleared; attachment neutral was rejected
         retry();
         CHECK(motor_h == 0 && motor_l == 0);
-        post_levels_at(204, 102, old_token); drain();
+        post_levels_at(&rumble_pads[0], 204, 102, old_token); drain();
         CHECK(motor_h == 0 && motor_l == 0);
         model_h = .8f; model_l = .4f;
     }
@@ -203,7 +221,7 @@ int main(void) {
     unsetenv("NFS_RUMBLE");
     rumble_off = -1;
 
-    removed(NULL, 0, NULL, pad); drain();
+    removed(NULL, 0, NULL, rumble_pads[0].pad); drain();
     FakeRumbleController *a = controller(@"fake-A"), *b = controller(@"fake-B");
     IOHIDDeviceRef dev_a = (IOHIDDeviceRef)CFSTR("fake-A"), dev_b = (IOHIDDeviceRef)CFSTR("fake-B");
     rumble_select((__bridge void *)a);
@@ -225,17 +243,65 @@ int main(void) {
     found(NULL, 0, NULL, dev_a); drain();
     reject_zeros = 1;
     rumble_select((__bridge void *)a); drain();
-    CHECK(pad == dev_b && timers.count == 1);   // B's first neutral report failed
+    CHECK(rumble_pads[0].pad == dev_b && timers.count == 1);   // B's first neutral report failed
     removed(NULL, 0, NULL, dev_b); drain();
-    CHECK(pad == dev_a);
+    CHECK(rumble_pads[0].pad == dev_a);
     retry();                                    // retire the retry for the detached pad
     model_h = .8f; model_l = .4f; update();
     CHECK(a_reports == 1);                      // A was retained while B was playing
 #endif
+    // Independent USB/BT routing, cache, generation and lifecycle state; no discovery.
+    // Refresh A's transport via a selection cycle; B exercises Edge identification.
+    rumble_select_slot(0, NULL); drain();
+    independent_transport = 1;
+    rumble_select_slot(0, (__bridge void *)a); drain();
+    b.productCategory = @"DualSense Edge";
+    found(NULL, 0, NULL, dev_b); drain();
+    rumble_select_slot(1, (__bridge void *)b); drain();
+    CHECK(rumble_pads[0].pad == dev_a && rumble_pads[1].pad == dev_b);
+    CHECK(!rumble_pads[0].bluetooth && rumble_pads[1].bluetooth);
+    model_h = model_l = 0; model2_h = .8f; model2_l = 0;
+    clock_ns += 1100000000;
+    rumble_update_slot(0); rumble_update_slot(1); drain();
+    printf("P2-only HID output: P1 %u, P2 %u\n", a_motor_h, b_motor_h);
+    CHECK(a_motor_h == 0 && a_motor_l == 0 && b_motor_h == 204 && b_motor_l == 0);
+    model_h = .6f; model_l = .2f; model2_h = .9f;
+    dispatch_suspend(hid_q);
+    rumble_update_slot(0); rumble_update_slot(1); rumble_stop_slot(1);
+    dispatch_resume(hid_q); drain();
+    CHECK(a_motor_h == 153 && b_motor_h == 0);
+    uint32_t p2_epoch = rumble_pads[1].motor_generation;
+    removed(NULL, 0, NULL, dev_b); drain();
+    CHECK(model_h == .6f && model2_h == 0 && a_motor_h == 153 && b_motor_h == 0);
+    found(NULL, 0, NULL, dev_b); drain();
+    post_levels_at(&rumble_pads[1], 204, 0, p2_epoch); drain();
+    CHECK(b_motor_h == 0 && a_motor_h == 153);
+    model2_h = .8f; rumble_update_slot(1); drain();
+    CHECK(b_motor_h == 204);
+    rumble_select_slot(1, NULL); drain();
+    CHECK(b_motor_h == 0 && a_motor_h == 153); // mode exit clears only its owned output
+    rumble_select_slot(1, (__bridge void *)a); drain();
+    CHECK(rumble_pads[1].pad == NULL && rumble_pads[0].pad == dev_a); // no shared HID ownership
+    rumble_select_slot(1, (__bridge void *)b); drain();
+    model2_h = .8f; rumble_update_slot(1); drain();
+    rumble_suppress(1); drain();
+    CHECK(a_motor_h == 0 && b_motor_h == 0);
+    rumble_suppress(0); drain();
+    CHECK(a_motor_h == 0 && b_motor_h == 0);
+    rumble_update_slot(0); rumble_update_slot(1); drain();
+    CHECK(a_motor_h == 153 && b_motor_h == 204);
+    rumble_select_slot(0, (__bridge void *)b);
+    rumble_select_slot(1, (__bridge void *)a); drain();
+    CHECK(rumble_pads[0].pad == dev_b && rumble_pads[1].pad == dev_a);
+    model_h = .6f; model2_h = .8f;
+    rumble_update_slot(0); rumble_update_slot(1); drain();
+    CHECK(a_motor_h == 204 && b_motor_h == 153); // independent selection also survives an ownership swap
     rumble_close();
+    CHECK(a_motor_h == 0 && b_motor_h == 0);
     CHECK(motor_h == 0 && motor_l == 0);
     update(); CHECK(motor_h == 0 && motor_l == 0);
-    if (pad) { removed(NULL, 0, NULL, pad); drain(); }
+    if (rumble_pads[0].pad) { removed(NULL, 0, NULL, rumble_pads[0].pad); drain(); }
+    if (rumble_pads[1].pad) { removed(NULL, 0, NULL, rumble_pads[1].pad); drain(); }
     manager = NULL;
     CHECK(invalidations >= 2);
     CHECK(real_opens == 0);

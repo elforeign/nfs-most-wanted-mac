@@ -255,6 +255,11 @@ bool Emitter::analyse() {
             if (s.type == R_CONSTBOOL && !bdef.count(s.num)) res.bool_used |= 1u << s.num;
         };
         for (const Src &s : in.src) see_src(s);
+        if ((in.op == OP_M4x4 || in.op == OP_M4x3 || in.op == OP_M3x4 || in.op == OP_M3x3 || in.op == OP_M3x2) && in.src.size() > 1) {
+            // a matrix op reads one constant row per output component, not just the register it names
+            int rows = in.op == OP_M4x4 || in.op == OP_M3x4 ? 4 : in.op == OP_M3x2 ? 2 : 3;
+            for (int r = 1; r < rows; r++) { Src m = in.src[1]; m.num += r; see_src(m); }
+        }
         if (in.predicated) see_src(in.pred);
         if (in.has_dst) {
             const Dst &d = in.dst;

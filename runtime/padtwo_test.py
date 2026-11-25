@@ -18,6 +18,11 @@
 
 
 
+
+
+
+
+
 """
 from pathlib import Path
 import os
@@ -112,7 +117,9 @@ int osk_pad(int port, uint32_t buttons, int up, int down, int left, int right,
     (void)lx; (void)ly; (void)connected; (void)xbox; return 0;
 }
 void rumble_update(void) { ++rumble_calls; }
+void rumble_update_slot(unsigned slot) { if (slot >= 2) abort(); ++rumble_calls; }
 void rumble_select(void *controller) { (void)controller; }
+void rumble_select_slot(unsigned slot, void *controller) { (void)slot; (void)controller; }
 void padfx_update(void *ctl, int ds, float lt, float rt) {
     (void)ctl; (void)ds; (void)lt; (void)rt; ++fx_calls;
 }
@@ -132,6 +139,9 @@ uint32_t portmenu_pad(uint32_t phys, int u, int d, int l, int r, float lx, float
     return menu_hide ? ~0u : 0;
 }
 int portmenu_is_open(void) { return menu_hide; }
+int freeze_calls, freeze_open;   /* portmenu_open_if_racing: calls, and whether a race is "on" */
+const char *freeze_why;
+int portmenu_open_if_racing(const char *why) { ++freeze_calls; freeze_why = why; return freeze_open; }
 static void di_event(uint8_t key, int down) { di_keys[key] = down ? 0x80 : 0; ++key_calls; }
 static int script_layout = 0;
 static int pad_layout_xbox(void) { return script_layout; }
@@ -214,7 +224,9 @@ static uint32_t state(uint32_t dev) {
     CHECK(invoke(d_GetDeviceState, 3, dev, 272u, out) == DI_OK); return out;
 }
 int main(int argc, const char **argv) { @autoreleasepool {
-    (void)argc; int count = atoi(argv[1]);
+    int count = atoi(argv[1]);
+    // "saved": the F10 setting reaches NFS_PADS only in main (boot.c settings_init), after every constructor ran.
+    if (argc > 2 && !strcmp(argv[2], "saved")) setenv("NFS_PADS", "2", 1);
     G = calloc(1, 0x1000000);
     GCController *a = controller(0), *b = controller(1);
     diag_on = 1;
@@ -222,6 +234,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     notify(GCControllerDidConnectNotification, a); notify(GCControllerDidConnectNotification, b);
     CHECK(connect_calls == 2 && last_connect == (__bridge void *)b);
     CHECK(pad_count() == count);
+    if (fails) { printf("padtwo_test: wrong pad count %d, stopping\n", pad_count()); return 1; }   // later checks need the right count
     // Drive notification + report hooks before any input read, including no-focus gaps.
     char battery_text[128];
     a.battery.batteryLevel = 0; a.battery.batteryState = -1;
@@ -277,7 +290,11 @@ int main(int argc, const char **argv) { @autoreleasepool {
         CHECK(invoke(i_GetDeviceStatus,2,0u,guid) != DI_OK);
         b.extendedGamepad.buttonX = b.extendedGamepad.buttonOptions = b.extendedGamepad.buttonMenu = button(1);
         fake_source = @[b,a];
-        CHECK(pad_read(&ps) && !ps.native);
+        CHECK(pad_read(&ps) && ps.native);  // list order alone keeps the pad in use (a: Cross held)
+        GCControllerButtonInput *a_cross = a.extendedGamepad.buttonA, *a_r2 = a.extendedGamepad.rightTrigger;
+        a.extendedGamepad.buttonA = button(0); a.extendedGamepad.rightTrigger = button(0);
+        CHECK(pad_read(&ps) && !ps.native); // a at rest, b pressed: b takes over
+        a.extendedGamepad.buttonA = a_cross; a.extendedGamepad.rightTrigger = a_r2;
         CHECK(di_keys[3] && di_keys[4] && di_keys[5]);
         fake_source = @[a]; notify(GCControllerDidDisconnectNotification,b);
         CHECK(pad_read(&ps) && ps.native);  // no empty-slot poll between the two controllers
@@ -293,7 +310,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         CHECK(led_slots[0] == (__bridge void *)a && led_slots[1] == (__bridge void *)b);
         CHECK(M32(p1) == 57343); CHECK(M32(p1+8) == 52428); CHECK(M32(p1+20) == 42598);
         CHECK(M32(p1+32) == 9000); CHECK(M8(p1+48) == 0x80);
-        CHECK(rumble_calls == rb && fx_calls == fx && binding_calls == pb);
+        CHECK(rumble_calls == rb + 1 && fx_calls == fx && binding_calls == pb);
         CHECK(menu_calls == mk && key_calls == kc && prompts_calls == pc && prompts_seen == seen);
         CHECK(invoke(d_GetDeviceInfo,2,dev1,info) == DI_OK); CHECK(M32(info+4) == PAD_GUID+1);
         CHECK(!strcmp((char *)G+info+40,"Controller (Xbox)"));
@@ -321,9 +338,35 @@ int main(int argc, const char **argv) { @autoreleasepool {
         fake_source = @[b,a]; notify(GCControllerDidConnectNotification,a);
         CHECK(connect_calls == connect_before + 1 && last_connect == (__bridge void *)a);
         CHECK(pad_read_n(0,&ps) && ps.lx == -.5f); CHECK(pad_read_n(1,&ps) && ps.lx == .75f);
-        notify(GCControllerDidDisconnectNotification,b); CHECK(!pad_read_n(1,&ps));
+        fake_source = @[a]; notify(GCControllerDidDisconnectNotification,b); CHECK(!pad_read_n(1,&ps));
         CHECK(M32(state(dev1)) == 32768); CHECK(invoke(i_GetDeviceStatus,2,0u,guid) == DI_OK);
-        notify(GCControllerDidConnectNotification,b);
+        fake_source = @[a,b]; notify(GCControllerDidConnectNotification,b);
+        // A waiting third pad fills only the hole, after a read reports the drop.
+        GCController *third = controller(0);
+        fake_source = @[third,b,a]; notify(GCControllerDidConnectNotification,third);
+        CHECK(pad_controller_n(0) == a && pad_controller_n(1) == b);
+        fake_source = @[b,third]; notify(GCControllerDidDisconnectNotification,a);
+        CHECK(!pad_read_n(0,&ps));
+        CHECK(pad_read_n(1,&ps) && pad_controller_n(1) == b);
+        CHECK(pad_read_n(0,&ps) && pad_controller_n(0) == third);
+        fake_source = @[a,b,third]; notify(GCControllerDidConnectNotification,a);
+        CHECK(pad_controller_n(0) == third && pad_controller_n(1) == b);
+        // A profile that becomes ready after its notification can fill the next empty slot.
+        fake_source = @[b]; notify(GCControllerDidDisconnectNotification,third);
+        CHECK(!pad_read_n(0,&ps));
+        GCController *late = [GCController new];
+        fake_source = @[late,b]; notify(GCControllerDidConnectNotification,late);
+        CHECK(!pad_read_n(0,&ps));
+        late.extendedGamepad = a.extendedGamepad;
+        CHECK(pad_read_n(0,&ps) && pad_controller_n(0) == late && pad_controller_n(1) == b);
+        // Reconnecting between polls must not erase the drop (and its race pause).
+        fake_source = @[b]; notify(GCControllerDidDisconnectNotification,late);
+        fake_source = @[b,late]; notify(GCControllerDidConnectNotification,late);
+        CHECK(pad_controller_n(0) == nil);
+        int freezes_before = freeze_calls;
+        CHECK(!pad_read_n(0,&ps));
+        CHECK(freeze_calls == freezes_before + 1);
+        CHECK(pad_read_n(0,&ps) && pad_controller_n(0) == late && pad_controller_n(1) == b);
         // Enumeration must respect DIENUM_STOP after the first pad.
         enumerated=0; stop_after=1;
         invoke(i_EnumDevices,5,0u,4u,1u,0u,0u); CHECK(enumerated==1);
@@ -337,7 +380,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     menu_hide=0; setenv("BOOT_PAD","sim",1); CHECK(pad_read(&ps) && !ps.native && ps.connected);
     setenv("BOOT_PAD","sim:dualsense@999",1); CHECK(!pad_read(&ps) && !ps.connected);
     CHECK(real_opens == 0 && real_writes == 0 && !strcmp(getenv("NFS_RUMBLE"), "off"));
-    printf("padtwo_test NFS_PADS=%s: %d checks, %d failures\n",getenv("NFS_PADS") ?: "unset", checks,fails);
+    printf("padtwo_test NFS_PADS=%s%s: %d checks, %d failures\n",getenv("NFS_PADS") ?: "unset", argc > 2 ? " (saved setting)" : "", checks,fails);
     return fails ? 1 : 0;
 } }
 '''
@@ -360,9 +403,17 @@ def main():
     assert di.count(mutation) == 1
     with tempfile.TemporaryDirectory(prefix='padtwo_') as td:
         td = Path(td)
-        for broken in (False, "index", "menu", "led", "disconnect", "connect", "link-presence", "link-battery", "link-unknown", "hotplug-keys"):
+        for broken in (False, "index", "menu", "led", "disconnect", "connect", "link-presence", "link-battery", "link-unknown", "hotplug-keys", "eager-reconnect", "constructor-cache"):
             sample = user if broken != "menu" else user.replace(' : (portmenu_is_open() ? ~0u : 0);', ' : 0;')
             assert broken != "menu" or sample != user
+            if broken == "constructor-cache":
+                # Before the fix the constructor read the pad count, caching 1 before main exported the saved setting.
+                sample = user.replace("pad_clock(void) { start_ns = host_ticks(); pad_slots_init(); }",
+                                      "pad_clock(void) { start_ns = host_ticks(); pad_slots_init(); (void)pad_count(); }")
+                assert sample != user
+            if broken == "eager-reconnect":
+                sample = user.replace(" && pad_presents[i] != 1", "")
+                assert sample != user
             if broken == "led":
                 sample = user.replace("padfx_player_update(idx,", "padfx_player_update(0,")
                 assert sample != user
@@ -403,14 +454,17 @@ def main():
             settings = ['1', '2'] if broken in ('connect', 'link-presence', 'link-unknown') else ['2']
             if broken == 'hotplug-keys':
                 settings = ['1']
-            for setting in settings if broken else [None, '1', '2', 'invalid']:
+            if broken == 'constructor-cache':
+                settings = ['saved']
+            for setting in settings if broken else [None, '1', '2', 'invalid', 'saved']:
                 env = dict(os.environ, NFS_RUMBLE='off')
                 env.pop('BOOT_PAD', None)
                 env.pop('BOOT_PAD2', None)
                 env.pop('NFS_PADS', None)
-                if setting is not None:
+                if setting not in (None, 'saved'):
                     env['NFS_PADS'] = setting
-                p = subprocess.run([exe, '2' if setting == '2' else '1'], env=env, capture_output=True, text=True)
+                args = [exe, '2' if setting in ('2', 'saved') else '1'] + (['saved'] if setting == 'saved' else [])
+                p = subprocess.run(args, env=env, capture_output=True, text=True)
                 if broken:
                     if p.returncode != 1 or 'FAIL' not in p.stdout:
                         raise RuntimeError('index-0 negative variant was not rejected: ' + p.stdout + p.stderr[-2000:])

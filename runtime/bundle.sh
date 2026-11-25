@@ -46,10 +46,10 @@ case "$VERSION" in *[!0-9.]*|.*|*.|*..*) echo "bundle.sh: version must contain n
 case "$GAME" in
     mw) GUIDE=docs/guide.md
         GAME_TITLE="Need for Speed Most Wanted (PC, v1.3)"
-        NET_TEXT="Online free roam finds your router to host a session." ;;
+        NET_TEXT="LAN play discovers games on your local network." ;;
     carbon) GUIDE=docs/guide_carbon.md
         GAME_TITLE="Need for Speed Carbon (PC)"
-        NET_TEXT="Network play finds your router to host a session." ;;
+        NET_TEXT="LAN play discovers games on your local network." ;;
     *) echo "bundle.sh: unknown game $GAME (mw or carbon)" >&2; exit 2 ;;
 esac
 APP="$OUT/$NAME.app"
@@ -95,10 +95,10 @@ trap 'rm -rf "$TMP"' EXIT
 set --
 [ "$GAME" = mw ] || set -- -DNFS_GAME=2
 # Build the delivery helper separately. Test URL overrides are compiled out of this binary.
-clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-deprecated-declarations -mmacosx-version-min="$MINOS" "$@" pub_update_helper.m -framework Foundation -o "$TMP/pub_update_helper"
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-deprecated-declarations -mmacosx-version-min="$MINOS" "$@" pub_update_helper.m -framework Foundation -framework Security -o "$TMP/pub_update_helper"
 cp "$TMP/pub_update_helper" "$APP/Contents/MacOS/pub_update_helper"
 codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_helper"
-clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-unused-function -Wno-deprecated-declarations "$@" -DPUB_UPDATE_WORKER=1 -mmacosx-version-min="$MINOS" pub_update.m -framework Cocoa -o "$TMP/pub_update_worker"
+clang -fobjc-arc -Os -Wall -Wextra -Werror -Wno-unused-function -Wno-deprecated-declarations "$@" -DPUB_UPDATE_WORKER=1 -mmacosx-version-min="$MINOS" pub_update.m -framework Cocoa -framework Security -o "$TMP/pub_update_worker"
 cp "$TMP/pub_update_worker" "$APP/Contents/MacOS/pub_update_worker"
 codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/pub_update_worker"
 clang -fobjc-arc -w app_icon.m -framework Cocoa -framework ImageIO -framework UniformTypeIdentifiers -o "$TMP/app_icon"

@@ -316,7 +316,7 @@ def main():
         def build(production):
             src.write_text(PRELUDE + production + catalogue + MAIN)
             p = subprocess.run(['clang', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
-                                '-fobjc-arc', '-I', str(ROOT), str(src), '-framework', 'Foundation',
+                                '-fobjc-arc', '-I', str(ROOT), str(src), str(ROOT / 'blackbox.c'), str(ROOT / 'blackbox_errors.c'), '-framework', 'Foundation',
                                 '-framework', 'Metal', '-o', str(exe)], capture_output=True, text=True)
             assert p.returncode == 0, p.stderr[-4000:]
         build(source)

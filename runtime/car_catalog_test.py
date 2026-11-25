@@ -472,7 +472,10 @@ class NativeCatalogTests(unittest.TestCase):
                        cc.CPF1_POLICY_SHA256, cc.CPF2_POLICY_SHA256, cc.CPF3_POLICY_SHA256,
                        cc.PRE_RETAIL_ATTRIBUTES_POLICY_SHA256, cc.RETAIL_ATTRIBUTES_POLICY_SHA256,
                        cc.PS_PERFORMANCE_POLICY_SHA256, cc.PRE_UC_PERFORMANCE_POLICY_SHA256,
-                       cc.PRE_SIBLING_PERFORMANCE_POLICY_SHA256, cc.PRE_CACHE_PUBLISH_POLICY_SHA256):
+                       cc.PRE_SIBLING_PERFORMANCE_POLICY_SHA256, cc.PRE_CACHE_PUBLISH_POLICY_SHA256,
+                       cc.PRE_PROSTREET_AUDIO_POLICY_SHA256, cc.PRE_TORQUE_SPLINE_POLICY_SHA256,
+                       cc.PRE_CACHE_RENAME_POLICY_SHA256, cc.PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256,
+                       cc.PRE_UC_TORQUE_POLICY_SHA256):
             self.rewrite(lambda doc: doc.update(policy_sha256=digest))
             self.good_result()
             self.assertEqual(len(cc.verify_current(self.store, policy=self.policy).selected), 3)
@@ -522,6 +525,24 @@ class NativeCatalogTests(unittest.TestCase):
                 mutant = SOURCE.read_text().replace('word32(header+4)==version', 'word32(header+4)==2')
                 self.assertEqual(self.native(exe=self.compile(source=mutant))['count'], 3)
                 type(self).mutants += 1
+
+    def test_prostreet_audio_versions_match_origin(self):
+        # Retained v4 and stock-player v5 headers admit; Carbon v3 refuses.
+        row=self.rows[0]
+        row['origin']['game']='prostreet'
+        row['origin']['platform']='pc'
+        row['identity']=cc.source_identity(**row['origin'])
+        path=self.outputs[0]/'AUDIO.BIN'
+        name=row['origin']['folder'].lower().encode()
+        for version in (4,5,3):
+            path.write_bytes(struct.pack('<4s4I16s32s',b'A7CA',version,68,2,1,name,bytes(32)))
+            row['outputs'][path.name]=cc.fingerprint(path)
+            self.approve_rows();self.policy=self.load_policy()
+            cc.publish(self.store,self.rows,self.outputs,self.inputs,policy=self.policy)
+            # Each generated policy needs its matching native trust root.
+            result=self.native(exe=self.compile())
+            if version in (4,5):self.good_result(result)
+            else:self.zero(result)
 
     def test_original_bug(self):
         d = self.root / 'original'
@@ -914,12 +935,14 @@ class NativeCatalogTests(unittest.TestCase):
         old = performance(car, donor)
         cpf2 = struct.pack('<4sI', b'CPF2', 320) + old[8:] + struct.pack('<2f', 1., 5.)
         valid = struct.pack('<4sI', b'CPF3', 344) + cpf2[8:] + struct.pack('<6f', 2., 3., 50., 30., 100., 50.)
+        spline = (struct.pack('<4sI', b'CPF4', 356) + old[8:] +
+                  struct.pack('<4fI6f', 800, 8000, 100, 200, 2, 0, 1, 0, 1, 0, 0))
         bad_count = valid[:48] + struct.pack('<I', 65535) + valid[52:]
         bad_nos = valid[:-4] + struct.pack('<f', float('nan'))
         bad_magic = cpf2[:4] + valid[4:]
         other_car = performance(car ^ 1, donor)
         pin = self.outputs[0] / 'PERFORMANCE.BIN'
-        for data, version in ((old, 1), (cpf2, 2), (valid, 3), (valid[:-1], 0),
+        for data, version in ((old, 1), (cpf2, 2), (valid, 3), (spline, 4), (spline[:-4], 0), (valid[:-1], 0),
                               (bad_count, 0), (bad_nos, 0), (bad_magic, 0), (other_car, 0)):
             with self.subTest(data=len(data), checksum=hashlib.sha256(data).hexdigest()[:8]):
                 pin.write_bytes(data)

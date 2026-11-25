@@ -110,7 +110,8 @@ def main():
             thread_file = tmp / 'threads.c'; thread_file.write_text(changes.get('threads', threads))
             harness.write_text(changes.get('boot', boot) + '\n' + (ROOT / 'runtime/server_loader_test.c').read_text())
             exe = tmp / name
-            cmd = ['clang', '-O1', '-g', '-w', '-DNFS_SERVER_LINKED=1', '-I'+str(ROOT/'runtime'),
+            cmd = ['clang', '-O1', '-g', '-w', '-DNFS_SERVER_LINKED=1',
+                   str(ROOT/'runtime/blackbox.c'), str(ROOT/'runtime/blackbox_errors.c'), '-I'+str(ROOT/'runtime'),
                    '-I'+str(ROOT/'recomp'), '-I'+str(ROOT/'recomp/out'), str(harness), str(loader),
                    str(ROOT/'runtime/heap.c'), str(ROOT/'runtime/private_cars_public.c'), str(ROOT/'runtime/car_catalog.c'), str(save_stubs), str(thread_file), str(ws_file), str(archive),
                    '-Wl,-dead_strip', '-o', str(exe)]

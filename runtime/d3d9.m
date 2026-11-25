@@ -11,6 +11,7 @@
 #include <stdlib.h>
 
 #include "d3d9_internal.h"
+#include "d3d9_constant_state.h"
 #include "envcube.m"
 #include "realworld_materials.h"
 #include "materials.h"
@@ -37,6 +38,7 @@ static uint32_t vt_d3d, vt_device, vt_texture, vt_cube, vt_volume, vt_surface, v
 
 static uint32_t *free_slots;                          // objs[] indices of destroyed objects
 static unsigned nfree_slots;
+static uint64_t resource_serial;
 static Obj *new_obj(int kind, uint32_t vtable) {
     uint32_t i;
     if (nfree_slots) i = free_slots[--nfree_slots];
@@ -46,6 +48,8 @@ static Obj *new_obj(int kind, uint32_t vtable) {
     }
     Obj *o = calloc(1, sizeof *o);
     o->kind = kind;
+    if (resource_serial == UINT64_MAX) abort();
+    o->resource_id = ++resource_serial;
     o->refs = 1;
     o->guest = gmalloc(16);
     M32(o->guest) = vtable;
@@ -129,7 +133,7 @@ uint32_t level_rows(uint32_t f, uint32_t h) { return is_dxt(f) ? (h + 3) / 4 : h
 uint32_t mipdim(uint32_t v, uint32_t l) { v >>= l; return v ? v : 1; }
 
 // ---------------- device state ----------------
-Device dev;
+Device dev = {.ver_vsc = 1, .ver_psc = 1, .ver_vsi = 1, .ver_psi = 1, .ver_vsb = 1, .ver_psb = 1};
 id<MTLDevice> mtl;
 id<MTLCommandQueue> queue;
 CAMetalLayer *layer;
@@ -507,7 +511,8 @@ static int d_CheckDeviceFormat(Cpu *c) {       // (this, adapter, devtype, adapt
     // depth surfaces; depth textures (hardware shadow maps, which the game enables on NVIDIA when D24S8 passes) for
     // D24S8 / D24X8 / D16: rendered to as depth targets and sampled with a compare sampler (render.m)
     if (depth) RET((usage & 2) && (rtype == 1 || (rtype == 3 && (f == 75 || f == 77 || f == 80))) ? D3D_OK : D3DERR_NOTAVAILABLE, 7);
-    static const uint32_t ok[] = {21, 22, 23, 24, 25, 26, 28, 32, 33, 34, 36, 50, 51, 60, 64, 111, 112, 113, 114, 115, 116,
+    // V8U8 (60) and V16U16 (64) are left out: they have no converter, so a texture in them would upload black
+    static const uint32_t ok[] = {21, 22, 23, 24, 25, 26, 28, 32, 33, 34, 36, 50, 51, 111, 112, 113, 114, 115, 116,
                                   0x31545844, 0x32545844, 0x33545844, 0x34545844, 0x35545844};
     for (unsigned i = 0; i < sizeof ok / sizeof *ok; ++i)
         if (ok[i] == f) {
@@ -1097,14 +1102,16 @@ static int v_GetPixelShader(Cpu *c) { M32(arg(c, 1)) = dev.ps; if (dev.ps) ++obj
 #define CONST_FN(name, arr, lim, w)                                                                  \
     static int v_Set##name(Cpu *c) {                                                                 \
         uint32_t s = arg(c, 1), n = arg(c, 3);                                                       \
-        if (s + n > lim) RET(D3DERR_INVALIDCALL, 4);                                                 \
-        memcpy(&dev.arr[s], G + arg(c, 2), (size_t)n * (w));                                         \
-        if (!++dev.ver_##arr) dev.ver_##arr = 1;                                                     \
+        if (s > lim || n > lim - s) RET(D3DERR_INVALIDCALL, 4);                                      \
+        if (n && memcmp(&dev.arr[s], G + arg(c, 2), (size_t)n * (w))) {                               \
+            memcpy(&dev.arr[s], G + arg(c, 2), (size_t)n * (w));                                     \
+            if (!++dev.ver_##arr) dev.ver_##arr = 1;                                                 \
+        }                                                                                          \
         RET(D3D_OK, 4);                                                                              \
     }                                                                                                \
     static int v_Get##name(Cpu *c) {                                                                 \
         uint32_t s = arg(c, 1), n = arg(c, 3);                                                       \
-        if (s + n > lim) RET(D3DERR_INVALIDCALL, 4);                                                 \
+        if (s > lim || n > lim - s) RET(D3DERR_INVALIDCALL, 4);                                      \
         memcpy(G + arg(c, 2), &dev.arr[s], (size_t)n * (w));                                         \
         RET(D3D_OK, 4);                                                                              \
     }
@@ -1114,6 +1121,23 @@ CONST_FN(VertexShaderConstantI, vsi, 16, 16)
 CONST_FN(PixelShaderConstantI, psi, 16, 16)
 CONST_FN(VertexShaderConstantB, vsb, 16, 4)
 CONST_FN(PixelShaderConstantB, psb, 16, 4)
+
+static const uint32_t constant_slots[2][3] = {{98, 96, 94}, {113, 111, 109}};
+static uint32_t constant_setters[2][3];   // original host thunks, saved before guest interception
+int d3d9_constants_equal(uint32_t device, int ps, uint32_t set, uint32_t start,
+                         uint32_t count, const void *data) {
+    if (!dev.self || device != dev.self->guest || ps < 0 || ps > 1 || set > 2 || !data) return 0;
+    uint32_t vt = M32(device);
+    if (!vt || !constant_setters[ps][set] ||
+        M32(vt + 4 * constant_slots[ps][set]) != constant_setters[ps][set]) return 0;
+    uint32_t limit = set == 2 ? (ps ? 224 : 256) : 16;
+    if (start > limit || count > limit - start) return 0;
+    const void *base = set == 2 ? (const void *)(ps ? dev.psc : dev.vsc)
+                     : set == 1 ? (const void *)(ps ? dev.psi : dev.vsi)
+                                : (const void *)(ps ? dev.psb : dev.vsb);
+    size_t width = set == 0 ? 4 : 16;
+    return !memcmp((const uint8_t *)base + start * width, data, count * width);
+}
 static int v_SetStreamSource(Cpu *c) {         // (this, stream, vb, offset, stride)
     uint32_t s = arg(c, 1);
     if (s >= 16) RET(D3DERR_INVALIDCALL, 5);
@@ -1245,6 +1269,8 @@ static void d3d9_init(void) {
     done = 1;
     vt_d3d = make_vtable("IDirect3D9", n_d3d, N(n_d3d), i_d3d);
     vt_device = make_vtable("IDirect3DDevice9", n_device, N(n_device), i_device);
+    for (int ps = 0; ps < 2; ++ps) for (int set = 0; set < 3; ++set)
+        constant_setters[ps][set] = M32(vt_device + 4 * constant_slots[ps][set]);
     vt_texture = make_vtable("IDirect3DTexture9", n_texture, N(n_texture), i_texture);
     vt_cube = make_vtable("IDirect3DCubeTexture9", n_cube, N(n_cube), i_cube);
     vt_volume = make_vtable("IDirect3DVolumeTexture9", n_volume, N(n_volume), i_volume);

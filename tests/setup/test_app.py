@@ -478,10 +478,10 @@ class AppTests(unittest.TestCase):
             binary = compile_app(source)
             rows = json.loads(subprocess.check_output([binary, '--disc-input-test'], text=True))
             passed = 0
-            for row, version, exe in zip(rows, ('1.3', '1.4'), ('speed.exe', 'NFSC.exe')):
+            for row, version, exe in zip(rows, ('1.3', '1.4'), ('a speed.exe that has the version 1.3 code (the one on the discs and in the update is copy-protected)', 'your compatible 1.4 NFSC.exe (the one on the disc is copy-protected)')):
                 command = row['args']
                 passed += (row['before'] == '' and row['after'] == 'check'
-                           and row['instructions'] == f'A disc install needs three things: the disc (or a copy of its files), the official {version} update, and the {exe} from that update. Choose all three, then press Check.'
+                           and row['instructions'] == f'A disc install needs three things: the disc (or a copy of its files), the official {version} update, and {exe}. Choose all three, then press Check.'
                            and command[command.index('--pc-disc') + 1] == '/disc.iso')
             return passed
 

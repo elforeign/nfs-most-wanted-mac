@@ -2,12 +2,13 @@
 #include "render_internal.h"
 #include "sign_diag.h"
 #include "brightness.h"
+#include "rt_scene.h"
 #include "hdr_output.h"
 #import <Cocoa/Cocoa.h>
 #include "settings.h"
 #include "framecap.h"
 #include "cliprec.h"
-#include "roam_online.h"
+#include <stdatomic.h>
 #include <errno.h>
 #include <time.h>
 
@@ -82,7 +83,6 @@ void render_presentation_stats(RenderPresentation *out) {
     static const int limits[] = {0, 120, 60, 40};
     int choice = settings_get("graphics.frame_rate_limit");
     int limit = choice >= 0 && choice < 4 ? limits[choice] : 0;
-    limit = roam_online_limit(limit, atomic_load_explicit(&roam_online_active, memory_order_relaxed));
     pthread_mutex_lock(&presentation_mu);
     presentation.limit = limit;
     presentation.refresh_ms = refresh_ms;
@@ -117,10 +117,9 @@ static void presented(id<MTLDrawable> drawable) {
     }
     pthread_mutex_unlock(&presentation_mu);
 }
-// The game loop's frame duration under the limit (pacing.c, looppace.h), ms; 0 when Off. Online keeps its own cap in
-// render_present, so the loop isn't paced twice.
+// The game loop's frame duration under the limit (pacing.c, looppace.h), ms; 0 when Off.
 double render_loop_limit_ms(void) {
-    if (!mtl || atomic_load_explicit(&roam_online_active, memory_order_relaxed)) return 0;
+    if (!mtl) return 0;
     RenderPresentation p;
     render_presentation_stats(&p);
     return p.limit > 0 ? p.duration_ms : 0;
@@ -576,36 +575,6 @@ static void present_show(PresentTiming timing) {
 
 void render_present(void) {
     if (!mtl) return;
-    // Also bound submitted frames when a background/occluded window has no drawable.
-    // Keep the scheduled slot through ordinary wake/GIL delays; a full-period
-    // overrun (including a pause) rebases so a real stall cannot cause a burst.
-    static uint64_t online_deadline;
-    static int online_limit;
-    if (atomic_load_explicit(&roam_online_active, memory_order_relaxed)) {
-        RenderPresentation policy; render_presentation_stats(&policy);
-        uint64_t now = host_ticks();
-        uint64_t period = 1000000000ull / (unsigned)policy.limit;
-        if (!online_deadline || online_limit != policy.limit) online_deadline = now;
-        else {
-            online_deadline += period;
-            if (now >= online_deadline && now - online_deadline >= period) online_deadline = now;
-        }
-        online_limit = policy.limit;
-        if (online_deadline > now) {
-            uint64_t wait_started = now;
-            gil_release();
-            while ((now = host_ticks()) < online_deadline) {
-                uint64_t remaining = online_deadline - now;
-                struct timespec t = {.tv_sec=(time_t)(remaining / 1000000000), .tv_nsec=(long)(remaining % 1000000000)};
-                if (nanosleep(&t, NULL) && errno != EINTR) break;
-            }
-            uint64_t woke = host_ticks(); gil_acquire();
-            now = host_ticks();
-            diag_idle_ns[IDLE_SLEEP] += woke - wait_started;
-            diag_idle_ns[IDLE_GIL] += now - woke;
-            if (now >= online_deadline && now - online_deadline >= period) online_deadline = now;
-        }
-    } else { online_deadline = 0; online_limit = 0; }
     frame_pool_cycle();
     PresentTiming timing = present_timing_begin(frame_serial);
     if (bb_rt.ms && (probe_sig & PROBE_MSAA)) bb_rt.stale = resolve_magenta = 1;   // BOOT_DIAG_PROBE msaa (probe.m)
@@ -614,6 +583,7 @@ void render_present(void) {
     end_pass();
     ensure_cmd();
     void probe_present(id<MTLCommandBuffer> cb, id<MTLTexture> shown);
+    if (rt_scene_enabled()) rt_scene_flush(cmd);
     probe_present(cmd, backbuffer_tex);   // BOOT_DIAG_PROBE: what is shown, captured (probe.m)
     int show = present_copy();
     if (!show) blackbox_render_present(frame_serial, BB_PRESENT_SUPPRESSED, 0, 0, 0, 0);

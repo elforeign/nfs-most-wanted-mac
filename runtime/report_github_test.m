@@ -127,7 +127,7 @@ const char *report_last_path(void) { return fixture ? fixture.fileSystemRepresen
 
 #if defined(NFS_PUBLIC) && NFS_PUBLIC && !defined(REPORT_TARGET_NO_UNIT)
 static NSDictionary *Identity(void) {
-    return @{@"home":@"/Volumes/TestHomes/playerone", @"user":@[@"playerone", @"Example Player"],
+    return @{@"home":@"/Volumes/TestHomes/playerone", @"user":@[@"playerone", @"Synthia Fixtureson"],
         @"computer":@[@"My Test Mac", @"test-mac.local"], @"serial":@[@"C02TEST12345"], @"wifi":@[@"Secret Network"]};
 }
 static NSString *Summary(void) {
@@ -143,14 +143,14 @@ static NSString *Events(void) {
 static void RedactionTests(void) {
     NSDictionary *idn = Identity();
     NSArray *inputs = @[@"/Volumes/TestHomes/playerone/file", [NSString pathWithComponents:@[@"/", @"Users", @"tester", @"log"]], [NSString pathWithComponents:@[@"/", @"home", @"tester", @"log"]],
-        @"playerone Example Player", @"My Test Mac test-mac.local", @"C02TEST12345",
+        @"playerone Synthia Fixtureson", @"My Test Mac test-mac.local", @"C02TEST12345",
         @"12345678-abcd-1234-5678-123456789abc", @"serial=PRIVATE123", @"UUID=PRIVATE456", @"s/n: PRIVATE789",
         @"192.168.1.2", @"2001:db8:85a3::8a2e:370:7334", @"fe80::1%en0", @"::1", @"::ffff:192.0.2.1",
         @"example.person+tag@example.invalid", @"SSID=\"Some Wifi Name\"", @"Wi-Fi: Some Wifi Name",
         @"wireless network='Another Name'", @"Secret Network"];
     for (NSString *value in inputs) CHECK(![Redact(value, idn) isEqual:value]);
     NSString *all = Redact([inputs componentsJoinedByString:@"\n"], idn);
-    for (NSString *secret in @[@"playerone", @"otheruser", @"Example Player", @"My Test Mac", @"test-mac.local", @"C02TEST12345",
+    for (NSString *secret in @[@"playerone", @"otheruser", @"Synthia Fixtureson", @"My Test Mac", @"test-mac.local", @"C02TEST12345",
         @"12345678-abcd", @"PRIVATE123", @"PRIVATE456", @"PRIVATE789", @"192.168", @"2001:db8", @"fe80::1", @"::1", @"::ffff",
         @"example.person", @"Some Wifi Name", @"Another Name", @"Secret Network"]) CHECK(![all containsString:secret]);
     CHECK(![all containsString:@"~/file"] && ![all containsString:@"~/log"]);

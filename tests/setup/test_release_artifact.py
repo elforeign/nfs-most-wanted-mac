@@ -22,6 +22,10 @@ nonempty reviewed policy, and the exported build's native save proof. Missing
 Setup/input still exits 3. Offline guard proof: 4 checks pass; failed driver,
 incomplete receipt, wrong public-code pin, empty policy and changed trust artifact reject 5/5.
 
+Shipped update verifier: missing audit fails 1/1 new guard test; fixed accepts 1/1
+and rejects 3/3 missing-code/pin-mismatch/signature-bypass payloads. The artifact
+audit uses shipped Python for native/Python pin parity and signed admission.
+
 Only real tools/builds/signatures are used. The driver selects Command Line Tools
 in the backend's child environment: production deliberately filters inherited
 DEVELOPER_DIR. It does not replace preflight, compilation, bundling or installation.
@@ -327,6 +331,19 @@ def audit_carbon_capabilities(source, python, scratch, env, exe=None):
     print('exported Carbon capabilities: PASS (table-free layout, native bindings, settings selectors)')
 
 
+def audit_update_verifier(source, python, scratch, env):
+    """Exercise the shipped verifier and native/Python pins with shipped Python."""
+    paths = ('runtime/pub_update_manifest_test.py', 'runtime/pub_update_manifest.h',
+             'runtime/pub_update_keys.h', 'tools/setup_kit/update_manifest.py')
+    for rel in paths:
+        require(nonempty(source / rel), 'missing shipped update verifier: ' + rel)
+    result = subprocess.run([str(python), '-I', str(source / paths[0])], cwd=scratch,
+                            env=env, capture_output=True, text=True, timeout=120)
+    (scratch / 'update-verifier.log').write_text(result.stdout + result.stderr)
+    require(result.returncode == 0 and 'pub_update_manifest_test PASS' in result.stdout,
+            'shipped update verifier audit failed; inspect update-verifier.log')
+
+
 def audit(resources, pc, scratch, expected_version, legacy=None, x360=None, game='mw'):
     product = PRODUCTS[game]
     require(game == 'mw' or not legacy, 'legacy replacement is a Most Wanted audit part')
@@ -365,6 +382,7 @@ def audit(resources, pc, scratch, expected_version, legacy=None, x360=None, game
     env = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', HOME=str(home), CFFIXED_USER_HOME=str(home), TMPDIR=str(tmp),
                LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
                DEVELOPER_DIR=str(CLT))
+    audit_update_verifier(source, python, scratch, env)
     if game == 'mw':  # the added-car commands belong to Most Wanted's app
         audit_car_commands(source, python, scratch, env)
     # Prove this toolchain has no offline Metal compiler; never change xcode-select.

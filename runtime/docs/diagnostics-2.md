@@ -69,9 +69,9 @@ race run: access 80000000, disposition 3), the X360 extract is read-only, logs g
 kernel objects (all are in-process: `threads.c`) or shared caches. Only the GPU, the Metal compiler service and the CPU
 are shared.
 
-Release-host offline checks: run `NFS_TESTS_NOSKIP=1 runtime/offline_tests.sh` before a release,
-or export `NFS_TESTS_NOSKIP=1` when running the gate. The default remains permissive for missing
-local inputs. In strict mode an exit-3 SKIP for any name in the `release_critical` list in `runtime/offline_tests.sh`
+Release-critical offline checks are strict by default in the suite and ordinary gates.
+Development hosts can use `NFS_TESTS_NOSKIP=0 runtime/offline_tests.sh` to permit missing local inputs.
+In strict mode an exit-3 SKIP for any name in the `release_critical` list in `runtime/offline_tests.sh`
 is a FAIL, with its log retained by the normal failure reporter; other skips remain nonfatal.
 The list covers the 4.4 feature checks, including translated paid Max Performance checkout,
 presenter-to-recorder delivery, screen detection and the existing codec/GPU checks. The release

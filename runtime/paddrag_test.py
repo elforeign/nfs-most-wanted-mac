@@ -267,6 +267,7 @@ const char *diag_dir="";
 const char *userdata_dir(void) { return scratch; }
 static int menu_open;
 int portmenu_is_open(void) { return menu_open; }
+int portmenu_open_if_racing(const char *why) { (void)why; return 0; }
 int pad_count(void) { return 1; }
 int user32_pad_layout_xbox(void) { return 1; }
 int pad_identity(char *name,size_t n) { snprintf(name,n,"Controller (DualSense)"); return PAD_KIND_DUALSENSE; }

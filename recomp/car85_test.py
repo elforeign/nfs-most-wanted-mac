@@ -121,6 +121,7 @@ void f_0045C090_orig(Cpu *c) { c->esp += 4; }
 void f_006794E0_orig(Cpu *c) { (void)c; abort(); }
 void f_00683EB0_orig(Cpu *c) { (void)c; abort(); }
 void f_00678CE0_orig(Cpu *c) { (void)c; abort(); }
+void f_00672FE0_orig(Cpu *c) { (void)c; abort(); }
 void f_005816B0_orig(Cpu *c) { c->eax=84; c->esp+=4; }
 void f_00581790_orig(Cpu *c) { c->eax=0; c->esp+=4; }
 void f_00591160_orig(Cpu *c) { c->eax=0; c->esp+=4; }

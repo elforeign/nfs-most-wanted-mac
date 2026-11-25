@@ -1,9 +1,12 @@
 """Native update delivery, real loopback HTTP + read-only DMGs and ad-hoc Setup signatures.
+Signed admission failing-first: bypass ACCEPT=4 / intact REFUSE=4 before DMG/mount
+(two substitutions per product); missing/malformed proof REFUSE=8; unset pins REFUSE=2.
+Transport completion bypass also removes the independent signed DMG size/hash barrier.
 Proof: 2 good release flows verify; 12 hostile releases reject; 8 guard mutants and
 1 packaging mutant are detected (including checksum bypass and interrupted promotion).
 Review proof: 7 good protections pass / 7 broken controls detected: ACL, open-fd
 validation, losing lock, busy detach, SIGTERM, partial attach and progress-failure cleanup/retry.
-Expected-size mismatch, interrupted process, clean Retry and job locking also pass.
+Untrusted feed size hints, interrupted process, clean Retry and job locking also pass.
 Transport proof: 8 prefix sizes reject before promotion with the completion guard;
 its mutant promotes all 8. Before the delivery barrier, the 1-byte prefix delivered
 0 bytes and hit the checksum guard instead, masking the disabled completion guard.
@@ -37,6 +40,7 @@ CAP = 1024 * 1024
 # The identity tools/installer/build_installer.sh --game carbon writes into the Carbon Setup's Info.plist; written
 # here, not read from the helper, so a helper expecting another identity fails Carbon delivery.
 CARBON_SETUP_ID = 'org.nfscarbon-native.setup'
+SIGNER = None
 
 
 def run(args, **kwargs):
@@ -45,8 +49,59 @@ def run(args, **kwargs):
     return result
 
 
+def fixture_headers(root):
+    """Clone production primitives; only the scratch key header gets throwaway pins."""
+    global SIGNER
+    headers = root / 'fixture-headers'
+    headers.mkdir(exist_ok=True)
+    key = headers / 'key.pem'
+    if not key.exists():
+        run(['/usr/bin/openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt',
+             'ec_paramgen_curve:prime256v1', '-out', key])
+        key.chmod(0o600)
+        public = subprocess.run(['/usr/bin/openssl', 'pkey', '-in', key, '-pubout', '-outform', 'DER'],
+                                capture_output=True, check=True).stdout[-65:]
+        assert len(public) == 65 and public[0] == 4
+        (headers / 'pub_update_keys.h').write_text('#include <stdint.h>\nstatic const uint8_t test_pin[65] = {' +
+            ','.join(str(b) for b in public) + '};\nstatic const uint8_t *const PUM_PINS[2] = {test_pin, test_pin};\n')
+        shutil.copy2(ROOT / 'pub_update_manifest.h', headers / 'pub_update_manifest.h')
+    SIGNER = key
+    return headers
+
+
+def sign_bytes(raw, key=None):
+    result = subprocess.run(['/usr/bin/openssl', 'dgst', '-sha256', '-sign', str(key or SIGNER)],
+                            input=raw, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def wire_proof(data, checksum, product='mw', version='4.2.0'):
+    repo = 'elforeign/nfs-carbon-mac' if product == 'carbon' else 'elforeign/nfs-most-wanted-mac'
+    prefix = 'NFS-Carbon-Native-Setup' if product == 'carbon' else 'NFS-Most-Wanted-Native-Setup'
+    asset = f'{prefix}-v{version}.dmg'
+    return (f'NFS-UPDATE-1\nrepo={repo}\nproduct={product}\nversion={version}\ntag=v{version}\n'
+            f'dmg={asset}|{len(data)}|{hashlib.sha256(data).hexdigest()}\n'
+            f'checksum={asset}.sha256|{len(checksum)}|{hashlib.sha256(checksum).hexdigest()}\n').encode()
+
+
+def retain_proof(job, headers, data=b'fixture image', product='mw', version='4.2.0'):
+    prefix = 'NFS-Carbon-Native-Setup' if product == 'carbon' else 'NFS-Most-Wanted-Native-Setup'
+    asset = f'{prefix}-v{version}.dmg'
+    checksum = (hashlib.sha256(data).hexdigest() + '  ' + asset + '\n').encode()
+    raw = wire_proof(data, checksum, product, version)
+    for name, content in ((asset, data), (asset+'.sha256', checksum),
+                          (asset+'.manifest', raw), (asset+'.manifest.sig', sign_bytes(raw, headers/'key.pem'))):
+        (job/name).write_bytes(content)
+        (job/name).chmod(0o600)
+    return asset
+
+
 def build(root, name, patch=None, testing=True, game="mw"):
     source = (ROOT / 'pub_update_helper.m').read_text()
+    if testing:
+        fixture_headers(root)
+        source = source.replace('"pub_update_manifest.h"', '"fixture-headers/pub_update_manifest.h"')
     if patch:
         for before, after in (patch if isinstance(patch, list) else [patch]):
             assert source.count(before) == 1, before
@@ -56,7 +111,7 @@ def build(root, name, patch=None, testing=True, game="mw"):
     exe = root / name
     run(['clang', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
          *(['-DPUB_UPDATE_HELPER_TESTING=1'] if testing else []),
-         *(['-DNFS_GAME=2'] if game == 'carbon' else []), '-I', ROOT, path, '-framework', 'Foundation', '-o', exe])
+         *(['-DNFS_GAME=2'] if game == 'carbon' else []), '-I', ROOT, path, '-framework', 'Foundation', '-framework', 'Security', '-o', exe])
     return exe
 
 
@@ -74,7 +129,7 @@ def image(root, name, mode='good'):
     contents = app / 'Contents'
     (contents / 'MacOS').mkdir(parents=True)
     (contents / 'Resources').mkdir()
-    (contents / 'Resources/sealed.txt').write_text('original contents\n')
+    (contents / 'Resources/sealed.txt').write_text('substituted contents\n' if mode == 'replacement' else 'original contents\n')
     info = dict(CFBundleIdentifier=CARBON_SETUP_ID if 'Carbon' in SETUP else 'org.nfsmw-native.setup', CFBundleExecutable='Setup',
                 CFBundlePackageType='APPL', CFBundleName='Setup', CFBundleShortVersionString='4.2.0',
                 CFBundleVersion='4.2.0')
@@ -110,6 +165,8 @@ class Server(http.server.ThreadingHTTPServer):
         self.slow_finish = threading.Event()
         self.partial_path = None
         self.truncated_delivered = False
+        self.proof_data = None
+        self.proof_fault = None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -121,17 +178,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         server = getattr(self.server, 'main', self.server)
         mode = server.mode
         server.requests.append((self.path, self.headers.get('Range')))
-        if self.path == PREFIX + SUM:
-            data = server.data
-            if mode == 'truncated':
-                data = truncated_prefix(data)  # only transport completion rejects this checksum-matched prefix
-            digest = '0' * 64 if mode == 'checksum' else hashlib.sha256(data).hexdigest()
-            name = 'other.dmg' if mode == 'missing' else ASSET
-            body = (digest + '  ' + name + '\n').encode()
-            if mode == 'duplicate':
-                body *= 2
-            if mode == 'sum-oversize':
-                body += b' ' * 4096
+        data = truncated_prefix(server.data) if mode == 'truncated' else server.data
+        if mode in ('oversize', 'stream-oversize'):
+            data = b'x' * (CAP + 1)
+        digest = '0' * 64 if mode == 'checksum' else hashlib.sha256(data).hexdigest()
+        name = 'other.dmg' if mode == 'missing' else ASSET
+        checksum = (digest + '  ' + name + '\n').encode()
+        if mode == 'duplicate': checksum *= 2
+        if mode == 'sum-oversize': checksum += b' ' * 4096
+        if self.path in (PREFIX + SUM, PREFIX + ASSET + '.manifest', PREFIX + ASSET + '.manifest.sig'):
+            proof_data = server.proof_data if server.proof_data is not None else data + bytes(128) if mode == 'truncated' else data
+            proof_sum = ((hashlib.sha256(proof_data).hexdigest() + '  ' + ASSET + '\n').encode()
+                         if server.proof_data is not None else checksum)
+            raw = wire_proof(proof_data, proof_sum, 'carbon' if 'Carbon' in ASSET else 'mw')
+            signature = sign_bytes(raw)
+            if server.proof_fault == 'rewritten':
+                # Repair every manifest field while keeping the original signature.
+                raw = wire_proof(data, checksum, 'carbon' if 'Carbon' in ASSET else 'mw')
+            if server.proof_fault == 'signature': signature = b'bad signature'
+            if server.proof_fault == 'manifest-oversize': raw = b'x' * 4097
+            if server.proof_fault == 'signature-oversize': signature = b'x' * 81
+            if server.proof_fault == 'missing' and self.path.endswith('.sig'):
+                self.send_error(404); return
+            body = checksum if self.path == PREFIX + SUM else signature if self.path.endswith('.sig') else raw
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -255,7 +324,7 @@ def bundle_check(root, release):
         target = runtime.parent / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT.parent / name, target)
-    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_rehearsal.h', 'pub_update_write.h', 'bundle_roots.h', 'game_select.h'):
+    for name in ('pub_update_helper.m', 'pub_update.m', 'pub_update_core.h', 'pub_update_manifest.h', 'pub_update_keys.h', 'pub_update_rehearsal.h', 'pub_update_write.h', 'bundle_roots.h', 'game_select.h'):
         shutil.copy2(ROOT / name, runtime / name)
     shutil.copy2(release, runtime / 'boot')
     (runtime / 'app_icon.m').touch()
@@ -359,7 +428,7 @@ def review_checks(root, exe, server, data, good_data):
     for good in (True, False):
         patches = [(opened, exchange)]
         if not good:
-            patches.append(('fstat(fd, &st)', 'stat([[NSProcessInfo.processInfo.arguments objectAtIndex:1] fileSystemRepresentation], &st)'))
+            patches.append(('if (fstat(fd, &st) || !S_ISDIR', 'if (stat([[NSProcessInfo.processInfo.arguments objectAtIndex:1] fileSystemRepresentation], &st) || !S_ISDIR'))
         binary = build(root, 'opened-' + str(good), patches)
         job = root / ('directory-' + str(good)); job.mkdir(mode=0o700)
         result = execute(binary, job)
@@ -484,6 +553,51 @@ def review_checks(root, exe, server, data, good_data):
     print('REVIEW: 7 good protections PASS; 7 broken controls detected; cleanup/retry PASS')
 
 
+
+def signed_admission_checks(root, exe, server, original, substitute, game='mw'):
+    """Remove only signed admission; the substituted Setup still passes legacy checks."""
+    source = (ROOT / 'pub_update_helper.m').read_text()
+    start = source.index('            PUMManifest proof = Authenticate(manifest, signature);')
+    end = source.index('            Progress(@"verifying", @"Verifying the release checksum', start)
+    legacy = ('            (void)Authenticate;\n            uint64_t size = 0;\n'
+              '            Download(checksum, ChecksumCap, 0);\n'
+              '            NSString *hash = ExpectedHash();\n'
+              '            NSDictionary *download = Download(asset, AssetCap, 0);\n')
+    bypass = build(root, game+'-unsigned-admission', (source[start:end], legacy), game=game)
+    server.proof_data = original
+    try:
+        # Failing first: an unsigned substitution and a rewritten proof each pass
+        # when the signed admission boundary is removed.
+        for fault in (None, 'rewritten'):
+            server.proof_fault = fault
+            outcome = invoke(bypass, root, server, substitute,
+                             job=root/(game+'-bypass-'+str(fault)))
+            assert outcome[0].returncode == 0 and outcome[1]['state'] == 'verified', outcome[:2]
+            outcome = invoke(exe, root, server, substitute,
+                             job=root/(game+'-admission-'+str(fault)))
+            assert rejected(outcome), outcome[:2]
+            assert not (outcome[2]/'mount').exists(), 'Hostile image reached mount'
+            assert not any(path == PREFIX+ASSET for path, _ in outcome[3]), outcome[3]
+        for fault in ('missing', 'signature', 'manifest-oversize', 'signature-oversize'):
+            server.proof_fault = fault
+            outcome = invoke(exe, root, server, original, job=root/(game+'-proof-'+fault))
+            assert rejected(outcome) and not (outcome[2]/'mount').exists(), outcome[:2]
+            assert not any(path == PREFIX+ASSET or path == PREFIX+SUM for path, _ in outcome[3]), outcome[3]
+        # Test the actual unset production pins over the same fixture transport.
+        unset_source = (ROOT/'pub_update_helper.m').read_text()
+        path = root/(game+'-unset.m'); path.write_text(unset_source)
+        unset = root/(game+'-unset')
+        run(['clang', '-fobjc-arc', '-Wno-deprecated-declarations', '-DPUB_UPDATE_HELPER_TESTING=1',
+             *(['-DNFS_GAME=2'] if game == 'carbon' else []), '-I', ROOT, path,
+             '-framework', 'Foundation', '-framework', 'Security', '-o', unset])
+        server.proof_fault = None
+        outcome = invoke(unset, root, server, original, job=root/(game+'-unset-job'))
+        assert rejected(outcome) and not (outcome[2]/'mount').exists(), outcome[:2]
+        print(game+' signed admission: bypass ACCEPT=2 / intact REFUSE=2 before DMG/mount; malformed/missing proof REFUSE=4; unset pins REFUSE=1')
+    finally:
+        server.proof_data = server.proof_fault = None
+
+
 def carbon_delivery(root):
     global ASSET, SUM, PREFIX, SETUP
     saved = ASSET, SUM, PREFIX, SETUP
@@ -494,10 +608,12 @@ def carbon_delivery(root):
     try:
         exe = build(root, 'carbon-helper', game='carbon')
         data = image(root, 'carbon-image')
+        substitute = image(root, 'carbon-replacement', 'replacement')
         with fixture() as server:
+            signed_admission_checks(root, exe, server, data, substitute, 'carbon')
             result, progress, _, requests = invoke(exe, root, server, data)
             assert result.returncode == 0 and progress['state'] == 'verified', progress
-            assert [x[0] for x in requests][:2] == [PREFIX + SUM, PREFIX + ASSET], requests
+            assert [x[0] for x in requests][:4] == [PREFIX + ASSET + '.manifest', PREFIX + ASSET + '.manifest.sig', PREFIX + SUM, PREFIX + ASSET], requests
             # A MW build cannot accept the Carbon asset or fetch from its repository.
             wrong = build(root, 'wrong-product-helper')
             assert rejected(invoke(wrong, root, server, data))
@@ -505,7 +621,7 @@ def carbon_delivery(root):
             stale = build(root, 'stale-carbon-id-helper', ('@"org.nfscarbon-native.setup"', '@"org.nfsc-native.setup"'), game='carbon')
             outcome = invoke(stale, root, server, data)
             assert rejected(outcome) and 'bundle identity' in outcome[1].get('message', ''), outcome[1]
-        print('Carbon delivery: verified=1; MW helper with Carbon asset refused=1; stale Carbon Setup id refused=1; Carbon repository requests=2')
+        print('Carbon delivery: verified=1; MW helper with Carbon asset refused=1; stale Carbon Setup id refused=1; Carbon repository requests=4')
     finally:
         ASSET, SUM, PREFIX, SETUP = saved
 
@@ -519,8 +635,9 @@ def main():
         # Exercise transport independently of DMG validity at eight buffer sizes.
         exe = build(root, 'helper')
         transport = build(root, 'transport-mutant',
-            ('if (!_failure && (error || !_received || (_total && _received != _total) || (_expected && _received != _expected)))',
-             'if (!_failure && NO && (error || !_received))'))
+            [('if (!_failure && (error || !_received || (_total && _received != _total) || (_expected && _received != _expected)))',
+             'if (!_failure && NO && (error || !_received))'),
+             ('if (!pum_asset_matches(&proof.dmg,', 'if (NO && !pum_asset_matches(&proof.dmg,')])
         with fixture() as server:
             for length in range(65536, 524289, 65536):
                 data = b'x' * (length + 128)
@@ -533,7 +650,7 @@ def main():
                     if not broken:
                         assert rejected(outcome), outcome[:2]
         print('TRANSPORT: 8 complete prefixes; good REJECT before promotion / broken PROMOTED')
-        images = {mode: image(root, 'image-' + mode, mode) for mode in ('good', 'unsigned', 'modified', 'version')}
+        images = {mode: image(root, 'image-' + mode, mode) for mode in ('good', 'unsigned', 'modified', 'version', 'replacement')}
         release = build(root, 'release', testing=False)
         assert 'PUB_UPDATE_HELPER_TEST_BASE_URL' not in run(['/usr/bin/strings', release]).stdout
         assert 'PUB_UPDATE_REHEARSAL_BASE_URL' not in run(['/usr/bin/strings', release]).stdout
@@ -541,13 +658,14 @@ def main():
         assert names == [ASSET, SUM]
         bundle_check(root, release)
         with fixture() as server:
+            signed_admission_checks(root, exe, server, images['good'], images['replacement'])
             review_checks(root, exe, server, images['version'], images['good'])
             for mode in ('good', 'redirect'):
                 result, progress, job, requests = invoke(exe, root, server, images['good'], mode, args=[str(len(images['good']))])
                 assert result.returncode == 0 and progress['state'] == 'verified', result.stderr + '\n' + (job / 'helper.log').read_text()[-2000:]
                 assert progress['sha256'] == hashlib.sha256(images['good']).hexdigest()
                 assert not (job / (ASSET + '.part')).exists()
-                assert [x[0] for x in requests][:2] == [PREFIX + SUM, PREFIX + ASSET]
+                assert [x[0] for x in requests][:4] == [PREFIX + ASSET + '.manifest', PREFIX + ASSET + '.manifest.sig', PREFIX + SUM, PREFIX + ASSET]
                 assert all(r is None for _, r in requests)
             bad_modes = ('checksum', 'truncated', 'foreign', 'oversize', 'stream-oversize', 'missing',
                          'duplicate', 'sum-oversize', 'redirect-loop')
@@ -562,7 +680,7 @@ def main():
             for mode in ('unsigned', 'modified', 'version'):
                 assert rejected(invoke(exe, root, server, images[mode], job=root / ('job-image-' + mode))), mode
                 print(mode, 'good REJECT')
-            assert rejected(invoke(exe, root, server, images['good'], args=[str(len(images['good']) + 1)]))
+            assert invoke(exe, root, server, images['good'], args=[str(len(images['good']) + 1)])[0].returncode == 0
             # Retry owns cleanup of a previously verified mount, even if the caller exited.
             retained = root / 'retained-mount'
             try:
@@ -578,7 +696,7 @@ def main():
             (retry / 'progress.json').write_text('{"state":"verified"}')
             result, progress, _, requests = invoke(exe, root, server, images['good'], job=retry)
             assert result.returncode == 0 and progress['state'] == 'verified', progress
-            assert len(requests) == 2 and all(r is None for _, r in requests)
+            assert len(requests) == 4 and all(r is None for _, r in requests)
             # A process killed with a partial stream never publishes the DMG or a verified receipt.
             job = root / 'interrupted'
             job.mkdir(mode=0o700)
@@ -612,7 +730,7 @@ def main():
                 'version': ('![info[@"CFBundleVersion"] isEqual:version])', 'NO)'),
             }
             for name, patch in mutants.items():
-                mutant = build(root, 'broken-' + name, patch)
+                mutant = build(root, 'broken-' + name, [patch, ('if (!pum_asset_matches(&proof.dmg,', 'if (NO && !pum_asset_matches(&proof.dmg,')] if name == 'truncated' else patch)
                 mode = 'good' if name in ('signature', 'version') else name
                 data = images['unsigned'] if name == 'signature' else images['version'] if name == 'version' else images['good']
                 outcome = invoke(mutant, root, server, data, mode)
@@ -636,8 +754,11 @@ def main():
             for mode in ('oversize', 'stream-oversize'):
                 good = invoke(exe, root, server, images['good'], mode)
                 broken = invoke(mutant, root, server, images['good'], mode)
-                good_size = (good[2] / (ASSET + '.part')).stat().st_size
-                broken_size = (broken[2] / (ASSET + '.part')).stat().st_size
+                good_part = good[2] / (ASSET + '.part')
+                good_size = good_part.stat().st_size if good_part.exists() else 0
+                broken_path = broken[2] / (ASSET + '.part')
+                if not broken_path.exists(): broken_path = broken[2] / ASSET
+                broken_size = broken_path.stat().st_size
                 assert good_size <= CAP and broken_size > CAP, (mode, good_size, broken_size)
                 print(mode, 'good bounded %d, broken %d' % (good_size, broken_size))
         carbon_delivery(root)

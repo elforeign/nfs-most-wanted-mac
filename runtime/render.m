@@ -14,6 +14,7 @@
 #include "post_cuts.h"
 #include "sign_diag.h"
 #include "render_internal.h"
+#include "blackbox_errors.h"
 #include "decal_depth.h"
 #include "lampbatch.h"
 #include "alpha_to_coverage.h"
@@ -21,6 +22,7 @@
 #include "rain_cover.h"
 #include "underglow_render.h"
 #include "headlights.h"
+#include "rt_scene.h"
 #include "realworld_materials.h"
 #include "clearcoat.h"
 #if NFS_GAME == NFS_GAME_PRIVATE
@@ -566,6 +568,7 @@ static id<MTLBuffer> gpu_buf(Obj *b) {
 }
 
 void render_release(Obj *o) {
+    if (rt_scene_enabled()) rt_scene_forget(o->resource_id);
     if (o->kind == K_QUERY && o->q_state == 1) render_query_issue(o, 1);
     render_panes_changed(o);
     if (o->gpu && (o->kind == K_VB || o->kind == K_IB)) {
@@ -685,6 +688,7 @@ void render_init(void) {
     }
     NSError *err = nil;
     id<MTLLibrary> lib = blit_lib = [mtl newLibraryWithSource:[NSString stringWithUTF8String:blit_src] options:nil error:&err];
+    if (!lib) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, err.code, 0, 0, 0);
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = [lib newFunctionWithName:@"blit_vs"];
     pd.fragmentFunction = [lib newFunctionWithName:@"blit_fs"];
@@ -707,8 +711,10 @@ void render_init(void) {
     if (mat_water_port()) {                // the authored water's wave kernel and maps, before any frame
         NSError *err = nil;
         id<MTLLibrary> lib = [mtl newLibraryWithSource:@(water_port_kernel()) options:nil error:&err];
+        if (!lib) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, err.code, 0, 0, 0);
         id<MTLFunction> fn = [lib newFunctionWithName:@"port_water_waves"];
         water_port_pso = fn ? [mtl newComputePipelineStateWithFunction:fn error:&err] : nil;
+        if (fn && !water_port_pso) blackbox_error(BB_ERR_METAL, BB_OP_PIPELINE, err.code, 0, 0, 0);
         if (!water_port_pso) fprintf(stderr, "boot: water: port wave kernel failed, PC water kept: %s\n", err.localizedDescription.UTF8String);
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:256 height:256 mipmapped:YES];
         d.textureType = MTLTextureType2DArray; d.arrayLength = 4;
@@ -744,6 +750,7 @@ void render_init(void) {
 
 void render_resize(void) {
     if (!mtl) return;
+    if (rt_scene_enabled()) rt_scene_reset();
     if(fs_active)render_float_scene_final(0);
     render_float_scene_present_end();
     drop_ms_texture(&fs_composite_rt);fs_composite_rt=(RenderTex){0};
@@ -943,6 +950,7 @@ static void float_scene_ramp(void) {
     if(!pso || samples!=t.sampleCount) {
         NSString *src=@"#include <metal_stdlib>\nusing namespace metal;\nvertex float4 vs(uint v [[vertex_id]]){float2 p=float2((v<<1)&2,v&2);return float4(p*2-1,0,1);}\nfragment float4 fs(float4 p [[position]]){float x=floor(p.x)/128.0f;if(p.x>1025)return as_type<float4>(uint4(0x7fc00000u,0x7f800000u,0xff800000u,0x7fc00000u));return float4(x,x,x,1);}";
         NSError *error=nil;id<MTLLibrary> lib=[mtl newLibraryWithSource:hdrclip_world_source(src,UINT64_MAX,0,0) options:nil error:&error];
+        if (!lib) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, error.code, 0, 0, 0);
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[lib newFunctionWithName:@"vs"];pd.fragmentFunction=[lib newFunctionWithName:@"fs"];pd.colorAttachments[0].pixelFormat=t.pixelFormat;pd.rasterSampleCount=t.sampleCount;
         pso=pipeline_build(pd, __func__, &error);samples=t.sampleCount;
         if(!pso){diag_event("float scene ramp compile: %s",error.localizedDescription.UTF8String);return;}
@@ -964,6 +972,8 @@ enum { EB_STENCILREF = 1, EB_CULL = 2, EB_VIEWPORT = 4, EB_SCISSOR = 8, EB_BIAS 
 static struct {
     uint32_t have;
     void *pso, *dss, *ftex[16], *fsamp[16], *vtex[4], *vsamp[4], *cbuf[2];
+    void *vbuf[16];
+    uint32_t voff[16];
     uint32_t stencil_ref, cull, bias, slope, blend_color, coff[2];
     uint8_t decal_back;          // the bias holds decal_depth.m's push-back
     uint32_t ver_vsi, ver_vsb, ver_psi, ver_psb;
@@ -1436,6 +1446,7 @@ static int soft_proof_begin(id<MTLTexture> scene,id<MTLTexture> z) {
     if(!pso[samples]){
         NSString *s=[[NSString stringWithFormat:@"#define SMOKE_MSAA %d\n",samples>1] stringByAppendingString:[NSString stringWithUTF8String:soft_copy_msl]];
         NSError *error=nil;id<MTLLibrary> l=[mtl newLibraryWithSource:s options:nil error:&error];
+        if (!l) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, error.code, 0, 0, 0);
         MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];pd.vertexFunction=[l newFunctionWithName:@"copy_vs"];pd.fragmentFunction=[l newFunctionWithName:@"copy_fs"];
         pd.colorAttachments[0].pixelFormat=scene.pixelFormat;pd.rasterSampleCount=samples;
         if(l)pso[samples]=pipeline_build(pd, __func__, &error);
@@ -1861,7 +1872,7 @@ static ShaderLibrary *shader_libraries;
 static pthread_mutex_t shader_library_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t shader_library_done = PTHREAD_COND_INITIALIZER;
 // BOOT_DIAG only: count source compiles on the drawing thread, including FE/loading.
-static id<MTLLibrary> shader_library(NSString *source, MTLCompileOptions *options, NSError **error) {
+static id<MTLLibrary> shader_library(NSString *source, MTLCompileOptions *options, NSError **error, uint64_t key) {
     pthread_mutex_lock(&shader_library_mu);
     ShaderLibrary *s = shader_libraries;
     while (s && ![s->source isEqualToString:source]) s = s->next;
@@ -1878,6 +1889,7 @@ static id<MTLLibrary> shader_library(NSString *source, MTLCompileOptions *option
         diag_event("shader_compile: frame_sync=%llu frame=%llu", ++stat_sync_shader, (unsigned long long)frame_serial);
     }
     id<MTLLibrary> library = [mtl newLibraryWithSource:source options:options error:error];
+    if (!library) blackbox_error(BB_ERR_SHADER, BB_OP_LIBRARY, error && *error ? (*error).code : 0, key, 0, 0);
     pthread_mutex_lock(&shader_library_mu);
     s->library = library; s->error = *error; s->pending = 0;
     pthread_cond_broadcast(&shader_library_done);
@@ -1936,6 +1948,7 @@ static void compile_entry(ShaderEntry *e) {
     if (fogged && diag_on) diag_event("render: shader %016llX: fog clamp 2500 -> %g", (unsigned long long)e->key, (double)X360F_KMAXDIST_WORLD);
     free(fogged);
     if (rc != 0) {
+        blackbox_error(BB_ERR_SHADER, BB_OP_TRANSLATE, rc, e->key, 0, 0);
         fprintf(stderr, "boot: render: shader translation failed: %s\n", e->refl.error);
 #if NFS_GAME == NFS_GAME_PRIVATE
         if(diag_on)diag_event("PRIVATE SHADER REJECT profile=%s_%u_%u error=%s", e->tokens[0]>>16==0xFFFEu?"vs":"ps", (e->tokens[0]>>8)&255, e->tokens[0]&255, e->refl.error);
@@ -1950,20 +1963,21 @@ static void compile_entry(ShaderEntry *e) {
         if(edge) {free(rep);rep=edge;}
         id<MTLLibrary> lib = nil;
         if (rep) {
-            lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:rep],e->key,e->mat,e->variant), co, &err);
+            lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:rep],e->key,e->mat,e->variant), co, &err, e->key);
             if (!lib) { fprintf(stderr, "boot: render: replacement MSL compile failed, translation kept: %s\n", err.localizedDescription.UTF8String); e->mat = 0; }
             else { free(e->refl.msl); e->refl.msl = rep; e->refl.msl_len = strlen(rep); rep = NULL; }
             free(rep);
         }
         // A failed grass variant must never masquerade as a successful grass shader:
         // the caller falls back to the complete variant-0 PC draw, with PC bindings.
-        if (!lib && !e->variant) lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:e->refl.msl],e->key,e->mat,e->variant), co, &err);
+        if (!lib && !e->variant) lib = shader_library(hdrclip_world_source([NSString stringWithUTF8String:e->refl.msl],e->key,e->mat,e->variant), co, &err, e->key);
 #if NFS_GAME == NFS_GAME_MW
         if (!lib) fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String);
 #else
         if (!lib) { fprintf(stderr, "boot: render: MSL compile failed: %s\n", err.localizedDescription.UTF8String); if(diag_on)diag_event("PRIVATE MSL REJECT error=%s",err.localizedDescription.UTF8String); }
 #endif
-        else { e->fn = [lib newFunctionWithName:@"sm_main"]; e->ok = e->fn != nil; }
+        else { e->fn = [lib newFunctionWithName:@"sm_main"]; e->ok = e->fn != nil;
+            if (!e->ok) blackbox_error(BB_ERR_SHADER, BB_OP_FUNCTION, 0, e->key, 0, 0); }
         if (diag_on && getenv("BOOT_DIAG_MSL")) {        // <diag>/msl/<key>.metal: the translated source of every variant
             char path[1024];
             snprintf(path, sizeof path, "%s/msl", diag_dir); mkdir(path, 0755);
@@ -2466,7 +2480,14 @@ static id<MTLSamplerState> sampler_state(int stage, int compare) {
     int white_border = compare == 1 && x360_shadow_border();
     uint32_t key[4] = {ss[1] | ss[2] << 4 | ss[3] << 8 | ss[5] << 12 | ss[6] << 16 | ss[7] << 20 | (uint32_t)compare << 24, ss[10], ss[4], ss[9]};
     key[0] |= (uint32_t)white_border << 28;   // F10 shadow fit can change this while the sampler cache stays alive
-    for (int i = 0; i < nsamplers; ++i) if (!memcmp(sampler_keys[i], key, sizeof key)) return samplers[i];
+    // One memo per stage, checked against the complete canonical key (including live compare/border policy).
+    // The backing table only grows; keeping an index also avoids retaining another sampler at each stage.
+    static int memo[20];                 // index + 1; zero means no previous lookup
+    int previous = memo[stage] - 1;
+    if (previous >= 0 && !memcmp(sampler_keys[previous], key, sizeof key)) return samplers[previous];
+    for (int i = 0; i < nsamplers; ++i) if (!memcmp(sampler_keys[i], key, sizeof key)) {
+        memo[stage] = i + 1; return samplers[i];
+    }
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     MTLSamplerAddressMode am[6] = {MTLSamplerAddressModeRepeat, MTLSamplerAddressModeRepeat, MTLSamplerAddressModeMirrorRepeat,
                                    MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeClampToBorderColor, MTLSamplerAddressModeMirrorClampToEdge};
@@ -2492,7 +2513,7 @@ static id<MTLSamplerState> sampler_state(int stage, int compare) {
     if (compare == 2) d.sAddressMode = d.tAddressMode = MTLSamplerAddressModeClampToEdge;
     id<MTLSamplerState> s = [mtl newSamplerStateWithDescriptor:d];
     if (diag_on && nsamplers >= MAX_SAMPLERS) ++ad1.samp_miss_full;
-    if (nsamplers < MAX_SAMPLERS) { memcpy(sampler_keys[nsamplers], key, sizeof key); samplers[nsamplers++] = s; }
+    if (nsamplers < MAX_SAMPLERS) { memcpy(sampler_keys[nsamplers], key, sizeof key); samplers[nsamplers++] = s; memo[stage] = nsamplers; }
     return s;
 }
 
@@ -2605,6 +2626,15 @@ static void underglow_scene_mesh(const Elem *elements, int count, uint32_t type,
 static MTLViewport mirror_composite_viewport(MTLViewport vp, uint64_t shader) {
     // RVMPIP rvm vs_2_0 / vs_1_1; neither reads WorldViewProj.
     if (shader != 0xE3D503E829EB7702ull && shader != 0x2406D3EEEE369C38ull) return vp;
+    extern float carbon_fe_kx(void), carbon_fe_ky(void);
+    double ky = carbon_fe_ky();
+    if (ky < 1.0) {   // the notch-safe race HUD uses a smaller centered canvas
+        double width = vp.width * carbon_fe_kx(), height = vp.height * ky;
+        vp.originX += (vp.width - width) * 0.5;
+        vp.originY += (vp.height - height) * 0.5;
+        vp.width = width; vp.height = height;
+        return vp;
+    }
     double width = vp.height * (4.0 / 3.0);
     if (width > 0 && width < vp.width) {
         vp.originX += (vp.width - width) * 0.5;
@@ -2978,6 +3008,98 @@ static int bind_floats(int st, const float *src, uint32_t ver, uint32_t n, uint3
 // and pipelines is prepared before emitting anything; any failure emits exactly one PC draw.
 // This section never changes dev.* and never uploads or scans geometry a second time.
 typedef struct { uint8_t reg, fmt_type, buf, zero; uint16_t offset; } DrawAttr;
+
+// Draw setup is game-thread-only. Declarations are immutable copies, but both their guest handles and Obj
+// addresses can be reused after Release. Share the shader lookup's never-reused object serial, not a pointer.
+typedef struct {
+    uint32_t decl, serial, fvf;
+    int valid, nel;
+    Elem el[32];
+} DrawDeclaration;
+static const DrawDeclaration *draw_declaration(void) {
+    static DrawDeclaration last;
+    Obj *d = obj(dev.decl);
+    if (d && !d->vc_serial) d->vc_serial = ++vcache_serial;
+    uint32_t serial = d ? d->vc_serial : 0;
+    if (!last.valid || last.decl != dev.decl || last.serial != serial || last.fvf != dev.fvf) {
+        last = (DrawDeclaration){.valid = 1, .decl = dev.decl, .serial = serial, .fvf = dev.fvf};
+        last.nel = decl_elems(last.el);
+    }
+    return &last;
+}
+static void draw_integer_inputs(const DrawDeclaration *decl, const ShaderEntry *vs, SmOptions *vo) {
+    static uint32_t serial, guest, fvf;
+    static const ShaderEntry *last_vs;
+    static uint16_t want_int, want_uint;
+    if (last_vs != vs || serial != decl->serial || guest != decl->decl || fvf != decl->fvf) {
+        want_int = want_uint = 0;
+        for (int k = 0; k < vs->refl.n_inputs; ++k) {
+            const SmInput *in = &vs->refl.inputs[k];
+            for (int i = 0; i < decl->nel; ++i)
+                if (decl->el[i].usage == in->usage && decl->el[i].index == in->usage_index) {
+                    if (decl->el[i].type == 6 || decl->el[i].type == 7) want_int |= (uint16_t)(1u << in->reg);
+                    if (decl->el[i].type == 5) want_uint |= (uint16_t)(1u << in->reg);
+                }
+        }
+        last_vs = vs; serial = decl->serial; guest = decl->decl; fvf = decl->fvf;
+    }
+    vo->vs_input_int = want_int; vo->vs_input_uint = want_uint;
+}
+typedef struct {
+    int valid, up, nattr, need_zero;
+    uint32_t decl, serial, fvf, up_stride, source_strides[16], strides[16], used_streams;
+    const ShaderEntry *vs;
+    DrawAttr attr[16];
+    uint64_t vkey;
+} DrawInputLayout;
+static const DrawInputLayout *draw_input_layout(const DrawDeclaration *decl, const ShaderEntry *vs,
+                                               int up, uint32_t up_stride) {
+    static DrawInputLayout last;
+    if (last.valid && last.decl == decl->decl && last.serial == decl->serial && last.fvf == decl->fvf &&
+        last.vs == vs && last.up == up && (up ? last.up_stride == up_stride :
+        !memcmp(last.source_strides, dev.stream_stride, sizeof last.source_strides))) return &last;
+    last = (DrawInputLayout){.valid = 1, .decl = decl->decl, .serial = decl->serial, .fvf = decl->fvf,
+                            .vs = vs, .up = up, .up_stride = up_stride};
+    memcpy(last.source_strides, dev.stream_stride, sizeof last.source_strides);
+    uint8_t vb[16 * (1 + sizeof(Elem)) + 16 * 4];
+    size_t vn = 0;
+    for (int k = 0; k < vs->refl.n_inputs && last.nattr < 16; ++k) {
+        const SmInput *in = &vs->refl.inputs[k];
+        int found = -1;
+        for (int i = 0; i < decl->nel; ++i)
+            if (decl->el[i].usage == in->usage && decl->el[i].index == in->usage_index) { found = i; break; }
+        if (found < 0 && in->usage == SM_USAGE_POSITION)        // POSITIONT data feeding a vs position input
+            for (int i = 0; i < decl->nel; ++i) if (decl->el[i].usage == SM_USAGE_POSITIONT) { found = i; break; }
+        vb[vn++] = (uint8_t)in->reg;
+        if (found < 0) {
+            last.attr[last.nattr++] = (DrawAttr){(uint8_t)in->reg, 0, 30, 1, 0};
+            last.need_zero = 1;
+            continue;
+        }
+        Elem e = decl->el[found];
+        if (up) e.stream = 0;
+        last.attr[last.nattr++] = (DrawAttr){(uint8_t)in->reg, e.type, e.stream, 0, e.offset};
+        last.used_streams |= 1u << e.stream;
+        memcpy(vb + vn, &e, sizeof e); vn += sizeof e;
+    }
+    for (int s = 0; s < 16; ++s) if (last.used_streams & (1u << s)) {
+        uint32_t stride = up ? up_stride : dev.stream_stride[s];
+        if (!stride) stride = 4;
+        last.strides[s] = stride;
+        memcpy(vb + vn, &stride, 4); vn += 4;
+    }
+    last.vkey = fnv(vb, vn, 0);
+    return &last;
+}
+
+static void bind_static_vertex_buffer(unsigned s) {
+    // Always resolve first: a dirty buffer can be renamed even when the D3D stream binding did not change.
+    id<MTLBuffer> b = gpu_buf(obj(dev.stream[s]));
+    if (eb.vbuf[s] != (__bridge void *)b || eb.voff[s] != dev.stream_off[s]) {
+        [enc setVertexBuffer:b offset:dev.stream_off[s] atIndex:s];
+        eb.vbuf[s] = (__bridge void *)b; eb.voff[s] = dev.stream_off[s];
+    }
+}
 typedef struct {
     int n;
     __unsafe_unretained id<MTLRenderPipelineState> pso[5];
@@ -3652,10 +3774,11 @@ static int bone_emit(void (^geometry)(void)) {
 }
 // ---------------- End X360 arrest worldbone ----------------
 static int headlight_receiver_encoding;
-static void material_emit(GrassDraw *g, WaterDraw *w, AuxDraw *a, void (^geometry)(void)) {
+static void material_emit(GrassDraw *g, WaterDraw *w, AuxDraw *a, const RTSceneDraw *rt1, void (^geometry)(void)) {
     if(headlights_casting()){geometry();headlights_drawn(0);return;}
     if(headlight_receiver_encoding)headlights_drawn(1);
     if (ssao_replay) { if (!trees_emit(geometry)) geometry();return; }
+    if (rt1 && !q_active && !lamp_replay) rt_scene_capture(rt1);
     if (glass_emit(geometry)) { aux_emit(a, geometry); return; }   // the glass draw is the base draw
     if (trees_emit(geometry)) { aux_emit(a, geometry); return; }   // R28: the tree draw is the base draw
     if (bone_emit(geometry)) { aux_emit(a, geometry); return; }    // X360 arrest worldbone: the character draw is the base draw
@@ -3788,26 +3911,15 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
     SmOptions vo, po;
     sm_default_options(&vo);
     sm_default_options(&po);
-    Elem el[32];
-    int nel = decl_elems(el);
-    for (int i = 0; i < nel; ++i) {
-        if (el[i].type == 6 || el[i].type == 7 || el[i].type == 5) { /* filled below once we know the attribute register */ }
-    }
+    const DrawDeclaration *declaration = draw_declaration();
+    const Elem *el = declaration->el;
+    int nel = declaration->nel;
     ShaderEntry *vse = get_shader(vs, &vo);
     if (shader_pending(vse)) { headlights_missed(); ++stat_deferred; return; }
     if (!vse->ok) { headlights_missed(); ++stat_fail; return; }
     // integer attribute formats need the VS compiled with them declared as ints
-    uint16_t want_int = 0, want_uint = 0;
-    for (int k = 0; k < vse->refl.n_inputs; ++k) {
-        SmInput *in = &vse->refl.inputs[k];
-        for (int i = 0; i < nel; ++i)
-            if (el[i].usage == in->usage && el[i].index == in->usage_index) {
-                if (el[i].type == 6 || el[i].type == 7) want_int |= (uint16_t)(1u << in->reg);
-                if (el[i].type == 5) want_uint |= (uint16_t)(1u << in->reg);
-            }
-    }
-    if (want_int || want_uint) {
-        vo.vs_input_int = want_int; vo.vs_input_uint = want_uint;
+    draw_integer_inputs(declaration, vse, &vo);
+    if (vo.vs_input_int || vo.vs_input_uint) {
         vse = get_shader(vs, &vo);
         if (shader_pending(vse)) { headlights_missed(); ++stat_deferred; return; }
         if (!vse->ok) { headlights_missed(); ++stat_fail; return; }
@@ -3881,48 +3993,13 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         } else if(headlights_casting())return;
     }
 
-    // vertex input: which element feeds each shader input (the MTLVertexDescriptor is only built for a new pipeline)
-    DrawAttr attr[16];
-    int nattr = 0;
-    uint32_t used_streams = 0;
-    int need_zero = 0;
-    // vkey/pkey: FNV over the bytes below, in this order (FNV is sequential, so hashing the concatenation equals the
-    // chained per-field hashing it replaced); the last draw's bytes and keys are kept, as consecutive draws mostly
-    // repeat them. Game thread only.
-    uint8_t vb[16 * (1 + sizeof(Elem)) + 16 * 4];
-    size_t vn = 0;
-    uint64_t vkey = 0;
-    for (int k = 0; k < vse->refl.n_inputs && nattr < 16; ++k) {
-        SmInput *in = &vse->refl.inputs[k];
-        int found = -1;
-        for (int i = 0; i < nel; ++i) if (el[i].usage == in->usage && el[i].index == in->usage_index) { found = i; break; }
-        if (found < 0 && in->usage == SM_USAGE_POSITION)        // POSITIONT data feeding a vs position input
-            for (int i = 0; i < nel; ++i) if (el[i].usage == SM_USAGE_POSITIONT) { found = i; break; }
-        if (found < 0) {
-            attr[nattr++] = (typeof(attr[0])){(uint8_t)in->reg, 0, 30, 1, 0};
-            need_zero = 1;
-            vb[vn++] = (uint8_t)in->reg;
-            continue;
-        }
-        uint8_t b = up_vertices ? 0 : el[found].stream;
-        attr[nattr++] = (typeof(attr[0])){(uint8_t)in->reg, el[found].type, b, 0, el[found].offset};
-        used_streams |= 1u << b;
-        vb[vn++] = (uint8_t)in->reg;
-        memcpy(vb + vn, &el[found], sizeof(Elem)); vn += sizeof(Elem);
-    }
-    uint32_t strides[16] = {0};
-    for (int s = 0; s < 16; ++s) {
-        if (!(used_streams & (1u << s))) continue;
-        uint32_t stride = up_vertices ? up_stride : dev.stream_stride[s];
-        if (!stride) stride = 4;
-        strides[s] = stride;
-        memcpy(vb + vn, &stride, 4); vn += 4;
-    }
-    static uint8_t last_vb[sizeof vb];
-    static size_t last_vn = SIZE_MAX;
-    static uint64_t last_vkey;
-    if (vn == last_vn && !memcmp(vb, last_vb, vn)) vkey = last_vkey;
-    else { vkey = fnv(vb, vn, 0); memcpy(last_vb, vb, vn); last_vn = vn; last_vkey = vkey; }
+    // Use the final reflection, after all ready material/headlight variants have been selected.
+    const DrawInputLayout *layout = draw_input_layout(declaration, vse, up_vertices != 0, up_stride);
+    const DrawAttr *attr = layout->attr;
+    int nattr = layout->nattr, need_zero = layout->need_zero;
+    uint32_t used_streams = layout->used_streams;
+    const uint32_t *strides = layout->strides;
+    uint64_t vkey = layout->vkey;
 
     // pipeline
     NSUInteger lv, sl;
@@ -4492,6 +4569,19 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
 #endif
         }
     }
+    // Capture only at material_emit's successful base emission, using this
+    // draw's prepared declaration and the original signed/index/UP ranges.
+    RTSceneDraw rt1_draw, *rt1 = NULL;
+    if (rt_scene_enabled()) {
+        _Static_assert(sizeof(Elem)==sizeof(RTSceneElement), "shared declaration layout");
+        rt1_draw=(RTSceneDraw){.type=type,.prims=prims,.start=start,.base_vertex=base_vertex,.indexed=indexed,
+            .up_vertices=up_vertices,.up_stride=up_stride,.up_indices=up_indices,.up_index_fmt=up_index_fmt,
+            .elements=(const RTSceneElement *)el,.element_count=(unsigned)nel,.shader=vs->tokens_hash,
+            .unsupported=(pse->refl.uses_kill?RT_SCENE_ALPHA:0) |
+                (mat_grass_draw.mesh||mat_trees_draw.mesh?RT_SCENE_FOLIAGE:0) |
+                (mat_glass_draw.mesh?RT_SCENE_GLASS:0) | (water.matched?RT_SCENE_WATER:0)};
+        rt1=&rt1_draw;
+    }
     // Fast path: every stream and the index buffer are static -> bind them as they are (no copies, no index scan).
     static int nofast = -1;
     if (nofast < 0) nofast = getenv("BOOT_NOFAST") != NULL;
@@ -4503,7 +4593,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (indexed && (!ib || (ib->usage & 0x200))) all_static = 0;
         if (all_static) {
             for (int s = 0; s < 16; ++s)
-                if (used_streams & (1u << s)) [enc setVertexBuffer:gpu_buf(obj(dev.stream[s])) offset:dev.stream_off[s] atIndex:(NSUInteger)s];
+                if (used_streams & (1u << s)) bind_static_vertex_buffer((unsigned)s);
             if (need_zero) [enc setVertexBuffer:zero_buf offset:0 atIndex:30];
 #if NFS_GAME == NFS_GAME_MW
             if (daynight_stream_wanted(dev.frames)) {
@@ -4516,9 +4606,9 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
                 [enc setVertexBytes:&rw_pane.first length:4 atIndex:21];
             }
             uint32_t nv = prim_vertices(type, prims);
-            if (!indexed) { material_emit(&grass, &water, &aux, ^{ [enc drawPrimitives:prim_type(type) vertexStart:start vertexCount:nv]; }); return; }
+            if (!indexed) { material_emit(&grass, &water, &aux, rt1, ^{ [enc drawPrimitives:prim_type(type) vertexStart:start vertexCount:nv]; }); return; }
             uint32_t isz = ib->fmt == 102 ? 4 : 2;
-            material_emit(&grass, &water, &aux, ^{
+            material_emit(&grass, &water, &aux, rt1, ^{
             [enc drawIndexedPrimitives:prim_type(type) indexCount:nv indexType:isz == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
                            indexBuffer:gpu_buf(ib) indexBufferOffset:start * isz instanceCount:1 baseVertex:base_vertex baseInstance:0];
             });
@@ -4567,6 +4657,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         if (up_vertices) memset((uint8_t *)p + copy_bytes, 0, stride);
         // the buffer is bound so that index 0 is vertex `first` (base vertex applied in the copy)
         [enc setVertexBuffer:b offset:off atIndex:(NSUInteger)s];
+        eb.vbuf[s] = NULL;              // a following static draw must restore this stream after the ring binding
     }
     if (glass_now.pso) {     // the copied streams start at vertex base_vertex+first: so does the UV1 side stream (audit 1)
         int64_t rb = indexed ? (int64_t)base_vertex + first : first;
@@ -4582,7 +4673,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
 
     MTLPrimitiveType pt = prim_type(type);
     if (!indexed && type != 6) {
-        material_emit(&grass, &water, &aux, ^{ [enc drawPrimitives:pt vertexStart:0 vertexCount:nverts]; });
+        material_emit(&grass, &water, &aux, rt1, ^{ [enc drawPrimitives:pt vertexStart:0 vertexCount:nverts]; });
         return;
     }
     // indices (fans become lists), rebased to `first`
@@ -4610,7 +4701,7 @@ static void draw_impl(uint32_t type, uint32_t prims, int indexed, int32_t base_v
         ((uint64_t *)vis_buf.contents)[mf_slot] = 0;
         [enc setVisibilityResultMode:MTLVisibilityResultModeCounting offset:(NSUInteger)mf_slot * 8];
     }
-    material_emit(&grass, &water, &aux, ^{
+    material_emit(&grass, &water, &aux, rt1, ^{
     [enc drawIndexedPrimitives:pt == MTLPrimitiveTypeTriangleStrip && type == 6 ? MTLPrimitiveTypeTriangle : pt indexCount:ilist
                      indexType:MTLIndexTypeUInt32 indexBuffer:ibuffer indexBufferOffset:off];
     });

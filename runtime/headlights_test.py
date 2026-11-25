@@ -42,6 +42,15 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / 'runtime'
+def switch_registry(root):
+    """runtime/switches.tsv, or None in a public copy. The registry is dev-only (tools/publish/denylist.txt keeps it out
+    of the public repos), so only a tree without tools/publish may lack it; in the dev repo a missing file still fails."""
+    path = root / 'runtime/switches.tsv'
+    if path.is_file() or (root / 'tools/publish').is_dir():
+        return path.read_text()
+    print('skip: switch registry checks (runtime/switches.tsv is not exported to the public repo)', flush=True)
+    return None
+
 
 
 def run(args, expected=0, env=None):
@@ -212,7 +221,8 @@ def integration():
     assert 'headlights.m' in (RT / 'build.sh').read_text()
     assert 'headlight_profile.c' in (RT / 'build.sh').read_text()
     assert 'headlights_test.py / headlights_test.m' in (RT / 'offline_tests.sh').read_text()
-    assert 'NFS_HEADLIGHT_PROJECTION\topt\toff\t' in (RT / 'switches.tsv').read_text()
+    registry = switch_registry(ROOT)
+    assert registry is None or 'NFS_HEADLIGHT_PROJECTION\topt\toff\t' in registry
     print('pre-opaque hook / composite shaders / target-depth binding / Off default PASS', flush=True)
 
 

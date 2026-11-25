@@ -18,6 +18,7 @@ binding-proof driver skips on it (audit fails) and, with the audited executable 
 Exported Carbon capability proof: PC-only and optional-Xbox each PASS/exit 0;
 missing settings registration, forced-PC resolver and forced-PC binding adapter
 each FAIL/exit 1 (6/6 broken exports rejected, fixed 2/2).
+Packaged update verifier: absent audit fails 1/1; fixed accepts 1/1 and refuses 3/3 broken payloads.
 Publication findings are reported separately; this fixture cannot authorize a release.
 The native evaluator comes from the local PC build; every provider, selector and
 test is read from the publication export. No console binding data is copied.
@@ -26,6 +27,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import os
 from pathlib import Path
 import plistlib
@@ -117,7 +119,8 @@ class ArtifactChecks(unittest.TestCase):
             allowed = publish.patterns(publish.HERE / 'allowlist.txt')
             denied = publish.deny_patterns(with_carbon=True)
             selected = [name for name in publish.tracked_files(a.ROOT)
-                        if not publish.deny(name, denied) and any(publish.matches(name, p) for p in allowed)]
+                        if (a.ROOT / name).is_file() and not publish.deny(name, denied)
+                        and any(publish.matches(name, p) for p in allowed)]
             for name in selected:
                 target = indexed / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -338,6 +341,31 @@ class ArtifactChecks(unittest.TestCase):
             (source / names[0]).unlink()
             with self.assertRaisesRegex(RuntimeError, 'missing shipped'):
                 a.audit_car_commands(source, python, root, {})
+
+    def test_packaged_update_verifier(self):
+        with tempfile.TemporaryDirectory(prefix='artifact-trust-') as directory:
+            root = Path(directory).resolve()
+            for fault in ('good', 'missing', 'pins', 'signature-bypass'):
+                source = root / fault
+                for rel in ('runtime/pub_update_manifest_test.py', 'runtime/pub_update_manifest.h',
+                            'runtime/pub_update_keys.h', 'tools/setup_kit/update_manifest.py'):
+                    path = source / rel; path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(a.ROOT / rel, path)
+                verifier = source / 'tools/setup_kit/update_manifest.py'
+                if fault == 'missing': verifier.unlink()
+                elif fault == 'pins':
+                    verifier.write_text(re.sub(r'(?m)^PINS = .*$',
+                        lambda m: m.group(0) + '\nPINS = (bytes([4]) + bytes(64), PINS[1])',
+                        verifier.read_text()))
+                elif fault == 'signature-bypass':
+                    verifier.write_text(verifier.read_text().replace(
+                        'valid = sec.SecKeyVerifySignature(key, algorithm, message, sig, ctypes.byref(error))', 'valid = True'))
+                scratch = root / ('scratch-' + fault); scratch.mkdir()
+                if fault == 'good':
+                    a.audit_update_verifier(source, Path(sys.executable), scratch, dict(os.environ))
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'update verifier'):
+                        a.audit_update_verifier(source, Path(sys.executable), scratch, dict(os.environ))
 
     def test_setup_guards(self):
         with tempfile.TemporaryDirectory() as directory:

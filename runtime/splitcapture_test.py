@@ -426,7 +426,7 @@ int main(void) {
  split_on=1;expected=c;f_006308E0_orig(&expected);
  uint32_t old_cube[2]={receiver_cube[0],receiver_cube[1]};f_006308E0(&c);
  CHECK(!memcmp(&c,&expected,sizeof c));CHECK(capture_generation==generation+1&&restart_posts==1);
- CHECK(!res(old_cube[0])->alive&&!res(old_cube[1])->alive);
+ CHECK(!res(old_cube[0])->alive&&!res(old_cube[1])->alive);CHECK(split_capture_resources()==0);
  memset(cube_faces,0,sizeof cube_faces);update_players();reference();direct_scope(0);direct_scope(1);
  CHECK(cube_faces[0]==6&&cube_faces[1]==6);
  // Odd heights round target dimensions separately; exact source projections still match.

@@ -20,7 +20,7 @@ int main(void) {
     G=calloc(1,0x1000000);
     unsetenv("NFS_LAN_LOOPBACK"); unsetenv("NFS_LAN_COPY");
     check(!lan_loopback(),"app default retains real LAN");
-    setenv("NFS_LAN_LOOPBACK","1",1);setenv("NFS_ONLINE_OPEN","1",1);
+    setenv("NFS_LAN_LOOPBACK","1",1);
     uint32_t s=invoke("#23",3,2u,2u,0u);
     const char *ips[]={"0.0.0.0","192.168.1.2","255.255.255.255","127.0.0.2"};
     for(unsigned i=0;i<4;++i) {

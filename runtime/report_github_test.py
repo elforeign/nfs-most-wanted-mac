@@ -33,13 +33,13 @@ RUNTIME = ROOT / 'runtime'
 MUTANTS = {
     'ipv4_sentence': ('report_privacy.h', '(?![A-Za-z0-9]|\\\\.[0-9])', '(?![A-Za-z0-9.])'),
     'join_codes': ('report_github.m', 'return ReportEndpointRedact(text);', 'return text;'),
-    'bundle': ('report_privacy.h', 'if (!text || ![ReportEndpointRedact(text) writeToFile:', 'if (!text || ![text writeToFile:'),
+    'bundle': ('report_privacy.h', 'NSString *safe = ReportEndpointRedact(text);', 'NSString *safe = text;'),
     'home': ('report_github.m', 'if (home.length)', 'if (0 && home.length)'),
     'home_paths_predecessor': ('report_privacy.h', '|~/|', '|'),
-    'user': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"computer", @"serial", @"wifi"]'),
-    'computer': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"serial", @"wifi"]'),
-    'serial_identity': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"wifi"]'),
-    'wifi_identity': ('report_github.m', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"serial"]'),
+    'user': ('report_privacy.h', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"computer", @"serial", @"wifi"]'),
+    'computer': ('report_privacy.h', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"serial", @"wifi"]'),
+    'serial_identity': ('report_privacy.h', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"wifi"]'),
+    'wifi_identity': ('report_privacy.h', '@[@"user", @"computer", @"serial", @"wifi"]', '@[@"user", @"computer", @"serial"]'),
     'consent': ('report_github.m', 'active = 1; confirmSelected = 0;', 'OpenBrowser([NSURL URLWithString:issueURL]); active = 1; confirmSelected = 0;'),
     'network': ('report_github.m', 'static void SendToGitHub(int discord) {', 'static void SendToGitHub(int discord) { [[[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:IssueBase]] resume];'),
     'cancel_default': ('report_github.m', 'padArmed = !padHeld; confirmSelected = 0;', 'padArmed = !padHeld; confirmSelected = 1;'),
@@ -154,7 +154,7 @@ def original_proof():
 
 
 def main():
-    assert 'ReportRedactBundle([NSString stringWithUTF8String:dir]);' in (RUNTIME / 'report.m').read_text()
+    assert 'ReportRedactBundle([NSString stringWithUTF8String:stage]);' in (RUNTIME / 'report.m').read_text()
     source = (RUNTIME / 'report_github.m').read_text()
     # Every generic privacy rule must fail independently when its production line is removed.
     markers = {'uuid': '@"[UUID]"', 'serial_label': '@"serial: [redacted]"', 'email': '@"[email]"',

@@ -68,6 +68,7 @@ from .install import (PUBLIC_BUNDLE_ID, CARBON, InstallError, OWNER_MARK, OWN_DI
 from . import pc_disc, rtpatch, prebuilt, carbon_source
 from . import car_sources, car_catalog
 from . import stage as staging
+from . import apply as updating
 from .x360_cache import PreparedCache, preparation_key
 from . import x360_extras
 
@@ -76,10 +77,10 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.10.0"
+PUBLIC_VERSION = "4.11.0"
 # Carbon's app: its names (install.CARBON), its data, Setup state and update folder name, and its own version.
 CARBON_PRODUCT = dict(CARBON, data="Carbon")
-CARBON_VERSION = "1.3.0"
+CARBON_VERSION = "1.4.0"
 CARBON_EXE_SHA256 = "baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3"  # NFSC.exe (car_sources.json pin)
 CARBON_RUNNING = re.compile(re.escape(CARBON_PRODUCT["name"]) + r"\.app/Contents/MacOS/")
 CARBON_X360_BYTES = 40_000_000  # the two Xbox archives (38.4 MB), kept whole
@@ -175,8 +176,18 @@ SETUP_WORK_NAMES = {"run-log.txt", "tmp", "tool-home", "toolchain", "logs", "sta
                     "carbon_src", "carbon_src.json", "carbon_src.tmp",
                     "check-x360.tmp", "pc_src", "pc_src.json", "pc_src.tmp", "x360_src", "x360_src.json", "x360_src.tmp",
                     ".setup.lock", "extras", "car-selection.json",
+                    # The app's Locate replies (--source-replies): made when a remembered source is missing, which
+                    # resolve_build_sources() asks about before the work folder is claimed.
+                    "source-replies",
                     OWNER_MARK}
 SETUP_CACHE_NAMES = {"builds", "stages", "build.lock", "x360", "cars", OWNER_MARK}
+# Files Finder and macOS put in any folder a person opens or copies (folder view settings, a custom icon, a
+# localized name, AppleDouble files on non-APFS volumes). They are never a reason to refuse a folder.
+FINDER_NAMES = {".DS_Store", ".localized", "Icon\r"}
+
+
+def finder_metadata(name):
+    return name in FINDER_NAMES or name.startswith("._")
 
 
 def claim(folder, default, known, what, registry):
@@ -191,7 +202,8 @@ def claim(folder, default, known, what, registry):
         raise SetupError(f"The {what} folder {folder} is reached through a link.", f"Choose a new, empty {what} folder.")
     if owned(folder, registry):
         return
-    entries = set(os.listdir(folder))
+    entries = {name for name in os.listdir(folder) if not finder_metadata(name)
+               and not (default and known is SETUP_WORK_NAMES and name.startswith(".run-log-"))}
     if entries and not (default and entries <= known):
         raise SetupError(f"The {what} folder {folder} already holds other files; Setup only uses a folder of its own.",
                          f"Choose a new or empty {what} folder.")
@@ -447,6 +459,44 @@ def exclusive(path):
         yield
 
 
+TOOLS_FIX = ("Install Apple's Command Line Tools: in Setup click Install…, or run `xcode-select --install` in Terminal. "
+             "After a macOS update, install them again the same way. Then build again.")
+LICENSE_FIX = ("Open Xcode once and accept its license, or run `sudo xcodebuild -license accept` in Terminal. "
+               "Then build again.")
+
+
+def developer_tools_problem(runner):
+    """Why Apple's tools won't run, in words a player can act on, or None. /usr/bin/clang and /usr/bin/xcrun are
+    Apple stubs that are always present: without the Command Line Tools (or after a macOS update removed them, or
+    with full Xcode whose license was never accepted) they exit non-zero, which used to surface as "clang failed
+    (exit 1)" or "(exit 69)" with only "Open the log" as the fix."""
+    for argv in (["clang", "--version"], ["xcrun", "--sdk", "macosx", "--show-sdk-path"]):
+        tool = shutil.which(argv[0], path=runner.env["PATH"])
+        try:
+            if tool is None:
+                raise FileNotFoundError(argv[0])
+            probe = subprocess.run([tool] + argv[1:], env=runner.env, stdin=subprocess.DEVNULL, capture_output=True,
+                                   timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            text, rc = str(e), None
+        else:
+            text, rc = (probe.stdout + probe.stderr).decode("utf-8", "replace"), probe.returncode
+        try:
+            runner.log.write(("developer tools diagnosis: " + shlex.join(argv) + " (exit " + str(rc) + ")\n" + text + "\n").encode())
+            runner.log.flush()
+        except OSError:
+            pass
+        if rc == 0:
+            continue
+        lowered = text.lower()
+        if "license" in lowered or rc == 69:
+            return SetupError("Apple's developer tools won't run until the Xcode license is accepted.", LICENSE_FIX)
+        if ("no developer tools" in lowered or "invalid active developer path" in lowered or "xcode-select" in lowered
+                or "missing xcrun" in lowered or rc is None):
+            return SetupError("Apple's Command Line Tools are not installed, or a macOS update removed them.", TOOLS_FIX)
+    return None
+
+
 def preflight(runner, work):
     if platform.system() != "Darwin" or platform.machine() != "arm64" or translated():
         raise SetupError("Setup requires native Apple Silicon macOS; it is running under Rosetta (Intel emulation).",
@@ -457,7 +507,7 @@ def preflight(runner, work):
     required = ("clang", "clang++", "ar", "make", "xcrun", "otool", "sips", "iconutil", "plutil", "codesign", "tar", "shasum", "sh")
     missing = [t for t in required if shutil.which(t, path=runner.env["PATH"]) is None]
     if missing:
-        raise SetupError("Missing developer tools: " + ", ".join(missing), "Install or update Apple developer tools, then try again.")
+        raise SetupError("Missing developer tools: " + ", ".join(missing), TOOLS_FIX)
     # An Intel-only tool would run under Rosetta and build for the wrong Mac (or fail half-way). Check each one's
     # Mach-O header before running any of them.
     intel = []
@@ -472,13 +522,19 @@ def preflight(runner, work):
                          "Apple's Command Line Tools (xcode-select --install), then try again.")
     # Apple's ar has no --version option. Hash the actual tool and probe archive
     # creation instead of treating that unsupported option as a missing CLT.
-    versions = {t: runner.run([t, "--version"], capture=True) for t in ("clang", "clang++", "make")}
+    try:
+        versions = {t: runner.run([t, "--version"], capture=True) for t in ("clang", "clang++", "make")}
+    except SetupError as e:
+        raise developer_tools_problem(runner) or e
     versions["ar"] = sha_file(shutil.which("ar", path=runner.env["PATH"]))
     m = re.search(r"clang version (\d+)", versions["clang"])
     if not m or int(m[1]) < 14:
         raise SetupError("Apple clang 14 or newer is required.", "Install or update Apple developer tools.")
-    sdk = runner.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).strip()
-    sdk_version = runner.run(["xcrun", "--sdk", "macosx", "--show-sdk-version"], capture=True).strip()
+    try:
+        sdk = runner.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture=True).strip()
+        sdk_version = runner.run(["xcrun", "--sdk", "macosx", "--show-sdk-version"], capture=True).strip()
+    except SetupError as e:
+        raise developer_tools_problem(runner) or SetupError("The macOS SDK is unavailable.", TOOLS_FIX) from e
     if not Path(sdk).is_dir() or not re.match(r"\d+(\.\d+)*$", sdk_version):
         raise SetupError("The macOS SDK is unavailable.", "Install or update Apple developer tools.")
     if int(sdk_version.split(".")[0]) < 14:
@@ -573,8 +629,37 @@ def validate_carbon(root):
     if not tracks.is_dir():
         raise SetupError("The Carbon folder has no TRACKS directory.", fix)
     if not exe.is_file() or sha_file(exe) != CARBON_EXE_SHA256:
-        raise SetupError("NFSC.exe is not the supported PC release of Need for Speed Carbon.", fix)
+        raise carbon_exe_refusal(exe)
     return exe
+
+
+def pe_file_version(path, limit=64 * 1024**2):
+    """The FileVersion (a.b.c.d) a Windows executable states in its version resource, or None."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(limit)
+    except OSError:
+        return None
+    at = data.find(struct.pack("<I", 0xFEEF04BD))  # VS_FIXEDFILEINFO signature
+    if at < 0 or at + 16 > len(data):
+        return None
+    ms, ls = struct.unpack_from("<II", data, at + 8)
+    return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}.{ls & 0xFFFF}"
+
+
+CARBON_EXE_FIX = ("Setup needs the compatible version 1.4 NFSC.exe (the README names it); the executable on the Carbon "
+                  "disc is copy-protected and can't be used. Choose a Carbon folder with that NFSC.exe, or that NFSC.exe "
+                  "itself.")
+
+
+def carbon_exe_refusal(exe):
+    """Say what the chosen NFSC.exe is, so a player is not sent back to choose the same folder again."""
+    if not exe.is_file():
+        return SetupError("NFSC.exe is not a file.", CARBON_EXE_FIX)
+    version = pe_file_version(exe)
+    stated = f"it states version {version}" if version else "it states no version"
+    return SetupError(f"NFSC.exe is not the supported PC release of Need for Speed Carbon ({stated}, "
+                      f"{exe.stat().st_size:,} bytes, SHA-256 {sha_file(exe)[:12]}).", CARBON_EXE_FIX)
 
 
 def movie_note(root):
@@ -957,9 +1042,14 @@ UPDATE_NEEDED = ("Choose the PC game's official 1.3 update (nfsmwpatch1.3.exe) a
                  "the game; the update is only read, never run.")
 
 
-def require_disc_inputs(update, exe, version, exe_name, fix=""):
-    missing = [item for value, item in ((update, f"official {version} update"),
-                                       (exe, f"{exe_name} from that update")) if not value]
+MW_DISC_EXE = "a speed.exe that has the version 1.3 code (the one on the discs and in the update is copy-protected)"
+CARBON_DISC_EXE = "your compatible 1.4 NFSC.exe (the one on the disc is copy-protected)"
+
+
+def require_disc_inputs(update, exe, version, exe_item, fix=""):
+    """exe_item names the executable Setup accepts. Never "from that update": the update's own executable is
+    copy-protected and refused, in both games."""
+    missing = [item for value, item in ((update, f"official {version} update"), (exe, exe_item)) if not value]
     if missing:
         raise SetupError("\n".join(f"Missing: {item}. Choose it above." for item in missing), fix)
 
@@ -1006,7 +1096,7 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
     # Which speed.exe the game ends up with is settled first, before gigabytes are unpacked.
     patch = rtpatch.Update(update) if update else None
     if patch is None and not current(first.read("speed.exe", rtpatch.MAX_FILE)):
-        require_disc_inputs(update, exe, "1.3", "speed.exe")
+        require_disc_inputs(update, exe, "1.3", MW_DISC_EXE)
     new_exe = None
     if exe:
         if not exe.is_file() or not 0 < exe.stat().st_size <= rtpatch.MAX_FILE:
@@ -1017,7 +1107,7 @@ def _install_discs(discs, update, exe, out, work, events, source_root):
         record = patch.record("speed.exe")
         new_exe = patch.decode(record, lambda n: events.progress(n, record.size))
         if not current(new_exe):
-            require_disc_inputs(update, exe, "1.3", "speed.exe")
+            require_disc_inputs(update, exe, "1.3", MW_DISC_EXE)
     archives = []
     budget = ZipDirectoryBudget()
     with ExitStack() as stack:
@@ -1533,6 +1623,54 @@ def check_locations(paths, pc, x360, dest, source, extras=(), carbon=None, data_
     # state itself is not recursively deleted or used as a build output root.
 
 
+def _important_capacity(path):
+    """The free space macOS reports for user-requested work (Finder and the Setup app's Review page:
+    URLResourceKey.volumeAvailableCapacityForImportantUsage). Unlike statfs, it counts purgeable space (iCloud
+    and Photos caches, local snapshots) that macOS frees on demand. None where it can't be read."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        import ctypes
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+        cf.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+        cf.CFURLCopyResourcePropertyForKey.restype = ctypes.c_bool
+        cf.CFURLCopyResourcePropertyForKey.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        cf.CFNumberGetValue.restype = ctypes.c_bool
+        cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        key = ctypes.c_void_p.in_dll(cf, "kCFURLVolumeAvailableCapacityForImportantUsageKey")
+        raw = os.fsencode(str(path))
+        url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), True)
+        if not url:
+            return None
+        try:
+            value = ctypes.c_void_p()
+            if not cf.CFURLCopyResourcePropertyForKey(url, key, ctypes.byref(value), None) or not value.value:
+                return None
+            try:
+                number = ctypes.c_int64(0)
+                if not cf.CFNumberGetValue(value, 4, ctypes.byref(number)):  # kCFNumberSInt64Type
+                    return None
+                return number.value if number.value > 0 else None
+            finally:
+                cf.CFRelease(value)
+        finally:
+            cf.CFRelease(url)
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def free_bytes(path):
+    """Free space for Setup's decisions, matching what the Setup app shows: the larger of statfs's free blocks and
+    macOS's important-usage capacity (which adds purgeable space). Using statfs alone refused builds the Review page
+    had shown as fitting, on Macs with several GB of purgeable space."""
+    path = existing_parent(path)
+    free = shutil.disk_usage(path).free
+    important = _important_capacity(path)
+    return max(free, important) if important else free
+
+
 def check_space(paths, pc=None, dest=None, stage_only=False, car_plan=None, x360_bytes=0, x360_shared_bytes=0):
     if car_plan is not None:
         # F-T groups extraction, temporary output, publication and margin by
@@ -1549,7 +1687,7 @@ def check_space(paths, pc=None, dest=None, stage_only=False, car_plan=None, x360
     requirements = space_requirements(paths, pc, dest, stage_only, x360_bytes, x360_shared_bytes)
     paths.space_requirements = requirements
     for path, required in requirements.values():
-        free = shutil.disk_usage(existing_parent(path)).free
+        free = free_bytes(path)
         if free < required:
             raise space_error(path, required - free)
 
@@ -1596,7 +1734,7 @@ def volume_name(root):
 
 
 def require_space(path, required):
-    free = shutil.disk_usage(existing_parent(path)).free
+    free = free_bytes(path)
     if free < required:
         raise space_error(path, required - free)
 
@@ -1627,9 +1765,54 @@ def storage_failure(error, paths):
     return error
 
 
+PRIVACY_FIX = ("Open System Settings > Privacy & Security > Files and Folders and allow Setup (or Terminal, if you run "
+               "setup.sh) to use that folder; for an external drive, allow Removable Volumes. Or move the game out of "
+               "Desktop, Documents and Downloads. Then try again.")
+UNREADABLE_INPUT_FIX = ("In Finder, select it, choose File > Get Info and give yourself Read access under Sharing & "
+                        "Permissions (or copy the game folder to your Mac again), then try again.")
+
+
+def input_paths(args):
+    """The player's chosen game files, as they were given (a picked NFSC.exe or speed.exe also names its folder)."""
+    result = []
+    for value in [getattr(args, name, None) for name in ("carbon", "pc", "x360", "pc_update", "pc_exe")] + list(
+            getattr(args, "pc_disc", None) or []):
+        if not value:
+            continue
+        try:
+            path = clean_path(value)
+        except (SetupError, OSError, ValueError):
+            continue
+        result.append(path)
+        if path.suffix.lower() == ".exe":
+            result.append(path.parent)
+    return result
+
+
+def blocked_input(error, inputs):
+    """A read of the player's own game files that the system refused. macOS privacy protection (Desktop, Documents,
+    Downloads, external drives) refuses with EPERM and file permissions with EACCES; both used to be reported with
+    the destination's advice ("Choose a writable destination"), which sends the player to the wrong folder."""
+    current, seen = error, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno in (errno.EPERM, errno.EACCES) and current.filename:
+            try:
+                denied = clean_path(os.fsdecode(current.filename))
+                hit = any(within(denied, path) for path in inputs)
+            except (SetupError, OSError, ValueError):
+                hit = False
+            if hit:
+                if current.errno == errno.EPERM:
+                    return SetupError(f"macOS did not allow Setup to read {denied}.", PRIVACY_FIX)
+                return SetupError(f"Your user account can't read {denied}.", UNREADABLE_INPUT_FIX)
+        current = current.__cause__ or current.__context__
+    return error
+
+
 SAVE_DIR = "NFS Most Wanted"            # the game's own folder under SHGetFolderPath (4.0: <data>/NFS Most Wanted)
 LEGACY_SAVES = Path("Documents") / SAVE_DIR  # 3.x mapped CSIDL_PERSONAL to <profile>/Documents
-MIGRATED_MSG = "Your 3.x career was copied into 4.0; the 3.x copy is untouched."
+MIGRATED_MSG = "Your 3.x career was copied into this version; the 3.x copy is untouched."
 
 
 def _save_crc_table():
@@ -1706,7 +1889,7 @@ def migrate_3x_saves(paths, events):
         files, aliases = legacy_saves(source)
     except (LegacySaveError, OSError) as e:
         log(f"3.x saves not copied: {e}")
-        events.emit("warn", id=events.current, msg=f"Your 3.x saves were not copied into 4.0 ({e}). The 3.x files were "
+        events.emit("warn", id=events.current, msg=f"Your 3.x saves were not copied into this version ({e}). The 3.x files were "
                     f"not changed: they are in {source}. Start a new career, or copy a career folder into {target} "
                     "by hand while the game is closed.")
         return []
@@ -1726,7 +1909,7 @@ def migrate_3x_saves(paths, events):
     except (LegacySaveError, OSError) as e:
         remove(staging)
         log(f"3.x saves not copied: {e}")
-        events.emit("warn", id=events.current, msg=f"Your 3.x saves could not be copied into 4.0 ({e}). The 3.x files "
+        events.emit("warn", id=events.current, msg=f"Your 3.x saves could not be copied into this version ({e}). The 3.x files "
                     f"were not changed: they are in {source}.")
         return []
     log(f"copied 3.x careers {', '.join(aliases)} from {source} to {target}; the 3.x files were not changed")
@@ -1761,6 +1944,13 @@ def resolve_build_sources(args, paths, source_root=None):
 
 
 def build(args, paths, events, runner, source_root=ROOT):
+    if getattr(args, "stage_only", False):
+        carbon_update = getattr(args, "game", "mw") == "carbon"
+        destination = clean_path(args.dest)
+        profile = paths.data / CARBON_PRODUCT["data"] if carbon_update else paths.data
+        with updating.ins.dest_lock(destination.parent):
+            updating.verify_update(clean_path(args.stage).parent, profile, destination,
+                                   CARBON_VERSION if carbon_update else PUBLIC_VERSION)
     resolve_build_sources(args, paths, source_root)
     stage_only = getattr(args, "stage_only", False)
     # Carbon (--game carbon) reads only the Carbon folder: the shared stages without Most Wanted (no PC copy, no
@@ -2680,7 +2870,7 @@ def main(argv=None):
                         log.write(traceback.format_exc().encode())
                     except OSError:
                         pass
-                    e = storage_failure(e, paths)
+                    e = blocked_input(storage_failure(e, paths), input_paths(args))
                     if isinstance(e, OSError):
                         fix = ("Choose a writable destination or ask an administrator to install the staged app."
                                if e.errno in (errno.EACCES, errno.EPERM) else
@@ -2699,7 +2889,7 @@ def main(argv=None):
     except (Exception, KeyboardInterrupt) as e:
         if events is not None and events.report_committed():
             return 0
-        e = storage_failure(e, paths)
+        e = blocked_input(storage_failure(e, paths), input_paths(args))
         # Includes failures before a log can be opened. stdout remains parseable.
         obj = dict(ev="error", id=events.current if events else ("cars" if car_mode else "preflight"), msg=str(e) or "Setup was interrupted.", fix=getattr(e, "fix", "Choose a writable work directory and try again."), log=str(log_path or ""))
         print(json.dumps(obj) if args.events else obj["msg"], flush=True)

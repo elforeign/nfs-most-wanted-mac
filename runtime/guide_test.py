@@ -46,7 +46,7 @@ MUTATIONS = {
     'hidden': ('guide.m', 'testing_row.hidden = ![NSFileManager.defaultManager fileExistsAtPath:resource(1) ?: @""];', 'testing_row.hidden = 0;'),
     'back': ('guide.m', 'case GUIDE_BACK: guide_close();', 'case GUIDE_BACK: break;'),
     'f10': ('portmenu.m', 'if (!o) guide_close();', 'if (0) guide_close();'),
-    'pause': ('portmenu.m', 'return is_open && M32(GAMEFLOW_STATE) == 6;', 'return 0;'),
+    'pause': ('portmenu.m', 'return is_open && portmenu_racing();', 'return 0;'),
     'opening': ('portmenu.m', 'if (trig) { last_phys = phys; return ~0u; }', 'if (trig && 0) { last_phys = phys; return ~0u; }'),
     'scale': ('guide.m', 'return active ? 2 : 1;', 'return 1;'),
     'old_fonts': ('guide.m', 'NSDictionary *normal=attributes(heading==1 ? 14 : heading==2 ? 12 : 10', 'NSDictionary *normal=attributes(heading==1 ? 28 : heading==2 ? 24 : 20'),
@@ -104,31 +104,7 @@ def build_and_run(base, name, mutation=None):
         assert result.returncode == 0 and failures == 0, result.stderr[-5000:]
 
 
-def check_online_guide(text):
-    assert '## Online (beta)' in text
-    for phrase in ('early beta', 'Online races are not included', 'different internet connections',
-                   'Create room', 'Access is free', 'R-XXXX-XXXXX', 'identify rooms rather than passwords',
-                   "contain no player's internet address", 'Keep the firewall enabled',
-                   'no shared relay configured', 'Relay unavailable', 'Reconnecting',
-                   'Old endpoint codes are unsupported', 'Remove join codes',
-                   '60 fps', 'six nearby remote cars', 'UDP is unencrypted'):
-        assert phrase in text, phrase
-    for phrase in ('Public IPv4 (optional)', 'choose Host', 'forward **UDP 47800**',
-                   'Join codes contain the host', 'No internet relay fallback'):
-        assert phrase not in text, phrase
-
-
-
 def main():
-    guide = (RUNTIME / 'docs/guide.md').read_text()
-    check_online_guide(guide)
-    old = guide.split('## Online (beta)')[0] + '## Audio' + guide.split('## Audio', 1)[1]
-    try:
-        check_online_guide(old)
-    except AssertionError:
-        print('Online guide: current 22 requirements pass; old section rejected', flush=True)
-    else:
-        raise AssertionError('old guide escaped detection')
     with tempfile.TemporaryDirectory(prefix='guide-check-') as scratch:
         base = Path(scratch)
         build_and_run(base, 'good')

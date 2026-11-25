@@ -18,8 +18,7 @@
 //   8 select polling an fd once per set (pre-2026-10-27 ws2_32.c; the fake poll models macOS, where an fd listed for
 //     POLLIN and again for POLLPRI reports nothing): 70 (14 per suite, including "listener in read and except sets is
 //     readable", server.dll's lobby). With the one-entry-per-fd fix: 5/5 suites, 4889 checks, 0 failures.
-//   Entire policy disabled (`return policy_open;` -> `return 1;`): 1067 failures, 1/5 suites passed.
-// Restricted suites: 0 resolver calls; unsafe-open suite: 5. All strict builds: 0 warnings/errors.
+// All suites enforce restricted DNS; the explicit numeric diagnostic peer is allowed.
 // clang -O1 -Iruntime -Irecomp -Irecomp/out runtime/ws2_policy_test.c -o /tmp/ws2_policy_test
 // /tmp/ws2_policy_test
 // -DWS2_C='"/absolute/path/ws2_32.c"' selects a source variant with one mutation above.
@@ -201,7 +200,7 @@ uint32_t gstr(const char *s) { uint32_t a = galloc((uint32_t)strlen(s) + 1); str
 ORIG(f_007A0060_orig) ORIG(f_00792230_orig) ORIG(f_00797450_orig) ORIG(f_0079FF50_orig)
 ORIG(f_005FE3E0_orig) ORIG(f_00761140_orig) ORIG(f_006F2850_orig) ORIG(f_007356A0_orig)
 ORIG(f_007617D0_orig) ORIG(f_00760B20_orig) ORIG(f_005FACD0_orig) ORIG(f_006F9BB0_orig) ORIG(f_0083CCC0_orig)
-ORIG(f_00755140_orig)
+ORIG(f_00755140_orig) ORIG(f_00793510_orig)
 void f_005A3590_orig(Cpu *c) { (void)c; if (!race_found) _exit(3); ++setup_called; }
 
 static void lan_translation(void);
@@ -407,11 +406,10 @@ static void online_race(void) {
               valid ? "online race uses normalized BOOT_RACE=1" : "missing online race refuses before custom setters");
     }
 }
-static int suite(const char *label, const char *open, const char *peer) {
-    unsetenv("NFS_TEST_WS2"); unsetenv("BOOT_ONLINE"); unsetenv("NFS_ONLINE_OPEN"); unsetenv("BOOT_ONLINE_PEER");
-    if (open) setenv("NFS_ONLINE_OPEN", open, 1);
+static int suite(const char *label, const char *peer) {
+    unsetenv("NFS_TEST_WS2"); unsetenv("BOOT_ONLINE"); unsetenv("BOOT_ONLINE_PEER");
     if (peer) setenv("BOOT_ONLINE_PEER", peer, 1);
-    int is_open = open && !strcmp(open, "1"), has_peer = peer && !strcmp(peer, "18.210.140.94:4567");
+    int has_peer = peer && !strcmp(peer, "18.210.140.94:4567");
     G = calloc(1, 0x1000000);
     FILE *logs = tmpfile();
     if (!G || !logs || dup2(fileno(logs), STDERR_FILENO) < 0) return 2;
@@ -430,15 +428,15 @@ static int suite(const char *label, const char *open, const char *peer) {
         "172.32.0.0", "192.167.255.255", "192.169.0.0", "169.253.255.255", "169.255.0.0", "100.63.255.255",
         "100.128.0.0", "0.0.0.0", "8.8.8.8", "255.255.255.254", "224.0.0.1", "18.210.140.95"};
     for (unsigned i = 0; i < sizeof allowed / sizeof *allowed; ++i) destination(allowed[i], 1);
-    for (unsigned i = 0; i < sizeof blocked / sizeof *blocked; ++i) destination(blocked[i], is_open);
-    destination("18.210.140.94", is_open || has_peer);
-    destination("18.210.140.94", is_open || has_peer);
+    for (unsigned i = 0; i < sizeof blocked / sizeof *blocked; ++i) destination(blocked[i], 0);
+    destination("18.210.140.94", has_peer);
+    destination("18.210.140.94", has_peer);
     // An explicit peer IP is allowed at other ports too, but adjacent addresses remain blocked.
     address("18.210.140.94", 9999);
     unsigned before = connects;
     uint32_t r = invoke("#4", 3, SOCK_BASE, 0x2000u, 16u);
-    check((r == 0) == (is_open || has_peer) && connects == before + (unsigned)(is_open || has_peer), "exact peer IP, any port");
-    if (!is_open && !has_peer) check(occurrences(logs, "ws2: blocked outbound to 18.210.140.94:3658\n") == 1, "address log once across all paths/retries");
+    check((r == 0) == (has_peer) && connects == before + (unsigned)(has_peer), "exact peer IP, any port");
+    if (!has_peer) check(occurrences(logs, "ws2: blocked outbound to 18.210.140.94:3658\n") == 1, "address log once across all paths/retries");
     check(invoke("#57", 2, 0x6000u, 256u) == 0, "gethostname");
     char own[256]; strcpy(own, (char *)G + 0x6000);
     hostname(own, 1, 0, ws2_local_ip);
@@ -447,19 +445,19 @@ static int suite(const char *label, const char *open, const char *peer) {
     hostname(NULL, 1, 0, ws2_local_ip); hostname("", 1, 0, ws2_local_ip);
     hostname("LOCALHOST", 1, 0, INADDR_LOOPBACK); hostname("NfSmW-PoRt", 1, 0, ws2_local_ip);
     hostname("18.210.140.94", 1, 0, 0x12D28C5E); hostname("192.168.1.2", 1, 0, 0xC0A80102);
-    hostname("example.invalid", is_open, is_open, 0x12010203);
-    hostname("example.invalid", is_open, is_open, 0x12010203);
-    hostname("127.1", is_open, is_open, 0x12010203);
+    hostname("example.invalid", 0, 0, 0x12010203);
+    hostname("example.invalid", 0, 0, 0x12010203);
+    hostname("127.1", 0, 0, 0x12010203);
     char longname[240]; memset(longname, 'a', sizeof longname - 1); longname[sizeof longname - 1] = 0;
-    hostname(longname, is_open, is_open, 0x12010203); hostname(longname, is_open, is_open, 0x12010203);
-    if (!is_open) {
+    hostname(longname, 0, 0, 0x12010203); hostname(longname, 0, 0, 0x12010203);
+    {
         check(occurrences(logs, "ws2: blocked hostname example.invalid\n") == 1, "hostname log once");
         check(occurrences(logs, longname) == 1, "long hostname log once without truncation");
     }
     before = sockets;
     check(invoke("#23", 3, 23u, 1u, 0u) == UINT32_MAX && sockets == before, "IPv6 remains unsupported, no host socket");
     connected_peer("127.0.0.1", 1); connected_peer("192.168.1.2", 1);
-    connected_peer("18.210.140.94", is_open || has_peer); connected_peer("18.210.140.95", is_open);
+    connected_peer("18.210.140.94", has_peer); connected_peer("18.210.140.95", 0);
     connect_results(); datagrams(); online_race(); lan_translation();
     printf("%s: checks=%u failures=%u host_connect=%u host_sendto=%u resolver=%u\n", label, checks, failures, connects, sends, resolves);
     return failures ? 1 : 0;
@@ -506,18 +504,17 @@ static void lan_translation(void) {
     unsetenv("NFS_LAN_COPY"); ws2_local_ip = INADDR_LOOPBACK; ws2_port_shift = 0;
 }
 int main(void) {
-    const char *labels[] = {"default", "public-peer", "invalid-peer", "unsafe-open", "nonexact-open"};
-    const char *opens[] = {NULL, NULL, NULL, "1", "01"};
-    const char *peers[] = {NULL, "18.210.140.94:4567", "18.210.140.94:65536", NULL, "example.invalid"};
+    const char *labels[] = {"default", "public-peer", "invalid-peer", "hostname-peer"};
+    const char *peers[] = {NULL, "18.210.140.94:4567", "18.210.140.94:65536", "example.invalid"};
     unsigned failed = 0;
-    for (unsigned i = 0; i < 5; ++i) {
+    for (unsigned i = 0; i < 4; ++i) {
         fflush(stdout);
         pid_t child = fork();
         if (child < 0) return 2;
-        if (!child) exit(suite(labels[i], opens[i], peers[i]));
+        if (!child) exit(suite(labels[i], peers[i]));
         int status;
         if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) ++failed;
     }
-    printf("WS2 POLICY %s: %u/5 suites passed\n", failed ? "FAIL" : "PASS", 5 - failed);
+    printf("WS2 POLICY %s: %u/4 suites passed\n", failed ? "FAIL" : "PASS", 4 - failed);
     return failed ? 1 : 0;
 }

@@ -44,6 +44,10 @@ Setting *settings_find(const char *id) { (void)id; return NULL; }
 void underglow_menu_option_added(uint32_t o) { (void)o; }
 uint8_t *G;
 int diag_on;
+unsigned threads_handle_count(void) { return 0; }
+unsigned split_capture_resources(void) { return 0; }
+uint64_t host_ticks(void) { return 0; }
+int split_view_rect(uint32_t v,uint32_t *r) { (void)v; (void)r; return 0; }
 static int checks, failures, added, allocations, fail_third, special_build;
 static unsigned finalizations, switches, ride_refreshes;
 static uint32_t options[4], textures[4], last_package;

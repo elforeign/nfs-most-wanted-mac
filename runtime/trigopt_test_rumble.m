@@ -19,14 +19,14 @@ IOHIDManagerRef trigopt_hid_open(CFAllocatorRef a, IOOptionBits b) { (void)a; (v
 void rumble_signals(void) {}
 void trigopt_rumble_init(void) {
     manager = (IOHIDManagerRef)(uintptr_t)1;
-    pad = (IOHIDDeviceRef)CFRetain(CFSTR("test-pad"));
+    rumble_pads[0].pad = (IOHIDDeviceRef)CFRetain(CFSTR("test-pad"));
     hid_q = dispatch_queue_create("trigopt.test", DISPATCH_QUEUE_SERIAL);
     rumble_off = 0;
 }
 unsigned trigopt_rumble_sample(uint8_t *bytes) {
     // Force one identical-state report each sample, independently of dedup's
     // one-second heartbeat. Every payload byte still comes from rumble.m.
-    sent_heavy = sent_light = 255;
+    rumble_pads[0].sent_heavy = rumble_pads[0].sent_light = 255;
     rumble_update(); dispatch_sync(hid_q, ^{});
     memcpy(bytes, last_report, (size_t)last_size);
     return reports;

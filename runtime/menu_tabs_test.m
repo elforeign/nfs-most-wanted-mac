@@ -1,5 +1,5 @@
-// Actual menu fixture: 4 sparse / 10 full; forced-true helper draws 10 sparse.
-// Good: 195 checks / 0 failures; forced-true: 195 checks / 28 failures.
+// Actual menu fixture: 4 sparse / 9 full; forced-true helper draws 9 sparse.
+// The broken helper must fail both rendering and navigation checks.
 #define main guide_fixture_main
 #include "guide_test.m"
 #undef main
@@ -55,10 +55,10 @@ int main(void) {
         }
         registry(1);
         int full = drawn_tabs();
-        printf("full shown=%d expected=10\n", full); CHECK(full == 10);
+        printf("full shown=%d expected=9\n", full); CHECK(full == 9);
         double old_audio = (tab_x[SET_AUDIO] + tab_x[SET_AUDIO + 1]) / 2;
-        for (int i = 0; i < 10; ++i) { key(0x09); CHECK(tab == (i + 1) % 10); }
-        for (int i = 0; i < 10; ++i) { key('Q'); CHECK(tab == (19 - i) % 10); }
+        for (int i = 0; i < 9; ++i) { key(0x09); CHECK(tab == (i + 1) % 9); }
+        for (int i = 0; i < 9; ++i) { key('Q'); CHECK(tab == (17 - i) % 9); }
         registry(0);
         int sparse = drawn_tabs();
         printf("sparse shown=%d expected=4\n", sparse); CHECK(sparse == 4);

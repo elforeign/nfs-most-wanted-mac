@@ -108,9 +108,14 @@ int render_target_msaa(uint32_t texture, uint32_t depth, int samples);   // rend
 int x360_reflection_target(uint32_t guest, uint32_t w, uint32_t h);
 int x360_shadow_border(void);
 void rumble_update(void);
+void rumble_update_slot(unsigned slot);
+void rumble_select_slot(unsigned slot, void *controller);
+void rumble_stop_slot(unsigned slot);
 void rumble_select(void *controller);
 void feedback_setup(void);
 void feedback_levels(float *heavy, float *light);
+void feedback_levels_slot(unsigned slot, float *heavy, float *light);
+void feedback_invalidate_slot(unsigned slot);
 enum { FEEDBACK_MENU = 1, FEEDBACK_PAUSE = 2, FEEDBACK_FOCUS = 4, FEEDBACK_APP = 8 };
 void feedback_suppress(unsigned reason, int on); // independent holds; resume starts with an empty model
 void feedback_poll_pause(void);         // main-loop pass / pad read: Sim::GetState() == 4
@@ -145,7 +150,7 @@ void padfx_disconnect(void *gc_controller);
 void padfx_connect(void *gc_controller); // settle detached restoration debt before accepting new effects
 void padfx_suppress(unsigned reason, int on); // same independent lifecycle holds as feedback
 void padfx_poll(void);                   // main-loop stale-frame stop even without pad reads
-void feedback_invalidate_effects(void); // atomic publication gate, also used on disconnect
+void feedback_invalidate_effects(void); // slot 0 pad-effect publication gate
 void feedback_road_state(float *speed, float *surface); // last frame, m/s and speed-curve peak 0..1
 void padfx_diag_text(char *buf, int n); // diag.c stats.log: this second's trigger modes and light colour
 void feedback_trigger_state(float slip[2], float hz[2], int *nos);   // feedback.c: last DoFFB frame, [0] rear [1] front
@@ -158,6 +163,7 @@ void widescreen_projection(Cpu *c, uint32_t proj);
 void widescreen_drop_offset(Cpu *c, uint32_t vec);
 void widescreen_drop_quad(Cpu *c, uint32_t verts, uint32_t stride);
 void user32_display_pixels(int *w, int *h);
+int user32_notch_fill(void);
 // Time the game thread spends not running game code, per reason (host_ticks ns; stats.log turns it into the
 // per-frame "busy" time, which is what limits the frame rate when the CPU is the bottleneck).
 enum { IDLE_SLEEP, IDLE_GIL, IDLE_DRAWABLE, IDLE_GPU, IDLE_N };

@@ -7,6 +7,7 @@
  * packages from the projected upgrade endpoints. */
 enum {
     CAR_PERFORMANCE_BYTES = 344,
+    CAR_PERFORMANCE_TORQUE_KNOTS = 64,
     CAR_PERFORMANCE_ENGINE_LINK = 0,
     CAR_PERFORMANCE_CHASSIS_LINK = 3,
     CAR_PERFORMANCE_NOS_LINK = 6,
@@ -17,6 +18,13 @@ typedef struct {
     uint32_t version;
     uint32_t values[(CAR_PERFORMANCE_BYTES - 16) / 4];
     unsigned source; /* Later-game provenance from the admitted catalog. */
+    struct {
+        uint32_t count;
+        float bounds[4];
+        float x[CAR_PERFORMANCE_TORQUE_KNOTS];
+        float y[CAR_PERFORMANCE_TORQUE_KNOTS];
+        float second[CAR_PERFORMANCE_TORQUE_KNOTS];
+    } torque;
 } CarPerformance;
 
 typedef struct {
@@ -33,4 +41,6 @@ unsigned car_performance_tiers(const CarPerformance *record, unsigned link,
 void car_performance_layout(const CarPerformance *record, unsigned link, int installed,
                             const void *stock, const void *endpoint, void *out);
 float car_performance_clamp_top_speed(const void *engine_layout, float speed);
+int car_performance_torque(const CarPerformance *record, const void *engine_layout,
+                          float rpm, float *torque);
 #endif

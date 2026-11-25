@@ -42,7 +42,7 @@ static const Block blocks[] = {
 
 static Block performance_block(unsigned index, unsigned version) {
     Block block=blocks[index];
-    if (index==CAR_PERFORMANCE_NOS_LINK+1 && version<3)
+    if (index==CAR_PERFORMANCE_NOS_LINK+1 && version!=3)
         block.count=version==2 ? 2 : 0;
     return block;
 }
@@ -76,14 +76,15 @@ int car_performance_read(int fd,uint32_t car,uint32_t donor,CarPerformance *out)
     static const struct { char magic[5]; unsigned size; } formats[] = {
         {"CPF1", 312}, {"CPF2", 320}, {"CPF3", CAR_PERFORMANCE_BYTES}
     };
-    uint32_t words[CAR_PERFORMANCE_BYTES / 4];
+    uint32_t words[(332 + 12 * CAR_PERFORMANCE_TORQUE_KNOTS) / 4];
     struct stat st;
     memset(out,0,sizeof *out);
     if (fstat(fd,&st) || !S_ISREG(st.st_mode)) return -1;
     unsigned format=0;
     while (format<sizeof formats/sizeof formats[0] && st.st_size!=formats[format].size) ++format;
-    if (format==sizeof formats/sizeof formats[0]) return -1;
-    size_t size=formats[format].size;
+    int spline=format==sizeof formats/sizeof formats[0];
+    if (spline && (st.st_size<356 || st.st_size>(off_t)sizeof words || (st.st_size-332)%12)) return -1;
+    size_t size=spline ? (size_t)st.st_size : formats[format].size;
     unsigned version=format+1;
     size_t read_bytes=0;
     while (read_bytes<size) {
@@ -92,7 +93,7 @@ int car_performance_read(int fd,uint32_t car,uint32_t donor,CarPerformance *out)
         if (got<=0) return -1;
         read_bytes+=(size_t)got;
     }
-    if (!car || !donor || memcmp(words,formats[format].magic,4) || words[1]!=size ||
+    if (!car || !donor || memcmp(words,spline ? "CPF4" : formats[format].magic,4) || words[1]!=size ||
         words[2]!=car || words[3]!=donor) return -1;
     const uint32_t *p=words+4;
     for (unsigned b=0;b<=CAR_PERFORMANCE_LINKS;++b) {
@@ -108,8 +109,29 @@ int car_performance_read(int fd,uint32_t car,uint32_t donor,CarPerformance *out)
             }
         }
     }
-    if (p!=words+size/sizeof words[0] || real(words+4)<=0) return -1;
-    memcpy(out->values,words+4,size-16);
+    if (p!=words+(spline ? 312 : size)/sizeof words[0] || real(words+4)<=0) return -1;
+    if (spline) {
+        unsigned n=p[4];
+        if (n<2 || n>CAR_PERFORMANCE_TORQUE_KNOTS || size!=332+12*n) return -1;
+        for (unsigned i=0;i<4;++i) {
+            if (!isfinite(real(p+i))) return -1;
+            out->torque.bounds[i]=real(p+i);
+        }
+        if (!(real(p)<real(p+1)) || real(p+2)>real(p+3)) return -1;
+        p+=5;
+        for (unsigned i=0;i<n;++i) {
+            float x=real(p+i), y=real(p+n+i), second=real(p+2*n+i);
+            if (!isfinite(x) || !isfinite(y) || !isfinite(second) ||
+                (i && x<=real(p+i-1))) return -1;
+            out->torque.x[i]=x;
+            out->torque.y[i]=y;
+            out->torque.second[i]=second;
+        }
+        if (real(p)!=0 || real(p+n-1)!=1 || real(words+32)<=0 ||
+            real(words+30)<=real(words+32)) return -1; /* Idle and maximum RPM. */
+        out->torque.count=n;
+    }
+    memcpy(out->values,words+4,(spline ? 312 : size)-16);
     out->version=version;
     return 0;
 }
@@ -118,6 +140,38 @@ static unsigned length(const unsigned char *array,unsigned maximum) {
     uint16_t header[4];
     memcpy(header,array,sizeof header);
     return header[1]<=maximum && header[2]==4 ? header[1] : 0;
+}
+
+int car_performance_torque(const CarPerformance *record,const void *engine_layout,
+                          float rpm,float *torque) {
+    unsigned n=record->torque.count;
+    if (record->version!=4 || n<2) return 0;
+    const unsigned char *engine_layout_bytes=engine_layout;
+    double idle=real(engine_layout_bytes+0x5c), maximum=real(engine_layout_bytes+0x54);
+    if (!isfinite(rpm) || !(idle<maximum) || length(engine_layout_bytes,9)!=9) return 0;
+    const uint32_t *stock=record->values+8; /* Engine block following body fields. */
+    double position=(rpm-idle)/(maximum-idle);
+    double source_rpm=real(stock+20)+position*(real(stock+18)-real(stock+20));
+    const float *bounds=record->torque.bounds;
+    double x=fmin(1,fmax(0,(source_rpm-bounds[0])/(bounds[1]-bounds[0])));
+    unsigned hi=1;
+    while (hi<n-1 && record->torque.x[hi]<=x) ++hi;
+    unsigned lo=hi-1;
+    double width=(double)record->torque.x[hi]-record->torque.x[lo];
+    double b=(x-record->torque.x[lo])/width, a=1-b;
+    double normalized=a*record->torque.y[lo]+b*record->torque.y[hi]+
+        ((a*a*a-a)*record->torque.second[lo]+(b*b*b-b)*record->torque.second[hi])*width*width/6;
+    double value=bounds[2]+((double)bounds[3]-bounds[2])*normalized;
+    if (source_rpm<bounds[0] && bounds[0]>0) value*=source_rpm/bounds[0];
+    /* Retain the donor kit's sample deltas and RPM envelope. At stock every
+     * delta is exactly zero; between samples the source curvature survives. */
+    double sample=fmin(8,fmax(0,position*8));
+    unsigned left=(unsigned)sample, right=left<8 ? left+1 : left;
+    double t=sample-left;
+    double d0=(double)real(engine_layout_bytes+8+4*left)-real(stock+1+left);
+    double d1=(double)real(engine_layout_bytes+8+4*right)-real(stock+1+right);
+    *torque=(float)(value+d0+(d1-d0)*t);
+    return 1;
 }
 
 float car_performance_clamp_top_speed(const void *engine_layout,float speed) {
@@ -148,7 +202,7 @@ unsigned car_performance_tiers(const CarPerformance *record,unsigned link,
     /* With two references MW blends stock into partial kits. Give nitrous a
      * separate low kit so both ends of the blend have equipped refill values. */
     if (link==CAR_PERFORMANCE_NOS_LINK &&
-        (record->version>=3 || record->source==CAR_PERFORMANCE_PROSTREET) && donor_count==2) {
+        (record->version==3 || record->source==CAR_PERFORMANCE_PROSTREET) && donor_count==2) {
         donor_indices[1]=0; donor_indices[2]=1;
         return 3;
     }
@@ -162,7 +216,7 @@ void car_performance_layout(const CarPerformance *record,unsigned link,int insta
         for (unsigned i=0;i<blocks[b].count;++i)
             p+=blocks[b].fields[i].width+blocks[b].fields[i].array;
     int prostreet=record->source==CAR_PERFORMANCE_PROSTREET;
-    int source_nos=link==CAR_PERFORMANCE_NOS_LINK && (record->version>=3 || prostreet);
+    int source_nos=link==CAR_PERFORMANCE_NOS_LINK && (record->version==3 || prostreet);
     Block block=performance_block(link+1,source_nos ? 3 : record->version);
     int stock_has_nos=source_nos && real(p+1)>0;
     for (unsigned i=0;i<block.count;++i) {

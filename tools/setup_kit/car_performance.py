@@ -217,8 +217,8 @@ def metadata(data, car, donor, *, attrib=None, endian='<'):
     return serialize(records, car, donor)
 
 
-def serialize(records, car, donor):
-    """Write MW stock fields. CPF1 keeps the complete MW nitrous setup."""
+def serialize(records, car, donor, *, torque_spline=None):
+    """Write stock fields; CPF4 extends CPF1 with normalized cubic torque data."""
     blocks = (('pvehicle', VEHICLE), *LINKS)
     require(len(records) in (len(blocks) - 1, len(blocks)), 'performance block count')
     magic = MAGIC if len(records) == len(blocks) else b'CPF1'
@@ -229,4 +229,16 @@ def serialize(records, car, donor):
             if array:
                 body += struct.pack('<I', len(value))
             body += struct.pack(f'<{capacity}f', *value, *([0.0] * (capacity - len(value))))
+    if torque_spline is not None:
+        require(magic == b'CPF1', 'torque spline requires source stock fields')
+        bounds, xs, ys, second = torque_spline
+        count = len(xs)
+        require(len(bounds) == 4 and 2 <= count <= 64 and len(ys) == len(second) == count and
+                all(math.isfinite(v) for vector in torque_spline for v in vector) and
+                bounds[0] < bounds[1] and bounds[2] <= bounds[3] and
+                xs[0] == 0 and xs[-1] == 1 and all(a < b for a, b in zip(xs, xs[1:])),
+                'torque spline shape')
+        magic = b'CPF4'
+        body += struct.pack('<4fI', *bounds, count)
+        body += struct.pack(f'<{3 * count}f', *xs, *ys, *second)
     return struct.pack('<4s3I', magic, 16 + len(body), hash32(car.lower()), hash32(donor.lower())) + body

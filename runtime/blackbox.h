@@ -55,6 +55,14 @@ typedef struct {
 void blackbox_record_carbon_cinematic(BlackboxKind kind, BlackboxCinematicEdge edge,
                                      const BlackboxCarbonCinematic *state,
                                      uint32_t valid, uint64_t frame, uint64_t now);
+/* Input source: 0 keyboard/mouse, 1 controller. Layout: 0 unobserved, 1 PS, 2 Xbox, 3 PC.
+ * changes bits: 1 source, 2 connection, 4 layout. No button or device identifiers. */
+typedef struct {
+    uint32_t source, connected, layout, changes;
+    uint64_t source_since;
+} BlackboxInput;
+void blackbox_record_input(const BlackboxInput *state, uint64_t frame, uint64_t now);
+void blackbox_input(uint64_t frame, uint64_t now);
 /* Selected game adapter; flow is already sampled by the caller on the guest thread. */
 void blackbox_game_frame(uint64_t frame, uint32_t flow, const BlackboxTiming *timing);
 void blackbox_menu(int open);

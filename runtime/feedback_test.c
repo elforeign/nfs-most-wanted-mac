@@ -1,3 +1,4 @@
+// Two-pad world collision: fixed P1 0.000, P2 0.984; singleton control P1 0.984, P2 0.000.
 // Offline regression: actual feedback.c, fake motor transport; no Cocoa, game, controller or Unicorn.
 // From repo root:
 //   cc -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -I recomp runtime/feedback_test.c -o /tmp/feedback_test && /tmp/feedback_test
@@ -25,16 +26,23 @@ const char *game_dir = "/nonexistent";
 static uint64_t clock_ns = 1000000000;
 static float motor_l, motor_r;
 static int output_off, output_hold, stop_calls, transition_logs, failures, checks;
+static int slot_stops[2];
 uint64_t host_ticks(void) { return clock_ns; }
+void rumble_stop_slot(unsigned slot) { if (slot >= 2) abort(); ++slot_stops[slot]; rumble_stop(); }
 void rumble_stop(void) { if (!output_off) { motor_l = motor_r = 0; ++stop_calls; } }
 void rumble_suppress(int on) { output_hold = on; rumble_stop(); }
 void diag_event(const char *fmt, ...) {
     if (!strncmp(fmt, "feedback: %s %s", 15)) ++transition_logs;
 }
 void diag_event_ring(const char *fmt, ...) { (void)fmt; }
-uint32_t galloc(uint32_t n) { (void)n; abort(); }
+uint32_t galloc(uint32_t n) { if (n != 16) abort(); return 0x3000; }
 uint32_t host_fn(HostFn fn, const char *name) { (void)fn; (void)name; abort(); }
-uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *a) { (void)c; (void)fn; (void)n; (void)a; abort(); }
+uint32_t call_guest(Cpu *c, uint32_t fn, int n, const uint32_t *a) {
+    (void)c;
+    if (fn == FN_KEYED_SEARCH && n == 3) return a[2] == 1 ? 0x3100 : 0;
+    if (fn == 0x3200 && n == 1) { memset(G + a[0], 0, 12); return a[0]; }
+    abort();
+}
 static unsigned fx_holds;
 static int broken_padfx;
 static int fx_stops;
@@ -60,9 +68,9 @@ static void pad_read_motors(void) {
 static void game_frame(void) {
     Cpu c = {0};
     fb_resume(&c);                        // DoFFB resumes the model each tick
-    S.osc[0] = (Osc){.offset = 0.6f};    // sustained road texture, not an envelope that eventually decays
-    S.osc[2] = (Osc){.offset = 0.3f};
-    S.env[0] = (Env){10, 10, 1, 0};      // a pending collision must also be discarded
+    feedback_states[0].model.osc[0] = (Osc){.offset = 0.6f};    // sustained road texture, not an envelope that eventually decays
+    feedback_states[0].model.osc[2] = (Osc){.offset = 0.3f};
+    feedback_states[0].model.env[0] = (Env){10, 10, 1, 0};      // a pending collision must also be discarded
 }
 static void moving(void) {
     game_frame(); pad_read_motors(); pad_read_motors();
@@ -72,6 +80,70 @@ static void quiet(void) {
     pad_read_motors();
     float l, r; feedback_last_levels(&l, &r);
     CHECK(motor_l == 0 && motor_r == 0 && l == 0 && r == 0);
+}
+static Cpu owned_cpu(unsigned slot) {
+    Cpu c = {0}; c.ecx = 0x8000 + 0x100 * slot; c.esp = 0x9000;
+    return c;
+}
+static void collision(unsigned slot) {
+    Cpu c = owned_cpu(slot); fb_resume(&c);
+    c = owned_cpu(slot); M32(c.esp + 4) = 0x4000; M32(c.esp + 8) = 1;
+    fb_collision(&c);
+}
+static void two_pad_isolation(void) {
+    diag_on = 0;
+    M32(0x0092D87Cu) = 0x6000; M32(0x0092D884u) = 2;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        uint32_t player = 0x7000 + 0x100 * slot;
+        M32(0x6000 + 4 * slot) = player;
+        M32(player + 0x0C) = 0x8000 + 0x100 * slot;
+        M32(player + 0x18) = slot;
+    }
+    memset(feedback_states, 0, sizeof feedback_states);
+    M32(0x3104) = 0x3300; M32(0x3300) = 0x3400; M32(0x3468) = 0x3200;
+    M32(0x401C) = 2; M32(0x403C) = 1; MF32(0x4050) = 1.0f / X360E_FB_WORLD_SLOPE; // full-strength world contact
+    collision(1);
+    float h[2], l[2];
+    for (unsigned slot = 0; slot < 2; ++slot) feedback_levels_slot(slot, &h[slot], &l[slot]);
+    clock_ns += 16000000;
+    for (unsigned slot = 0; slot < 2; ++slot) feedback_levels_slot(slot, &h[slot], &l[slot]);
+    printf("P2-only collision: P1 %.3f, P2 %.3f\n", h[0], h[1]);
+    CHECK(h[0] == 0 && l[0] == 0 && h[1] > 0 && l[1] == 0);
+    collision(0); // simultaneous envelopes survive an independent P2 invalidation
+    feedback_levels_slot(0, &h[0], &l[0]); clock_ns += 16000000;
+    feedback_levels_slot(0, &h[0], &l[0]);
+    feedback_invalidate_slot(1);
+    feedback_levels_slot(1, &h[1], &l[1]);
+    CHECK(h[1] == 0 && feedback_states[1].model.env[0].time == 0);
+    CHECK(h[0] > 0 && feedback_states[0].model.env[0].time > 0);
+    collision(1);
+    Cpu c = owned_cpu(0); fb_stop(&c); // P1 native Rumble Off leaves P2 live
+    feedback_levels_slot(1, &h[1], &l[1]); clock_ns += 16000000;
+    feedback_levels_slot(1, &h[1], &l[1]);
+    CHECK(!feedback_states[0].model.active && h[1] > 0);
+    int stops0 = slot_stops[0], stops1 = slot_stops[1];
+    M32(0x0092D884u) = 0; // leaving the race: no LocalPlayers, no pending feedback
+    feedback_poll_pause(); // no pad read is needed for neutral output
+    CHECK(slot_stops[0] == stops0 + 1 && slot_stops[1] == stops1 + 1);
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        feedback_levels_slot(slot, &h[slot], &l[slot]);
+        CHECK(h[slot] == 0 && l[slot] == 0 && !feedback_states[slot].effects_valid);
+    }
+    M32(0x0092D884u) = 2;
+    // Reorder the vector and swap owned ports: feedback follows the port, not list order or settings index.
+    M32(0x6000) = 0x7100; M32(0x6004) = 0x7000;
+    M32(0x7118) = 0; M32(0x7018) = 1;
+    collision(1);
+    feedback_levels_slot(0, &h[0], &l[0]); clock_ns += 16000000;
+    feedback_levels_slot(0, &h[0], &l[0]); feedback_levels_slot(1, &h[1], &l[1]);
+    CHECK(h[0] > 0 && h[1] == 0);
+    feedback_suppress(FEEDBACK_MENU, 1);
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        feedback_levels_slot(slot, &h[slot], &l[slot]);
+        CHECK(h[slot] == 0 && l[slot] == 0);
+    }
+    feedback_suppress(FEEDBACK_MENU, 0);
+    M32(0x0092D884u) = 0;
 }
 int main(int argc, char **argv) {
     setenv("NFS_RUMBLE", "off", 1);
@@ -124,7 +196,7 @@ int main(int argc, char **argv) {
 
     feedback_invalidate_effects(); // unplug invalidates motors as well as trigger publications
     quiet(); quiet();
-    CHECK(S.osc[0].offset == 0 && S.env[0].time == 0);
+    CHECK(feedback_states[0].model.osc[0].offset == 0 && feedback_states[0].model.env[0].time == 0);
     moving();
     feedback_invalidate_effects();
     diag_on = 0; // a new BeginFrame must reset the model before building fresh output
@@ -147,6 +219,7 @@ int main(int argc, char **argv) {
     feedback_suppress(FEEDBACK_MENU, 0); pad_read_motors();
     CHECK(motor_l == 0.17f && motor_r == 0.23f);
     CHECK(transition_logs == 20);
+    two_pad_isolation();
     free(G);
     printf("feedback_test: %s, %d checks, %d failures, %d transition logs\n", failures ? "FAIL" : "PASS", checks, failures, transition_logs);
     return failures != 0;

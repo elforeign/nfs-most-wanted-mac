@@ -124,6 +124,35 @@ class CarUpdateRefresh(unittest.TestCase):
         self.assert_refresh(previous, expected, self.apply_update(ready))
         self.assertTrue(any((self.fixture.profile / stage.CAR_INPUTS).glob('car-import-*/c-*')))
 
+    def test_f4_proof_gate_preserves_car_pointer_until_verified_apply(self):
+        # Original accepts 1/1 tampered proofs; fixed refuses 1/1; bypass applies 1/1 and rollback restores the pointer.
+        previous = self.install_previous(self.assets.engine)
+        expected = self.new_release()
+        f = self.fixture
+        f.version = '4.11.0'
+        f.make_app(f.job / f.bundle, 'new')
+        ready, warning = self.prepare_update()
+        self.assertEqual(warning, '')
+        ready_body = ready.read_bytes()
+        signer = test_apply.UpdateProof(f.base)
+        signer.write(f.base, 'mw', f.version)
+        signature = signer.signature.read_bytes()
+        test_apply.put(signer.signature, b'changed signature')
+        before = self.assets.pointer()
+        with mock.patch.object(backend, 'PUBLIC_VERSION', f.version), signer.trust(apply.updates):
+            with self.assertRaises(install.InstallError):
+                apply.apply_ready(ready, f.profile, f.dest, running=lambda: None)
+            self.assertEqual(self.assets.pointer(), before)
+            with mock.patch.object(apply, 'verify_update', return_value=None), redirect_stdout(io.StringIO()):
+                apply.apply_ready(ready, f.profile, f.dest, running=lambda: None)
+                self.assertEqual(f.recover(), 'restored')
+            self.assertEqual(self.assets.pointer(), before)
+            test_apply.put(ready, ready_body)
+            test_apply.put(signer.signature, signature)
+            self.assert_refresh(previous, expected, self.apply_update(ready))
+        healthy = json.loads((f.profile / '.update-healthy-mw.json').read_bytes())
+        self.assertEqual(healthy['version'], f.version)
+
     def test_update_without_cache_or_original_media(self):
         previous = self.install_previous(stage.car_importer(self.fixture.profile, self.cache))
         expected = self.new_release()

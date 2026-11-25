@@ -11,34 +11,44 @@
 #include "pub_update_write.h"
 #include "bundle_roots.h"
 #include "game_select.h"
+#include "pub_update_manifest.h"
 
 #if NFS_GAME == NFS_GAME_PRIVATE
 static NSString *const PublicBundleID = @"io.github.nfs-carbon-native-mac";
 static NSString *const SetupBundleID = @"org.nfscarbon-native.setup";
 static NSString *const SetupBundleName = @"NFS Carbon Native Setup.app";
+static const char *UpdateProduct = "carbon", *UpdateRepository = "elforeign/nfs-carbon-mac";
+static NSString *const UpdateAssetPrefix = @"NFS-Carbon-Native-Setup";
 #else
 static NSString *const PublicBundleID = @"io.github.nfsmw-native-mac";
 static NSString *const SetupBundleID = @"org.nfsmw-native.setup";
 static NSString *const SetupBundleName = @"NFS Most Wanted Native Setup.app";
+static const char *UpdateProduct = "mw", *UpdateRepository = "elforeign/nfs-most-wanted-mac";
+static NSString *const UpdateAssetPrefix = @"NFS-Most-Wanted-Native-Setup";
 #endif
 
 extern const char *game_dir;  // assigned only after app_start validates the PC root
 
-static NSDictionary *UpdateJSON(NSString *path) {
+static NSData *UpdateBytes(NSString *path, NSUInteger cap) {
     // The ready index and journals are small. Never follow a descriptor link or
     // allocate an unbounded file on the ordinary startup path.
     int fd = open(path.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return nil;
     struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > 16384) { close(fd); return nil; }
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || (uint64_t)st.st_size > cap) { close(fd); return nil; }
     NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
     size_t offset = 0;
     while (offset < data.length) {
         ssize_t count = read(fd, (char *)data.mutableBytes + offset, data.length - offset);
+        if (count < 0 && errno == EINTR) continue;
         if (count <= 0) { close(fd); return nil; }
         offset += (size_t)count;
     }
     close(fd);
+    return data;
+}
+static NSDictionary *UpdateJSON(NSString *path) {
+    NSData *data = UpdateBytes(path, 16384);
     id value = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
@@ -56,31 +66,53 @@ static NSString *CanonicalPath(NSString *path) {
 }
 
 static BOOL ReleaseVersion(id value) {
-    return [value isKindOfClass:NSString.class] && [value length] <= 63 &&
-        [value rangeOfString:@"\\A[0-9]+(?:\\.[0-9]+){1,3}\\z"
-                     options:NSRegularExpressionSearch].location != NSNotFound;
+    uint32_t parts[4];
+    return [value isKindOfClass:NSString.class] && [value length] <= PUM_VERSION_MAX &&
+        [value length] == strlen([value UTF8String]) && pum_version_parts([value UTF8String], parts);
 }
 
 static BOOL NewerVersion(NSString *target, NSString *installed) {
-    NSArray<NSString *> *left = [target componentsSeparatedByString:@"."];
-    NSArray<NSString *> *right = [installed componentsSeparatedByString:@"."];
-    for (NSUInteger i = 0; i < MAX(left.count, right.count); ++i) {
-        NSString *a = i < left.count ? left[i] : @"0";
-        NSString *b = i < right.count ? right[i] : @"0";
-        NSComparisonResult order = [a compare:b options:NSNumericSearch];
-        if (order != NSOrderedSame) return order == NSOrderedDescending;
-    }
-    return NO;
+    int order;
+    return pum_compare_versions(target.UTF8String, installed.UTF8String, &order) && order > 0;
 }
 
-static BOOL ReadyVersionMatches(NSString *job, NSString *ready, NSString *destination) {
+static BOOL SignedJob(NSString *job, NSString *target) {
+    if (!ReleaseVersion(target)) return NO;
+    NSString *asset = [NSString stringWithFormat:@"%@-v%@.dmg", UpdateAssetPrefix, target];
+    NSString *path = [job stringByAppendingPathComponent:[asset stringByAppendingString:@".manifest"]];
+    NSData *raw = UpdateBytes(path, PUM_MANIFEST_MAX);
+    NSData *sig = UpdateBytes([path stringByAppendingString:@".sig"], PUM_SIGNATURE_MAX);
+    PUMManifest proof;
+    NSString *tag = [@"v" stringByAppendingString:target];
+    return pum_verify(raw.bytes, raw.length, sig.bytes, sig.length,
+                       UpdateRepository, UpdateProduct, tag.UTF8String, &proof) &&
+        pum_verify_file(&proof.dmg, [job stringByAppendingPathComponent:asset].fileSystemRepresentation) &&
+        pum_verify_file(&proof.checksum, [job stringByAppendingPathComponent:[asset stringByAppendingString:@".sha256"]].fileSystemRepresentation);
+}
+
+static BOOL HealthyVersionAllows(NSString *target, NSString *profile) {
+    NSString *path = [profile stringByAppendingPathComponent:
+        [NSString stringWithFormat:@".update-healthy-%s.json", UpdateProduct]];
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st)) return errno == ENOENT;
+    if (!S_ISREG(st.st_mode) || st.st_nlink != 1) return NO;
+    NSData *data = UpdateBytes(path, 1024);
+    id record = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    return [record isKindOfClass:NSDictionary.class] && [record count] == 3 &&
+        [record[@"format_version"] isEqual:@1] &&
+        [record[@"product"] isEqual:[NSString stringWithUTF8String:UpdateProduct]] &&
+        ReleaseVersion(record[@"version"]) && NewerVersion(target, record[@"version"]);
+}
+
+static BOOL ReadyVersionMatches(NSString *job, NSString *ready, NSString *destination, NSString *profile) {
     // Retained apply.py is supplied by the release and may predate this check.
     NSString *target = UpdateJSON([job stringByAppendingPathComponent:@"target-version.json"])[@"version"];
     NSDictionary *descriptor = UpdateJSON(ready);
     NSString *installed = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"];
     if (!ReleaseVersion(target) || !ReleaseVersion(installed) ||
+        !SignedJob(job, target) ||
         ![target isEqual:descriptor[@"version"]] || ![descriptor[@"app"] isEqual:destination.lastPathComponent] ||
-        !NewerVersion(target, installed)) return NO;
+        !NewerVersion(target, installed) || !HealthyVersionAllows(target, profile)) return NO;
     NSString *staged = [[ready.stringByDeletingLastPathComponent stringByAppendingPathComponent:destination.lastPathComponent]
         stringByAppendingPathComponent:@"Contents/Info.plist"];
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:staged];
@@ -298,7 +330,9 @@ void pub_update_launch(int *argc, char ***argv, const char *profilePath) {
         if (needsRecovery) exit(1);
         return;
     }
-    if (ready && !ReadyVersionMatches(job, ready, destination)) {
+    // Only new transactions need a newer signed target. Recovery/ack must still
+    // finish an already admitted transaction, including the legacy bootstrap.
+    if (ready && !ReadyVersionMatches(job, ready, destination, profile)) {
         fprintf(stderr, "boot: prepared update version verification failed. Prepare the update again.\n");
         NSString *failed = [ready.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".apply-failed.json"];
         PUReplaceFile(failed, [@"{\"state\":\"failed\"}\n" dataUsingEncoding:NSUTF8StringEncoding], 0600);
