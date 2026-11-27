@@ -199,6 +199,9 @@ static void nonps_defaults(int xbox) {
         add(A_SHIFTUP, T_ROT_HI, 2);
     }
     add(A_NEXTSONG, T_BUTTON, XBOX_L3);
+    // FE START reads B3, not FE_ACTION_START. Only port 0 gets the layout's
+    // keyboard fallback; port 1 needs the actual menu button in its own queue.
+    if (pad_count() == 2) add(A_FE_B3, T_BUTTON, 7);
 }
 // P2 uses its own layout defaults when P1's shared table describes another layout.
 // Cache from the retail Xbox base, before profile/custom bindings are applied.

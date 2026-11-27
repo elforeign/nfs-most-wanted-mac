@@ -42,8 +42,8 @@ Per-volume checks preserve unknown sizes and refuse either full volume.
 Effective TMPDIR log: original code fails 1/1; fixed code passes 1/1, with
 two real child commands sharing one log entry independent of the caller TMPDIR.
 
-Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.11.0;
-changing it to 4.10.0 fails 1/1 against the independent 4.11.0 expectations.
+Release-version proof: bundle test passes 1/1 with PUBLIC_VERSION 4.12.0;
+changing it to 4.11.0 fails 1/1 against the independent 4.12.0 expectations.
 
 Run-log link regression: good 2/2 symlink/hardlink preservation oracles pass;
 broken base 2c887bc3 passes 0/2 (2 failures) after an injected runtime build failure.
@@ -2193,8 +2193,8 @@ printf icon > "$1"
         self.assertNotEqual(public["CFBundleIdentifier"], "local.nfsmw-port")
         self.assertEqual(public["CFBundleIdentifier"], b.PUBLIC_ID)
         self.assertEqual(public["CFBundleDisplayName"], b.PUBLIC_NAME)
-        self.assertEqual(public["CFBundleShortVersionString"], "4.11.0")
-        self.assertEqual(public["CFBundleVersion"], "4.11.0")
+        self.assertEqual(public["CFBundleShortVersionString"], "4.12.0")
+        self.assertEqual(public["CFBundleVersion"], "4.12.0")
         self.assertEqual(public["NFSMWSourceIdentity"], "content-hash")
         via_env = bundle(overrides=dict(NFSMW_BUNDLE_NAME=b.PUBLIC_NAME, NFSMW_BUNDLE_ID=b.PUBLIC_ID, NFSMW_BUNDLE_EXEC="NFSMostWanted",
                                        NFSMW_BUNDLE_VERSION="4.0.1", NFSMW_SOURCE_ID="explicit-source"), expect=b.PUBLIC_NAME)
@@ -3823,32 +3823,32 @@ class CarbonBuildTests(Fixture):
         self.assertTrue(bundle[bundle.index("--boot") + 1].endswith("recomp/out/carbon/boot_carbon"))
 
     def test_carbon_update_from_its_own_version_and_remembered_folder(self):
-        """Carbon's updater inputs: its own version 1.4.0 (Most Wanted's stays), its sources remembered at install in
-        its own Setup state, and a 1.4.1 update staged from those alone, bound to its app and profile <data>/Carbon.
+        """Carbon's updater inputs: its own version 1.5.0 (Most Wanted's stays), its sources remembered at install in
+        its own Setup state, and a 1.5.1 update staged from those alone, bound to its app and profile <data>/Carbon.
         Proof: with main 583933e9's tools/setup_kit this fails at its first check (bundle --version 4.6.0); fixed: passes."""
         from setup_kit import apply   # the checked-in launch transaction (the builds below load the build copy's)
         installed, runner = self.carbon_build()
         bundle = next(c for c in runner.commands if "runtime/bundle.sh" in " ".join(c))
-        self.assertEqual(bundle[bundle.index("--version") + 1], "1.4.0")
+        self.assertEqual(bundle[bundle.index("--version") + 1], "1.5.0")
         self.assertNotEqual(b.PUBLIC_VERSION.split(".")[0], "1")   # Most Wanted keeps its 4.x numbers
         with (Path(installed) / "Contents/Info.plist").open("rb") as f:
-            self.assertEqual(plistlib.load(f)["CFBundleShortVersionString"], "1.4.0")
+            self.assertEqual(plistlib.load(f)["CFBundleShortVersionString"], "1.5.0")
         choices = b.staging.load_choices(self.paths.state / "Carbon", required=True)
         self.assertEqual((Path(choices["pc"]), Path(choices["destination"])), (self.carbon.resolve(), Path(installed)))
         self.assertFalse((self.paths.state / "source-choices.json").exists())   # Most Wanted's choices untouched
         setup_kit.__path__ = self.package_path   # a new process (the update's preparer) imports the full package again
-        signer, stage = self.signed_carbon_job("carbon-update", "1.4.1")   # past the unsigned bootstrap (1.3.0)
+        signer, stage = self.signed_carbon_job("carbon-update", "1.5.1")   # past the unsigned bootstrap (1.3.0)
         real = b.build
         with mock.patch.object(b, "build", lambda args, paths, events, runner, source_root=None:
                                real(args, paths, events, CarbonRunner(self.log, self.child_env, paths.work), self.source)), \
-             mock.patch.object(b, "CARBON_VERSION", "1.4.1"), signer.trust(b.updating.updates), \
+             mock.patch.object(b, "CARBON_VERSION", "1.5.1"), signer.trust(b.updating.updates), \
              self.pipeline_stubs(), mock.patch.object(b, "assert_not_running"), redirect_stdout(self.stream):
             rc = b.main(["--stage-only", "--game", "carbon", "--stage", str(stage), "--work", str(self.paths.work), "--events"])
         self.assertEqual(rc, 0, self.stream.getvalue()[-2000:])
         ready = json.loads((stage / "ready.json").read_text())
         self.assertEqual((ready["version"], ready["app"], ready["profile"], ready["destination"]["path"]),
-                         ("1.4.1", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
-        with signer.trust(apply.updates), mock.patch.object(b, "CARBON_VERSION", "1.4.1"):   # apply reauthenticates the proof
+                         ("1.5.1", "NFS Carbon Native.app", str(self.paths.data / "Carbon"), str(installed)))
+        with signer.trust(apply.updates), mock.patch.object(b, "CARBON_VERSION", "1.5.1"):   # apply reauthenticates the proof
             record, app, data = apply.read_ready(stage / "ready.json", self.paths.data / "Carbon", Path(installed))
         self.assertTrue((Path(app) / "Contents/MacOS/NFSCarbon").is_file())
         self.assertTrue((stage / record["roots"]["pc_root"] / "NFSC.exe").is_file())
@@ -4073,8 +4073,8 @@ class CarbonSetupDiscTests(Fixture):
         saved = b.staging.load_choices(b.carbon_state(self.paths), required=True)
         self.assertEqual([saved[k] for k in ("pc", "pc_update", "pc_exe")],
                          [str(p) for p in (self.disc, self.update, self.exe)])
-        signer, stage = self.signed_carbon_job("update", "1.4.1")   # past the unsigned bootstrap (1.3.0)
-        with mock.patch.object(b, "CARBON_VERSION", "1.4.1"), signer.trust(b.updating.updates):
+        signer, stage = self.signed_carbon_job("update", "1.5.1")   # past the unsigned bootstrap (1.3.0)
+        with mock.patch.object(b, "CARBON_VERSION", "1.5.1"), signer.trust(b.updating.updates):
             self.cli("--stage-only", "--stage", str(stage))
         record = json.loads((stage / "ready.json").read_text())
         self.assertEqual([record["provenance"][k] for k in ("carbon", "pc_update", "pc_exe")],

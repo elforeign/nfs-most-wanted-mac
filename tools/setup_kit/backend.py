@@ -77,10 +77,10 @@ FFMPEG_SHA = "733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1"
 PUBLIC_NAME = "NFS Most Wanted Native"
 PUBLIC_ID = PUBLIC_BUNDLE_ID  # also the 3.x id: the Dock icon carries over. Never local.nfsmw-port.
 PUBLIC_EXEC = "NFSMostWanted"  # never NFSMW: a distinct name, so this app is never mistaken for another build
-PUBLIC_VERSION = "4.11.0"
+PUBLIC_VERSION = "4.12.0"
 # Carbon's app: its names (install.CARBON), its data, Setup state and update folder name, and its own version.
 CARBON_PRODUCT = dict(CARBON, data="Carbon")
-CARBON_VERSION = "1.4.0"
+CARBON_VERSION = "1.5.0"
 CARBON_EXE_SHA256 = "baaaaec33873d4ba7e4dbae6a5212049ffdcf9679a35d865d7625b4189952fd3"  # NFSC.exe (car_sources.json pin)
 CARBON_RUNNING = re.compile(re.escape(CARBON_PRODUCT["name"]) + r"\.app/Contents/MacOS/")
 CARBON_X360_BYTES = 40_000_000  # the two Xbox archives (38.4 MB), kept whole
@@ -2539,8 +2539,8 @@ def cars_command(args):
     inputs = ([carbon] if carbon else []) + ([car_import._path(args.cars_spec)] if args.cars_spec else [])
     uc_x360 = car_import._path(args.cars_uc_x360) if args.cars_uc_x360 else None
     if uc_x360 is not None:
-        if not uc_x360.is_file():
-            raise SetupError('Choose an Undercover Xbox 360 disc image for engine sounds.')
+        if not (uc_x360.is_file() or uc_x360.is_dir()):
+            raise SetupError('Choose an Undercover PC folder or Xbox 360 disc image for engine sounds.')
         inputs.append(uc_x360)
     mw = None
     mw_archive = False
@@ -2715,7 +2715,7 @@ def main(argv=None):
                     help='carbon: --check or --build Carbon from --carbon alone, with an optional --x360 (no --pc, no Most Wanted copy)')
     ap.add_argument('--cars-spec', help='JSON array of local car metadata for the F-T API')
     ap.add_argument('--cars-mw-pc', help='MW donor folder or .zip/.7z before first installation; otherwise use installed roots')
-    ap.add_argument('--cars-uc-x360', help='Optional Undercover Xbox 360 disc ISO for Undercover PC engine sounds')
+    ap.add_argument('--cars-uc-x360', help='Optional installed Undercover PC folder or Xbox 360 disc ISO for engine sounds')
     ap.add_argument('--cars-measure', action='store_true', help='measure conversion without activating it')
     ap.add_argument('--cars-repair', action='store_true', help='rebuild a rejected preparation from original sources')
     ap.add_argument('--source-replies', help='private directory for Locate source replies from the app')

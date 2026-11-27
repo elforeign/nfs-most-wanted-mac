@@ -23,6 +23,10 @@ def pinned_source(file, edits, digest):
         text = text.removeprefix('#include "save_timing.h"\n')
         text = text.replace('SAVE_TIME("stream.close", fclose(f))', 'fclose(f)')
         text = text.replace('SAVE_TIME("rename", rename(tmp, p))', 'rename(tmp, p)')
+        # Keep the historical source's missing port-1 START binding and offsets.
+        text = text.replace("    // FE START reads B3, not FE_ACTION_START. Only port 0 gets the layout's\n"
+                            "    // keyboard fallback; port 1 needs the actual menu button in its own queue.\n"
+                            "    if (pad_count() == 2) add(A_FE_B3, T_BUTTON, 7);\n", '')
         # These historical control-page baselines precede status and retry reporting.
         for current, historical in (
             ('static int sets_save(void)', 'static void sets_save(void)'),

@@ -32,7 +32,7 @@ static uint64_t age_key(const CarAudioBackend *b, const CarAudioVoice *v) {
 }
 static int allocate(CarAudioBackend *b, const CarAudioPCM *s, uint8_t priority,
                     uint16_t angle, int32_t *handle) {
-    if (!b || !b->voices || !handle || !valid_sample(s) || priority > 100 ||
+    if (!b || !b->voices || !handle || !valid_sample(s) || (priority > 100 && priority != 255) ||
         b->next_handle > INT32_MAX || b->clock == UINT64_MAX) return -1;
     CarAudioVoice *slot = NULL;
     for (size_t i = 0; i < b->capacity; ++i) {
@@ -78,7 +78,7 @@ void car_audio_backend_destroy(CarAudioBackend *b) {
 static int create(void *context, const CarAudioPlayerCreate *r, int32_t *handle) {
     CarAudioBackend *b = context;
     if (!b || !r || !handle || !b->resolve || r->sample < 0 ||
-        (r->mode != 60 && r->mode != 80 && r->mode != 100)) return -1;
+        (r->mode != 60 && r->mode != 80 && r->mode != 90 && r->mode != 100 && r->mode != 255)) return -1;
     CarAudioPCM sample = {0};
     if (b->resolve(b->context, r->bank_identity, r->sample, &sample) < 0) return -1;
     int rc = allocate(b, &sample, r->mode, (uint16_t)r->initialization[0], handle);

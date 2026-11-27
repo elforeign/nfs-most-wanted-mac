@@ -48,6 +48,7 @@ NATIVE = r'''
 #include "bundle_roots.h"
 #include "settings.h"
 uint8_t *G;
+void overlay_notice(const char *text) { (void)text; }
 int diag_on;
 const char *game_dir;
 static unsigned checks,failures,constructors,retail_calls,uploads;

@@ -19,10 +19,13 @@ typedef struct {
 // Typed big-endian ABKC fields and the S10A header table (X360 825EA4C8). 1 = ok, else why is set.
 int x360abk_parse(const uint8_t *file, size_t size, X360Abk *out, char *why, size_t why_size);
 int x360abk_parse_carbon(const uint8_t *file, size_t size, X360Abk *out, char *why, size_t why_size);
+int x360abk_parse_undercover(const uint8_t *file, size_t size, X360Abk *out, char *why, size_t why_size);
 // One sound to interleaved PCM16 (malloc'd, *frames = declared sample count exactly). Codec 3 only. 1 = ok.
 int x360abk_decode(const uint8_t *file, const X360AbkSound *s, int16_t **pcm, unsigned *frames, char *why, size_t why_size);
 int x360abk_decode_carbon(const uint8_t *file, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
                          char *why, size_t why_size);
+int x360abk_decode_undercover(const uint8_t *file, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
+                            char *why, size_t why_size);
 
 // A PC BNKl slot as the PC's PT parser (00823E83) reads it.
 typedef struct {

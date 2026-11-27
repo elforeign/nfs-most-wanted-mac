@@ -556,13 +556,13 @@ class NativeCatalogTests(unittest.TestCase):
         row['identity']=cc.source_identity(**row['origin'])
         path=self.outputs[0]/'AUDIO.BIN'
         name=row['origin']['folder'].lower().encode()
-        for version in (6,5,3):
+        for version in (6,7,5,3):
             path.write_bytes(struct.pack('<4s4I16s32s',b'A7CA',version,68,2,1,name,bytes(32)))
             row['outputs'][path.name]=cc.fingerprint(path)
             self.approve_rows();self.policy=self.load_policy()
             cc.publish(self.store,self.rows,self.outputs,self.inputs,policy=self.policy)
             result=self.native(exe=self.compile())
-            if version==6:
+            if version in (6,7):
                 self.good_result(result)
                 admitted='NEED(kind!=CAR_CATALOG_AUDIO || carbon ||\n             (pc && (equal(j,game,"prostreet") || equal(j,game,"undercover"))),'
                 source=SOURCE.read_text()

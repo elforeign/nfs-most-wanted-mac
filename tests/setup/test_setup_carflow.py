@@ -241,7 +241,7 @@ TRANSPORT = r'''
         fixtureCommands.append(arguments)
         if fixtureFailMode == mode {
             fixtureFailMode = nil
-            finish(.failed(FailureInfo(stage: "cars", message: "approval failed for 0123456789abcdef",
+            finish(.failed(FailureInfo(stage: "cars", message: "Car source not recognised: ProStreet shared files did not match: GLOBALB.LZC",
                                        fix: "approved deadbeef", log: "/fixture.log")), state)
             return
         }
@@ -315,6 +315,7 @@ HARNESS = r'''
                 fixtureFailMode = .carsImport
                 pressCarButton(importTitle); drawCars(s)
                 output["failurePrivate"] = !fixtureText.joined().contains("deadbeef")
+                output["failureExplained"] = fixtureText.joined().contains("did not match: GLOBALB.LZC")
                     && !fixtureText.joined().contains("0123456789abcdef") && !fixtureText.joined().contains("approv")
                 output["retrySameButton"] = fixtureButtons[importTitle]?.1 == true && s.carImportNeedsRepair
                 pressCarButton(importTitle)
@@ -413,6 +414,7 @@ class CarFlow(unittest.TestCase):
         self.assertEqual((self.new['hashes'], self.new['jargon'], self.new['postImportHashes']), (0, 0, 0))
         self.assertEqual(self.new['sourceRows'], 5)
         self.assertTrue(self.new['failurePrivate'])
+        self.assertTrue(self.new['failureExplained'])
         self.assertTrue(self.new['technicalDetailsPrivate'])
         print('Screen hash strings: old 6 -> new 0; approval words: old %d -> new 0' % self.old['jargon'])
 

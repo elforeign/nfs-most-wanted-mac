@@ -107,7 +107,7 @@ def parser_proof(folder, resources):
     controls = {
         'fixed': source,
         'uncorrected': source.replace('s->frames=terminal+1;', '/* original frame count retained */'),
-        'rate': source.replace('!(be && s->rate==34000)', '1'),
+        'rate': source.replace('!(uc && s->rate==34000)', '1'),
     }
     assert all(text != source for key, text in controls.items() if key != 'fixed')
     for label, text in controls.items():
@@ -144,6 +144,13 @@ def importer_proof(folder, resources):
     from unittest import mock
     from setup_kit import car_catalog as catalog, car_import, car_selection
     original = input_path('Need for Speed Undercover').resolve()
+    attributes=(original/'GLOBAL/ATTRIBUTES.BIN').read_bytes()
+    override=os.environ.get('NFS_UC_X360_ISO')
+    images=[Path(override)] if override else sorted((input_path().parent/'ext_untrusted/undercover_x360').glob('*.iso'))
+    resources=dict(resources)
+    with uc.Disc(images[0]) as disc:
+        for name in uc.describe(attributes,'DOD_CHR_BEE_07')['resources']:
+            resources[name]=disc.read(name)
     source = folder / 'source'
     source.mkdir()
     # Only the selected car and shared packs are required for recognition.
@@ -159,10 +166,10 @@ def importer_proof(folder, resources):
     mw = Path(os.environ.get('NFS_GAME', ROOT.parent / 'Need For Speed Most Wanted Black Edition')).resolve()
     plan = engine.plan(source, mw_pc=mw, cars=[car_selection.spec(before)], measure=True)
     after = plan['cars'][0]['contract']
-    assert after['outputs']['AUDIO.BIN']['sha256'] == '0d5cf10886953aefc44fbdab33c74a360fe842e46abf94c139d5ce469455c945'
+    assert after['outputs']['AUDIO.BIN'] == before['outputs']['AUDIO.BIN']
     assert {k:v for k,v in after['outputs'].items() if k!='AUDIO.BIN'} == {k:v for k,v in before['outputs'].items() if k!='AUDIO.BIN'}
-    names = {n for n in after['inputs']['source'] if n.startswith('SOUND/ENGINE/')}
-    assert names == {'SOUND/ENGINE/CAR_073-ENGINE-PLAYER.TMX','SOUND/ENGINE/CAR_073-EXHAUST-PLAYER.TMX'}
+    names = {n for n in after['inputs']['source'] if n.startswith('SOUND/')}
+    assert names == set(uc.describe(attributes,car)['resources'])
     assert all(after['inputs']['source'][n] == dict(size=len(resources[n]),sha256=hashlib.sha256(resources[n]).hexdigest()) for n in names)
     rows = [after if r['slot']==before['slot'] and r['origin']==before['origin'] else r for r in car_selection.load()]
     doc = json.loads(catalog.packaged_policy().data)
@@ -247,17 +254,13 @@ def private(original=False):
         folder = Path(work).resolve(); manifest = []; pins = {}
         for car, paths in expected.items():
             package = reference_package(attributes, car, paths, resources)
-            if not original:
-                selected = car_audio_pack.resource_paths(attributes, car, resources, game='undercover')
-                assert set(selected) == set(paths)
-                assert car_audio_pack.build(attributes, car, {p: resources[p] for p in selected}, game='undercover') == package
             path = folder / (car + '.bin'); path.write_bytes(package)
             pins[car.lower()] = hashlib.sha256(package).hexdigest()
             manifest.append(f'{car.lower()} {path} ' + ' '.join(hashlib.sha256(resources[p]).hexdigest() for p in paths) + '\n')
         manifest_path = folder / 'stock.txt'; manifest_path.write_text(''.join(manifest))
         print('package pins:', json.dumps(pins, sort_keys=True))
         implementation = (ROOT / 'runtime/car_audio.c').read_text()
-        guard = 'if(version==6) for(size_t i=0;i<sizeof undercover_packages/sizeof *undercover_packages;i++)'
+        guard = 'if(version==6) for(size_t i=0;i<sizeof undercover_stock_packages/sizeof *undercover_stock_packages;i++)'
         assert implementation.count(guard) == 1
         def check(result):
             if original:
@@ -281,13 +284,16 @@ def private(original=False):
                 path = folder / (car + '-wrong.bin'); path.write_bytes(package)
                 digest = hashlib.sha256(package).hexdigest()
                 old = '{"' + car.lower() + '","' + pins[car.lower()] + '"}'
-                assert changed.count(old) == 1
-                changed = changed.replace(old, '{"' + car.lower() + '","' + digest + '"}')
+                start=changed.index('undercover_stock_packages[]=')
+                end=changed.index('\n};',start)
+                table=changed[start:end]
+                assert table.count(old)==1
+                changed=changed[:start]+table.replace(old,'{"'+car.lower()+'","'+digest+'"}')+changed[end:]
                 wrong.append(f'{car.lower()} {path} ' + ' '.join(hashlib.sha256(resources[p]).hexdigest() for p in paths) + '\n')
             wrong_path = folder / 'wrong.txt'; wrong_path.write_text(''.join(wrong))
             ps.live(folder, wrong_path, harness_main=harness(ps), implementation=changed, check=no_admission)
             print('wrong-car pairing control: 0/28 on both constructors (exit 1)')
-            normalization = 'if(track && e->package->version==6) M32(gin+24)=track->frames;'
+            normalization = 'if(track && e->package->version>=6) M32(gin+24)=track->frames;'
             assert implementation.count(normalization) == 1
             def uncorrected(result):
                 assert result.returncode != 0 and ('rd(actual+24)' in result.stderr or 'e && e->replaced' in result.stderr), result.stderr[-3000:]

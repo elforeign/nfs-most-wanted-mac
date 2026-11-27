@@ -18,6 +18,7 @@ void daynight_sample(double hour, float azimuth, float tilt, DaynightSample *out
 void daynight_mix(DaynightRecord *day, const DaynightRecord *night, float n);
 void daynight_night_record(DaynightRecord *out);
 float daynight_lamp_level(void); // car lamp level 0..1; 1 when the clock is off
+float daynight_headlight_scale(void); // photometric-to-authored night radiance; 1 with clock off
 
 // Optional MW clock provider. Without a provider the standalone lighting unit
 // retains its provisional clock; registration introduces no link dependency.

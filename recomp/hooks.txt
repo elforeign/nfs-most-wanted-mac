@@ -42,6 +42,11 @@
 0081FE64    posaudio.c: optional smooth ITU 5.1 panner; Game calls original table
 004EE3E0    posaudio.c: BOOT_DIAG engine voice/gain context
 004DC360    car_audio.c: optional added-car AEMS initialization
+004F33B0    car_audio.c: bind added-car secondary exports during native shift-controller events
+00831A8A    car_audio.c: isolate source secondary CSIS creation from the native registry
+008311AA    car_audio.c: report source secondary lifetime to its native controller
+00831782    car_audio.c: release owned source secondary tokens
+0083179C    car_audio.c: copy native secondary controller members into the source instance
 004DC1D0    car_audio.c: detach source audio before the native controller buffer is released
 004DC670    car_audio.c: detach source Ginsu before the native controller buffer is released
 004EE1C0    car_audio.c: optional added-car Ginsu initialization

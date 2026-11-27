@@ -54,10 +54,14 @@ static Feedback feedback_states[2], unowned_feedback;
 static unsigned suppressed;
 
 // The local-player vector contains IPlayer pointers. GetFFB reads +0x0C and
-// GetControllerPort reads +0x18; DoFFB's complete object starts 0x4C earlier.
+// GetControllerPort reads +0x18; the complete-object offset is image-specific.
 static uint32_t feedback_owner(unsigned slot, uint32_t object) {
 #if NFS_GAME == NFS_GAME_MW
     uint32_t list = G ? M32(0x0092D87Cu) : 0, count = G ? M32(0x0092D884u) : 0;
+#else
+    uint32_t list = G ? M32(CARBON_FEEDBACK_PLAYERS) : 0;
+    uint32_t count = G ? M32(CARBON_FEEDBACK_PLAYER_COUNT) : 0;
+#endif
     for (uint32_t i = 0; list && i < count; ++i) {
         uint32_t player = M32(list + i * 4);
         if (player && M32(player + 0x18) == slot) {
@@ -65,13 +69,9 @@ static uint32_t feedback_owner(unsigned slot, uint32_t object) {
             if (feedback && (!object || feedback == object)) return feedback;
         }
     }
-#else
-    (void)slot; (void)object;
-#endif
     return 0;
 }
 static Feedback *feedback_for(Cpu *c) {
-#if NFS_GAME == NFS_GAME_MW
     for (unsigned slot = 0; c->ecx && slot < 2; ++slot) {
         uint32_t owner = feedback_owner(slot, c->ecx);
         if (!owner) continue;
@@ -88,10 +88,11 @@ static Feedback *feedback_for(Cpu *c) {
         return f;
     }
     if (c->ecx) return &unowned_feedback;
-#else
-    (void)c;
-#endif
+#if NFS_GAME == NFS_GAME_MW
     return &feedback_states[0];
+#else
+    return &unowned_feedback;
+#endif
 }
 void feedback_invalidate_slot(unsigned slot) {
     if (slot >= 2) return;
@@ -127,7 +128,6 @@ void feedback_suppress(unsigned reason, int on) {
         on ? "suppress" : "resume", reason == FEEDBACK_MENU ? "menu" : reason == FEEDBACK_PAUSE ? "pause" :
         reason == FEEDBACK_FOCUS ? "focus" : "app", suppressed);
 }
-#if NFS_GAME == NFS_GAME_MW
 // Main-loop passes must retire a departed player even when pad reads have stopped.
 static void feedback_poll_owners(void) {
     for (unsigned slot = 0; slot < 2; ++slot) {
@@ -136,9 +136,13 @@ static void feedback_poll_owners(void) {
             memset(&f->model, 0, sizeof f->model);
             f->owner = 0; f->effects_valid = 0; f->reset_model = 1;
             rumble_stop_slot(slot); // mode exit or reassignment, even without another pad read
+#if NFS_GAME != NFS_GAME_MW
+            padfx_stop();
+#endif
         }
     }
 }
+#if NFS_GAME == NFS_GAME_MW
 void feedback_poll_pause(void) {
     feedback_poll_owners();
     uint32_t sim = G ? M32(0x009885E0u) : 0;  // Sim::_mSystem; Sim::GetState (006E8D20), 4 = paused

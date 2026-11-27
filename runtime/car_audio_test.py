@@ -235,6 +235,11 @@ static void pump(Cpu *c) {
     *c=caller;
 }
 static void original(Cpu *c) { ++original_calls; c->eax=0xabcdef01; c->esp+=4; }
+void f_004F33B0_orig(Cpu *c) { c->eax=0; c->esp+=8; }
+void f_00831A8A_orig(Cpu *c) { M32(arg(c,2))=0; c->eax=0; c->esp+=4; }
+void f_008311AA_orig(Cpu *c) { M32(arg(c,0))=0; c->eax=0; c->esp+=8; }
+void f_00831782_orig(Cpu *c) { dispatch(c,0x831782); }
+void f_0083179C_orig(Cpu *c) { c->eax=0; c->esp+=8; }
 void f_004DC360_orig(Cpu *c) { original(c); }
 void f_004EE1C0_orig(Cpu *c) {
     uint32_t object=c->ecx,packets=8,overhead=native_call(c,0x81dafd,0,1,&packets);
@@ -678,6 +683,11 @@ uint32_t call_guest(Cpu *c,uint32_t target,int n,const uint32_t *args) {
     c->esp-=4; M32(c->esp)=0xfeedf00d; dispatch(c,target); c->esp=sp; return c->eax;
 }
 static void original(Cpu *c) { c->eax=0xabcdef01; c->esp+=4; }
+void f_004F33B0_orig(Cpu *c) { c->eax=0; c->esp+=8; }
+void f_00831A8A_orig(Cpu *c) { M32(arg(c,2))=0; c->eax=0; c->esp+=4; }
+void f_008311AA_orig(Cpu *c) { M32(arg(c,0))=0; c->eax=0; c->esp+=8; }
+void f_00831782_orig(Cpu *c) { dispatch(c,0x831782); }
+void f_0083179C_orig(Cpu *c) { c->eax=0; c->esp+=8; }
 void f_004DC360_orig(Cpu *c) { M32(member)=123; original(c); }
 void f_004EE1C0_orig(Cpu *c) {
     M32(member)=123;
@@ -1012,6 +1022,20 @@ int x360abk_decode_carbon(const uint8_t *f, const X360AbkSound *s, int16_t **pcm
                           unsigned *frames, char *msg, size_t len) {
     (void)f; (void)s; (void)pcm; (void)frames; (void)msg; (void)len; return 0;
 }
+int x360abk_parse(const uint8_t *f, size_t n, X360Abk *b, char *msg, size_t len) {
+    return x360abk_parse_carbon(f,n,b,msg,len);
+}
+int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm,
+                  unsigned *frames, char *msg, size_t len) {
+    return x360abk_decode_carbon(f,s,pcm,frames,msg,len);
+}
+int x360abk_parse_undercover(const uint8_t *f, size_t n, X360Abk *b, char *msg, size_t len) {
+    return x360abk_parse_carbon(f,n,b,msg,len);
+}
+int x360abk_decode_undercover(const uint8_t *f, const X360AbkSound *s, int16_t **pcm,
+                            unsigned *frames, char *msg, size_t len) {
+    return x360abk_decode_carbon(f,s,pcm,frames,msg,len);
+}
 ''')
     return [str(stub)]
 
@@ -1114,8 +1138,9 @@ def native_fragments(proof, source_exe):
     code = proof.private_code(source_exe) + '\n' + declarations + '\n' + '\n'.join(found.values())
     dispatch = '\n'.join(f'if(t==0x{n}) {{ f_{n}(c); return; }}' for n in found)
     dispatch += '\n' + '\n'.join(f'if(t==0x{target:08X}) {{ f_{target:08X}(c); return; }}'
-        for ordinal, (_, target, _, _) in proof.abi.ARITHMETIC.items())
-    declarations += '\n' + '\n'.join(f'void f_{target:08X}(Cpu *);' for _, target, _, _ in proof.abi.ARITHMETIC.values())
+        for ordinal, (_, target, _, _) in {**proof.abi.ARITHMETIC, **proof.abi.SECONDARY_IMPORTS}.items())
+    declarations += '\n' + '\n'.join(f'void f_{target:08X}(Cpu *);'
+        for _, target, _, _ in {**proof.abi.ARITHMETIC, **proof.abi.SECONDARY_IMPORTS}.values())
     stubs = '\n'.join(f'void f_{n}(Cpu *c) {{ dispatch(c,0x{n}); }}' for n in services)
     return code, declarations, dispatch, stubs
 

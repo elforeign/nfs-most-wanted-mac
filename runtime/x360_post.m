@@ -108,6 +108,7 @@ static int tone_curve_x360(void) {
 // bloom and colour 100), `x360look` (NFS_VISUALLOOK=x360), `raw` (the chain's input, untreated).
 // `lampglow` / `lampglowoff`: selective police lamp emission On / Off, retaining the current Natural/Glow mode.
 // `headlightoff` / `headlighton`: player low-beam projection Off / On; naming `headlighton` runs it for the whole run.
+// `nightold`: daylight car rig and no projected beams, the previous night defaults.
 // BOOT_DIAG_LOOK_AB=1: old,b0,b25,b50,b100,c0,c50,c100.
 static char look_vars[16][16];
 static int look_nvars = -1, look_state, look_var;   // state 1 base shot taken, 2 the held pass draws variant look_var, 3 its shot set

@@ -318,6 +318,11 @@ static void loop_intro(void) {
 static void put(unsigned char *p,unsigned value) {
     for(unsigned i=0;i<4;i++) p[i]=(unsigned char)(value>>(8*i));
 }
+static void secondary_priority(void) {
+    init(1);int32_t h=make(255,0);C(h>=0);
+    near(voices[0].priority,2.55,1e-6,"authored secondary priority");
+    cb->release(&pool,h);C(retired==1);
+}
 static void player_lifetime(void) {
     init(1); unsigned char state[40]={0},rows[16]={0};
     state[14]=1; state[16]=255; state[28]=2; put(state+36,256);
@@ -341,7 +346,7 @@ static void player_lifetime(void) {
 int main(int argc,char **argv) {
     goldens();
     if(argc>1 && !strcmp(argv[1],"all")) {
-        parameters(); pause_history(); contention(); age_batches(); blocks_and_rates(); lifecycle(); player_lifetime(); wrap_round(); loop_intro();
+        parameters(); pause_history(); contention(); age_batches(); blocks_and_rates(); lifecycle(); player_lifetime(); wrap_round(); loop_intro(); secondary_priority();
     }
     car_audio_backend_destroy(&pool);
 #ifdef ORIGINAL

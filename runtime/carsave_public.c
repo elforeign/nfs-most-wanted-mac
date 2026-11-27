@@ -112,6 +112,7 @@ static void signature(const CarCatalogSlot *slot,unsigned char out[32]) {
     CC_SHA256_Final(out,&ctx);
 }
 static const char *catalog(const Metadata *m) {
+    static char detail[128];
     if (!any(m->used) || (m->used[11]&0xFC)) return "Invalid car dependency metadata.";
     if (!car_catalog_generation()[0]) return "Required car catalog is unavailable or disabled.";
     unsigned char zero[32]={0};
@@ -121,10 +122,15 @@ static const char *catalog(const Metadata *m) {
             continue;
         }
         const CarCatalogSlot *slot=car_catalog_inventory_get(k);
-        if (!slot || slot->slot!=k || !slot->ready || !slot->selected)
-            return "A required car pack is missing, disabled or corrupt.";
+        if (!slot || slot->slot!=k || !slot->ready || !slot->selected) {
+            snprintf(detail,sizeof detail,"Car slot %u is missing, disabled or corrupt.",k);
+            return detail;
+        }
         unsigned char hash[32]; signature(slot,hash);
-        if (memcmp(hash,m->slots[k],32)) return "Required car identity or part ordering is incompatible.";
+        if (memcmp(hash,m->slots[k],32)) {
+            snprintf(detail,sizeof detail,"Car slot %u (%.20s) differs; save refused.",k,slot->folder);
+            return detail;
+        }
     }
     return NULL;
 }
@@ -201,16 +207,39 @@ const char *carsave_public_stage(void *buffer,size_t size,const unsigned char *u
     if (!metadata_write(&m)) { memcpy(buffer,old,16); return journal_failure; }
     return NULL;
 }
-static const char *read_metadata(const void *buffer,size_t size,Metadata *m) {
+static const char *read_metadata(const void *buffer,size_t size,Metadata *m,int *missing) {
     unsigned char hash[32],tag[16]; char key[65];
     CC_SHA256(buffer,(CC_LONG)size,hash); hex(hash,key);
-    int dir=metadata_root(0); int rc=dir<0?-1:metadata_read(dir,key,m,0); if (dir>=0) close(dir);
+    int dir=metadata_root(0); int rc=dir<0?-1:metadata_read(dir,key,m,0);
+    int absent=rc && errno==ENOENT;
+    if (dir>=0) close(dir);
+    if (missing) *missing=absent;
+    if (absent) return "Missing .car-catalog save record; copy it from the other Mac.";
     if (rc || memcmp(m->save_hash,hash,32)) return "Car compatibility metadata is missing or damaged.";
     marker(m,tag);
     if (memcmp(buffer,tag,16)) return "Car compatibility marker does not match the save.";
     return catalog(m);
 }
-const char *carsave_public_admit(const void *buffer,size_t size,const unsigned char *used) {
+/* The marker binds the original generation, dependency mask and every slot
+ * signature. Only an exact reconstruction may replace an absent record; a
+ * damaged record is never repaired, and the profile bytes never change. */
+static const char *recover_metadata(const void *buffer,size_t size,const unsigned char *used) {
+    Metadata m={0}; memcpy(m.magic,magic,8); memcpy(m.used,used,sizeof m.used);
+    const char *generation=car_catalog_generation();
+    if (strlen(generation)>=sizeof m.generation) return "Unsupported catalog generation.";
+    strcpy(m.generation,generation);
+    for (unsigned k=0;k<CAR_CATALOG_SLOTS;++k) if (used[k/8]&(1u<<(k%8))) {
+        const CarCatalogSlot *slot=car_catalog_inventory_get(k);
+        if (slot) signature(slot,m.slots[k]);
+    }
+    const char *why=catalog(&m); if (why) return why;
+    unsigned char tag[16]; marker(&m,tag);
+    if (memcmp(buffer,tag,16))
+        return "Missing .car-catalog record; installed cars or generation differ.";
+    CC_SHA256(buffer,(CC_LONG)size,m.save_hash); checksum(&m);
+    return metadata_write(&m)?NULL:"Cannot restore missing .car-catalog save record.";
+}
+static const char *admit(const void *buffer,size_t size,const unsigned char *used,int loading) {
     const char *why=carsave_public_verify(buffer,size); if (why) return why;
     unsigned char zero[16]={0};
     if (memcmp(buffer,magic,8)) {
@@ -218,9 +247,20 @@ const char *carsave_public_admit(const void *buffer,size_t size,const unsigned c
         if (used && any(used)) return "Added-car save has no verifiable provenance.";
         return NULL;
     }
-    Metadata m; why=read_metadata(buffer,size,&m); if (why) return why;
+    Metadata m; int missing=0; why=read_metadata(buffer,size,&m,&missing);
+    if (why && missing && loading) {
+        /* Preflight may defer absence until references() supplies the complete
+         * validated dependency mask. No retail load runs before the second pass. */
+        if (!used) return NULL;
+        why=recover_metadata(buffer,size,used);
+        if (!why) why=read_metadata(buffer,size,&m,NULL);
+    }
+    if (why) return why;
     if (used && memcmp(used,m.used,sizeof m.used)) return "Saved car dependencies do not match their metadata.";
     return NULL;
+}
+const char *carsave_public_admit(const void *buffer,size_t size,const unsigned char *used) {
+    return admit(buffer,size,used,0);
 }
 
 /* Class/type queries read the staged FE rows. Save mode avoids frontend lookup:
@@ -279,6 +319,7 @@ static const char *references(Cpu *c,uint32_t db,unsigned char *used,int loading
 }
 static void refuse_load(Cpu *c,const char *why) {
     latch(why);
+    overlay_notice(why);
     Cpu saved=*c;
     static uint32_t text,format,empty;
     if (!text) { text=gmalloc(sizeof problem); format=gstr("%s"); empty=gstr(""); }
@@ -312,13 +353,13 @@ void carsave_public_load(Cpu *c) {
     const char *why=refused?"A previous profile refusal requires restart.":NULL;
     if (!why && ((uint64_t)buffer+size>(1ull<<32) || M32(c->esp+16)>1 ||
                  !M32(FEDB) || (uint64_t)self+0x9CB0u>(1ull<<32))) why="Invalid profile buffer or slot.";
-    if (!why) why=carsave_public_admit(G+buffer,size,NULL);
+    if (!why) why=admit(G+buffer,size,NULL,1);
     if (why) { refuse_load(c,why); return; }
     uint32_t staged=gmalloc(CARSAVE_PUBLIC_FE_SIZE);
     memcpy(G+staged,G+buffer+FE_OFFSET,CARSAVE_PUBLIC_FE_SIZE);
     unsigned char used[CARSAVE_PUBLIC_MASK_SIZE];
     why=references(c,staged,used,1);
-    if (!why) why=carsave_public_admit(G+buffer,size,used);
+    if (!why) why=admit(G+buffer,size,used,1);
     if (!why && reconcile && car_catalog_count()) {
         Cpu saved=*c; why=reconcile(c,staged); *c=saved;
         if (!why) why=reconciled_rows(c,buffer+FE_OFFSET,staged);
@@ -388,7 +429,7 @@ static int backup(const char *destination,const char *staged) {
     unsigned char bytes[CARSAVE_PUBLIC_SIZE]; struct stat st;
     if (read_payload(staged,bytes,&st)) return 0;
     if (st.st_size!=CARSAVE_PUBLIC_SIZE+36 || memcmp(bytes,magic,8)) return 1;
-    Metadata next; if (read_metadata(bytes,sizeof bytes,&next)) return 0;
+    Metadata next; if (read_metadata(bytes,sizeof bytes,&next,NULL)) return 0;
     size_t len=strlen(userdata);
     if (!len || strncmp(destination,userdata,len) || destination[len]!='/') return 0;
     const char *path=destination+len+1;
@@ -399,7 +440,7 @@ static int backup(const char *destination,const char *staged) {
     if (st.st_size==sizeof bytes+36 && pread(input,bytes,sizeof bytes,36)==sizeof bytes &&
         !carsave_public_admit(bytes,sizeof bytes,NULL) && !memcmp(bytes,magic,8)) {
         Metadata old;
-        if (!read_metadata(bytes,sizeof bytes,&old)) {
+        if (!read_metadata(bytes,sizeof bytes,&old,NULL)) {
             int new_dependency=0;
             for (unsigned k=0;k<CAR_CATALOG_SLOTS;++k) if (next.used[k/8]&(1u<<(k%8)))
                 new_dependency|=!(old.used[k/8]&(1u<<(k%8))) || memcmp(old.slots[k],next.slots[k],32);

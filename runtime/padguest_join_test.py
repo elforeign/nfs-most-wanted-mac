@@ -14,10 +14,15 @@
 
 
 
+
+
+
+
 """
 from pathlib import Path
 import os
 import re
+import struct
 import subprocess
 import tempfile
 
@@ -38,8 +43,9 @@ PRE = r'''
 #include <stdlib.h>
 #include <stdarg.h>
 uint8_t *G;
-void f_005B7420_orig(Cpu *c) { (void)c; abort(); } // Menu allocation has its own translated-code test.
 int diag_on;
+static unsigned pipeline_joins;
+static int pipeline_active;
 static int checks, failures, shared_init, init_calls[2], factory_calls[4];
 static int fail_pad1, backend_stops, device_frees, other_frees;
 static uint32_t dev[4]={0x310000,0x320000,0x330000,0x340000};
@@ -76,6 +82,9 @@ void f_0063CD10(Cpu *c) {
  c->esp+=4;
 }
 void dispatch(Cpu *c,uint32_t t) {
+ if(t==0x701) { c->eax=0x350000; c->esp+=4; return; } // cached physical pad 1
+ if(t==0x5b54c0) { f_005B54C0(c); return; }
+ if(t==0x516860) { f_00516860(c); return; }
  if(t==0x63cd10) { f_0063CD10(c); return; }
  if(t==0x63f850) { f_0063F850(c); return; }
  if(t==0x6287d0) { f_006287D0(c); return; }
@@ -87,7 +96,7 @@ void dispatch(Cpu *c,uint32_t t) {
   unsigned p=arg(c,0),kind=t-0x101; CHECK(p==(unsigned)(pad_count()==2?2:1)+kind);
   ++factory_calls[2+kind]; c->eax=dev[2+kind]; c->esp+=4; return;
  }
- fprintf(stderr,"dispatch %x\n",t); exit(2);
+ fprintf(stderr,"dispatch %x self=%x caller=%x\n",t,c->ecx,M32(c->esp)); exit(2);
 }
 static void setup(void) {
  memset(G,0,0x1000000); memset(factory_calls,0,sizeof factory_calls);
@@ -203,6 +212,26 @@ void f_0056AD30(Cpu *c) { c->esp+=4; }
 void f_00585770(Cpu *c) { c->esp+=8; }
 void f_00516F30_stub(Cpu *c) { c->esp+=4; }
 void f_00660200(Cpu *c) { c->esp+=4; }
+void f_006349B0_orig(Cpu *c) { (void)c; abort(); } // This proof evaluates logical port 1 only.
+void f_007C5DF0(Cpu *c) { c->esp+=4; } // atexit registration
+void f_005B7780(Cpu *c) {
+ // Deliver the package notification once; the other queued message targets its objects.
+ if(pipeline_active && arg(c,0)==0xebfcda65 && arg(c,3)==0xfffffffb && arg(c,4)==2) {
+  ++pipeline_joins;
+  Cpu q=*c; q.ecx=0x290000; q.esp-=64;
+  M32(q.esp)=0; M32(q.esp+4)=arg(c,0); M32(q.esp+8)=0;
+  M32(q.esp+12)=arg(c,4); M32(q.esp+16)=0; f_007A3F20(&q);
+ }
+ c->esp+=24;
+}
+void f_00652B10(Cpu *c) { c->esp+=4; }
+void f_005C1460(Cpu *c) { c->esp+=4; }
+void f_005C4F60(Cpu *c) { c->esp+=4; }
+void f_005C1B30(Cpu *c) { c->esp+=12; }
+void f_005B01E0(Cpu *c) { (void)c; abort(); }
+void f_005B0B20(Cpu *c) { (void)c; abort(); }
+void f_005B9640(Cpu *c) { (void)c; abort(); }
+void f_005B1560(Cpu *c) { (void)c; abort(); }
 '''
 
 MAIN = r'''
@@ -376,8 +405,51 @@ static void device_teardown_tests(void) {
  }
  invoke(f_006279E0,0x920de0,0,NULL); CHECK(backend_stops==1);
 }
+static unsigned xbox_join_sequence(const char *bindings,int mask_edge) {
+ setup(); fail_pad1=0; invoke(f_0063CBF0,0x920de0,0,NULL); heap_reset();
+ FILE *input=fopen(bindings,"rb"); CHECK(input!=NULL);
+ if(!input) return 0;
+ CHECK(fread(G+GA,52,76,input)==76); fclose(input);
+ nonps_defaults(1);
+ M32(0x8a7b9c+20)=0x628bf0;
+ M8(dev[1]+0x183c)=0; memset(G+dev[1]+0x1034,0,0x800);
+ // Start is DI button 8 after the Xbox menu layout. Keyboard input stays with P1.
+ M32(0x91f154)=0x350100; M32(0x350100)=0x350200; M32(0x350204)=0x701;
+ M32(0x982bec)=1; M32(0x920e30)=1; MF32(0x890968)=0; MF32(0x89096c)=1;
+ MF32(0x8a7a5c)=.0078125f; MF32(0x8933d4)=.5f;
+ M32(0x91cf90)=0x270000; M8(0x27000c)=0; M8(0x27000d)=0xff;
+ M32(0x91cae0)=0x260000; M32(0x91cadc)=0x280000; M32(0x280000)=0x2b0000;
+ M32(0x290010)=0x200000; M32(0x29002c)=1;
+ invoke(f_00516D70,0,0,NULL);
+ uint32_t fe=M32(0x91cad0),q1=M32(fe+4);
+ // One InputMapping row: the shipped FE START action consumes scalar B3 (39).
+ M32(q1+0x270)=0x360000; M32(0x360004)=0x360100;
+ M32(0x360100)=0x360200; M32(0x360200)=0x360100;
+ M32(0x360208)=0; M32(0x360214)=0x24; M32(0x360218)=39;
+ M8(q1+0x280)=1;
+ M32(0x8f34ec)=0x24; M32(0x8f34f0)=0x40;
+ Cpu c=cpu(0x2b0000); M32(c.esp)=0x516934; M32(c.esp+4)=1;
+ f_005B7420(&c); abi(&c,1);
+ M8(0x2b0000)=1; M32(0x2b0108)=0x370000;
+ M32(0x370000)=0x370100; M32(0x370140)=0x516860;
+ M32(0x2b00e0)=0x2c0000; M8(0x2c0028)=1; M32(0x2c0020)=3;
+ M32(0x2c005c)=0x380000; M32(0x38000c)=0xebfcda65; M32(0x8f5740+6*4)=0xebfcda65;
+ pipeline_joins=0; pipeline_active=1;
+ for(unsigned frame=0;frame<5;++frame) {
+  M32(0x350000+0xc+4*7)=frame==1 || frame==2 ? 128 : 0;
+  c=cpu(dev[1]); ct_update(&c); abi(&c,0);
+  invoke(f_006448E0,q1,0,NULL); // binding -> scalar -> real ActionQueue edge
+  invoke(f_00559400,fe,0,NULL); // queue 1 -> FE column 1
+  if(mask_edge) M32(0x8f34fc)=0;
+  uint32_t args[]={16,0}; invoke(f_005C53C0,0x2b0000,2,args);
+  if(frame<3) CHECK(pipeline_joins==0); // join only on release
+ }
+ pipeline_active=0;
+ CHECK(M8(0x27000d)==(mask_edge?0xff:1));
+ return pipeline_joins;
+}
 int main(int argc,char **argv) {
- if(argc!=2) return 2;
+ if(argc<2 || argc>3) return 2;
  FILE *out=fopen(argv[1],"wb"); if(!out) return 2;
  G=calloc(1,0x1000000); if(!G) return 2;
  for(fail_pad1=0;fail_pad1<=1;fail_pad1++) {
@@ -408,6 +480,11 @@ int main(int argc,char **argv) {
   f_00628D30(&c); CHECK(factory_calls[1]==before); CHECK(c.esi==0x920de0 && c.esp==0x800004);
  }
  fe_tests(out); device_teardown_tests(); fclose(out);
+ if(argc==3 && pad_count()==2) {
+  unsigned fixed=xbox_join_sequence(argv[2],0), broken=xbox_join_sequence(argv[2],1);
+  printf("Xbox P2 START join notifications: %u; masked queue-1 edge: %u\n",fixed,broken);
+  CHECK(fixed==1); CHECK(broken==0);
+ }
  printf("padguest_join NFS_PADS=%s: %d checks, %d failures\n",getenv("NFS_PADS")?:"unset",checks,failures);
  free(G); return failures!=0;
 }
@@ -422,22 +499,40 @@ def run(cmd, **kwargs):
 
 
 def main():
+    exe_path = Path(os.environ.get('NFS_GAME',str(ROOT.parent/'Need For Speed Most Wanted Black Edition')))/'speed.exe'
+    if not exe_path.is_file():
+        print('padguest_join_test: private executable required')
+        raise SystemExit(3)
     hook = (ROOT/'runtime/padguest.c').read_text()
     pad = re.search(r'int pad_count\(void\) \{.*?\n\}', (ROOT/'runtime/user32.m').read_text(), re.S).group()
+    bindings = (ROOT/'runtime/padbind.c').read_text()
+    definitions = bindings[bindings.index('#define GA '):bindings.index('static uint32_t name_hash')]
+    defaults = '\n'.join(re.search(r'static void '+name+r'\([^\n]*\{.*?\n\}',bindings,re.S)[0]
+                         for name in ('add','nonps_defaults'))
+    producer = re.search(r'static void ct_update\(Cpu \*c\) \{.*?\n\}',
+                         (ROOT/'runtime/controltype.c').read_text(),re.S)[0]
     groups = (
+        ('speed_00.c', ('00401AE0','00404DB0')),
         ('speed_31.c', ('0063CBF0','00633D80','00633D90','00633DC0','00633D10','00634D00','0063F9A0')),
         ('speed_17.c', ('00516D70','00514960','005149E0','00514A10','00514A60','00514A70',
                          '00514AE0','00514B20','00514B50','00514B7C','00514B81',
-                         '00516F30','00516E10','00516C90')),
+                         '00516F30','00516E10','00516C90','00516860')),
         ('speed_18.c', ('00524770','005247A0','00525790','005257F0','005258B0','00525940')),
         ('speed_19.c', ('00559280','00559400')),
         ('speed_20.c', ('0056DBA0',)),
         ('speed_21.c', ('00572FF0','00573020')),
-        ('speed_30.c', ('00626D70','00626DD0','006287D0','00628F10','006279E0')),
-        ('speed_32.c', ('00648DB0','00644060','00642D70','006466B0','00644E40','006440B0')),
+        ('speed_23.c', ('005B7420','005B54C0','005AE8E0','005AE960','005AEA10','005BB720')),
+        ('speed_24.c', ('005C53C0','005C20A0')),
+        ('speed_30.c', ('00626D70','00626DD0','006287D0','00628F10','006279E0','00628940')),
+        ('speed_31.c', ('00634370',)),
+        ('speed_32.c', ('00648DB0','00644060','00642D70','006466B0','00644E40','006440B0',
+                         '00642C90','006448E0')),
         ('speed_51.c', ('007A3F20',)),
     )
     hooked = set(re.findall(r'^void f_([0-9A-F]{8})\(Cpu \*c\) \{',hook,re.M))
+    if any(not (ROOT/'recomp/out'/file).is_file() for file,_ in groups):
+        print('padguest_join_test: translated inputs required')
+        raise SystemExit(3)
     bodies = '\n'.join(translated(file,name,name in hooked or name == '006287D0')
                        for file,names in groups for name in names)
     connection = re.search(r'void f_006287D0\(Cpu \*c\) \{.*?\n\}',
@@ -486,12 +581,22 @@ void f_0063CBF0(Cpu *c) {
     assert all(source != hook for source in mutants.values())
     with tempfile.TemporaryDirectory(prefix='padguest-join-') as tmp:
         tmp = Path(tmp)
-        def compile_one(name, source):
+        data = exe_path.read_bytes()
+        pe = struct.unpack_from('<I',data,0x3c)[0]
+        sections = pe+24+struct.unpack_from('<H',data,pe+20)[0]
+        for i in range(struct.unpack_from('<H',data,pe+6)[0]):
+            size,rva,raw_size,raw = struct.unpack_from('<IIII',data,sections+40*i+8)
+            if rva <= 0x4f6d80 < rva+raw_size:
+                start = raw+0x4f6d80-rva
+                (tmp/'bindings').write_bytes(data[start:start+76*52])
+                break
+        assert (tmp/'bindings').stat().st_size == 76*52
+        def compile_one(name, source, binding_defaults=defaults):
             path=tmp/(name+'.c'); exe=tmp/name
             compiled_bodies = bodies
             if name == 'pad-appended-after-mouse':
                 compiled_bodies = compiled_bodies.replace('void f_0063CBF0(', 'void f_0063CBF0_orig(',1)
-            path.write_text(PRE+FIXTURE+pad+compiled_bodies+source+MAIN)
+            path.write_text('\n'.join((PRE,FIXTURE,pad,definitions,binding_defaults,compiled_bodies,source,producer,MAIN)))
             run(['clang','-std=c11','-g','-w','-DRECOMP_ABICHECK','-fsanitize=address,undefined',
                  '-fno-sanitize-recover=all','-I',str(ROOT/'recomp'),'-I',str(ROOT/'recomp/out'),
                  '-I',str(ROOT/'runtime'),str(path),'-o',str(exe)])
@@ -501,7 +606,7 @@ void f_0063CBF0(Cpu *c) {
         for mode in (None,'1','invalid','2'):
             env=dict(os.environ); env.pop('NFS_PADS',None); env.pop('ASAN_OPTIONS',None)
             if mode is not None: env['NFS_PADS']=mode
-            print(run([str(exe),str(tmp/'sample.bin')],env=env).strip())
+            print(run([str(exe),str(tmp/'sample.bin'),str(tmp/'bindings')],env=env).strip())
             if mode != '2':
                 run([str(old),str(tmp/'original.bin')],env=env)
                 assert (tmp/'sample.bin').read_bytes() == (tmp/'original.bin').read_bytes()
@@ -512,6 +617,14 @@ void f_0063CBF0(Cpu *c) {
                                   text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
             assert result.returncode == 1 and 'checks,' in result.stdout, (name,result.stdout[-2000:])
             print(f'  rejected {name}: {result.stdout.splitlines()[-1]}')
+        old_defaults = defaults.replace('if (pad_count() == 2) add(A_FE_B3, T_BUTTON, 7);','')
+        assert old_defaults != defaults
+        old = compile_one('old-xbox-start',hook,old_defaults)
+        result = subprocess.run([str(old),str(tmp/'old.bin'),str(tmp/'bindings')],
+                                env=dict(os.environ,NFS_PADS='2'),text=True,capture_output=True)
+        assert result.returncode == 1 and 'START join notifications: 0;' in result.stdout, result.stdout[-2000:]+result.stderr[-2000:]
+        number = next(line for line in result.stdout.splitlines() if 'START join notifications:' in line)
+        print('  rejected old Xbox defaults: '+number+'; '+result.stdout.splitlines()[-1])
     print('padguest_join_test: PASS')
 
 

@@ -58,6 +58,7 @@ NATIVE = r'''
 #include <stdlib.h>
 #include <unistd.h>
 uint8_t *G;
+void overlay_notice(const char *text) { (void)text; }
 static unsigned checks,failures,retail_calls,retail_writes,hashes,dialogs,accepted;
 static int broken_serializer,missing_donor,create_fail;
 static uint32_t arena=0x2000000,selected,created;

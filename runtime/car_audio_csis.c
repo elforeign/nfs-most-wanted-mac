@@ -84,6 +84,17 @@ int car_audio_csis_execution_resolve(const CarAudioCsisInterface *source,
     const CarAudioCsisInterface *targets, size_t count, size_t *index)
 {
     int error = car_audio_csis_check(source);
+    if (error == CAR_AUDIO_CSIS_IDENTITY && valid(source)) {
+        const char *name = (const char *)source->id + 4;
+        unsigned system = word(source->id), signature = word(source->id + 2), members = 0;
+        if (system == 0x6a16 && signature == 0x7859 && !strcmp(name, "CAR_SWTN")) members = 7;
+        if (system == 0x6a16 && signature == 0x603f && !strcmp(name, "CAR_WHINE")) members = 9;
+        if (system == 0x085b && signature == 0x7937 && !strcmp(name, "FX_SHIFTING_01")) members = 6;
+        if (members) {
+            if (source->member_words != members) return CAR_AUDIO_CSIS_LAYOUT;
+            error = CAR_AUDIO_CSIS_CAR_MAP; /* Exact execution-registry match below. */
+        }
+    }
     if (error != CAR_AUDIO_CSIS_CAR_MAP && error != CAR_AUDIO_CSIS_ENGINE_MAP)
         return car_audio_csis_resolve(source, targets, count, index);
     if ((!targets && count) || count > 65536) return CAR_AUDIO_CSIS_INVALID;

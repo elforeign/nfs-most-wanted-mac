@@ -18,6 +18,7 @@ Keep retained generations when removing cars. If a career requests missing cars,
 verified generation in Setup, or reimport the identical source files with the
 same package, then restart. Keep the career and its dependency files together;
 never delete or overwrite a career to bypass a missing-car refusal.
+When moving saves between Macs, install the same cars and copy the matching hidden `~/Library/Application Support/NFSMW-port/.car-catalog` records too; a missing record is rebuilt only when the installed catalog exactly matches the save's marker.
 
 ## Open Help from the couch
 

@@ -44,6 +44,8 @@
 #define PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256 "5c52fc73694c442707aef4b023a2170d5402f609fcd0276afc1e9bfb6496ec6e"
 #define PRE_UC_TORQUE_POLICY_SHA256 "d2a7671118660bf0c48c67bf91499a698619134480587f7b18800c68a8072aa7"
 #define PRE_SNR_READER_POLICY_SHA256 "f679645d63b3c426eb1c72286589a781e9dbceaec52e154401cf9c7ffed813c8"
+#define PRE_UC_PC_AUDIO_POLICY_SHA256 "04f9fd1087c43a11124d340a25a86f35657e066554f2bb074136e1a54d0bfeef"
+#define PRE_UC_SECONDARY_POLICY_SHA256 "bb8e675ff566ef881a5f973844283d4f45065f9722051606a4a473d9d8b1c72f"
 #define PRE_CACHE_RENAME_POLICY_SHA256 "1933a5cb7999c9248030687d4bafc440bdf92d5e9f9010d9dfb35f477f52f3db"
 #define PRE_UC_DISC_POLICY_SHA256 "3c64d1b1d883f1ea52a9674b642ab5bfc010aefe081f9441816bb97aeb8e2be4"
 #define LEGACY_POLICY_SHA256 "cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c"
@@ -362,7 +364,7 @@ static int policy_load(Json *p, int slots[CAR_CATALOG_SLOTS], char digest[65]) {
             uint64_t legacy;
             NEED((FIELDS(p,v,"contract","compatibility") ||
                   (FIELDS(p,v,"contract","compatibility","legacy") &&
-                   !number(p,field(p,v,"legacy"),18,&legacy) && legacy)) &&
+                   !number(p,field(p,v,"legacy"),20,&legacy) && legacy)) &&
                  !hash_field(p,v,"contract",contracts[used]) &&
                  !hash_field(p,v,"compatibility",c),"invalid approval variant");
             for (unsigned k=0;k<used;++k) NEED(strcmp(contracts[k],contracts[used]),"duplicate approval variant");
@@ -546,7 +548,8 @@ static int sidecar(CarCatalogSlot *car, unsigned kind, int fd) {
         unsigned version=!strcmp(car->source_game,"undercover")?6:!strcmp(car->source_game,"prostreet")?4:!strcmp(car->source_platform,"x360")?3:2;
         NEED(name_size<16 && o->size>=sizeof header && o->size<=256u*1024*1024 &&
              pread(fd,header,sizeof header,0)==sizeof header && !memcmp(header,"A7CA",4) &&
-             (word32(header+4)==version || (version==4 && word32(header+4)==5)) && word32(header+8)==o->size &&
+             (word32(header+4)==version || (version==4 && word32(header+4)==5) ||
+              (version==6 && word32(header+4)==7)) && word32(header+8)==o->size &&
              !strncasecmp((const char *)header+20,car->source_folder,name_size),"invalid source audio header");
         for (size_t i=name_size;i<16;++i) NEED(!header[20+i],"invalid source audio car");
         o->version=word32(header+4);
@@ -826,7 +829,9 @@ static int load(const char *root) {
          strcmp(claimed,PRE_CACHE_RENAME_POLICY_SHA256) &&
          strcmp(claimed,PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256) &&
          strcmp(claimed,PRE_UC_TORQUE_POLICY_SHA256) &&
-         strcmp(claimed,PRE_SNR_READER_POLICY_SHA256) && strcmp(claimed,PRE_UC_DISC_POLICY_SHA256))) {
+         strcmp(claimed,PRE_SNR_READER_POLICY_SHA256) && strcmp(claimed,PRE_UC_DISC_POLICY_SHA256) &&
+         strcmp(claimed,PRE_UC_SECONDARY_POLICY_SHA256) &&
+         strcmp(claimed,PRE_UC_PC_AUDIO_POLICY_SHA256))) {
         bad("catalog schema or packaged approval policy mismatch"); goto done;
     }
     int cars=field(&catalog,0,"cars");

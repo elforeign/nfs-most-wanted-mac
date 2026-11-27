@@ -297,7 +297,8 @@ def resource_paths(attributes, car, candidates, *, game='carbon'):
 
 def from_directory(attributes, car, root, read, *, game='carbon', legacy_xk=False):
     """Read only graph-reachable resources through the converter input tracker."""
-    paths = (p.relative_to(root).as_posix() for p in (root / 'SOUND/ENGINE').rglob('*') if p.is_file())
+    directory = root / ('SOUND' if game == 'undercover' else 'SOUND/ENGINE')
+    paths = (p.relative_to(root).as_posix() for p in directory.rglob('*') if p.is_file())
     selected = resource_paths(attributes, car, paths, game=game)
     return build(attributes, car, {path: read(root / path) for path in selected}, game=game, legacy_xk=legacy_xk)
 

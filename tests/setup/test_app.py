@@ -4,6 +4,9 @@
 P5 item 11 Review: destination-only/broken aggregation 0/1; grouped volume fixture 1/1.
 P5 item 7 disc collection: eager-check control 0/2; explicit Check 2/2 products.
 
+Car mismatch detail: original generic-only branch 0/1; current first-line summary
+1/1, retaining the file name and replacing the home folder with ~.
+
 X360 choices: 8/8 combinations pass; original all-enabled loading violates 7/8.
 Remembered source fields: original empty loading restores 0/2 product fixtures;
 current Setup restores 2/2 (PC, destination, disc supplements and car selections).
@@ -441,6 +444,51 @@ def updater_failures(fn):
 
 
 class AppTests(unittest.TestCase):
+    def test_car_failure_first_line(self):
+        original = '                message = "The car operation could not finish. See the log for details, then try again."\n'
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),
+                         'b7e1550d96bcb3ed89b6329817304b52b563ed9797c29fcd5b175f241e0f3f25')
+        source = SWIFT.read_text()
+        start = source.index(original, source.index('struct ExtrasFlow'))
+        end = source.index('\n            }', start)
+        old_source = source[:start] + original.rstrip('\n') + source[end:]
+        harness = '''
+        if args.count == 3, args[1] == "--car-failure-test" {
+            var flow = ExtrasFlow()
+            let error = args[2].replacingOccurrences(of: "$HOME", with: NSHomeDirectory())
+            flow.begin()
+            flow.finish(.failed(FailureInfo(stage: "cars", message: error, fix: "Retry", log: "")), mode: .carsImport)
+            print(jsonString(["message": flow.message, "completed": flow.completed, "busy": flow.busy]))
+            exit(0)
+        }
+'''
+        def build(text):
+            return compile_app(text.replace('        let args = CommandLine.arguments',
+                                           '        let args = CommandLine.arguments\n' + harness))
+        def run(binary, message):
+            result = subprocess.run([binary, '--car-failure-test', message], check=True,
+                                    capture_output=True, text=True, timeout=20)
+            got = json.loads(result.stdout)
+            self.assertFalse(got['completed'])
+            self.assertFalse(got['busy'])
+            return got['message']
+        generic = 'The car operation could not finish. See the log for details, then try again.'
+        mismatch = ('Car source not recognised: ProStreet shared files did not match: '
+                    '$HOME/Source/GLOBAL/GLOBALB.LZC (does not match a known file)')
+        old, current = build(old_source), build(source)
+        def explains(message):
+            return 'did not match' in message and 'GLOBALB.LZC' in message
+        self.assertFalse(explains(run(old, mismatch)))
+        message = run(current, mismatch + '\nSecond line must stay in the log.')
+        self.assertTrue(explains(message))
+        self.assertEqual(message, generic + '\n\n' + mismatch.replace('$HOME', '~'))
+        self.assertEqual(run(current, 'Unexpected backend failure.'),
+                         generic + '\n\nUnexpected backend failure.')
+        self.assertEqual(run(current, ''), generic)
+        self.assertIn('not enough free space', run(current, 'disk full'))
+        self.assertIn('could not be found', run(current, 'missing file'))
+        print('Car mismatch detail: old 0/1 -> current 1/1; first line, home redaction, generic fallback PASS')
+
     def test_P5_7_collect_disc_inputs_before_check(self):
         """Both products: broken eager selection 0/2; collected selection 2/2."""
         text = SWIFT.read_text()

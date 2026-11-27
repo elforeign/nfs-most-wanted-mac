@@ -388,7 +388,7 @@ static const struct {
     {"graphics.carbon_ao","NFS_CARBON_AO",{"off","on"},0,1,SET_PICTURE},
     {"graphics.carbon_envcube","NFS_CARBON_ENVCUBE",{"0","1"},0,1,SET_PICTURE},
     {"graphics.carbon_reflect_hdr","NFS_CARBON_REFLECT_HDR",{"0","1"},1,1,SET_PICTURE},
-    {"graphics.daynight","NFS_DAYNIGHT",{"off","on"},0,1,SET_PICTURE},
+    {"graphics.daynight","NFS_DAYNIGHT",{"off","on"},1,1,SET_PICTURE},
     {"graphics.daynight_mode","NFS_DAYNIGHT_MODE",{"game","cycle","fixed"},0,2,SET_PICTURE},
     {"graphics.daynight_hour","NFS_DAYNIGHT_HOUR",{NULL},12,24,SET_PICTURE},
     {"audio.carbon_limiter","NFS_CARBON_LIMITER",{"0","1"},1,1,SET_AUDIO},
@@ -456,13 +456,22 @@ int main(int argc,char **argv) {
         CHECK(!s->hidden && (!s->locked || !strcmp(argv[2],"locked")));
     }
     if(failures) { printf("missing/invalid rows=%d\n",failures); return 1; }
-    CHECK(settings_count()==26);
+    CHECK(settings_count()==27);
     Setting *preset=settings_find("graphics.look_preset");
     CHECK(preset && preset->nchoices==3 && preset->derived && preset->own_pref && !*preset->pref);
     CHECK(settings_look_apply(PRESET_X360)==-1);
     CHECK(!getenv("NFS_SIMHZ") && !getenv("NFS_CARBON_SURROUND"));
     const char *op=argv[2];
-    if(!strcmp(op,"live")) {
+    if(!strcmp(op,"controllers_save") || !strcmp(op,"controllers_load")) {
+        Setting *pads=settings_find("controls.pads");
+        int value=atoi(argv[3]);
+        CHECK(pads && pads->restart && pads->nchoices==2 && pads->def==0);
+        CHECK(pads && pads->env && !strcmp(pads->env,"NFS_PADS"));
+        if(pads && !strcmp(op,"controllers_save")) settings_set(pads,value);
+        if(pads) CHECK(settings_get(pads->id)==value);
+        const char *pick=getenv("NFS_PADS");
+        if(!strcmp(op,"controllers_load")) CHECK(value ? pick && !strcmp(pick,"2") : !pick || !strcmp(pick,"1"));
+    } else if(!strcmp(op,"live")) {
         int start=atoi(argv[3]);
         const int indices[]={0,1,2,3,4,6,7,8,10};
         for(unsigned j=0;j<sizeof indices/sizeof *indices;++j){
@@ -478,6 +487,7 @@ int main(int argc,char **argv) {
         settings_set(settings_find("graphics.daynight_mode"),2);
         settings_set(settings_find("graphics.daynight_hour"),19);
         settings_set(settings_find("graphics.carbon_ao"),1);
+        settings_find("graphics.daynight")->boot_value=0;
         settings_set(settings_find("graphics.look_preset"),1);
         CHECK(!strcmp(port_status,"Look applied."));
         settings_set(settings_find("graphics.daynight"),1);
@@ -486,7 +496,7 @@ int main(int argc,char **argv) {
         CHECK(strstr(port_status,"Day-night lighting") && !strstr(port_status,"Car lacquer") && !strstr(port_status,"Physical materials") && !strstr(port_status,"Real reflections"));
         CHECK(!strstr(port_status,"Contact shadows") && !strstr(port_status,"Day-night mode") && !strstr(port_status,"Fixed hour"));
         CHECK(selected(2)==0 && selected(6)==0 && selected(7)==12);
-        settings_find("graphics.daynight")->boot_value=0;
+        settings_find("graphics.daynight")->boot_value=1;
         settings_set(settings_find("graphics.look_preset"),0);
         CHECK(!strcmp(port_status,"Look applied."));
     } else if(!strcmp(op,"defaults")) {

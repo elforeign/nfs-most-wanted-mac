@@ -118,8 +118,8 @@ int main(int argc,char **argv) {
             size_t at=0; while(at<r->size) { ssize_t n=read(fd,bytes+at,r->size-at); assert(n>0); at+=(size_t)n; }
             close(fd); assert(!memcmp(bytes,r->source,r->size)); free(bytes); ++layers;
             assert(r->samples && r->samples->loop && r->samples->rate==48000);
-            for(unsigned j=0;j<p->tmx[k].track_count;j++) {
-                const CarAudioTmxTrack *track=p->tmx[k].tracks+j;
+            for(unsigned j=0;j<e->tier->tmx[k].track_count;j++) {
+                const CarAudioTmxTrack *track=e->tier->tmx[k].tracks+j;
                 if(!track->gin) continue;
                 assert(!memcmp(G+e->ginsu[voice].gin,r->source+track->offset,track->size));
                 assert(M32(e->ginsu[voice].data+0x1c)==e->ginsu[voice].gin+0x20);
@@ -157,7 +157,7 @@ int main(int argc,char **argv) {
             assert(played==race_level); race_levels+=race_level>0;
         }
         assert(race_main && race_levels);
-        for(unsigned k=0;k<2;k++) for(unsigned j=0;j<p->tmx[k].track_count;j++) if(!p->tmx[k].tracks[j].gin) {
+        for(unsigned k=0;k<2;k++) for(unsigned j=0;j<e->tier->tmx[k].track_count;j++) if(!e->tier->tmx[k].tracks[j].gin) {
             float race_volume=(float)(int32_t)(e->tmx_gains[k][j]*race_control*32767)*(1.0f/32767.0f),played=-1;
             for(unsigned v=0;v<512;v++) if(voices[v].owned && voices[v].handle==e->resident[k][j]) played=voices[v].volume;
             assert(played==race_volume);
@@ -223,11 +223,11 @@ int main(int argc,char **argv) {
             float low=0,high=100000;
             for(unsigned role=0;role<2;role++) {
                 Resource *r=p->resource+e->tier->layer[role][0];unsigned bounds=rd(r->source+0x4c);
-                assert(p->minimum_rpm[role]==rf(r->source+bounds));
-                assert(p->maximum_rpm[role]==rf(r->source+bounds+4));
-                low=fmaxf(low,p->minimum_rpm[role]);high=fminf(high,p->maximum_rpm[role]);
+                assert(e->tier->minimum_rpm[role]==rf(r->source+bounds));
+                assert(e->tier->maximum_rpm[role]==rf(r->source+bounds+4));
+                low=fmaxf(low,e->tier->minimum_rpm[role]);high=fminf(high,e->tier->maximum_rpm[role]);
             }
-            assert(p->tmx_minimum_rpm==low+1 && p->tmx_rpm_span==high-low-3);
+            assert(e->tier->tmx_minimum_rpm==low+1 && e->tier->tmx_rpm_span==high-low-3);
             for(unsigned role=0;role<2;role++) {
                 Resource *r=p->resource+e->tier->layer[role][0];
                 char name[192],pid[65],rid[65]; hex(p->digest,pid); hex(r->digest,rid);
@@ -239,8 +239,8 @@ int main(int argc,char **argv) {
                 matches[cycle]+=!strcmp(served,expected[role]);
                 const uint8_t *pcm=r->sample_source;
                 unsigned sample=0;
-                for(unsigned j=0;j<p->tmx[role].track_count;j++) {
-                    const CarAudioTmxTrack *t=p->tmx[role].tracks+j;
+                for(unsigned j=0;j<e->tier->tmx[role].track_count;j++) {
+                    const CarAudioTmxTrack *t=e->tier->tmx[role].tracks+j;
                     if(t->gin) {
                         assert(!memcmp(G+e->ginsu[voice].gin,r->source+t->offset,t->size));
                         assert(M32(e->ginsu[voice].data+0x1c)==e->ginsu[voice].gin+0x20);++voice;
@@ -277,7 +277,7 @@ int main(int argc,char **argv) {
 '''
 
 def live(folder, package, *, original=False, broken_mix=False, double_mix=False, broken_rpm=False, stock=False, control=False,
-         harness_main=None, implementation=None, check=None):
+         harness_main=None, implementation=None, check=None, harness_transform=None, console=False, overrides=None):
     proof = module(ROOT/'runtime/car_audio_runtime_test.py', 'ps_native_proof')
     driver = module(ROOT/'runtime/car_audio_test.py', 'ps_live_proof')
     source = input_path('NFSC/NFSC.exe').read_bytes()
@@ -294,10 +294,11 @@ def live(folder, package, *, original=False, broken_mix=False, double_mix=False,
         implementation = implementation.replace('if(version==4 && !strcasecmp(name,"veyron"))',
                                                 'if(0 && version==4 && !strcasecmp(name,"veyron"))')
     if broken_rpm:
-        old = ('        float rpm=(float)(p->minimum_rpm[layer]+(p->maximum_rpm[layer]-p->minimum_rpm[layer])*(normalized-1000)/9000);\n'
-               '        rpm=fmaxf(p->minimum_rpm[layer],fminf(p->maximum_rpm[layer],rpm));')
-        assert hashlib.sha256(old.encode()).hexdigest() == 'b3576eb9d998c8d40a076bde6160d77459500313eaa800f2fd9655e5bfb088d0'
-        current='    float rpm=(float)(p->tmx_minimum_rpm+p->tmx_rpm_span*fmax(0,fmin(1,(normalized-1000)/9000)));'
+        old = ('        float rpm=(float)(e->tier->minimum_rpm[layer]+(e->tier->maximum_rpm[layer]-e->tier->minimum_rpm[layer])*(normalized-1000)/9000);\n'
+               '        rpm=fmaxf(e->tier->minimum_rpm[layer],fminf(e->tier->maximum_rpm[layer],rpm));')
+        # Tier storage moved; the frozen per-layer RPM formula is unchanged.
+        assert hashlib.sha256(old.replace('e->tier->','p->').encode()).hexdigest() == 'b3576eb9d998c8d40a076bde6160d77459500313eaa800f2fd9655e5bfb088d0'
+        current='    float rpm=(float)(e->tier->tmx_minimum_rpm+e->tier->tmx_rpm_span*fmax(0,fmin(1,(normalized-1000)/9000)));'
         assert implementation.count(current)==1
         implementation=implementation.replace(current,'')
         marker='    for(unsigned layer=0;layer<2;layer++) {'
@@ -324,14 +325,20 @@ def live(folder, package, *, original=False, broken_mix=False, double_mix=False,
     harness = harness.replace('NATIVE_STUBS', stubs).replace('VOICE_WRAPPERS', wrappers)
     harness = harness.replace('void diag_event(const char *fmt,...) { (void)fmt; }',
         'void diag_event(const char *fmt,...) { va_list args; va_start(args,fmt); vprintf(fmt,args); putchar(10); va_end(args); }')
+    if harness_transform is not None:
+        harness=harness_transform(harness)
     (folder/'harness.c').write_text(harness)
+    overrides=overrides or {}
+    for name,text in overrides.items():
+        (folder/name).write_text(text)
     cmd = ['clang', '-std=c11', '-D_DARWIN_C_SOURCE', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
            '-Wno-unused-function', '-Wno-unused-variable', '-Wno-parentheses-equality', '-Wno-deprecated-declarations',
            '-ffp-contract=off', '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
            '-I'+str(folder), '-I'+str(ROOT/'runtime'), '-I'+str(ROOT/'recomp'),
            str(folder/'harness.c'), str(folder/'native.c'), str(ROOT/'runtime/interp.c'),
-           *[str(ROOT/f'runtime/car_audio_{n}.c') for n in ('runtime','csis','engine_class','player','backend','filter','tmx')],
-           *driver.xma_link(folder), '-o', str(folder/'live')]
+           *[str(folder/f'car_audio_{n}.c' if f'car_audio_{n}.c' in overrides else ROOT/f'runtime/car_audio_{n}.c')
+             for n in ('runtime','csis','engine_class','player','backend','filter','tmx')],
+           *driver.xma_link(folder,real=console), '-o', str(folder/'live')]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stderr[-5000:]
     stock_dir = native.parent/'SOUND/ENGINE'

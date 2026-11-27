@@ -19,6 +19,9 @@
 #include <pthread.h>
 
 #include "host.h"
+#if NFS_GAME != NFS_GAME_MW
+#include "carbon_padfx.h"
+#endif
 #include "settings.h"
 #include "stream_key.h"
 #include "gpuclients.h"
@@ -985,6 +988,13 @@ static void script_seq(const char *spec, uint64_t real_frame, uint64_t draws) {
             if (row) { for (int i = 0; i < row->nchoices || (row->type == SET_TOGGLE && i < 2); ++i) {
                 char sp[32]; const char *l = row->values ? row->values[i] : row->choices ? row->choices[i] : i ? "on" : "off";
                 snprintf(sp, sizeof sp, "%s", l); if (!strcasecmp(sp, eq + 1)) { v = i; break; } } }
+#if NFS_GAME == NFS_GAME_MW
+            // Diagnostic sliders use their stored integer units, e.g. fixed hour 1800 = 18:00.
+            if (row && row->type == SET_SLIDER) {
+                char *end; long number = strtol(eq + 1, &end, 10);
+                if (end != eq + 1 && !*end && number >= row->min && number <= row->max) v = (int)number;
+            }
+#endif
             int changed = row && v >= 0 ? settings_set(row, v) : -1;
             diag_event("script: %s -> %d", tok, changed);
         }
@@ -2153,7 +2163,11 @@ int pad_read_n(int idx, PadState *st) {
         }
         rumble_update_slot((unsigned)idx);
         // the adaptive triggers and lightbar decide as for a real pad and only log it (padfx.m never touches a pad here)
+#if NFS_GAME == NFS_GAME_MW
         if (!idx) padfx_update(NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
+#else
+        carbon_padfx_update((unsigned)idx, NULL, kind == PAD_KIND_DUALSENSE || kind == PAD_KIND_EDGE, st->lt, st->rt);
+#endif
         return 1;
     }
     @autoreleasepool {
@@ -2191,7 +2205,11 @@ int pad_read_n(int idx, PadState *st) {
             kind = [cat rangeOfString:@"Edge" options:NSCaseInsensitiveSearch].location != NSNotFound ? PAD_KIND_EDGE : PAD_KIND_DUALSENSE;
         else if ([g isKindOfClass:GCDualShockGamepad.class] || [cat hasPrefix:@"DualShock"]) kind = PAD_KIND_DUALSHOCK4;
         set_identity(idx, kind, ctl.vendorName.UTF8String);
+#if NFS_GAME == NFS_GAME_MW
         if (idx == 0) padfx_update((__bridge void *)ctl, [g isKindOfClass:GCDualSenseGamepad.class], g.leftTrigger.value, g.rightTrigger.value);
+#else
+        carbon_padfx_update((unsigned)idx, (__bridge void *)ctl, [g isKindOfClass:GCDualSenseGamepad.class], g.leftTrigger.value, g.rightTrigger.value);
+#endif
         st->lx = g.leftThumbstick.xAxis.value; st->ly = g.leftThumbstick.yAxis.value;
         st->rx = g.rightThumbstick.xAxis.value; st->ry = g.rightThumbstick.yAxis.value;
         st->lt = g.leftTrigger.value; st->rt = g.rightTrigger.value;

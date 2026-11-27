@@ -1,8 +1,8 @@
-"""Bounded Undercover console car recordings, with separate normalized GINs.
+"""Bounded Undercover PC and console car recordings, with separate normalized GINs.
 
-TMX controls and ABKC metadata are BE; embedded Gnsu20 stays LE. This reader
+TMX controls and ABKC metadata follow their source byte order; Gnsu20 stays LE. This reader
 retains source identities and authored rates/loops. The stock player adapter
-selects Audio[0]; secondary bank programs and upgrades remain unadmitted.
+retains the ordered Audio tiers and independently bound secondary players.
 Disc files are read only.
 """
 import hashlib
@@ -25,7 +25,7 @@ def admitted(attributes, car):
 
 
 def describe(attributes, car):
-    """Resolve the stock pvehicle Audio[0] typed NG player filenames."""
+    """Resolve ordered pvehicle Audio references and their player resources."""
     from . import car_audio as ca, uc_attrib
     from .car_convert import FitAttributes, hash32
     require(admitted(attributes, car), 'audio unsupported Undercover attributes/car')
@@ -35,27 +35,44 @@ def describe(attributes, car):
     own = hash32(uc_attrib.STOCK_ALIASES.get(car.upper(), car).lower())
     tiers = attrib.field(hash32('pvehicle'), own, hash32('Audio'))
     require(tiers and tiers['values'], 'Undercover audio selection missing')
-    ref = tiers['values'][0]
-    require(int(ref['class'], 16) == ca.CAR and int(ref['key'], 16), 'Undercover audio class')
-    audio = int(ref['key'], 16)
-    layers = []
-    for field, role in ((0x9aed4ffe, 'engine'), (0xb3186761, 'exhaust')):
-        value = attrib.field(ca.CAR, audio, field)
-        require(value and len(value['values']) == 1, 'Undercover NG reference')
-        ref = value['values'][0]
-        key = int(ref['key'], 16)
-        require(int(ref['class'], 16) == 0x6d483f8f and key, 'Undercover NG class')
-        value = attrib.field(0x6d483f8f, key, 0x0eb1c9d2)
-        require(value and len(value['values']) == 1, 'Undercover NG filename field')
-        filename = value['values'][0]['text']
-        require(filename and re.fullmatch(r'car_[0-9]{3}-' + role + r'-player\.tmx', filename.lower()),
-                'Undercover NG player filename')
-        layers.append(dict(role=role, key=f'{key:08x}', paths=['SOUND/ENGINE/' + filename.upper()]))
-    return dict(pvehicle=f'{own:08x}', caraudio=f'{audio:08x}', audio_index=0, layers=layers)
+    require(1 <= len(tiers['values']) <= 4, 'Undercover authored tier count')
+    plans, resources = [], set()
+    for index, ref in enumerate(tiers['values']):
+        require(int(ref['class'], 16) == ca.CAR and int(ref['key'], 16), 'Undercover audio class')
+        audio, layers = int(ref['key'], 16), []
+        for field, role in ((0x9aed4ffe, 'engine'), (0xb3186761, 'exhaust')):
+            value = attrib.field(ca.CAR, audio, field)
+            require(value and len(value['values']) == 1, 'Undercover NG reference')
+            ref = value['values'][0]
+            key = int(ref['key'], 16)
+            require(int(ref['class'], 16) == 0x6d483f8f and key, 'Undercover NG class')
+            value = attrib.field(0x6d483f8f, key, 0x0eb1c9d2)
+            require(value and len(value['values']) == 1, 'Undercover NG filename field')
+            filename = value['values'][0]['text']
+            require(filename and re.fullmatch(r'car_[0-9]{3}-' + role + r'-player\.tmx', filename.lower()),
+                    'Undercover NG player filename')
+            paths = ['SOUND/ENGINE/' + filename.upper()]
+            value = attrib.field(0x6d483f8f, key, 0xa7468316)
+            require(value and len(value['values']) == 2, 'Undercover secondary bank references')
+            banks = [v['text'].upper() for v in value['values']]
+            require(re.fullmatch(r'SWTN_CAR_[0-9]{3}\.ABK', banks[0]) and banks[1] == 'CAR_WHINE.ABK',
+                    'Undercover secondary bank filenames')
+            banks = ['SOUND/ENGINE/' + banks[0], 'SOUND/IG_GLOBAL/' + banks[1]]
+            resources.update(paths + banks)
+            layers.append(dict(role=role, key=f'{key:08x}', paths=paths, banks=banks))
+        gear = attrib.field(ca.CAR, audio, 0x364efa6a)
+        require(gear and len(gear['values']) == 1, 'Undercover gear bank reference')
+        name = gear['values'][0]['text'].upper()
+        require(name in ('GEAR_LRG_BASE.ABK', 'GEAR_MED_BASE.ABK', 'GEAR_SML_BASE.ABK'),
+                'Undercover gear bank filename')
+        gear = 'SOUND/SHIFTING/' + name
+        resources.add(gear)
+        plans.append(dict(caraudio=f'{audio:08x}', audio_index=index, layers=layers, gear=gear))
+    return dict(pvehicle=f'{own:08x}', **plans[0], tiers=plans, resources=sorted(resources))
 
 
 def resource_paths(attributes, car, candidates):
-    names = {p.casefold() for layer in describe(attributes, car)['layers'] for p in layer['paths']}
+    names = {p.casefold() for p in describe(attributes, car)['resources']}
     found = {}
     for path in candidates:
         key = path.casefold()
@@ -67,31 +84,63 @@ def resource_paths(attributes, car, candidates):
 
 
 def build(attributes, car, resources):
-    """v6 keeps original BE TMXs and PCM at authored rates/loop positions.
+    """v7 retains ordered authored tiers, source slots and isolated secondary ABIs.
 
     GIN normalization is applied to the guest copy at attachment, preserving
     source TMX identities and all compressed blocks/tables in the package.
     """
-    from .car_audio_pack import HEADER, MAX_SIZE
-    layers = describe(attributes, car)['layers']
+    from .car_audio_pack import HEADER, MAX_SIZE, execution_plan
+    from . import car_audio, car_audio_abi as abi, car_audio_x360
+    tiers = describe(attributes, car)['tiers']
     paths = resource_paths(attributes, car, resources)
     require(set(paths) == set(resources), 'Undercover audio resource closure differs')
-    plans = {p: tmx(resources[p]) for p in paths}
+    plans = {p: tmx(resources[p]) for p in paths if p.upper().endswith('.TMX')}
     index = {p.casefold(): i for i, p in enumerate(paths)}
-    ordered = [next(p for p in paths if p.casefold() == layer['paths'][0].casefold()) for layer in layers]
-    payload = bytearray(struct.pack('<2I4f', *(index[p.casefold()] for p in ordered),
-                                    *(v for p in ordered for v in plans[p]['rpm'])))
-    payload += bytes.fromhex(ATTRIBUTES)
+    payload = bytearray(bytes.fromhex(ATTRIBUTES))
+    for tier in tiers:
+        ordered = [next(p for p in paths if p.casefold() == layer['paths'][0].casefold()) for layer in tier['layers']]
+        payload += struct.pack('<2I4f', *(index[p.casefold()] for p in ordered),
+                               *(v for p in ordered for v in plans[p]['rpm']))
+        # One event bank per source layer; the shared whine and gear players
+        # are attached once per engine, even when both layers refer to them.
+        banks = [layer['banks'][0] for layer in tier['layers']]
+        banks += [tier['layers'][0]['banks'][1], tier['gear']]
+        payload += struct.pack('<4I', *(index[p.casefold()] for p in banks))
     for path in paths:
         data = resources[path]
-        sounds = [track['sound'] for track in plans[path]['tracks'] if track['sound']]
-        payload += struct.pack('<4I', 3, len(data), 0, len(sounds)) + hashlib.sha256(data).digest() + data
+        if path in plans:
+            sounds = [track['sound'] for track in plans[path]['tracks'] if track['sound']]
+            plan, kind = b'', 3
+        else:
+            sounds, kind = bank(data), 2
+            endian = '<' if struct.unpack_from('<I', data, 20)[0] == len(data) else '>'
+            source_bank = struct.unpack_from(endian + 'I', data, 32)[0]
+            metadata = [dict(empty=True) if s is None else dict(empty=False,
+                offset=s.header_offset-source_bank, frames=s.frames, rate=s.rate, loop_start=s.loop_start)
+                for s in sounds]
+            interface = ('CAR_WHINE' if path.upper().endswith('/CAR_WHINE.ABK') else
+                         'FX_SHIFTING_01' if '/SHIFTING/' in path.upper() else 'CAR_SWTN')
+            native, identity = car_audio_x360.translate_undercover(data, dict(sounds=metadata), interface)
+            profile = dict(car_audio.bank_inventory(native), kind='abk', size=len(native),
+                           sha256=hashlib.sha256(native).hexdigest(), sounds=metadata)
+            report = abi.inspect_bank(native, profile)
+            require(set(report['blockers']) <= {'A5-player', 'A5-player-destruction',
+                'native program semantics and adapters require separate admission proof'},
+                'Undercover unsupported secondary program')
+            plan = struct.pack('<I', len(native)) + native + struct.pack('<I', identity) + execution_plan(report)
+        payload += struct.pack('<4I', kind, len(data), len(plan), len(sounds))
+        payload += hashlib.sha256(data).digest() + data + plan
         for sound in sounds:
-            pcm = codec.decode_sound(sound).pcm
+            if sound is None:
+                payload += bytes(16)
+                continue
+            # XMA stays compressed for the native decoder; resident PC XAS
+            # uses the same PCM16 package path as the TMX tracks.
+            pcm = codec.decode_sound(sound).pcm if sound.codec == 4 else b''
             payload += struct.pack('<4I', sound.frames, sound.rate,
                                    0 if sound.loop_start is None else sound.loop_start + 1, len(pcm)) + pcm
     require(HEADER.size + len(payload) <= MAX_SIZE, 'Undercover audio package limit')
-    return HEADER.pack(b'A7CA', 6, HEADER.size + len(payload), len(paths), 1,
+    return HEADER.pack(b'A7CA', 7, HEADER.size + len(payload), len(paths), len(tiers),
                        car.lower().encode().ljust(16, b'\0'), hashlib.sha256(payload).digest()) + payload
 
 
@@ -186,24 +235,26 @@ def normalize_gin(data):
 
 
 def bank(data):
-    """Read BE ABKC/S10A sample identities; preserve null slots and XMA bytes."""
-    require(isinstance(data, bytes) and len(data) <= MAX_BYTES, 'ABKC size')
-    return codec.parse_bank(data, endian='>', codecs=(3,))
+    """Read PC/X360 ABKC identities; retain original codec and null slots."""
+    require(isinstance(data, bytes) and 0x60 <= len(data) <= MAX_BYTES, 'ABKC size')
+    endian = '<' if struct.unpack_from('<I', data, 20)[0] == len(data) else '>'
+    return codec.parse_bank(data, endian=endian, codecs=(4,) if endian == '<' else (3,))
 
 
 def tmx(data):
-    """Read the audited BE control topology and bounded resident GIN/SNR tracks.
+    """Read the audited three-input control topology in either byte order and bounded resident GIN/SNR tracks.
 
     Normalized track data is separate from source SHA-256/offset/span_size.
     Offsets refer to the original TMX, including each track's alignment bytes.
     """
     require(isinstance(data, bytes) and 96 <= len(data) <= MAX_BYTES, 'TMX size')
-    u = lambda at: struct.unpack('>I', span(data, at, 4, 'TMX field bounds'))[0]
+    endian = '<' if data[12:16] == b'1000' else '>'
+    u = lambda at: struct.unpack(endian + 'I', span(data, at, 4, 'TMX field bounds'))[0]
     bins_count, count = u(20), u(40)
-    require(data[12:16] == b'0001' and u(16) == 4 and bins_count in (3, 4) and
+    require(data[12:16] in (b'0001', b'1000') and u(16) == 4 and bins_count in (3, 4) and
             u(24) == 0 and 3 <= count <= 6 and u(32) == u(44) == count and
             u(36) == 1 and u(48) == 3 and u(52) == 16 and 0 < u(28) <= 32,
-            'TMX BE topology')
+            'TMX Undercover topology')
     offsets = [u(at) for at in range(56, 96, 4)]
     require(offsets == sorted(offsets) and offsets[0] == 96 and offsets[-1] < len(data), 'TMX section offsets')
     inputs, cross, bins, extras, spare, variables, v1, v2, tracks, base = offsets
@@ -215,8 +266,8 @@ def tmx(data):
     controls, at = [], cross
     for _ in range(2):
         for _ in range(2):
-            ident, curve, zero, control, block, pointer = struct.unpack('>6I', span(data, at, 24))
-            values = struct.unpack('>5f', span(data, at+24, 20))
+            ident, curve, zero, control, block, pointer = struct.unpack(endian + '6I', span(data, at, 24))
+            values = struct.unpack(endian + '5f', span(data, at+24, 20))
             require(ident == len(controls) and curve in (0, 1, 4, 8, 9) and not (zero or block or pointer) and
                     control in (0, 2, 4) and all(math.isfinite(v) for v in values) and
                     values[1] > 0 and 0 <= values[2] <= values[3] <= 1 and values[4] == 0,
@@ -228,16 +279,16 @@ def tmx(data):
     require(at == bins, 'TMX crossfade extent')
     layers = []
     for index in range(bins_count):
-        ident, pairs, extent, deps, control, block, pointer = struct.unpack('>7I', span(data, at, 28))
+        ident, pairs, extent, deps, control, block, pointer = struct.unpack(endian + '7I', span(data, at, 28))
         require(ident == index and 0 <= pairs <= 3 and deps <= 4 and extent == 28 + 4*deps and
                 control in (0, 2, 4) and not (block or pointer), 'TMX bin header')
-        dependencies = struct.unpack('>' + 'I'*deps, span(data, at+28, deps*4))
+        dependencies = struct.unpack(endian + 'I'*deps, span(data, at+28, deps*4))
         require(len(set(dependencies)) == deps and all(x < 4 for x in dependencies), 'TMX bin dependencies')
         ends = []
         for side in range(2*pairs):
             pos = at + extent + 32*side
-            ident, track, zero, curve = struct.unpack('>4I', span(data, pos, 16))
-            start, width, gain, output = struct.unpack('>4f', span(data, pos+16, 16))
+            ident, track, zero, curve = struct.unpack(endian + '4I', span(data, pos, 16))
+            start, width, gain, output = struct.unpack(endian + '4f', span(data, pos+16, 16))
             require(ident == side and track < count and not zero and curve in (0, 1, 4, 8, 9) and
                     all(math.isfinite(v) for v in (start, width, gain, output)) and
                     start >= 0 and width >= 0 and 0 <= gain <= 1 and output == 0, 'TMX bin endpoint')
@@ -248,12 +299,12 @@ def tmx(data):
     require(at == extras == spare == variables and v1 == variables + 128 and v2 == v1 + 64 and
             tracks == v2 + 4*count and tracks + count*36 == base and
             not any(data[variables+8:tracks]), 'TMX variable/bin/track extent')
-    bounds = struct.unpack('>2f', span(data, variables, 8))
+    bounds = struct.unpack(endian + '2f', span(data, variables, 8))
     require(all(math.isfinite(v) for v in bounds) and 0 < bounds[0] < bounds[1], 'TMX RPM range')
     sources, previous = [], -1
     for index in range(count):
         at = tracks + index*36
-        kind, ident, offset, pointer, zero, one, history, frequency, gain = struct.unpack('>7I2f', span(data, at, 36))
+        kind, ident, offset, pointer, zero, one, history, frequency, gain = struct.unpack(endian + '7I2f', span(data, at, 36))
         require(kind in (0x534e5220, 0x47494e20) and ident == index and
                 not (pointer or zero or history or gain) and one == 1 and math.isfinite(frequency) and
                 0 < frequency <= 20000 and offset > previous and (index != 0 or offset == 0),

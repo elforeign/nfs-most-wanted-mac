@@ -310,6 +310,10 @@ static NSTask *pu_worker;
 static NSString *pu_source_token;
 
 static void PULocateSource(NSDictionary *request) {
+#ifdef PUB_UPDATE_REHEARSAL
+    // The offline driver answers via source-replies; never show desktop UI.
+    (void)request; return;
+#endif
     NSString *token = request[@"token"], *title = request[@"title"], *body = request[@"body"];
     if (![token isKindOfClass:NSString.class] || token.length != 32 ||
         [token rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location != NSNotFound ||

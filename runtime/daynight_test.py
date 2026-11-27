@@ -17,9 +17,11 @@ Cars follow the hour (NFS_DAYNIGHT_CARS): the in-game rig's light 0 luminance at
 midnight over noon, as fed by the elSetupLights hook, is 0.070506 (expected
 Y(night sun)/Y(day sun) 0.070506; noon equals the shipped rig 0.744170 exactly).
 With the switch off or the scaling removed (cars_broken) it stays 1: fails by 0.929494.
+Default car/world night attenuation ratio: 1; old default 14.1832275, rejected.
 The expanded layer checker finds 0 MW reads with the fence, 2 without it.
 """
 from pathlib import Path
+import hashlib
 import os
 import re
 import subprocess
@@ -27,6 +29,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'runtime'
+
+ORIGINAL_CAR_DEFAULT = '''    cars_enabled = d65 ? !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")))
+                       : enabled && e && (!strcmp(e, "1") || !strcasecmp(e, "on"));'''
+ORIGINAL_CAR_DEFAULT_SHA256 = '955b7d107619da4ade6ffa6b601b2a56e8bbb8bb5b383769da5646b602d1b0d3'
 
 HARNESS = r'''
 #include <assert.h>
@@ -220,13 +226,26 @@ int main(void) {
     close_value(car_sun_y(tod,0,0x00900000u,1),luma(RIG_SUN),"other rigs untouched");
     cars_enabled=0;
     close_value(car_sun_y(tod,0,CAR_RIG,1),luma(RIG_SUN),"car switch off leaves the rig");
+    // Default car/world night attenuation must agree, independently of paint.
+    setenv("NFS_DAYNIGHT","on",1); unsetenv("NFS_DAYNIGHT_CARS");
+    daynight_configure(); fixed=1;
+    float default_noon=car_sun_y(tod,12,CAR_RIG,1);
+    float default_night=car_sun_y(tod,0,CAR_RIG,1);
+    float relative=(default_night/default_noon)/expect;
+    printf("default car/world night ratio %.9g (limit 1.05)\n",relative);
+    close_value(relative,1,"default car/world night ratio");
     // A stripped/public source uses the fallback palette and still executes.
-    unsetenv("NFS_DAYNIGHT"); unsetenv("NFS_TEST_DAYNIGHT_HOUR");
+    setenv("NFS_DAYNIGHT","off",1); unsetenv("NFS_TEST_DAYNIGHT_HOUR");
     setenv("NFS_DAYNIGHT_CARS","on",1);
     daynight_configure(); assert(!enabled && !cars_enabled);
     setenv("NFS_DAYNIGHT","on",1); setenv("NFS_TEST_DAYNIGHT_HOUR","24",1);
     daynight_configure(); assert(enabled && fixed && fixed_hour==0 && cars_enabled);
-    unsetenv("NFS_DAYNIGHT_CARS"); daynight_configure(); assert(enabled && !cars_enabled);
+    unsetenv("NFS_DAYNIGHT_CARS"); daynight_configure(); assert(enabled && cars_enabled);
+    unsetenv("NFS_DAYNIGHT"); daynight_configure(); assert(enabled && cars_enabled);
+    car_sun_y(tod,0,CAR_RIG,1); close_value(daynight_headlight_scale(),8192,"midnight lamp radiance");
+    car_sun_y(tod,18,CAR_RIG,1); close_value(daynight_headlight_scale(),4096.5f,"dusk lamp radiance");
+    car_sun_y(tod,12,CAR_RIG,1); close_value(daynight_headlight_scale(),1,"noon lamp radiance");
+    enabled=0; close_value(daynight_headlight_scale(),1,"clock Off lamp radiance");
     // A separately registered provider adds no mandatory dependency to this unit.
     daynight_register_clock(registered_clock);
     enabled=0; c=cpu(tod); f_00769360(&c); assert(clock_calls==0);
@@ -264,6 +283,7 @@ def check_private_source(candidate):
 
 
 def main():
+    assert hashlib.sha256(ORIGINAL_CAR_DEFAULT.encode()).hexdigest() == ORIGINAL_CAR_DEFAULT_SHA256
     source = (RUNTIME / 'daynight.c').read_text()
     with tempfile.TemporaryDirectory(prefix='daynight-test-') as directory:
         scratch = Path(directory)
@@ -294,6 +314,9 @@ def main():
             'rate_broken': source.replace('#define SECONDS_PER_GAME_HOUR 150.0', '#define SECONDS_PER_GAME_HOUR 90.0'),
             'weight_broken': source.replace('after.diffuse[i] *= clock_weight;', '(void)clock_weight;'),
             'cars_broken': source.replace('write_float(a + 4 * i, rgb[i] * f);', '(void)f;'),
+            'default_cars_broken': source.replace(
+                'cars_enabled = enabled && !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")));',
+                ORIGINAL_CAR_DEFAULT),
             'public': source,
         }
         for name, text in variants.items():

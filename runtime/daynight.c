@@ -108,10 +108,9 @@ __attribute__((constructor)) static void daynight_configure(void) {
     fixed = 0;
     const char *e = getenv("NFS_DAYNIGHT");
     int d65 = lighting_mode_d65();
-    enabled = d65 || (e && (!strcmp(e, "1") || !strcasecmp(e, "on")));
+    enabled = d65 || !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")));
     e = getenv("NFS_DAYNIGHT_CARS");
-    cars_enabled = d65 ? !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")))
-                       : enabled && e && (!strcmp(e, "1") || !strcasecmp(e, "on"));
+    cars_enabled = enabled && !(e && (!strcmp(e, "0") || !strcasecmp(e, "off")));
     e = getenv("NFS_TEST_DAYNIGHT_HOUR");
     if (enabled && e && *e) {
         char *end;
@@ -130,6 +129,16 @@ float daynight_lamp_level(void) {
     DaynightSample s;
     daynight_sample(clock_state.hour, 0, 0, &s);
     return fminf(1, 2 * s.night);
+}
+
+// Authored world radiance has no SI calibration. Map the photometric lamps to
+// its night exposure, retaining their candela, aim, inverse-square and shadows.
+// This is a renderer conversion, not an increase in the physical lamp output.
+float daynight_headlight_scale(void) {
+    if (!enabled || !clock_state.ready) return 1;
+    DaynightSample s;
+    daynight_sample(clock_state.hour, 0, 0, &s);
+    return 1 + 8191 * s.night;
 }
 
 static float read_float(uint32_t a) { float f; memcpy(&f, G + a, 4); return f; }
@@ -293,7 +302,7 @@ static void rig_by_hour(Cpu *c) {
         M32(FLOW) != 6)
         return;
     int postfx_look_variant(const char *v);   // x360_post.m: BOOT_DIAG_LOOK_AB `carsoff`, the same frame Off
-    if (diag_on && postfx_look_variant("carsoff")) return;
+    if (diag_on && (postfx_look_variant("carsoff") || postfx_look_variant("nightold"))) return;
     for (int light = 0; light < 3; ++light) {
         float f = light ? car_light.sky : car_light.sun;
         int d65 = lighting_mode_d65();

@@ -164,6 +164,18 @@ class CarSetupLifecycle(unittest.TestCase):
     def import_args(self, source=None):
         return ['--cars-import', '--carbon', str(source or self.f.carbon), '--cars-spec', str(self.selection)]
 
+    def test_mismatch_error_is_in_setup_log(self):
+        message = ('Car source not recognised: ProStreet shared files did not match: '
+                   'GLOBALB.LZC (does not match a known file)')
+        with mock.patch.object(b.car_sources, 'recognise', side_effect=b.car_sources.SourceError(message)):
+            _, events = self.call('--cars-check', '--carbon', str(self.f.carbon), success=False)
+        error = events[-1]
+        self.assertEqual(error['msg'], message)
+        log = Path(error['log'])
+        self.assertEqual(log.parent, self.base / 'state/car-work')
+        self.assertIn(message, log.read_text())
+        self.assertFalse(self.pointer.exists())
+
     def test_moved_car_source_locate_and_path_only_control(self):
         self.call(*self.import_args())
         before = self.pointer.read_bytes()

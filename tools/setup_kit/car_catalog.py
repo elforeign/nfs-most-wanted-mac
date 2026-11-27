@@ -28,7 +28,9 @@ MAX_JSON = 4 << 20
 MAX_FILE = 2 << 30
 # Filled by the release's approval step, together with the runtime trust root.
 # A digest supplied in a local catalog or beside a policy is never a trust root.
-PACKAGED_POLICY_SHA256 = 'bb8e675ff566ef881a5f973844283d4f45065f9722051606a4a473d9d8b1c72f'
+PACKAGED_POLICY_SHA256 = 'cda222e5d47ff08ddf77660684f73a9e04ffd09d0bddb9ec249ba33d65c4e8a5'
+PRE_UC_PC_AUDIO_POLICY_SHA256 = '04f9fd1087c43a11124d340a25a86f35657e066554f2bb074136e1a54d0bfeef'
+PRE_UC_SECONDARY_POLICY_SHA256 = 'bb8e675ff566ef881a5f973844283d4f45065f9722051606a4a473d9d8b1c72f'
 LEGACY_POLICY_SHA256 = 'cf1965a6ad93a2da2ea28001f29e298912c1d61c3883d6842231f98162918a9c'
 LEGACY_POLICY_REVISION = 2
 # Last policy before Carbon PC audio. Its original contracts remain reviewable.
@@ -468,7 +470,7 @@ def _policy(policy):
         for variant in row['variants']:
             if type(variant) is dict and 'legacy' in variant:
                 _keys(variant, ('contract', 'compatibility', 'legacy'))
-                _integer(variant['legacy'], 1, 18)
+                _integer(variant['legacy'], 1, 20)
             else:
                 _keys(variant, ('contract', 'compatibility'))
             _hex(variant['contract'])
@@ -603,7 +605,7 @@ def _catalog(doc, policy):
                                      PRE_PROSTREET_AUDIO_POLICY_SHA256, PRE_TORQUE_SPLINE_POLICY_SHA256,
                                      PRE_CACHE_RENAME_POLICY_SHA256, PRE_STOCK_PLAYER_AUDIO_POLICY_SHA256,
                                      PRE_UC_TORQUE_POLICY_SHA256, PRE_SNR_READER_POLICY_SHA256,
-                                     PRE_UC_DISC_POLICY_SHA256),
+                                     PRE_UC_DISC_POLICY_SHA256, PRE_UC_SECONDARY_POLICY_SHA256, PRE_UC_PC_AUDIO_POLICY_SHA256),
              'catalog policy or compatibility mismatch')
     _require(dict(doc, policy_sha256=policy.sha256) == make_catalog(doc['cars'], policy),
              'catalog policy or compatibility mismatch')

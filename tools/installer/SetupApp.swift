@@ -644,7 +644,7 @@ func backendArguments(mode: RunMode, pc: URL, x360: URL?, dest: URL, work: URL, 
 }
 
 // Generated from the policy-validated metadata by test_car_release.py --generate-selections.
-let carSelectionsSHA256 = "5378dc30bf3a85981c7d90ac501934375edd541b87d726f8bb797b1fddebd697"
+let carSelectionsSHA256 = "023558557e9661c09ca81ab2f22337a49a2412060786b4bc722ac4114eb4e814"
 let carGameNames = ["carbon": "Carbon", "prostreet": "ProStreet", "undercover": "Undercover"]
 
 func carSourceName(_ game: String, _ platform: String) -> String {
@@ -765,6 +765,10 @@ struct ExtrasFlow {
                 message = "Required car files could not be found. Check your source and try again."
             } else {
                 message = "The car operation could not finish. See the log for details, then try again."
+                let firstLine = f.message.components(separatedBy: .newlines).first ?? ""
+                let summary = firstLine.trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: NSHomeDirectory(), with: "~")
+                if !summary.isEmpty { message += "\n\n" + summary }
             }
         }
     }
@@ -1136,9 +1140,11 @@ final class Setup: ObservableObject {
     }
 
     func chooseUndercoverDisc() {
-        guard !busy, let url = pickFolder(message: "Choose your Undercover Xbox 360 disc image (.iso) for engine sounds.", files: true) else { return }
-        guard url.pathExtension.lowercased() == "iso" else {
-            extras.message = "Choose an Undercover Xbox 360 disc image (.iso)."
+        guard !busy, let url = pickFolder(message: "Choose your installed Undercover PC game folder or Xbox 360 disc image (.iso) for engine sounds.", files: true) else { return }
+        var directory: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &directory)
+        guard directory.boolValue || url.pathExtension.lowercased() == "iso" else {
+            extras.message = "Choose an Undercover PC folder or Xbox 360 disc image (.iso)."
             return
         }
         undercoverDisc = url
@@ -1741,9 +1747,9 @@ struct ContentView: View {
                     choice("Later-game source", s.carbon, "Folder or ISO", s.chooseCarbon)
                     if let recognition = s.state.recognition {
                         if recognition.game == "undercover" && recognition.platform == "pc" {
-                            choice("Undercover Xbox 360 sounds (optional)", s.undercoverDisc, "Disc image (.iso)", s.chooseUndercoverDisc)
+                            choice("Undercover engine sounds (optional)", s.undercoverDisc, "PC folder or disc image (.iso)", s.chooseUndercoverDisc)
                             if s.undercoverDisc != nil {
-                                Button("Use donor sounds") { s.undercoverDisc = nil; s.state.carPlan = nil }
+                                Button("Clear sound source") { s.undercoverDisc = nil; s.state.carPlan = nil }
                             }
                             Text("The disc supplies the cars' own engine sounds. Without engine recordings, cars keep MW donor sounds.")
                                 .font(.caption).foregroundStyle(.secondary)

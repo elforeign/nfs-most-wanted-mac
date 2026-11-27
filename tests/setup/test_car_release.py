@@ -95,8 +95,8 @@ LOCK = 'tools/installer/deps.lock.json'
 SETUP_PYTHON = 'build/installer/dmg/NFS Most Wanted Native Setup.app/Contents/Resources/python/bin/python3'
 PIN =re.compile(r'^PACKAGED_POLICY_SHA256 = .*$', re.M)
 # Generated from actual PC/X360 conversions by --refresh-converter-pins.
-MEASURED_OUTPUTS = '{"pc":{"converter":{"policy":"04b41eac1e6c9f5bd13608b6e5752ca89a4e7b4b0f57a09685360351dde463fb","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"fbe66eb609a07e9c7ee3519ee42433ec8e7ce50b77e4d0c51f25e811ad04c5cb","size":4028804},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"176851d91c89debdd7989f9e8d19e473b79e09af8c4cb6a74f7bf7b8cdf7e55a","size":31821188},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PERFORMANCE.BIN":{"sha256":"a7d33579b17de01751d311f0b6e3e35ebb48d0deaa6f5da2bd0e85fb9eddf8cc","size":344},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"130f958a3932f42c42a5dd13b8c8f961b503b8b22a29890ece199b9e0b56b36e","size":894620},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0},"x360":{"converter":{"policy":"8b955384ab02ac78524d5031c0009249ddc270807f167f52569e55150054ee7c","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"09f8cfc744202d6af67aff6b49f5240341f0d94a3debe0ae8ed558f53d0f14df","size":1087690},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"8fc2ae2f49fce608fb39b3c012505115317ae0ff549f1af26f875ac5249f5e02","size":24033149},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PERFORMANCE.BIN":{"sha256":"a7d33579b17de01751d311f0b6e3e35ebb48d0deaa6f5da2bd0e85fb9eddf8cc","size":344},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"2bd3ebccf9d75de9e773b140297ca7283fe1f1a1345ae08ed308ddda659f0e39","size":931484},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0}}\n'
-MEASURED_OUTPUTS_SHA256 = '0535e6be5e0c0d057c32209c6a9e0a624db435521f78cacac95062c8535183ef'
+MEASURED_OUTPUTS = '{"pc":{"converter":{"policy":"50e8806334cf5d737b9a41528ac66b3364c4e97e49bfe3d575ac4b73c142dbb8","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"fbe66eb609a07e9c7ee3519ee42433ec8e7ce50b77e4d0c51f25e811ad04c5cb","size":4028804},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"176851d91c89debdd7989f9e8d19e473b79e09af8c4cb6a74f7bf7b8cdf7e55a","size":31821188},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PERFORMANCE.BIN":{"sha256":"a7d33579b17de01751d311f0b6e3e35ebb48d0deaa6f5da2bd0e85fb9eddf8cc","size":344},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"130f958a3932f42c42a5dd13b8c8f961b503b8b22a29890ece199b9e0b56b36e","size":894620},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0},"x360":{"converter":{"policy":"8ca75500cf2217ffc91692227c491e05dbfec68a558c2a4236e1aaea438ef232","revision":2},"outputs":{"AUDIO.BIN":{"sha256":"09f8cfc744202d6af67aff6b49f5240341f0d94a3debe0ae8ed558f53d0f14df","size":1087690},"COLLISION.BIN":{"sha256":"3c7c590819521ec3b8d00123ea59cc685d2848a2e4e063eee278f40b710707f4","size":804},"GEOMETRY.BIN":{"sha256":"8fc2ae2f49fce608fb39b3c012505115317ae0ff549f1af26f875ac5249f5e02","size":24033149},"GRIP.BIN":{"sha256":"af08088289f1d5272e85c066a78f0ca263c6bba137e35791cfac11a96a2b79da","size":1096},"PAINT.BIN":{"sha256":"4f93698a8357e5605dc0c4c4460842833f503d81b25c5059a1710abd8d7b7474","size":32},"PERFORMANCE.BIN":{"sha256":"a7d33579b17de01751d311f0b6e3e35ebb48d0deaa6f5da2bd0e85fb9eddf8cc","size":344},"PHYSICS.BIN":{"sha256":"90a7dfcd6832bd149d945587e22f5c6c87b315be6ca3e80f58ef43a6106dc042","size":36},"SOLIDMAP.BIN":{"sha256":"fecf6712465dd21dfbcfdb41adf825e4f15a872c2871822cb8e06d9bcc4a42ad","size":8600},"TEXTURES.BIN":{"sha256":"2bd3ebccf9d75de9e773b140297ca7283fe1f1a1345ae08ed308ddda659f0e39","size":931484},"WHEELFIT.BIN":{"sha256":"b03e5a0b5b8d80548926363400de7c7f91f1a5acda157c8b2ba93c12a0f5eba9","size":380}},"slot":0}}\n'
+MEASURED_OUTPUTS_SHA256 = 'd3330f213b8dfc05f461424d702fd7ff5224c9c4be9c8c80aeda515bd5a6dd32'
 FORBIDDEN = (
     'tools_snapshot/carbon_car.py', 'tools_snapshot/carbon_batch.py',
     'tools_snapshot/private_cars.py', 'tools_snapshot/carbon_namespace.py',
@@ -473,7 +473,7 @@ def undercover_donor_rows(rows):
         donor = copy.deepcopy(row)
         donor['outputs'].pop('AUDIO.BIN', None)
         donor['inputs']['source'] = {n: pin for n, pin in donor['inputs']['source'].items()
-                                     if not n.startswith('SOUND/ENGINE/')}
+                                     if not n.startswith('SOUND/')}
         donors.append(donor)
     return donors
 
@@ -485,7 +485,26 @@ def measured_converter_rows(rows, pc, x360, mw, later_pc=None, uc_x360=None):
         work = Path(td).resolve()
         engine = car_import.CarImporter(work / 'catalog', work / 'work')
         measured = []
-        for before in rows:
+        reviewed = copy.deepcopy(rows)
+        if uc_x360 is not None:
+            from setup_kit import car_audio_undercover
+            attributes = ((later_pc or {})['undercover'] / 'GLOBAL/ATTRIBUTES.BIN').read_bytes()
+            # The refresh tool measures the newly reachable authored resources
+            # from the same disc, while requiring all prior pins to agree.
+            with car_audio_undercover.Disc(uc_x360) as disc:
+                for row in reviewed:
+                    if row['origin']['game'] != 'undercover': continue
+                    for name in car_audio_undercover.describe(attributes, row['origin']['folder'])['resources']:
+                        data = disc.read(name)
+                        pin = dict(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+                        old = row['inputs']['source'].get(name)
+                        assert old is None or old == pin, 'changed prior Undercover source: ' + name
+                        row['inputs']['source'][name] = pin
+            previous_later = engine._later_rows
+            engine._later_rows = lambda recognition, policy: (
+                {r['slot']: r for r in reviewed if r['origin']['game'] == 'undercover'}
+                if recognition['game'] == 'undercover' else previous_later(recognition, policy))
+        for before in reviewed:
             game, platform = before['origin']['game'], before['origin']['platform']
             source = (pc if platform == 'pc' else x360) if game == 'carbon' else (later_pc or {})[game]
             sound_disc = uc_x360 if game == 'undercover' and platform == 'pc' else None
@@ -498,10 +517,11 @@ def measured_converter_rows(rows, pc, x360, mw, later_pc=None, uc_x360=None):
             if game in ('prostreet', 'undercover') and platform == 'pc' and (source / 'SOUND/ENGINE').is_dir():
                 from setup_kit import car_audio_pack
                 attributes = (source / 'GLOBAL/ATTRIBUTES.BIN').read_bytes()
-                candidates = (p.relative_to(source).as_posix() for p in (source / 'SOUND/ENGINE').iterdir() if p.is_file())
+                directory = source / ('SOUND' if game == 'undercover' else 'SOUND/ENGINE')
+                candidates = (p.relative_to(source).as_posix() for p in directory.rglob('*') if p.is_file())
                 paths = car_audio_pack.resource_paths(attributes, before['origin']['folder'], candidates, game=game)
                 expected['inputs']['source'] = {p: pin for p, pin in expected['inputs']['source'].items()
-                                                if not p.startswith('SOUND/ENGINE/')}
+                                                if not p.startswith('SOUND/')}
                 expected['inputs']['source'].update({p.upper(): cc.fingerprint(source / p) for p in paths})
             expected['outputs'] = after['outputs']
             if after != expected:
@@ -583,7 +603,7 @@ def generate_prostreet_runtime_pins(root, rows):
 
 
 def generate_undercover_runtime_pins(root, rows):
-    """Reproduce native v6 identities from measured Undercover writer receipts."""
+    """Reproduce native v7 identities from measured Undercover writer receipts."""
     entries=sorted((r['origin']['folder'].lower(),r['outputs']['AUDIO.BIN']['sha256'])
                    for r in rows if r['origin']['game']=='undercover')
     if len(entries)!=14 or len({name for name,_ in entries})!=14:
@@ -594,6 +614,16 @@ def generate_undercover_runtime_pins(root, rows):
     text,count=re.subn(r'static const struct \{ const char \*car,\*sha; \} undercover_packages\[\]=\{.*?\n\};',
                        lambda _:table,path.read_text(),flags=re.S)
     if count!=1:raise ValueError('native Undercover player pin table must occur once')
+    from setup_kit import car_selection
+    entries = sorted((r['origin']['folder'].lower(), r['outputs']['AUDIO.BIN']['sha256'])
+                     for r in car_selection.pc_audio_variants(rows))
+    if len(entries) != 14:
+        raise ValueError('incomplete Undercover PC player package inventory')
+    table = 'static const struct { const char *car,*sha; } undercover_pc_packages[]={\n'
+    table += ''.join('    {"'+name+'","'+sha+'"},\n' for name,sha in entries)+'};'
+    text,count = re.subn(r'static const struct \{ const char \*car,\*sha; \} undercover_pc_packages\[\]=\{.*?\n\};',
+                        lambda _:table, text, flags=re.S)
+    if count != 1:raise ValueError('native Undercover PC player pin table must occur once')
     path.write_text(text)
 
 
@@ -611,15 +641,22 @@ def refresh_converter_pins(pc, x360, mw, prostreet, undercover, uc_x360=None):
         assert cc.slot_compatibility(before) == cc.slot_compatibility(after)
         replacement = dict(contract=cc.contract_hash(after), compatibility=cc.slot_compatibility(after))
         if replacement != variant:
-            variants[index] = dict(variant, legacy=18)
+            variants[index] = dict(variant, legacy=20)
+            variants.append(replacement)
+    for before, after in zip(car_selection.pc_audio_variants(rows), car_selection.pc_audio_variants(refreshed)):
+        variants = policy['slots'][before['slot']]['variants']
+        variant = dict(contract=cc.contract_hash(before), compatibility=cc.slot_compatibility(before))
+        replacement = dict(contract=cc.contract_hash(after), compatibility=cc.slot_compatibility(after))
+        if replacement != variant:
+            variants[variants.index(variant)] = dict(variant, legacy=20)
             variants.append(replacement)
     for row in x360_donor_rows(refreshed) + undercover_donor_rows(refreshed):
         variants = policy['slots'][row['slot']]['variants']
-        variant = dict(contract=cc.contract_hash(row), compatibility=cc.slot_compatibility(row), legacy=1)
+        variant = dict(contract=cc.contract_hash(row), compatibility=cc.slot_compatibility(row), legacy=20)
         if variant not in variants:
             variants.append(variant)
     refresh_carbon_source_variants(policy, rows, refreshed)
-    policy['revision'] = max(policy['revision'], 22)
+    policy['revision'] = max(policy['revision'], 24)
     (ROOT / POLICY).write_bytes(cc.encoded(policy))
     generate(ROOT)
     cc.PACKAGED_POLICY_SHA256 = cc.digest(policy)
@@ -763,7 +800,8 @@ def export_payload(base, fault=None):
                      '--exclude-standard', '-z']).stdout.split('\0')
     names += ['tools/publish/denylist_carbon.txt', POLICY, HEADER, SELECTIONS, 'tools/setup_kit/car_selection.py',
               'tests/setup/test_car_release.py', 'runtime/save_file_fixture.py']
-    names += ['tools/setup_kit/carbon_source.py', 'tools/setup_kit/car_audio_x360.py']
+    names += ['tools/setup_kit/carbon_source.py', 'tools/setup_kit/car_audio_x360.py',
+              'tools/setup_kit/car_audio_undercover_pc.json']
     names += [f'tools/setup_kit/{stem}.py' for stem in
               ('ps_attrib', 'ps_namespace', 'uc_attrib', 'uc_batch', 'ucpc_car', 'v25_batch', 'v25_car')]
     allowed = publish.patterns(ROOT / 'tools/publish/allowlist.txt')
@@ -1025,7 +1063,7 @@ class CarRelease(unittest.TestCase):
         # Compact digests over the independently approved local output hashes.
         approvals = {
             'prostreet': (217, '71644f705ef737a3aff2e9c43acb31c1595ad88e084c58c89f40c2cc2b3ebc1a'),
-            'undercover': (70, '8dc02801370965a2f281d5be2f55d8b2313dbed29f437a4bcc8a545c60e4800a'),
+            'undercover': (70, 'bd71cebd69689380a90e1a619fab7213db6000ae5798faec7cd73dbdc66837fb'),
         }
         for game, (count, digest) in approvals.items():
             by_game = [r for r in rows if r['origin']['game'] == game]
@@ -1232,7 +1270,7 @@ class CarRelease(unittest.TestCase):
     def test_generated_trust_artifacts(self):
         doc = verify_policy(ROOT)
         self.assertEqual(len(doc['slots']), 90)
-        self.assertEqual(doc['revision'], 22)
+        self.assertEqual(doc['revision'], 24)
 
     def test_prostreet_stock_player_audio_is_approved(self):
         from setup_kit import car_selection
@@ -1249,18 +1287,61 @@ class CarRelease(unittest.TestCase):
         self.assertEqual({n for n in row['inputs']['source'] if n.startswith('SOUND/ENGINE/')},
             {'SOUND/ENGINE/CAR_106-ENGINE.TMX','SOUND/ENGINE/CAR_126-EXHAUST.TMX'})
 
-    def test_undercover_stock_player_audio_is_approved(self):
+    def test_undercover_tiers_and_secondary_audio_are_approved(self):
         from setup_kit import car_selection
         rows=[r for r in car_selection.load() if r['origin']['game']=='undercover']
         self.assertEqual(len(rows),14)
         resources=set()
         for row in rows:
-            names={n for n in row['inputs']['source'] if n.startswith('SOUND/ENGINE/')}
-            self.assertEqual(len(names),2)
-            self.assertTrue(all(n.endswith('-PLAYER.TMX') for n in names))
+            names={n for n in row['inputs']['source'] if n.startswith('SOUND/')}
+            self.assertTrue(any(n.endswith('-PLAYER.TMX') for n in names))
+            self.assertIn('SOUND/IG_GLOBAL/CAR_WHINE.ABK', names)
+            self.assertEqual(sum(n.startswith('SOUND/SHIFTING/') for n in names),1)
             self.assertGreater(row['outputs']['AUDIO.BIN']['size'],68)
             resources.update(names)
-        self.assertEqual(len(resources),20)
+        self.assertEqual(len(resources),51)
+        # Secondary audio changes no geometry, performance or other output.
+        non_audio={r['origin']['folder']:{n:p for n,p in r['outputs'].items() if n!='AUDIO.BIN'} for r in rows}
+        self.assertEqual(sum(map(len,non_audio.values())),70)
+        self.assertEqual(cc.digest(non_audio),'9ac843d4f30a2d5319731fffb99b949a63860ea1b0f14aa5d579bb0170e49505')
+
+    def test_pre_secondary_approvals_are_retained(self):
+        doc=verify_policy(ROOT)
+        entries=sorted((slot['slot'],v['contract'],v['compatibility'])
+                       for slot in doc['slots'] for v in slot['variants'] if v.get('legacy')==19)
+        self.assertEqual(len(entries),89)
+        self.assertEqual(cc.digest(entries),'c6dbdbb79ed34886656145713e29bedf8f56fa32a5ba940e44c06e8bac0d2758')
+
+    def test_pre_pc_audio_approvals_are_retained(self):
+        doc = verify_policy(ROOT)
+        entries = sorted((slot['slot'], v['contract'], v['compatibility'])
+                         for slot in doc['slots'] for v in slot['variants'] if v.get('legacy') == 20)
+        self.assertEqual(len(entries), 117)
+        self.assertEqual(cc.digest(entries), 'e343b013d7fc13b50b8e1258f7250377137d51a5a0a06744b5d5316dc4542a02')
+
+    def test_undercover_pc_sound_contracts(self):
+        from setup_kit import car_selection
+        rows = car_selection.load()
+        variants = car_selection.pc_audio_variants(rows)
+        self.assertEqual(len(variants), 14)
+        for row in variants:
+            original = next(r for r in rows if r['origin'] == row['origin'])
+            self.assertEqual(cc.slot_compatibility(row), cc.slot_compatibility(original))
+            self.assertEqual({n:p for n,p in row['outputs'].items() if n != 'AUDIO.BIN'},
+                             {n:p for n,p in original['outputs'].items() if n != 'AUDIO.BIN'})
+            reservations = cc.reservations(); reservations[row['slot']] = row
+            cc.make_catalog(reservations, cc.packaged_policy())
+            changed = copy.deepcopy(row)
+            changed['outputs']['AUDIO.BIN']['sha256'] = '0' * 64
+            reservations[row['slot']] = changed
+            with self.assertRaisesRegex(cc.CatalogError, 'conversion contract is not approved'):
+                cc.make_catalog(reservations, cc.packaged_policy())
+        with tempfile.TemporaryDirectory() as work:
+            target = Path(work) / 'runtime/car_audio.c'
+            target.parent.mkdir()
+            target.write_bytes((ROOT / 'runtime/car_audio.c').read_bytes())
+            generate_undercover_runtime_pins(Path(work), rows)
+            self.assertEqual(target.read_bytes(), (ROOT / 'runtime/car_audio.c').read_bytes())
 
     def test_undercover_without_disc_donor_contracts_are_approved(self):
         from setup_kit import car_selection
@@ -1301,8 +1382,10 @@ class CarRelease(unittest.TestCase):
         entries = sorted((slot['slot'], variant['contract'], variant['compatibility'])
                          for slot in doc['slots'] for variant in slot['variants']
                          if variant.get('legacy') in (1, 2))
-        self.assertEqual(len(entries), 577)
-        self.assertEqual(cc.digest(entries), '1308e0a82711b154273a19cd44197c999f75f208ace7970bef3e6e6a3c756471')
+        # All previous 577 entries remain; this refresh adds 14 console and
+        # 14 Undercover donor contracts for the new converter identity.
+        self.assertEqual(len(entries), 605)
+        self.assertEqual(cc.digest(entries), '42abaf2819ecc3f4beb21129e98bc4269110d1e9851c54d4821a62461584ace3')
 
     def test_pre_performance_approvals_are_retained(self):
         doc = verify_policy(ROOT)

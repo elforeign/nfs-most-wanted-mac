@@ -1,5 +1,13 @@
 """Public admission/provenance, native translated loader/serializer, scratch only.
 
+Copied-save regression: matching catalog loads 1/1; one recomputed slot-signature
+byte flipped with the same generation refuses 1/1, notice 1/1, metadata writes 0.
+Different generation and different part ordering each refuse 1/1 with notice 1/1.
+Frozen pre-fix call sites: copied save loads 0/1 (6/13 assertions fail), refusal
+notice 0/1 (2/15 fail). One stored signature byte flipped also refuses 1/1;
+omitting its signature check admits 1/1 (7/13 fail). Omitting the host notice
+fails 2/13. Current proof: 71 invocations, 1126 parent assertions, ASan/UBSan.
+
 Measured: 43 good runs, 685 parent assertions plus 21 retry-child assertions; original control fails 13/22 with two
 forbidden retail calls/profile writes. Eight baseline mutants fail respectively:
 journal 1/8, dependency comparison 2/13, signature 13/22, exact generation 4/11,
@@ -53,7 +61,14 @@ GUARD = r'''
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <CommonCrypto/CommonDigest.h>
 extern int fault_kind;
+extern int flip_signature;
+static int g_signature_final(unsigned char *out,CC_SHA256_CTX *ctx) {
+    int ok=CC_SHA256_Final(out,ctx);
+    if(flip_signature) out[0]^=1;
+    return ok;
+}
 extern unsigned mutations;
 extern unsigned file_syncs,dir_syncs;
 static int g_openat(int dir,const char *p,int flags,...) {
@@ -103,6 +118,7 @@ static int g_mkdirat(int fd,const char *p,mode_t mode) { ++mutations; return mkd
 #define fsync g_sync
 #define fcntl g_fcntl
 #define mkdirat g_mkdirat
+#define CC_SHA256_Final g_signature_final
 #include "MODULE"
 '''
 
@@ -120,8 +136,13 @@ NATIVE = r'''
 #include <fcntl.h>
 uint8_t *G;
 int fault_kind;
+int flip_signature;
 unsigned mutations,file_syncs,dir_syncs;
 static unsigned checks,failures,dialogs,retail_calls,retail_writes,hashes,lookups;
+static unsigned notices;
+static char notice[64];
+/* Match the real overlay's bounded line, including notices while it is off. */
+void overlay_notice(const char *text) { ++notices; snprintf(notice,sizeof notice,"%s",text); }
 static int missing_class,missing_part,missing_fe,broken_serializer;
 static uint32_t arena=0x2000000;
 static const uint32_t self=0x100000,buffer=0x200000,frontend=0x300000;
@@ -395,6 +416,34 @@ int main(int argc,char **argv) {
         uint32_t sp=c.esp; c.esp-=12; M32(c.esp)=0; M32(c.esp+4)=buffer; M32(c.esp+8)=SIZE-1; c.ecx=self;
         f_0058FD10(&c); CHECK(c.esp==sp); CHECK(!carsave_public_save_allowed());
         CHECK(!memcmp(raw,G+buffer,SIZE)); CHECK(!mutations);
+    } else if(!strcmp(mode,"copy-load") || !strcmp(mode,"copy-refuse") || !strcmp(mode,"copy-signature") || !strcmp(mode,"signature-refuse")) {
+        readsave(path,G+buffer); unsigned char bytes[SIZE],before[0x9CB0];
+        memcpy(bytes,G+buffer,SIZE); memset(G+self,0xA6,sizeof before); memcpy(before,G+self,sizeof before);
+        int refuse=strcmp(mode,"copy-load")!=0;
+        if(strcmp(mode,"signature-refuse")) {
+            CHECK(!files(metadata,".meta") && !files(metadata,".pending"));
+            CHECK(carsave_public_admit(G+buffer,SIZE,NULL)!=NULL);
+        }
+        /* Keep the installed generation and used mask identical. Flip exactly
+         * one byte of the recomputed used-slot signature, not the catalog. */
+        flip_signature=!strcmp(mode,"copy-signature");
+        invoke(&c,0,0);
+        int loaded=(c.eax&255)!=0;
+        CHECK(loaded==!refuse); CHECK(carsave_public_save_allowed()==!refuse);
+        CHECK(!memcmp(bytes,G+buffer,SIZE));
+        if(refuse) {
+            CHECK(retail_calls==0); CHECK(!memcmp(before,G+self,sizeof before));
+            CHECK(notices==1); CHECK(strlen(carsave_public_error())>0);
+            CHECK(!strncmp(notice,carsave_public_error(),strlen(notice)));
+            CHECK(strstr(notice,!strcmp(mode,"signature-refuse")?"Car slot 0 (MODEL_0) differs":".car-catalog")!=NULL);
+            CHECK(!mutations);
+        } else {
+            CHECK(retail_calls==1); CHECK(!notices);
+            CHECK(files(metadata,".pending")==1);
+            CHECK(!carsave_public_admit(G+buffer,SIZE,(unsigned char[12]){1}));
+            CHECK(!memcmp(G+self+0x414,G+buffer+0x5BA1,CARSAVE_PUBLIC_FE_SIZE));
+        }
+        printf("copied save loads=%d/1 refused=%d/1 notice=%u/1\n",loaded,!loaded,notices);
     } else if(!strcmp(mode,"metadata")) {
         seed(&c,1); unsigned char used[12]={1},wrong[12]={2},out[SIZE];
         memcpy(out,G+buffer,SIZE); CHECK(!carsave_public_admit(out,SIZE,used));
@@ -453,6 +502,7 @@ int main(int argc,char **argv) {
         } else invoke(&c,0,0);
         if(refusal) {
             CHECK(!carsave_public_save_allowed()); CHECK(dialogs==1);
+            CHECK(notices==1 && notice[0]);
             CHECK(!memcmp(before,G+self,sizeof before)); CHECK(retail_calls==calls);
             CHECK(mutations==writes); CHECK(!file_latewrite(writer)); CHECK(!file_latetruncate(writer)); CHECK(!file_finish(writer));
             CHECK(M32(frontend+8)==crc);
@@ -641,6 +691,42 @@ def main():
         run('load', store='compatible', user='pending')
         run('load')
         run('load', store='compatible')
+        # Copy only the profile into a fresh Mac's scratch userdata. No metadata
+        # is inherited; matching installed generation/signatures must recover it.
+        def copy_save(user):
+            target = root / user
+            target.mkdir()
+            shutil.copyfile(root / 'user/TEST', target / 'TEST')
+        copy_save('copy-match')
+        result = run('copy-load', user='copy-match')
+        assert 'loads=1/1 refused=0/1' in result.stdout
+        copy_save('copy-entry')
+        (root / 'copy-entry/.car-catalog').mkdir()
+        run('copy-load', user='copy-entry')
+        copy_save('copy-signature')
+        result = run('copy-signature', user='copy-signature')
+        assert 'loads=0/1 refused=1/1 notice=1/1' in result.stdout
+        for store in ('compatible', 'incompatible'):
+            copy_save('copy-' + store)
+            result = run('copy-refuse', store=store, user='copy-' + store)
+            assert 'loads=0/1 refused=1/1 notice=1/1' in result.stdout
+        # Broken control: one used-slot SHA256 byte differs. Keep the save's
+        # marker, metadata checksum and save hash internally consistent so only
+        # installed-slot compatibility can reject it (not a damaged-record gate).
+        signature_user = root / 'signature-byte'
+        shutil.copytree(root / 'user', signature_user)
+        old_meta = next((signature_user / '.car-catalog').glob('*.meta'))
+        record = bytearray(old_meta.read_bytes())
+        record[8 + 67 + 12] ^= 1
+        profile = bytearray((signature_user / 'TEST').read_bytes())
+        profile[36:52] = record[:8] + hashlib.sha256(record[:-64]).digest()[:8]
+        record[-64:-32] = hashlib.sha256(profile[36:]).digest()
+        record[-32:] = hashlib.sha256(record[:-32]).digest()
+        old_meta.unlink()
+        (old_meta.parent / (record[-64:-32].hex() + '.meta')).write_bytes(record)
+        (signature_user / 'TEST').write_bytes(profile)
+        result = run('signature-refuse', user='signature-byte')
+        assert 'loads=0/1 refused=1/1 notice=1/1' in result.stdout
         for mode in ('missing', 'secondary-refuse', 'backup-refuse'):
             run(mode, switch='off')
         shutil.copytree(root / 'user', root / 'original-user')
@@ -673,13 +759,11 @@ def main():
         geometry.write_bytes(b'corrupt synthetic output')
         run('missing', store='corrupt')
         geometry.chmod(0o400)
-        for name, change in [('no-metadata', 'missing'), ('bad-metadata', 'corrupt'), ('symlink-metadata', 'symlink')]:
+        for name, change in [('bad-metadata', 'corrupt'), ('symlink-metadata', 'symlink')]:
             user = root / name
             shutil.copytree(root / 'user', user)
             meta = next((user / '.car-catalog').glob('*.meta'))
-            if change == 'missing':
-                meta.unlink()
-            elif change == 'corrupt':
+            if change == 'corrupt':
                 meta.write_bytes(b'corrupt')
             else:
                 held = user / 'held'
@@ -688,6 +772,26 @@ def main():
             run('missing', user=name)
         # Each gate has a broken control, in addition to the original public bug.
         actual = (ROOT / 'runtime/carsave_public.c').read_text()
+        # Frozen pre-fix call sites: missing sidecars used strict admission on
+        # both passes, and refusal had no host overlay call. Pin just these
+        # fragments rather than reading git history or hashing a whole file.
+        old_calls = ('    if (!why) why=carsave_public_admit(G+buffer,size,NULL);',
+                     '    if (!why) why=carsave_public_admit(G+buffer,size,used);')
+        old_refusal = '    latch(why);\n    Cpu saved=*c;'
+        assert hashlib.sha256(('\n'.join(old_calls) + '\n' + old_refusal).encode()).hexdigest() == 'ef0a4c95eed53cc61a28caf4e079e90fab4822b70c5d07ae876132e09d10595c'
+        predecessor = actual.replace('    if (!why) why=admit(G+buffer,size,NULL,1);', old_calls[0])
+        predecessor = predecessor.replace('    if (!why) why=admit(G+buffer,size,used,1);', old_calls[1])
+        predecessor = predecessor.replace('    latch(why);\n    overlay_notice(why);\n    Cpu saved=*c;', old_refusal)
+        assert predecessor != actual
+        (root/'mutant.c').write_text(predecessor)
+        (root/'module.c').write_text(GUARD.replace('MODULE',str(root/'mutant.c')))
+        compile_native('copy-predecessor')
+        copy_save('copy-old')
+        result = run('copy-load', user='copy-old', binary='copy-predecessor', expect=1)
+        assert 'loads=0/1 refused=1/1 notice=0/1' in result.stdout
+        copy_save('copy-old-refuse')
+        result = run('copy-refuse', store='incompatible', user='copy-old-refuse', binary='copy-predecessor', expect=1)
+        assert 'notice=0/1' in result.stdout
         previous = '    if (why) latch(why);'
         start = actual.index('    if (why == journal_failure)')
         end = actual.index('\n}',start)
@@ -701,6 +805,7 @@ def main():
             assert 'recovered saves=0/1' in result.stdout
         result = run('linked-home', user='old-linked-home',binary='pre-savefix',expect=1)
         assert 'linked home saves=0/1' in result.stdout
+        copy_save('copy-unchecked')
         mutants = [
             ('reuse-no-sync', 'metadata_read(dir,key,&existing,1)', 'metadata_read(dir,key,&existing,0)', 'journal-retry', {}),
             ('reuse-no-dir-sync', '!memcmp(&existing,m,sizeof *m) && !durable_sync(dir)', '!memcmp(&existing,m,sizeof *m)', 'journal-retry', {}),
@@ -708,6 +813,9 @@ def main():
             ('no-journal', 'if (!metadata_write(&m))', 'if (0)', 'seed', {}),
             ('no-dependencies', 'if (used && memcmp(used,m.used,sizeof m.used))', 'if (0)', 'metadata', {}),
             ('no-signature', 'if (memcmp(hash,m->slots[k],32))', 'if (0)', 'missing', {'store': 'incompatible', 'user': 'user'}),
+            ('signature-byte-unchecked', 'if (memcmp(hash,m->slots[k],32))', 'if (0)', 'signature-refuse', {'user': 'signature-byte'}),
+            ('recovery-marker-unchecked', 'if (memcmp(buffer,tag,16))\n        return "Missing .car-catalog record; installed cars or generation differ.";', 'if (0) return NULL;', 'copy-refuse', {'store': 'incompatible', 'user': 'copy-unchecked'}),
+            ('no-refusal-notice', '    overlay_notice(why);', '', 'signature-refuse', {'user': 'signature-byte'}),
             ('exact-generation', 'if (!car_catalog_generation()[0])', 'if (strcmp(m->generation,car_catalog_generation()))', 'load', {'store': 'compatible', 'user': 'user'}),
             ('no-backup', 'if (destination && staged && backup(destination,staged))', 'if (1)', 'transaction', {}),
             ('no-barrier', 'return !refused;', 'return 1;', 'missing', {'switch': 'off', 'user': 'user'}),

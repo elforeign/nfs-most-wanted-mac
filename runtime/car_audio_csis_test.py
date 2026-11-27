@@ -329,10 +329,11 @@ def compile_proof(folder, original=False, mutant=None):
             raise unittest.SkipTest('pinned translated MW bodies absent')
         text = path.read_text()
         for key, digest in FROZEN.items():
-            match = re.search(r'void f_' + key + r'\(Cpu \*restrict c\) \{.*?\n\}', text, re.S)
+            match = re.search(r'void f_' + key + r'(?:_orig)?\(Cpu \*restrict c\) \{.*?\n\}', text, re.S)
             if match:
-                assert hashlib.sha256(match[0].encode()).hexdigest() == digest, key + ' baseline changed'
-                generated[key] = match[0]
+                body=match[0].replace('f_'+key+'_orig(', 'f_'+key+'(')
+                assert hashlib.sha256(body.encode()).hexdigest() == digest, key + ' baseline changed'
+                generated[key] = body
     assert set(generated) == set(FROZEN)
     names = set(generated)
     for body in generated.values():
@@ -445,6 +446,19 @@ class CsisProof(unittest.TestCase):
                 row = execute(self.binary, 'execution', refs_bytes([bad], [ref(name)]))[0]
                 self.assertNotEqual(row['guard'], 0)
                 self.assertEqual(row['index'], 12345)
+
+    def test_undercover_secondary_exact_execution_only(self):
+        for name, system, signature, words in (('CAR_SWTN',0x6a16,0x7859,7),
+                ('CAR_WHINE',0x6a16,0x603f,9), ('FX_SHIFTING_01',0x085b,0x7937,6)):
+            source=ref(name,system=system,signature=signature,members=words)
+            actual=execute(self.binary,'execution',refs_bytes([source],[source]))[0]
+            self.assertEqual(actual,dict(guard=0,index=0))
+            generic=execute(self.binary,'preflight',refs_bytes([source],[source]))[0]
+            self.assertEqual(generic['guard'],-2)
+            for target in (ref(name,system=0x311c,signature=signature,members=words),
+                           ref(name,system=system,signature=signature,members=words+1)):
+                actual=execute(self.binary,'execution',refs_bytes([source],[target]))[0]
+                self.assertNotEqual(actual['guard'],0)
 
     def test_original_failed_binding_still_writes_module(self):
         before = []

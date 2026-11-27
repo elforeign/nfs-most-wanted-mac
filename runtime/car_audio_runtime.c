@@ -16,8 +16,10 @@ static int overlap(const void *a,size_t n,const void *b,size_t m) {
 static uint32_t target(unsigned ordinal) {
     switch(ordinal) {
     case 0:return 0x8196c2; case 1:return 0x8196ce; case 4:return 0x8196e8;
+    case 3:return 0x8196de;
     case 6:return 0x8199d1; case 7:return 0x819a0f; case 8:return 0x819a32;
     case 10:return 0x819b13; case 13:return 0x819bbe; case 15:return 0x819cc6;
+    case 11:return 0x819b49; case 12:return 0x819b90;
     case 16:return 0x819dc6; case 17:return 0x819e57; case 21:return 0x819f0b;
     case 22:return 0x819f57; case 25:return 0x819f92; case 27:return 0x81a52c;
     case 28:return 0x81a61d; case 29:return 0x81a707; case 30:return 0x81a7a6;

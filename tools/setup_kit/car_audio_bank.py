@@ -105,7 +105,7 @@ def source_selectors(data, sounds, *, table_offsets=None):
                 continue
             word = _u32(data, target + 4, bank)
             # Classify by the first row's signature, then validate EVERY row.
-            if word == 65535 or word >> 16 in (60, 80, 100):
+            if word == 65535 or word >> 16 in (60, 80, 90, 100, 255):
                 selected.append(target)
     else:
         selected = tuple(table_offsets)
@@ -124,7 +124,7 @@ def source_selectors(data, sounds, *, table_offsets=None):
                 indices.append(None)
                 continue
             index = word & 65535
-            _require(word >> 16 in (60, 80, 100) and reserved == 0xffffffff,
+            _require(word >> 16 in (60, 80, 90, 100, 255) and reserved == 0xffffffff,
                      'unsupported source selector row')
             _require(index < len(sounds) and slot == index + 1 and sounds[index] is not None,
                      'source selector sample identity')

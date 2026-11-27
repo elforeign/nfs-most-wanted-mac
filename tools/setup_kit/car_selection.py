@@ -10,6 +10,7 @@ from . import car_catalog as catalog
 from . import car_sources
 
 METADATA = Path(__file__).with_name('car_selections.json')
+PC_AUDIO = Path(__file__).with_name('car_audio_undercover_pc.json')
 SPEC_FIELDS = ('slot', 'display', 'bindings', 'donors', 'parts')
 
 
@@ -28,10 +29,34 @@ def validate(rows, policy=None):
         catalog._require(key not in seen, 'duplicate packaged selection')
         seen.add(key)
         contracts.add((slot, catalog.contract_hash(row)))
+    # The same car choice has a second approved sound source, without adding
+    # a duplicate car to Setup's list. Everything except sound bytes is shared.
+    for row in pc_audio_variants(rows):
+        reservations = catalog.reservations()
+        reservations[row['slot']] = row
+        catalog.make_catalog(reservations, policy)
+        contracts.add((row['slot'], catalog.contract_hash(row)))
     expected = {(r['slot'], v['contract']) for r in approved['slots'] for v in r['variants']
                 if 'legacy' not in v}
     catalog._require(contracts == expected, 'packaged selections do not cover the approved contracts')
     return sorted(rows, key=lambda r: (r['origin']['game'], r['origin']['platform'], r['slot']))
+
+
+def pc_audio_variants(rows):
+    """Reconstruct PC-sound contracts from their independently pinned assets."""
+    import copy
+    data = catalog._decode(PC_AUDIO.read_bytes())
+    result = []
+    for row in rows:
+        if row['origin']['game'] != 'undercover' or 'AUDIO.BIN' not in row['outputs']:
+            continue
+        variant = copy.deepcopy(row)
+        for name in variant['inputs']['source']:
+            if name.startswith('SOUND/'):
+                variant['inputs']['source'][name] = data['resources'][name]
+        variant['outputs']['AUDIO.BIN'] = data['packages'][row['origin']['folder']]
+        result.append(variant)
+    return result
 
 
 def load(path=METADATA, *, policy=None):

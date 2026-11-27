@@ -2,7 +2,10 @@
 #import <Foundation/Foundation.h>
 #include <glob.h>
 #include <stdarg.h>
-#include "headlights.m"
+#ifndef HEADLIGHTS_SOURCE
+#define HEADLIGHTS_SOURCE "headlights.m"
+#endif
+#include HEADLIGHTS_SOURCE
 #include "headlights_compat.inc"
 #include "roadfilm.m"
 #include "headlights_culling.inc"
@@ -18,6 +21,8 @@ int pass_dirty=1,diag_on;
 uint32_t q_active;
 static float lamp_level=1;
 float daynight_lamp_level(void){return lamp_level;}
+static float night_scale=1;
+float daynight_headlight_scale(void){return night_scale;}
 MatWaterDraw mat_water_draw;
 MatGrassDraw mat_grass_draw;
 static unsigned checks,failures,guest_calls,guest_allocations,texture_allocations,draws;
@@ -54,6 +59,7 @@ void d3d9_addref_guest(uint32_t g){++*refs(g);}
 void d3d9_release_guest(uint32_t g){if(--*refs(g)==0)++freed_bound;}
 static void guest_bind(uint32_t *slot,uint32_t g){if(*slot==g)return;if(g)d3d9_addref_guest(g);uint32_t old=*slot;*slot=g;if(old)d3d9_release_guest(old);}
 void diag_event(const char *s,...){(void)s;}
+int diag_shot_due(uint64_t frame){(void)frame;return 0;}
 uint32_t gmalloc_try(uint32_t n){++guest_allocations;CHECK(n<1500000);return scratch_address;}
 void end_pass(void){if(enc){[enc endEncoding];enc=nil;}pass_dirty=1;}
 void ensure_cmd(void){if(!cmd)cmd=[queue commandBuffer];}
@@ -309,10 +315,65 @@ static void sources(const char *root){
     CHECK(covered>=12);CHECK(coated>=6);
     printf("production shader libraries=%u rain-cover/film=%u clearcoat=%u\n",compiled,covered,coated);
 }
+/* A wall is both caster and receiver. At world-sized translations the old
+ * interpolated world positions corrupt screen derivatives and cause acne. */
+static void wall_self_shadow(int right_only){
+    translation[0]=1024;translation[1]=-2048;translation[2]=4096;
+    memset(camera_vp,0,sizeof camera_vp);camera_vp[0][0]=25;camera_vp[1][1]=50/.75f;camera_vp[2][2]=.5f;camera_vp[2][3]=1;
+    camera_vp[3][0]=-translation[0]*25;camera_vp[3][1]=(-translation[1]+.625f)*camera_vp[1][1];camera_vp[3][2]=-.5f*translation[2]+.1f;camera_vp[3][3]=-translation[2];
+    constants();install_lamps(0);clear_maps();
+    if(right_only){prepared.lamps[1]=prepared.lamps[0];prepared.lamps[0].position[3]=0;}
+    Vertex v[6];v[0]=vertex(1023,-2049,4115);v[1]=vertex(1025,-2049,4127);v[2]=vertex(1025,-2048.25f,4127);
+    v[3]=v[0];v[4]=v[2];v[5]=vertex(1023,-2048.25f,4115);
+    casting=1;cast_index=right_only;HLConstants k;CHECK(headlights_draw(&world_vs,0x8abb0769bddd41b4ULL,0,&k)==HL_CASTER);
+    ensure_cmd();id<MTLRenderCommandEncoder> e=headlights_encoder(cmd);
+    [e setRenderPipelineState:pipeline(caster_vs,native_ps,1)];[e setDepthStencilState:depth_state_fixture];
+    bind_native(e,v,6);headlights_bind(e,&k,0);[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];[e endEncoding];casting=0;finish();
+    const char *entry="struct WallIn {float4 p [[position]];float3 world [[user(hl_world)]];};\n"
+    "fragment float4 wall_ps(WallIn p [[stage_in]],constant HLConstants &k [[buffer(0)]],depth2d<float> map [[texture(0)]]) {"
+    "return float4(hl_visibility(p.world,cross(dfdx(p.world),dfdy(p.world)),k.lamps[k.frame.w],map));}\n";
+    char *source=NULL;asprintf(&source,"%s\n%s",headlights_msl(),entry);id<MTLFunction> ps=[library(source) newFunctionWithName:@"wall_ps"];free(source);
+    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:256 height:256 mipmapped:NO];
+    td.usage=MTLTextureUsageRenderTarget;id<MTLTexture> texture=[mtl newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=texture;
+    pass.colorAttachments[0].loadAction=MTLLoadActionClear;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    CHECK(headlights_draw(&world_vs,0x8abb0769bddd41b4ULL,1,&k)==HL_RECEIVER);
+    ensure_cmd();e=[cmd renderCommandEncoderWithDescriptor:pass];[e setRenderPipelineState:pipeline(projected_vs,ps,0)];bind_native(e,v,6);headlights_bind(e,&k,0);
+    [e setFragmentBytes:&k length:sizeof k atIndex:0];[e setFragmentTexture:maps[right_only] atIndex:0];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];[e endEncoding];finish();
+    float *pixels=malloc(256*256*16);[texture getBytes:pixels bytesPerRow:256*16 fromRegion:MTLRegionMake2D(0,0,256,256) mipmapLevel:0];
+    double sum=0,square=0;unsigned n=0;for(int y=64;y<192;++y)for(int x=64;x<192;++x){float a=pixels[(y*256+x)*4];sum+=a;square+=a*a;++n;}free(pixels);
+    double mean=sum/n,grain=255*sqrt(fmax(0,square/n-mean*mean));
+    printf("wall visibility grain %.6f/255 mean %.6f (maximum 1; right only %d)\n",grain,mean,right_only);CHECK(mean>.99);CHECK(grain<=1);
+    translation[0]=translation[1]=translation[2]=0;install_camera(25,1.15,-.571);install_lamps(0);clear_maps();
+}
+/* One optical edge number: largest adjacent grayscale step in a .002-degree
+ * sweep over the upper cut-off and the near (-5 degree) domain boundary. */
+static void beam_edges(void){
+    const char *entry=
+    "vertex float4 edge_vs(uint i [[vertex_id]]) { return float4(i==1?3.0f:-1.0f,i==2?3.0f:-1.0f,0,1); }\n"
+    "fragment float4 edge_ps(float4 p [[position]]) { float v=p.y<1?-.9f+p.x*.002f:-5.4f+p.x*.002f;"
+    "return float4(saturate(hl_cookie(-2.0f,v)/5000.0f)); }\n";
+    char *source=NULL;asprintf(&source,"%s\n%s",headlights_msl(),entry);
+    id<MTLLibrary> lib=library(source);free(source);
+    MTLRenderPipelineDescriptor *pd=[MTLRenderPipelineDescriptor new];
+    pd.vertexFunction=[lib newFunctionWithName:@"edge_vs"];pd.fragmentFunction=[lib newFunctionWithName:@"edge_ps"];
+    pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA32Float;
+    NSError *error=nil;id<MTLRenderPipelineState> pipe=[mtl newRenderPipelineStateWithDescriptor:pd error:&error];CHECK(pipe!=nil);
+    MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:512 height:2 mipmapped:NO];
+    td.usage=MTLTextureUsageRenderTarget;id<MTLTexture> texture=[mtl newTextureWithDescriptor:td];
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=texture;
+    pass.colorAttachments[0].loadAction=MTLLoadActionClear;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    ensure_cmd();id<MTLRenderCommandEncoder> e=[cmd renderCommandEncoderWithDescriptor:pass];
+    [e setRenderPipelineState:pipe];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];finish();
+    float pixels[2][512][4];[texture getBytes:pixels bytesPerRow:512*16 fromRegion:MTLRegionMake2D(0,0,512,2) mipmapLevel:0];
+    float step=0;for(int y=0;y<2;++y)for(int x=1;x<512;++x)step=fmaxf(step,255*fabsf(pixels[y][x][0]-pixels[y][x-1][0]));
+    printf("beam angular edge step %.6f/255 (maximum 10)\n",step);CHECK(step<=10);
+}
 int main(int argc,char **argv){@autoreleasepool {
     if(argc<2)return 2;mutation=argc>2?argv[2]:NULL;
     id<MTLDevice> real=MTLCreateSystemDefaultDevice();if(!real){puts("SKIP: no Metal device");return 3;}
     HLDevice *counter=[HLDevice new];counter->real=real;mtl=(id<MTLDevice>)counter;queue=[mtl newCommandQueue];
+    beam_edges();
     game_fixture();
     char path[2048];snprintf(path,sizeof path,"%s/world/t0_world_p0_vs_1_1.bin",argv[1]);world_vs=translate(path);
     snprintf(path,sizeof path,"%s/world/t0_world_p0_ps_1_1.bin",argv[1]);world_ps=translate(path);
@@ -329,7 +390,7 @@ int main(int argc,char **argv){@autoreleasepool {
     install_camera(25,1.15,-.571);cull_planes();float alpha=0,alpha_base=0;
     /* Baseline is the production untranslated variant with no preparation.
      * Count external guest calls/device allocations as well as feature counters. */
-    unsetenv("NFS_HEADLIGHT_PROJECTION");option=-1;
+    setenv("NFS_HEADLIGHT_PROJECTION","off",1);option=-1;
     main_draws=draws;main_guest=guest_calls;main_allocations=guest_allocations;main_textures=texture_allocations;
     float baseline=render_receiver(0,&alpha_base);unsigned baseline_draws=draws-main_draws;
     HLCounters off=counters;unsigned start=draws;
@@ -421,8 +482,26 @@ int main(int argc,char **argv){@autoreleasepool {
     // A diagnostic list naming headlighton runs the feature without the switch; the held Off pass stays native.
     unsetenv("NFS_HEADLIGHT_PROJECTION");option=-1;diag_on=1;listed_on=1;
     CHECK(headlights_enabled());held_variant="headlightoff";CHECK(!headlights_enabled());
-    held_variant="headlighton";listed_on=0;CHECK(headlights_enabled());held_variant=NULL;CHECK(!headlights_enabled());
-    diag_on=0;CHECK(!headlights_enabled());setenv("NFS_HEADLIGHT_PROJECTION","on",1);option=-1;
+    held_variant="headlighton";listed_on=0;CHECK(headlights_enabled());held_variant=NULL;CHECK(headlights_enabled());
+    diag_on=0;CHECK(headlights_enabled());setenv("NFS_HEADLIGHT_PROJECTION","on",1);option=-1;
+    floor_receiver=1;
+    // A horizontal dark road (1% linear reflectance), 50 m ahead and .65 m below the lamp, must
+    // retain readable radiance through the actual receiver shader and maps.
+    float asphalt[4]={.09985282f,.09985282f,.09985282f,.37f};
+    [diffuse replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:asphalt bytesPerRow:16];
+    night_scale=8192;prepare_fixture();float packed_night_scale=prepared.lamps[0].position[3];
+    install_camera(50,1.15,atan2(-.65,50)*180/M_PI);install_lamps(0);
+    prepared.lamps[0].position[3]=packed_night_scale;
+    memset(camera_vp,0,sizeof camera_vp);camera_vp[0][0]=camera_vp[2][1]=1/halfwidth;
+    camera_vp[1][2]=.001f;camera_vp[3][3]=1;camera_vp[3][0]=-centre[0]/halfwidth;
+    camera_vp[3][1]=-centre[2]/halfwidth;camera_vp[3][2]=.5f-centre[1]*.001f;
+    constants();memcpy(G+M32(0x919650)+0x80,camera_vp,64);
+    receiver_normal[0]=receiver_normal[2]=0;receiver_normal[1]=1;
+    clear_maps();float night_road=render_receiver(1,&alpha)-baseline;
+    printf("night road at 50m radiance %.9g (minimum .01)\n",night_road);
+    CHECK(night_road>=.01f);
+    night_scale=1;floor_receiver=0;
+    wall_self_shadow(0);wall_self_shadow(1);
     if(!mutation)sources(argv[1]);
     printf("headlights %s: checks=%u failures=%u caster_draws=%llu receiver_draws=%llu\n",mutation?mutation:"production",checks,failures,(unsigned long long)counters.caster_draws,(unsigned long long)counters.receiver_draws);
     return failures?1:0;

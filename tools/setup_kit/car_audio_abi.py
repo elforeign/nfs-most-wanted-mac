@@ -76,9 +76,15 @@ LIFECYCLE = {
     38: (0x897d56, 0x819875, 'control_class', 'handle@0:8; p32 instance@8; u8 clamp@12,count@13; bounds@16 stride8; then i32 create,destroy,members[]'),
 }
 
+SECONDARY_IMPORTS = {
+    3: (0x897bc7, 0x8196de, 'pulse', 'u32 value@0; return value and clear it'),
+    11: (0x898014, 0x819b49, 'timer', 'f32 elapsed@0; u8 pulse@4; i32 reset@8,delay@12'),
+    12: (0x89805f, 0x819b90, 'latch', 'u16 input_offset@0; u8 count@2; i32 held@4,values@8[count],inputs[input_offset]'),
+}
+
 
 def import_contract(ordinal):
-    item = ARITHMETIC.get(ordinal) or LIFECYCLE.get(ordinal)
+    item = ARITHMETIC.get(ordinal) or LIFECYCLE.get(ordinal) or SECONDARY_IMPORTS.get(ordinal)
     if item is None:
         return {'ordinal': ordinal, 'classification': UNSUPPORTED,
                 'implemented': False, 'reason': 'ordinal has no decoded source/target contract'}
@@ -104,6 +110,15 @@ INTERFACES = {
 
 
 def interface_contract(name, system, signature, kind, member_count=None):
+    secondary = {('CAR_SWTN', 0x6a16): (0x7859, 7),
+                 ('CAR_WHINE', 0x6a16): (0x603f, 9),
+                 ('FX_SHIFTING_01', 0x085b): (0x7937, 6)}.get((name, system))
+    if secondary and signature == secondary[0] and kind == 1 and member_count in (None, secondary[1]):
+        return dict(name=name, classification=DIRECT, kind=kind, source_system=system,
+                    source_signature=signature, source_member_words=secondary[1],
+                    target_system=system, target_signature=signature, target_member_words=secondary[1],
+                    member_layout='packed little endian i32 words, member data excludes class handle',
+                    adapter=None, implemented=True)
     profile = INTERFACES.get(name)
     if (profile is None or system != 0x311c or kind != 1 or
             signature != profile[0] or member_count not in (None, profile[1])):

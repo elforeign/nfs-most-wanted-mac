@@ -46,7 +46,8 @@ static int parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n,
         uint32_t a = rd32(h), b = rd32(h + 4);
         s->version = a >> 28; s->codec = a >> 24 & 15; s->channels = (a >> 18 & 63) + 1; s->rate = a & 0x3ffff;
         s->storage = b >> 30; s->loop = b >> 29 & 1; s->samples = b & 0x1fffffff;
-        if (carbon && (s->version || s->codec != 3 || s->channels != 1 || s->rate != 48000 ||
+        if (carbon && (s->version || s->codec != 3 || s->channels != 1 ||
+                       (carbon == 2 ? (s->rate != 44100 && s->rate != 48000) : s->rate != 48000) ||
                        s->storage || !s->samples || s->samples > 10000000))
             return fail(why, n, "invalid Carbon sound profile at slot %u", i, 0);
         unsigned hs = 8;
@@ -76,6 +77,9 @@ int x360abk_parse(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n
 int x360abk_parse_carbon(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
     return parse(f, size, o, why, n, 1);
 }
+int x360abk_parse_undercover(const uint8_t *f, size_t size, X360Abk *o, char *why, size_t n) {
+    return parse(f, size, o, why, n, 2);
+}
 
 // Walks the blocks of one resident sound and returns the packet payloads (stripped of the EA wrapping) in order.
 static int collect(const uint8_t *f, const X360AbkSound *s, XmaPacket **out, unsigned *npk,
@@ -93,7 +97,10 @@ static int collect(const uint8_t *f, const X360AbkSound *s, XmaPacket **out, uns
         // padding lies after the block's last frame.
         for (size_t p = (size_t)pos + 12; p < (size_t)pos + bsize; p += 2048) {
             size_t remaining = pos + bsize - p;
-            int valid = carbon
+            /* This mono profile has no interleaved-stream skips. Its packet
+             * sequence nibble is not a counter (the decoder ignores it for
+             * XMA); retain the header and continuous bit reservoir verbatim. */
+            int valid = carbon == 2 ? remaining >= 4 && !f[p + 3] : carbon
                 ? remaining >= 4 && (f[p] & 0xfc) == 0x08 && !f[p + 3]
                 : p == pos + 12 || (unsigned)(f[p] >> 4) == ((seq + 1) & 15);
             if (!valid) {
@@ -110,13 +117,19 @@ static int collect(const uint8_t *f, const X360AbkSound *s, XmaPacket **out, uns
             if (out) {
                 memcpy(buf[pk].data, f + p, len);
                 memset(buf[pk].data + len, 0, 2048 - len);
-                buf[pk].block_frames = carbon && p == pos + 12 ? bsamp : 0;
+                buf[pk].block_frames = carbon == 1 && p == pos + 12 ? bsamp : 0;
                 /* Drain at each EA block and each independent XMA stream inside it. */
-                buf[pk].restart = carbon && (buf[pk].block_frames || !(rd32(f + p) & 0x03fff800u));
+                buf[pk].restart = carbon == 1 && (buf[pk].block_frames || !(rd32(f + p) & 0x03fff800u));
             }
             ++pk;
         }
         total += bsamp; pos += bsize;
+    }
+    if (carbon == 2 && (pos > s->end || s->end - pos > 3)) {
+        free(buf); return fail(why,n,"sound extent %u differs from blocks %u",s->end,pos);
+    }
+    if (carbon == 2) for(uint32_t p=pos;p<s->end;p++) if(f[p]) {
+        free(buf); return fail(why,n,"nonzero sound alignment at %u",p,0);
     }
     if (out) { *out = buf; *npk = pk; }
     return 1;
@@ -176,12 +189,12 @@ static int decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsign
     int16_t *out = calloc((size_t)cap * s->channels, sizeof(*out));
     int ok = out != NULL;
     if (!ok) fail(why, n, "out of memory", 0, 0);
-    unsigned block_end = carbon ? packets[0].block_frames : cap;
+    unsigned block_end = carbon == 1 ? packets[0].block_frames : cap;
     for (unsigned first = 0, end = 1; ok && end <= count; ++end) {
         if (end < count && !packets[end].restart) continue;
         ok = decode_packets(packets + first, end - first, s, out, block_end, &got, &decoded, why, n);
         unsigned next_frames = end < count ? packets[end].block_frames : 0;
-        if (ok && carbon && (next_frames || end == count) && got != block_end)
+        if (ok && carbon == 1 && (next_frames || end == count) && got != block_end)
             ok = fail(why, n, "Carbon EA block ended at %u frames (expected %u)", got, block_end);
         block_end += next_frames;
         first = end;
@@ -201,6 +214,10 @@ int x360abk_decode(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsig
 int x360abk_decode_carbon(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
                          char *why, size_t n) {
     return decode(f, s, pcm, frames, why, n, 1);
+}
+int x360abk_decode_undercover(const uint8_t *f, const X360AbkSound *s, int16_t **pcm, unsigned *frames,
+                            char *why, size_t n) {
+    return decode(f, s, pcm, frames, why, n, 2);
 }
 
 // ---- PC side (BNKl, the only bank PC Snd reads: 008222A1 / 00823E2D) ----

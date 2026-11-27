@@ -18,24 +18,25 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
     int be=!memcmp(p+12,"0001",4);
     uint32_t (*word)(const uint8_t *)=be?be32:u32;
     float (*number)(const uint8_t *)=be?bef32:f32;
+    int uc=word(p+48)==3;
     if((!be && memcmp(p+12,"1000",4)) || word(p+16)!=4 || word(p+24) ||
-       (word(p+20)!=4 && !(be && word(p+20)==3)) ||
-       word(p+40)<3 || word(p+40)>6 || word(p+48)!=(be?3u:2u)) return -1;
-    if(be && (!word(p+28) || word(p+28)>32 || word(p+32)!=word(p+40) ||
+       (word(p+20)!=4 && !(uc && word(p+20)==3)) ||
+       word(p+40)<3 || word(p+40)>6 || (word(p+48)!=2 && !uc) || (be && !uc)) return -1;
+    if(uc && (!word(p+28) || word(p+28)>32 || word(p+32)!=word(p+40) ||
               word(p+36)!=1 || word(p+44)!=word(p+40) || word(p+52)!=16)) return -1;
     uint32_t offsets[10];
     for(unsigned i=0;i<10;i++) {
         offsets[i]=word(p+56+i*4);
         if(offsets[i]>n || (i && offsets[i]<offsets[i-1])) return -1;
     }
-    unsigned blocks=be?3:2;
+    unsigned blocks=uc?3:2;
     if(offsets[0]!=96 || offsets[1]!=96+32*blocks || !inside(n,96,32*blocks) ||
        offsets[8]+36*word(p+40)!=offsets[9]) return -1;
     for(unsigned i=0;i<blocks;i++) {
         const uint8_t *input=p+96+32*i;
-        unsigned controls=be?(i==0?7:i==1?5:4):(i==0?5:4);
+        unsigned controls=uc?(i==0?7:i==1?5:4):(i==0?5:4);
         if(memcmp(p,input,12) || word(input+12)!=i || word(input+16)!=controls ||
-           (be && !zero(input+20,12))) return -1;
+           (uc && !zero(input+20,12))) return -1;
     }
     CarAudioTmx t={0}; t.track_count=word(p+40); t.bin_count=word(p+20);
     size_t at=offsets[1];
@@ -45,7 +46,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
         c->curve=word(p+at+4); c->input=word(p+at+12);
         c->low=number(p+at+24); c->range=number(p+at+28);
         c->minimum=number(p+at+32); c->maximum=number(p+at+36);
-        if(word(p+at)!=i || !valid_curve(c->curve) || c->input>=5 || (be && (c->input&1)) || word(p+at+8) ||
+        if(word(p+at)!=i || !valid_curve(c->curve) || c->input>=5 || (uc && (c->input&1)) || word(p+at+8) ||
            word(p+at+16) || word(p+at+20) || word(p+at+40) ||
            !isfinite(c->low) || !isfinite(c->range) || !isfinite(c->minimum) || !isfinite(c->maximum) ||
            c->range<=0 || c->minimum<0 || c->maximum>1 || c->minimum>c->maximum) return -1;
@@ -58,7 +59,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
         CarAudioTmxBin *b=t.bins+i;
         b->count=word(p+at+12); b->input=word(p+at+16); b->pairs=word(p+at+4);
         if(word(p+at)!=i || b->pairs>3 || b->count>4 ||
-           word(p+at+8)!=28+b->count*4 || b->input>=5 || (be && (b->input&1)) || word(p+at+20) || word(p+at+24) ||
+           word(p+at+8)!=28+b->count*4 || b->input>=5 || (uc && (b->input&1)) || word(p+at+20) || word(p+at+24) ||
            !inside(n,at,28+b->count*4+64*b->pairs)) return -1;
         for(unsigned j=0;j<b->count;j++) {
             b->dependencies[j]=word(p+at+28+j*4); if(b->dependencies[j]>=4) return -1;
@@ -82,7 +83,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
     t.minimum_rpm=number(p+offsets[5]); t.maximum_rpm=number(p+offsets[5]+4);
     if(!isfinite(t.minimum_rpm) || !isfinite(t.maximum_rpm) ||
        t.minimum_rpm<=0 || t.minimum_rpm>=t.maximum_rpm) return -1;
-    if(be && (offsets[6]!=offsets[5]+128 || offsets[7]!=offsets[6]+64 ||
+    if(uc && (offsets[6]!=offsets[5]+128 || offsets[7]!=offsets[6]+64 ||
               offsets[8]!=offsets[7]+4*t.track_count ||
               !zero(p+offsets[5]+8,offsets[8]-offsets[5]-8))) return -1;
     uint32_t previous=0;
@@ -105,14 +106,14 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
             if(s->size<40 || memcmp(raw,"Gnsu20",6)) return -1;
             uint32_t f=u32(raw+16),c=u32(raw+20); s->frames=u32(raw+24); s->rate=u32(raw+28);
             uint64_t tables=40+4ull*(f+c);
-            if(be) {
+            if(uc) {
                 if(!f || f>65536 || !c || c>1048576 || tables>s->size) return -1;
                 uint32_t terminal=u32(raw+tables-4);
                 if(terminal==UINT32_MAX || !s->frames || terminal>=s->frames) return -1;
                 s->frames=terminal+1;
             }
             uint64_t bytes=tables+((s->frames+31ull)/32)*19;
-            if(!f || f>65536 || !c || c>1048576 || !s->frames || (s->rate!=24000 && s->rate!=32000 && !(be && s->rate==34000) && s->rate!=36000 && s->rate!=44000 && s->rate!=44100 && s->rate!=48000) ||
+            if(!f || f>65536 || !c || c>1048576 || !s->frames || (s->rate!=24000 && s->rate!=32000 && !(uc && s->rate==34000) && s->rate!=36000 && s->rate!=44000 && s->rate!=44100 && s->rate!=48000) ||
                !isfinite(f32(raw+8)) || !isfinite(f32(raw+12)) || f32(raw+8)<=0 || f32(raw+8)>=f32(raw+12) ||
                bytes>s->size || s->size-bytes>3 || !zero(raw+bytes,s->size-(size_t)bytes)) return -1;
             s->size=(uint32_t)bytes;
@@ -120,7 +121,7 @@ int car_audio_tmx_parse(CarAudioTmx *out,const uint8_t *p,size_t n) {
             t.snr_count++;
             if(s->size<20 || (be32(raw)>>18)!=0x100 || be32(raw+4)>>30 || !(be32(raw+4)&0x20000000)) return -1;
             s->frames=be32(raw+4)&0x1fffffff; s->loop=be32(raw+8)+1; s->rate=be32(raw)&0x3ffff;
-            if((s->rate!=32000 && s->rate!=44000 && s->rate!=48000 && !(be && (s->rate==22050 || s->rate==24000 || s->rate==36000 || s->rate==44100))) || !s->frames || !s->loop || s->loop>s->frames) return -1;
+            if((s->rate!=32000 && s->rate!=44000 && s->rate!=48000 && !(uc && (s->rate==22050 || s->rate==24000 || s->rate==36000 || s->rate==44100))) || !s->frames || !s->loop || s->loop>s->frames) return -1;
         }
     }
     *out=t; return 0;

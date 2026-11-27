@@ -52,7 +52,7 @@ static int table_valid(const uint8_t *rows, size_t size)
         if (first == 65535 && !read32(r + 4) && !read32(r + 8)) continue;
         uint32_t index = first & 65535;
         uint32_t mode = first >> 16;
-        if (index > INT16_MAX || (mode != 60 && mode != 80 && mode != 100) ||
+        if (index > INT16_MAX || (mode != 60 && mode != 80 && mode != 90 && mode != 100 && mode != 255) ||
             read32(r + 4) != index + 1 || read32(r + 8) != UINT32_MAX) return 0;
     }
     return 1;

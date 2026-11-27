@@ -1,7 +1,7 @@
 # Day and night
 
 `NFS_DAYNIGHT=on` enables a full sun orbit and night lighting in the original
-world renderer. It is **Off by default**, read at startup. Off calls the original
+world renderer. It is **On by default** in both games, read at startup; `0`/`off` disables it. Off calls the original
 advance and lighting blend through one branch in each wrapper. The native pause
 Video > Time Of Day slider remains the daylight control while paused.
 
@@ -198,7 +198,7 @@ That wrap is counted and logged separately; every other frame keeps the raw .075
 Existing world-lighting options still
 read this block and apply their own colour treatment.
 
-`NFS_DAYNIGHT_CARS=on`, together with On (Off by default, read at startup), makes
+`NFS_DAYNIGHT_CARS`, together with the clock (On by default, `0`/`off` disables it, read at startup), makes
 cars follow the hour. Every in-game car is lit by the fixed rig
 ShaperLightsCarsInGame (.data 008F2E70: sun 0.85/0.90/1.00 x 0.83, fills x 0.40
 and x 0.45), whose colours `elSetupLights` 00502130 copies to the light context
@@ -210,9 +210,26 @@ colours, ratios and directions stay. Diagnostics add `daynight: cars sun= sky=`;
 `BOOT_DIAG_LOOK_AB=carsoff` draws a shot's held copy with the rig unscaled (the
 same frame Off).
 
+The previous car/world mismatch was the rig's three diffuse lights, not a missing world night blend. At midnight the world already has diffuse .025/.035/.055 and ambient .012/.018/.035 × 4; the unscaled rig still used its daylight key and two fills. Material hotspot gain already reads the time-of-day environment field. The default rig now takes the existing ratios (key .070506, fills .076343 in race 15.1.1); its noon values remain exact. The hook check's normalized car/world night attenuation is 1; restoring the old default gives 14.1832275 and fails. Headlight projection also defaults On; its separate night radiance conversion and road check are documented in [Rendering](render-4.md).
+
+Matched M3 controls in race 15.1.1 use the full detail registry list and held `nightold`, `carsoff`, `headlightoff` variants. `nightold` reproduces the previous car/headlight defaults at the same hour and exposure; it is not a second advancing game. [Midnight](../../run_shots/mwnight-m3-midnight.jpg), [dusk](../../run_shots/mwnight-m3-dusk.jpg) and [noon](../../run_shots/mwnight-m3-noon.jpg) are labelled, 1920 pixels wide. The midnight body/adjacent-road/wall means are 8.489019/6.933107/3.492187 with car scaling and no beam, versus 28.133515/6.933107/3.492187 with the old rig. Their car/world contrast correction is .301740; a fixed-rig control is 1 and fails the .5 limit. This paired correction cancels the different paint/road reflectances; an absolute car/road limit of 1.5 had rejected a correctly scaled frame at 1.631915.
+
+Actual scene-depth road measurements (Rec. 709 code luma /255, ±3 m across the lamp axis):
+
+| Forward distance | Beams On | Beams Off | Pixels |
+| --- | ---: | ---: | ---: |
+| 5–10 m | 12.103063 | 18.558106 | 1179 |
+| 10–20 m | 32.712391 | 20.497981 | 782 |
+| 20–30 m | 34.757898 | 15.658106 | 449 |
+| 40–60 m | 36.246419 | 8.878215 | 364 |
+
+Close-road held passes differ on wet reflections; they are reported without treating the final image as a strictly additive-light oracle. The unchanged-noon controls also drift (native control pair mean absolute RGB difference .088472/255; branch/old-state pair .151271/255), so whole-image byte identity is not claimed. The actual hook fixture proves exact noon car-light inputs and zero daylight projection work. The 40–60 m visible-road check requires >=15/255 and rejects the no-beam control. The shader check independently rejects the original lamp-unit conversion, using a pinned original packing fragment.
+
+Second-car live verification remains pending. A run using `porsche911turbo` failed before the race at `QuickGame::CreateCars+0x428` (006F4BC8, flow 5, null car object); the stock internal key is `911turbo`. The six-run budget was exhausted. This is not a second-car lighting proof. For a bounded repeat, use race 15.1.1 with `BOOT_RACE_CAR=911turbo`, `NFS_TEST_DAYNIGHT_START=0` and the held list `nightold,carsoff,headlightoff,ssaon`. The existing diagnostic `set:` command accepts integer slider units in this image, so `set:gameplay.daynight_hour=1800`, `set:gameplay.daynight_mode=fixed`, then `set:gameplay.daynight_hour=1200` capture dusk and noon in the same run. No test-hour override may be set for that live sequence. Carbon's implementation changes only its clock default and the matching F10 default; its native headlights and car lighting code are unchanged.
+
 In Carbon's Rockport (`carbon_daynight_cars.h`, hook 00746A00), the same
 `NFS_DAYNIGHT_CARS` with On (On by default inside Carbon, `0`/`off` turns it
-off; Most Wanted keeps Off by default) replaces Carbon's fixed in-game rig
+off; Most Wanted also defaults On) replaces Carbon's fixed in-game rig
 (00A6CC20/CCC0/CD60: three lights x .10/.15/.05, no clock read; Carbon zeroes
 sun-relative kinds) by day. A private rig holds Most Wanted's three lights
 above as fixed directions taken from the clock's light vector (key = sun

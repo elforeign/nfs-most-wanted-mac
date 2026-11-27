@@ -91,7 +91,7 @@ class UndercoverDiscImport(unittest.TestCase):
             row['outputs'] = {}
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(audio, 'ATTRIBUTES', hashlib.sha256(b'attribute fixture').hexdigest()).start()
-        mock.patch.object(audio, 'describe', side_effect=lambda _, car: dict(layers=[dict(paths=[p]) for p in self.paths[car]])).start()
+        mock.patch.object(audio, 'describe', side_effect=lambda _, car: dict(resources=self.paths[car])).start()
         mock.patch.object(car_sources, 'recognise', return_value=self.recognition).start()
         mock.patch.object(self.engine, '_later_rows', return_value={r['slot']: r for r in self.rows}).start()
 
@@ -117,6 +117,56 @@ class UndercoverDiscImport(unittest.TestCase):
                 self.assertFalse(code.call_args.kwargs['mac_audio'])
                 self.assertEqual(len(result['notes']), 1)
                 self.assertIn('donor engine sounds', result['notes'][0])
+
+    def test_pc_sound_folder_uses_existing_picker(self):
+        sounds = self.base / 'installed-pc'
+        for name, raw in self.resources.items():
+            self.write(sounds, name.lower(), raw)
+        for row in self.rows:
+            with self.subTest(car=row['origin']['folder']), mock.patch.object(ci, '_code', wraps=ci._code) as code:
+                self.engine.plan(self.pc, mw_pc=self.mw, cars=[car_selection.spec(row)], uc_x360=sounds)
+                self.assertTrue(code.call_args.kwargs['mac_audio'])
+
+    def test_automatic_pc_sounds_and_disc_preference(self):
+        for name, raw in self.resources.items():
+            self.write(self.pc, name.lower(), raw + b'PC source')
+        for row in self.rows:
+            with self.subTest(car=row['origin']['folder']), mock.patch.object(ci, '_code', wraps=ci._code) as code, \
+                 mock.patch.object(ci, '_range', wraps=ci._range) as reads:
+                self.engine.plan(self.pc, mw_pc=self.mw, cars=[car_selection.spec(row)], uc_x360=self.disc)
+                self.assertTrue(code.call_args.kwargs['mac_audio'])
+                self.assertEqual(sum(call.args[0] == self.disc for call in reads.call_args_list),
+                                 len(self.paths[row['origin']['folder']]))
+
+    def test_pc_auto_detection_and_exact_snapshot(self):
+        for name, raw in self.resources.items():
+            self.write(self.pc, name.lower(), raw)
+        class Extracted(Exception):
+            pass
+        def check(platform, folder, car, recognition, stage, owned, donor, names, identity):
+            for name in self.paths[folder]:
+                self.assertEqual((stage / 'source' / name).read_bytes(), self.resources[name])
+            raise Extracted()
+        for row in self.rows:
+            with self.subTest(car=row['origin']['folder']), mock.patch.object(self.engine, '_convert', side_effect=check):
+                with self.assertRaises(Extracted):
+                    self.engine.plan(self.pc, mw_pc=self.mw, cars=[car_selection.spec(row)], measure=True)
+
+    def test_changed_external_pc_sounds_refused(self):
+        sounds = self.base / 'external-pc'
+        for name, raw in self.resources.items():
+            self.write(sounds, name.lower(), raw)
+        row = self.rows[0]
+        with self.engine._transaction(None) as receipt:
+            prepared = self.engine._prepare(self.pc, self.mw, self.recognition, car_selection.spec(row),
+                car_catalog.packaged_policy(), receipt, None, None,
+                later_rows={r['slot']: r for r in self.rows}, uc_x360=sounds)
+        name = self.paths[row['origin']['folder']][0]
+        self.write(sounds, name.lower(), b'changed')
+        with self.assertRaisesRegex(ci.ImportError, 'PC sounds changed'):
+            prepared['unchanged']()
+        with self.assertRaisesRegex(ci.ImportError, 'source changed during selected extraction'):
+            prepared['finish']()
 
     def test_exact_disc_bytes_reach_converter_for_all_14(self):
         class Extracted(Exception):

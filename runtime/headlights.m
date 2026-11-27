@@ -3,6 +3,7 @@
  * are lamp-frustum reculls of resident scenery and current vehicle meshes,
  * independent of the sun shadow setting and the camera's visible list.
  * Delta L = linear diffuse reflectance * lux / (pi * 100 cd/m2 per unit).
+ * The clock's authored-night unit conversion is packed in lamp strength W.
  * Neutral source RGB; no assertion about the installed bulb's spectrum.
  * Camera fog attenuates this term once; exposure/bloom/output encoding follow
  * the existing path. SDR targets can clip. No volumetric light is added.
@@ -70,7 +71,10 @@ static const char hl_math[] =
 " if(h<hl_h[0]||h>hl_h[HL_NX-1]||v<hl_v[0]||v>hl_v[HL_NY-1]||v>min(0.0f,-.57f+.2679491924f*max(h,0.0f)))return 0;\n"
 " uint x=0,y=0;while(x+2<HL_NX&&h>hl_h[x+1])++x;while(y+2<HL_NY&&v>hl_v[y+1])++y;\n"
 " float u=(h-hl_h[x])/(hl_h[x+1]-hl_h[x]),t=(v-hl_v[y])/(hl_v[y+1]-hl_v[y]);\n"
-" return mix(mix(hl_cd[y*HL_NX+x],hl_cd[y*HL_NX+x+1],u),mix(hl_cd[(y+1)*HL_NX+x],hl_cd[(y+1)*HL_NX+x+1],u),t);\n"
+/* Feather inward: no upward light, and the useful central road lobe is
+ * unchanged. The lower domain edge otherwise clips nonzero grid values. */
+" float edge=smoothstep(0.0f,.2f,min(0.0f,-.57f+.2679491924f*max(h,0.0f))-v)*smoothstep(hl_v[0],hl_v[0]+.5f,v);\n"
+" return mix(mix(hl_cd[y*HL_NX+x],hl_cd[y*HL_NX+x+1],u),mix(hl_cd[(y+1)*HL_NX+x],hl_cd[(y+1)*HL_NX+x+1],u),t)*edge;\n"
 "}\n"
 /* Four point-depth taps with receiver-plane correction. A fixed normalized
  * bias leaks metres at long range and still self-shadows grazing roads. Each
@@ -217,11 +221,11 @@ int headlights_enabled(void) {
     extern int diag_on;int postfx_look_variant(const char *),postfx_look_listed(const char *);
     /* Each held variant is one pass, too short for first-use shader compiles
      * and lamp maps: a list naming `headlighton` runs the feature all along. */
-    if(diag_on&&postfx_look_variant("headlightoff"))return 0;
+    if(diag_on&&(postfx_look_variant("headlightoff")||postfx_look_variant("nightold")))return 0;
     if(diag_on&&(postfx_look_variant("headlighton")||postfx_look_listed("headlighton")))return 1;
 #endif
     int value=__atomic_load_n(&option,__ATOMIC_ACQUIRE);
-    if(value<0){const char *s=getenv("NFS_HEADLIGHT_PROJECTION");value=s&&!strcmp(s,"on");__atomic_store_n(&option,value,__ATOMIC_RELEASE);}
+    if(value<0){const char *s=getenv("NFS_HEADLIGHT_PROJECTION");value=!(s&&(!strcmp(s,"0")||!strcasecmp(s,"off")));__atomic_store_n(&option,value,__ATOMIC_RELEASE);}
     return value;
 }
 #ifndef HEADLIGHTS_CORE_ONLY
@@ -299,6 +303,17 @@ int headlights_draw(const SmResult *vs,uint64_t pixel_hash,int main_target,HLCon
     for(int i=0;i<4;++i)for(int j=0;j<4;++j) {
         world[i][j]=0;for(int k=0;k<4;++k)world[i][j]+=dev.vsc[wvp+k][i]*inverse_vp[k][j];
         out->world[j][i]=world[i][j];
+    }
+    /* Subtract an enabled lamp origin in double precision BEFORE packing the
+     * vertex transform. Interpolating kilometre-sized world coordinates loses
+     * millimetres per fragment and corrupts the receiver-plane derivatives.
+     * Both caster and receiver now rasterize the same lamp-relative metres;
+     * the projection helper uses only the VP's linear columns (w=0). */
+    int anchor=prepared.lamps[0].position[3]>0?0:1;
+    for(int i=0;i<3;++i) {
+        double origin=prepared.lamps[anchor].position[i];
+        out->world[i][3]=(float)(world[3][i]-origin);
+        for(int lamp=0;lamp<2;++lamp)out->lamps[lamp].position[i]-=origin;
     }
     if(!hl_inverse(world,inverse)){headlights_missed();return 0;}
     for(int i=0;i<3;++i)for(int j=0;j<3;++j)out->normal[i][j]=inverse[i][j];
@@ -430,6 +445,28 @@ void headlights_prepare(Cpu *c,uint32_t view,uint32_t flags) {
     if(!hl_player(c,lamps,storage+table_bytes+matrix_bytes)){*c=saved;return;}
     *c=saved;
     double vp[4][4];for(int i=0;i<4;++i)for(int j=0;j<4;++j)vp[i][j]=MF32(platform+0x80+16*i+4*j);
+    if(diag_on && diag_shot_due(frame_serial)) {
+        char line[1024];
+        int at=snprintf(line,sizeof line,"headlights_view: frame=%llu geometry=",
+            (unsigned long long)frame_serial);
+        const HLVec3 axes[]={lamps[0].position,lamps[0].right,lamps[0].up,lamps[0].forward};
+        for(int i=0;i<4;++i)at+=snprintf(line+at,sizeof line-at,"%.12g,%.12g,%.12g,",axes[i].x,axes[i].y,axes[i].z);
+        for(int i=0;i<4;++i)for(int j=0;j<4;++j)at+=snprintf(line+at,sizeof line-at,"%.12g%s",vp[i][j],i==3&&j==3?"":",");
+        diag_event("%s",line);
+        // Reference road plane .65 m below the lamp, at known forward ranges.
+        // Normalized screen coordinates allow distance-labelled capture ROIs;
+        // actual sloping/curved scenery still needs inspection in the capture.
+        for(int distance=5;distance<=60;distance+=5) {
+            HLVec3 p=lamps[0].position;
+            const HLVec3 f=lamps[0].forward,u=lamps[0].up;
+            p.x+=distance*f.x-.65*u.x;p.y+=distance*f.y-.65*u.y;p.z+=distance*f.z-.65*u.z;
+            double pos[4]={p.x,p.y,p.z,1},q[4]={0};
+            for(int i=0;i<4;++i)for(int j=0;j<4;++j)q[i]+=pos[j]*vp[j][i];
+            if(q[3]>0)diag_event("headlights_range: frame=%llu metres=%d screen=%.6f,%.6f lux=%.6f scale=%.3f",
+                (unsigned long long)frame_serial,distance,.5+.5*q[0]/q[3],.5-.5*q[1]/q[3],
+                hl_pair_lux(lamps,p,u),daynight_headlight_scale());
+        }
+    }
     if(!hl_inverse(vp,inverse_vp))return;
     if(!hl_resources())return;
     call_guest(c,0x006E2F50u,0,NULL); /* finish preceding sky/queue before snapshot */
@@ -446,7 +483,8 @@ void headlights_prepare(Cpu *c,uint32_t view,uint32_t flags) {
     hl_bindings(&device,d3d9_addref_guest);
     memcpy(entry_save,G+entry,sizeof entry_save);
     prepared_frame=frame_serial;prepared_view=view;
-    for(int i=0;i<2;++i){headlights_pack_lamp(&lamps[i],&prepared.lamps[i]);prepared.lamps[i].position[3]*=level;} /* w: lamp strength */
+    float radiance_scale=daynight_headlight_scale();
+    for(int i=0;i<2;++i){headlights_pack_lamp(&lamps[i],&prepared.lamps[i]);prepared.lamps[i].position[3]*=level*radiance_scale;} /* w: renderer lamp strength */
     casting=1;cast_failed=0;cast_requested=cast_emitted=0;
     for(int i=0;i<2;++i) {
         cast_index=i;clear_map=1;ensure_cmd();

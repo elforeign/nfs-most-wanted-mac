@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.12.0
+
+- **Day and night on by default:** the in-game clock moves the sky and lighting from day to night; at night your headlights light the road ahead, the low beams light walls without grain or hard edges, and your car is lit to match the world.
+- **Split-screen:** player 2 can join with a second Xbox controller (GitHub #27).
+- **Added cars and Setup:** Undercover cars can take their sounds from an installed Undercover PC copy as well as the Xbox 360 disc image, and their extra sound banks and upgrade steps play too; Setup says why a car import failed (GitHub #24); a save that uses added cars loads after you copy it to another Mac (GitHub #28).
+- Going back to an older version after this update needs Setup to run again.
+
 ## 4.11.0
 
 - **Pause when the controller drops:** if your controller disconnects during a race, or the Mac sleeps and wakes, the race pauses in the F10 menu.
